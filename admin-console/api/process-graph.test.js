@@ -343,7 +343,11 @@ test('lint: a brake label emitted by an agent trips NOTHING', () => {
 test('lint: a clean wired pair produces no lints', () => {
   const g = buildProcessGraph([
     { id: 'a', emits: ['dispatch'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch' }] },
+    // The listener carries its derived claim (#958): since `unclaimed-listener`
+    // is advisory, a pair is only fully clean once the label listener also
+    // declares what it takes over when it wakes.
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch',
+      claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
   assert.deepEqual(g.lints, []);
 });
@@ -816,4 +820,76 @@ test('a loop trigger self-edge omits absent stop-contract fields (#936)', () => 
   assert.equal(g.edges.length, 1);
   assert.deepEqual(g.edges[0].loop, { maxIterations: 5 });
   assert.equal(g.lints.length, 0);
+});
+
+// ─── unclaimed-listener (#958, concept §3.5) ──────────────────────────────────
+
+test('lint: unclaimed-listener fires (info) for a label listener without a claim', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ]);
+  const l = g.lints.find(x => x.code === 'unclaimed-listener');
+  assert.ok(l, 'expected an unclaimed-listener lint');
+  assert.equal(l.severity, 'info');   // ADVISORY — must never block a shipped bundle
+  assert.equal(l.nodeId, 'b');
+  assert.equal(l.label, 'ready');
+  assert.deepEqual(l.triggerIds, ['t']);
+});
+
+test('lint: unclaimed-listener stays silent once the listener carries its claim', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready',
+      claim: { remove: 'ready', add: 'ready:wip' } }] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'unclaimed-listener'));
+});
+
+test('lint: unclaimed-listener ignores raw event and claim-label listeners', () => {
+  const g = buildProcessGraph([
+    // No labelFilter → nothing to claim.
+    { id: 'a', triggers: [{ id: 't1', type: 'github-event', events: ['push'] }] },
+    // Listening on a claim label → claiming it would derive `ready:wip:wip`.
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready:wip' }] },
+    // Not a github-event trigger at all.
+    { id: 'c', triggers: [{ id: 't3', type: 'cron', cron: '0 3 * * *' }] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'unclaimed-listener'));
+});
+
+test('#958: a claim rides on the listener edge and on the node trigger port', () => {
+  const claim = { remove: 'ready', add: 'ready:wip' };
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', claim }] },
+  ]);
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'b');
+  assert.deepEqual(e.claim, claim, 'the listener edge carries the claim (canvas badge)');
+  const port = g.nodes.find(n => n.id === 'b').triggers.find(t => t.id === 't');
+  assert.deepEqual(port.claim, claim, 'the node trigger port carries the claim (Routing readout)');
+});
+
+test('#958: a gate listener also carries its claim on the human-sourced edge', () => {
+  // `ready` is the canonical case: a HUMAN applies it, the agent claims it.
+  const claim = { remove: 'ready', add: 'ready:wip' };
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', claim }] },
+  ], { labels: [{ name: 'ready', humanGate: true }] });
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'dev');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null);          // comes from outside (a human)
+  assert.deepEqual(e.claim, claim);
+});
+
+test('#958: a malformed claim is not surfaced on the graph', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready',
+      claim: { remove: 'ready' } }] },  // no `add`
+  ]);
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'b');
+  assert.equal(e.claim, undefined);
+  // ...and it still counts as unclaimed, so the blind spot stays visible.
+  assert.ok(g.lints.some(x => x.code === 'unclaimed-listener' && x.nodeId === 'b'));
 });

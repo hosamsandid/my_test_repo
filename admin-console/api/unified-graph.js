@@ -162,6 +162,10 @@ function processEdgeToUnified(e) {
   if (u.from == null && u.gate === 'human') u.from = ACTORS.github;
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
+  // Claim (#958): what the listener takes over when it wakes. Forwarded verbatim
+  // so the canvas can render the claim badge on the listener edge — same
+  // pass-through shape as the loop stop-contract blob (#936).
+  if (e.claim) u.claim = e.claim;
   return u;
 }
 

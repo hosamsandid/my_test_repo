@@ -25,6 +25,10 @@
 const {
   isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
 } = require('./outcomes');
+// Claim-label convention (#958) — the suffix is defined once, in process-template,
+// so the lint below can never drift from what the expanders derive. Acyclic:
+// process-template requires only ./outcomes, never this module.
+const { CLAIM_SUFFIX } = require('./process-template');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -130,12 +134,26 @@ function classifyKind(key, sources) {
   return makeLabelClassifier(sources).classifyKind(key);
 }
 
+// Normalized `claim` (#958) for the graph, or null. Shared by triggerView and the
+// label-listener edge builder so the node port and its edge never disagree.
+function claimView(t) {
+  const c = t && t.claim;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  if (typeof c.remove !== 'string' || !c.remove) return null;
+  if (typeof c.add !== 'string' || !c.add) return null;
+  return { remove: c.remove, add: c.add };
+}
+
 // Slim, render-ready view of a trigger.
 function triggerView(t) {
   const v = { id: t.id, type: t.type, enabled: t.enabled !== false };
   if (t.type === 'github-event') {
     v.events = Array.isArray(t.events) ? t.events : [];
     if (t.labelFilter) v.labelFilter = t.labelFilter;
+    // Claim (#958): what this listener takes over when it wakes. Carried so the
+    // editor can render the claim badge and the read-only claim readout.
+    const c = claimView(t);
+    if (c) v.claim = c;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -354,11 +372,14 @@ function buildProcessGraph(agents, options) {
         // events (issues/pull_request × labeled/unlabeled) ride along so the
         // renderer can show WHICH label change wakes the listener.
         const evs = Array.isArray(t.events) && t.events.length ? { events: t.events.slice() } : {};
+        // Claim (#958) rides on the listener edge so the renderer can badge it.
+        const cv = claimView(t);
+        const clm = cv ? { claim: cv } : {};
         const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
-          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs });
+          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs, ...clm });
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
           if (emitters.length === 0) {
@@ -366,11 +387,11 @@ function buildProcessGraph(agents, options) {
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
             // runtime; this is only about what the static graph can prove.
-            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm });
           } else {
             for (const s of emitters) {
               const oc = ocOf(key, s);
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs });
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm });
             }
           }
         }
@@ -556,6 +577,32 @@ function computeLints(nodes, edges, classifier) {
         message: `\`${n.id}\` has ${group.length} triggers listening on the same event`
           + `${label ? ` + label \`${label}\`` : 's'}${ids.length ? ` (${ids.map(i => `\`${i}\``).join(', ')})` : ''}`
           + ` — they fire redundantly.`,
+      });
+    }
+  }
+
+  // unclaimed-listener (#958, concept §3.5). A label listener without a `claim`
+  // never turns its wake label into a visible work-in-progress state, so the
+  // three stall modes (wake never arrived / run died mid-flight / ran but never
+  // emitted) stay indistinguishable on GitHub — a reconciliation blind spot.
+  //
+  // ADVISORY (`info`) on purpose: hand-authored listeners are legitimately
+  // unclaimed (the author may have opted out), and the shipped-bundle guard in
+  // process-template-registry.test.js fails on error/warning lints only. Raising
+  // this to a warning would turn every not-yet-migrated curated template red.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    for (const t of (n.triggers || [])) {
+      if (!t || t.type !== 'github-event') continue;
+      const label = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+      if (!label) continue;                       // raw event listener — nothing to claim
+      if (label.endsWith(CLAIM_SUFFIX)) continue; // a claim-label listener claims nothing
+      if (claimView(t)) continue;                 // already claimed
+      lints.push({
+        code: 'unclaimed-listener', severity: 'info', nodeId: n.id, label,
+        ...(t.id ? { triggerIds: [t.id] } : {}),
+        message: `\`${n.id}\` listens on \`${label}\` without a claim — a stalled run`
+          + ` cannot be told apart from a wake that never arrived.`,
       });
     }
   }

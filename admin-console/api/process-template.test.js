@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -996,4 +996,230 @@ test('reconcile fan-out (per-member transform): only authored-outcomes members g
   assert.equal(pass1[2], 'C.');
   const pass2 = pass1.map((p, i) => applyDerivedPromptBlocks(p, { github: members[i].github, outcomes: members[i].outcomes }));
   assert.deepEqual(pass2, pass1); // idempotent fan-out
+});
+
+// ─── claim labels (#958, concept §3.4–§3.5) ──────────────────────────────────
+// The claim is DERIVED by convention (`<wakeLabel>:wip`), never authored: Layer-3
+// reconciliation computes the claim label from the wake label, so an arbitrary
+// `add` would make a stalled run invisible again. These tests pin the convention,
+// the validator, and both derivation paths (draft expanders + live reconcilers,
+// which delegate to the very same pure functions).
+
+test('deriveClaim follows the <wakeLabel>:wip convention', () => {
+  assert.deepEqual(deriveClaim('ready'), { remove: 'ready', add: 'ready:wip' });
+  assert.deepEqual(deriveClaim('  ready-2  '), { remove: 'ready-2', add: 'ready-2:wip' });
+  assert.equal(claimLabelFor('ready'), `ready${CLAIM_SUFFIX}`);
+});
+
+test('deriveClaim returns null where there is nothing to claim', () => {
+  assert.equal(deriveClaim(undefined), null);   // raw event listener (e.g. push)
+  assert.equal(deriveClaim(''), null);
+  assert.equal(deriveClaim('   '), null);
+  assert.equal(deriveClaim(null), null);
+  // A listener already waiting on a claim label must not claim its own claim
+  // (that would derive `ready:wip:wip`).
+  assert.equal(deriveClaim('ready:wip'), null);
+});
+
+test('claimError: a well-formed derived claim validates', () => {
+  assert.equal(claimError(deriveClaim('ready'), 'ready', 'github-event'), null);
+  assert.equal(claimError(undefined, 'ready', 'github-event'), null); // optional
+  assert.equal(claimError(null, 'ready', 'github-event'), null);
+});
+
+test('claimError enforces claim.remove === labelFilter', () => {
+  const err = claimError({ remove: 'dispatch', add: 'dispatch:wip' }, 'ready', 'github-event');
+  assert.match(err, /claim\.remove/);
+  assert.match(err, /must equal labelFilter/);
+});
+
+test('claimError enforces the <wakeLabel>:wip naming convention on claim.add', () => {
+  const err = claimError({ remove: 'ready', add: 'ready-in-progress' }, 'ready', 'github-event');
+  assert.match(err, /<wakeLabel>:wip/);
+  assert.match(err, /ready:wip/);
+});
+
+test('claimError rejects a malformed or misplaced claim', () => {
+  assert.match(claimError('nope', 'ready', 'github-event'), /must be an object/);
+  assert.match(claimError([], 'ready', 'github-event'), /must be an object/);
+  assert.match(claimError({ add: 'ready:wip' }, 'ready', 'github-event'), /claim\.remove/);
+  assert.match(claimError({ remove: 'ready' }, 'ready', 'github-event'), /claim\.add/);
+  // A claim on a listener with no label filter has no wake label to take over.
+  assert.match(claimError(deriveClaim('ready'), '', 'github-event'), /requires a labelFilter/);
+  // ...and a claim on a cron trigger is meaningless.
+  assert.match(claimError({ remove: 'ready', add: 'ready:wip' }, 'ready', 'cron'), /only valid on a github-event/);
+});
+
+test('validateProcessTemplate rejects a bundle whose claim disagrees with its listener', () => {
+  const bundle = (claim) => ({
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', claim }] }],
+  });
+  assert.equal(validateProcessTemplate(bundle(deriveClaim('ready'))).ok, true);
+  const bad = validateProcessTemplate(bundle({ remove: 'other', add: 'other:wip' }));
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /role dev: trigger t:/);
+  assert.match(bad.error, /must equal labelFilter/);
+});
+
+test('channelAutoClaim defaults ON and only an explicit false opts out', () => {
+  assert.equal(channelAutoClaim({}), true);
+  assert.equal(channelAutoClaim({ autoClaim: true }), true);
+  assert.equal(channelAutoClaim(undefined), true);
+  assert.equal(channelAutoClaim({ autoClaim: false }), false);
+});
+
+test('expandGithubChannels stamps the derived claim on a labelled channel listener', () => {
+  const out = expandGithubChannels({
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'rev', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-test' }], triggers: [] },
+    ],
+  });
+  const t = out.roles.find(r => r.id === 'rev').triggers.find(x => x.channel);
+  assert.equal(t.labelFilter, 'ready-for-test');
+  assert.deepEqual(t.claim, { remove: 'ready-for-test', add: 'ready-for-test:wip' });
+});
+
+test('expandGithubChannels stamps NO claim on an unlabelled (opened) channel listener', () => {
+  const out = expandGithubChannels({
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'rev', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [] },
+    ],
+  });
+  const t = out.roles.find(r => r.id === 'rev').triggers.find(x => x.channel);
+  assert.equal(t.labelFilter, undefined);
+  assert.equal(t.claim, undefined); // nothing to take over — it wakes on "opened"
+});
+
+test('expandGithubChannels honours the per-port autoClaim opt-out', () => {
+  const out = expandGithubChannels({
+    roles: [
+      { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+      { id: 'rev', displayName: 'Reviewer', triggers: [],
+        channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-test', autoClaim: false }] },
+    ],
+  });
+  const t = out.roles.find(r => r.id === 'rev').triggers.find(x => x.channel);
+  assert.equal(t.labelFilter, 'ready-for-test');
+  assert.equal(t.claim, undefined);
+});
+
+test('expandGithubChannels: an opt-out on ANY consolidated channel wins', () => {
+  // Two producers over the same (artifact, label) consolidate into ONE listener
+  // (#826); the claim is a property of that single listener, so an explicit
+  // opt-out on either contributing port disables it.
+  const out = expandGithubChannels({
+    roles: [
+      { id: 'a', displayName: 'A', github: { producesPr: true }, triggers: [] },
+      { id: 'b', displayName: 'B', github: { producesPr: true }, triggers: [] },
+      { id: 'rev', displayName: 'Reviewer', triggers: [], channels: [
+        { artifact: 'pr', from: 'a', label: 'ready-for-test' },
+        { artifact: 'pr', from: 'b', label: 'ready-for-test', autoClaim: false },
+      ] },
+    ],
+  });
+  const ts = out.roles.find(r => r.id === 'rev').triggers.filter(x => x.channel);
+  assert.equal(ts.length, 1);          // consolidated
+  assert.equal(ts[0].claim, undefined); // opt-out wins
+});
+
+test('expandGithubChannels leaves a hand-authored trigger untouched', () => {
+  const authored = { id: 'mine', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' };
+  const out = expandGithubChannels({
+    roles: [{ id: 'dev', displayName: 'Dev', triggers: [{ ...authored }] }],
+  });
+  assert.deepEqual(out.roles[0].triggers.find(t => t.id === 'mine'), authored);
+});
+
+test('expandDataFlowSteps stamps no claim — a push step has no wake label', () => {
+  const out = expandDataFlowSteps({
+    roles: [
+      { id: 'up', displayName: 'Up', outputs: [{ name: 'spec' }], triggers: [] },
+      { id: 'down', displayName: 'Down', inputs: [{ name: 'spec' }], triggers: [] },
+    ],
+  });
+  const t = out.roles.find(r => r.id === 'down').triggers.find(x => x.dataFlow);
+  assert.deepEqual(t.events, ['push']);
+  assert.equal(t.claim, undefined);
+});
+
+test('live reconcile path derives the same claim as the draft path (#958)', () => {
+  // reconcileTeamGithubChannels strips the previously-derived channel triggers and
+  // re-expands from the ports through this very function, so the live port write
+  // and the draft materialise cannot diverge. Model that round: expanding an
+  // ALREADY-expanded role set (derived stripped first) is byte-stable.
+  const roles = [
+    { id: 'dev', displayName: 'Dev', github: { producesPr: true }, triggers: [] },
+    { id: 'rev', displayName: 'Reviewer', channels: [{ artifact: 'pr', from: 'dev', label: 'ready-for-test' }], triggers: [] },
+  ];
+  const pass1 = expandGithubChannels({ roles }).roles;
+  const stripped = pass1.map(r => ({ ...r, triggers: r.triggers.filter(t => t.channel !== true) }));
+  const pass2 = expandGithubChannels({ roles: stripped }).roles;
+  const claimOf = (rs) => rs.find(r => r.id === 'rev').triggers.find(t => t.channel).claim;
+  assert.deepEqual(claimOf(pass2), { remove: 'ready-for-test', add: 'ready-for-test:wip' });
+  assert.deepEqual(claimOf(pass2), claimOf(pass1)); // reconcile is stable
+});
+
+test('claim survives export → materialise round-trip', () => {
+  const bundle = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [{
+      id: 'acme-dev', displayName: 'Dev', systemPrompt: 'p',
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
+        labelFilter: 'ready', claim: { remove: 'ready', add: 'ready:wip' } }],
+    }],
+  });
+  // Exported bundle keeps the claim…
+  const exported = bundle.roles[0].triggers.find(t => t.id === 't');
+  assert.deepEqual(exported.claim, { remove: 'ready', add: 'ready:wip' });
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+  // …and materialising re-derives it against the substituted label.
+  const member = buildMemberFromTemplate(
+    { displayName: 'Dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: '{{wake}}', claim: { remove: '{{wake}}', add: '{{wake}}:wip' } }] },
+    { vars: { repoFullName: 'o/r', wake: 'ready' } },
+  );
+  const mt = member.triggers.find(t => t.id === 't');
+  assert.equal(mt.labelFilter, 'ready');
+  assert.deepEqual(mt.claim, { remove: 'ready', add: 'ready:wip' });
+});
+
+test('materialise drops the claim when the template opted out', () => {
+  const member = buildMemberFromTemplate(
+    { displayName: 'Dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+    { vars: { repoFullName: 'o/r' } },
+  );
+  assert.equal(member.triggers.find(t => t.id === 't').claim, undefined);
+});
+
+test('bundleTrigger drops a claim that does not satisfy the convention', () => {
+  // A corrupt/legacy claim must not be exported as if it were authoritative.
+  const bundle = buildProcessTemplate({
+    name: 'x', level: 'template',
+    roles: [{ id: 'dev', displayName: 'Dev', systemPrompt: 'p',
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
+        labelFilter: 'ready', claim: { remove: 'something-else', add: 'nope' } }] }],
+  });
+  assert.equal(bundle.roles[0].triggers.find(t => t.id === 't').claim, undefined);
+  assert.equal(validateProcessTemplate(bundle).ok, true); // and the export stays valid
+});
+
+test('templateToCustomRoles carries the claim into the member config (#958)', () => {
+  // REGRESSION: dropping `claim` here made the feature a silent runtime no-op —
+  // the graph rendered the badge, but the container's triggers.json had no claim
+  // for `_claim_plan` (#957) to act on. Caught by an end-to-end pipeline run, not
+  // by the unit tests above, so it is pinned explicitly.
+  const roles = templateToCustomRoles({
+    roles: [{
+      id: 'dev', displayName: 'Dev', systemPrompt: 'p',
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
+        labelFilter: 'ready', claim: { remove: 'ready', add: 'ready:wip' }, prompt: 'go' }],
+    }],
+  });
+  assert.deepEqual(roles[0].triggers[0].claim, { remove: 'ready', add: 'ready:wip' });
+
+  // ...and the full materialise chain lands it on the runtime trigger.
+  const member = buildMemberFromTemplate(roles[0], { teamId: 'acme', vars: { repoFullName: 'o/r' } });
+  assert.deepEqual(member.triggers.find(t => t.id === 't').claim, { remove: 'ready', add: 'ready:wip' });
 });

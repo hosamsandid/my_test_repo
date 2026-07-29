@@ -2515,7 +2515,18 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 "git": git_block,
                 "resultEvent": result_event,
             })
-            _spool_usage_record(build_usage_record(ctx))
+            record = build_usage_record(ctx)
+            _spool_usage_record(record)
+            # Loop token budget (#934): accumulate this invocation's output-token
+            # spend back onto the caller's run_context (by reference) so
+            # _execute_inner can feed a loop's cumulative total to the stop
+            # contract. Retries (_call_claude calling this twice) add up. This is
+            # additive and inert for every non-loop caller.
+            if isinstance(run_context, dict):
+                run_context["_loopOutputTokens"] = (
+                    run_context.get("_loopOutputTokens", 0)
+                    + _record_output_tokens(record)
+                )
         except Exception as exc:  # telemetry must never break the run
             print(f"[Runner] usage-record emit failed: {exc}", file=sys.stderr)
 
@@ -2780,6 +2791,15 @@ def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
         if not ok:
             return False, reason
 
+    # Optional token budget (#934): the whole loop stops as `exhausted` once
+    # cumulative output tokens exceed it. Must be a positive integer when set;
+    # bool rejected explicitly (bool is an int subclass in Python).
+    max_tokens = trigger.get("maxTokens")
+    if max_tokens is not None and (not isinstance(max_tokens, int)
+                                   or isinstance(max_tokens, bool)
+                                   or max_tokens < 1):
+        return False, "maxTokens must be a positive integer"
+
     return True, ""
 
 
@@ -2972,22 +2992,65 @@ def _build_verify_feedback(output: str, *, mode: str) -> str:
 
 
 def _loop_stop_decision(iterations: int, max_iterations: int,
-                        until_exit_code: int | None) -> str | None:
-    """Decide a loop's terminal outcome *after* an iteration (#932, concept §4.2).
+                        until_exit_code: int | None,
+                        tokens_spent: int = 0,
+                        max_tokens: int | None = None,
+                        backstop_tripped: bool = False) -> str | None:
+    """Decide a loop's terminal outcome *after* an iteration (concept §4.2).
 
+    Priority order (#932 + #934):
+
+    - the blast-radius backstop (#611) tripped → ``"paused"`` — the spawn was
+      dropped, no work happened this iteration, so this wins outright and the
+      loop surfaces the runaway backstop as a first-class loop state rather than
+      a silent stderr log.
     - ``until.command`` exited ``0`` → ``"done"`` (goal met).
+    - ``tokens_spent >= max_tokens`` → ``"exhausted"`` (token budget spent) — the
+      loop budget is the *first* line of defence against compounding token cost.
     - ``iterations >= max_iterations`` → ``"exhausted"`` (hard cap reached).
     - otherwise → ``None`` (run another iteration).
 
     ``until_exit_code`` is ``None`` when the loop has no ``until.command``.
-    ``done`` is evaluated first, so a goal met on the final permitted iteration
-    reports ``done`` rather than ``exhausted``.
+    ``max_tokens`` is ``None`` when the loop declares no budget. ``done`` is
+    evaluated before either exhaustion path, so a goal met on the iteration that
+    also crosses the budget/cap reports ``done`` rather than ``exhausted``.
     """
+    if backstop_tripped:
+        return "paused"
     if until_exit_code == 0:
         return "done"
+    if max_tokens is not None and tokens_spent >= max_tokens:
+        return "exhausted"
     if iterations >= max_iterations:
         return "exhausted"
     return None
+
+
+def _record_output_tokens(record: dict) -> int:
+    """Sum the output tokens attributable to one usage record (#934).
+
+    Prefers the per-model ``modelUsage`` breakdown (its ``output`` fields summed
+    over every model are the true output-token spend for the invocation); falls
+    back to the top-level ``tokens.output`` when ``modelUsage`` is empty (e.g. a
+    record shaped before per-model capture). Never raises — a malformed record
+    contributes 0 so the loop budget accounting stays robust."""
+    if not isinstance(record, dict):
+        return 0
+    total = 0
+    model_usage = record.get("modelUsage")
+    if isinstance(model_usage, dict) and model_usage:
+        for u in model_usage.values():
+            if isinstance(u, dict):
+                out = u.get("output")
+                if isinstance(out, int) and not isinstance(out, bool):
+                    total += out
+        return total
+    tokens = record.get("tokens")
+    if isinstance(tokens, dict):
+        out = tokens.get("output")
+        if isinstance(out, int) and not isinstance(out, bool):
+            return out
+    return 0
 
 
 def _clamp_event_deep(value, depth: int = 0):
@@ -3629,6 +3692,8 @@ class TriggerScheduler:
         """
         tid = trigger.get("id", "?")
         max_iterations = trigger.get("maxIterations")
+        max_tokens = trigger.get("maxTokens")
+        max_tokens = max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else None
         until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
         until_cmd = until.get("command")
         until_cmd = until_cmd if isinstance(until_cmd, str) and until_cmd.strip() else None
@@ -3646,6 +3711,7 @@ class TriggerScheduler:
               file=sys.stderr)
 
         iterations = 0
+        tokens_spent = 0
         outcome: str | None = None
         last_until_output = ""
         pending_feedback: str | None = None   # verifier feedback → next iteration
@@ -3668,14 +3734,29 @@ class TriggerScheduler:
                           f"after maintenance mode ended", file=sys.stderr)
 
                 # One iteration through the shared chokepoint. A failed
-                # verifier's output from the previous pass is fed in via ctx.
+                # verifier's output from the previous pass is fed in via ctx
+                # (#933); `sink` carries back this iteration's output-token
+                # spend (#934 budget) and a backstop-tripped flag
+                # (#611 → paused loop state).
                 ctx = {"loopFeedback": pending_feedback} if pending_feedback else None
+                sink: dict = {}
                 try:
-                    await self._execute(trigger, ctx)
+                    await self._execute(trigger, ctx, loop_sink=sink)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)
+
+                # The blast-radius backstop dropped the spawn — no work ran, so
+                # don't count the iteration or evaluate `until`; surface it as a
+                # first-class `paused` loop state and stop (concept §4.2/§4.4).
+                if sink.get("backstopTripped"):
+                    outcome = _loop_stop_decision(
+                        iterations, max_iterations, None,
+                        tokens_spent, max_tokens, backstop_tripped=True)
+                    break
+
                 iterations += 1
+                tokens_spent += int(sink.get("outputTokens", 0) or 0)
 
                 # Verifier gate (#933): the iteration only "counts" as progress
                 # when `verify` passes. On failure, feed the verifier output
@@ -3703,7 +3784,9 @@ class TriggerScheduler:
                 if until_cmd:
                     until_code, last_until_output = await asyncio.to_thread(
                         _run_pre_check, until_cmd, until_env)
-                outcome = _loop_stop_decision(iterations, max_iterations, until_code)
+                outcome = _loop_stop_decision(
+                    iterations, max_iterations, until_code,
+                    tokens_spent, max_tokens)
                 if outcome:
                     break
 
@@ -3722,6 +3805,7 @@ class TriggerScheduler:
         try:
             await self._post_loop_outcome(
                 trigger, outcome, iterations, last_until_output,
+                tokens_spent, max_tokens,
                 verify_plan=verify_plan, verify_failures=verify_failures,
                 last_verify_output=last_verify_output)
         except Exception as exc:
@@ -3730,16 +3814,19 @@ class TriggerScheduler:
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,
                                  iterations: int, last_until_output: str,
+                                 tokens_spent: int = 0,
+                                 max_tokens: int | None = None,
                                  *, verify_plan: dict | None = None,
                                  verify_failures: int = 0,
                                  last_verify_output: str = "") -> None:
-        """Post the single terminal outcome DM for a finished loop (#932/#933).
+        """Post the single terminal outcome DM for a finished loop (#932/#933/#934).
 
         This is the "completed" signal agents lack today: outcome
-        (done/exhausted), iterations used, the last `until` output, and — when a
-        verifier was in effect (#933) — the verifier used, how many iterations
-        it blocked, and the last failing verifier output.
-        Best-effort — a missing DM room just skips it.
+        (done/exhausted/paused), iterations used vs the cap, output tokens spent
+        vs the budget, the last `until` output, and — when a verifier was in
+        effect (#933) — the verifier used, how many iterations it blocked, and
+        the last failing verifier output. Best-effort — a missing DM room just
+        skips it.
         """
         raw_room_id = trigger.get("roomId") or _load_dm_room_id()
         room_id = (
@@ -3757,14 +3844,29 @@ class TriggerScheduler:
         heading = {
             "done": "✅ **Loop done**",
             "exhausted": "🛑 **Loop exhausted**",
+            "paused": "⏸️ **Loop paused**",
         }.get(outcome, f"**Loop {outcome}**")
         desc = f" — {trigger['description']}" if trigger.get("description") else ""
+        # Budget-aware report (#934): iterations used vs cap AND output tokens
+        # spent vs budget (the budget line only names a limit when one is set).
+        tokens_line = f"- Output tokens: {tokens_spent}"
+        if max_tokens is not None:
+            tokens_line += f" / {max_tokens}"
         lines = [
             f"{heading} — `{tid}`{desc}",
             "",
             f"- Outcome: `{outcome}`",
             f"- Iterations: {iterations} / {max_iterations}",
+            tokens_line,
         ]
+        if outcome == "paused":
+            # The runaway backstop (#611) tripped — make the terminal state and
+            # its cause legible instead of leaving it a stderr log + one-off DM.
+            lines.append(
+                "- Paused by the runaway backstop (#611): this agent hit its "
+                "concurrency ceiling / spawn-rate limit, so the loop stopped "
+                "rather than fanning out. Re-enable it once the pressure eases."
+            )
         until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
         if isinstance(until.get("command"), str) and until.get("command").strip():
             snippet = (last_until_output or "").strip()
@@ -4449,7 +4551,8 @@ class TriggerScheduler:
             content=content,
         )
 
-    async def _execute(self, trigger: dict, ctx: dict | None = None) -> None:
+    async def _execute(self, trigger: dict, ctx: dict | None = None,
+                       loop_sink: dict | None = None) -> None:
         tid = trigger.get("id", "?")
         if _under_test_harness():
             # Safety net (#606): never spawn a real Claude run, post to Matrix,
@@ -4473,6 +4576,11 @@ class TriggerScheduler:
         # (log always, one DM), then silent until the pressure eases.
         decision = self._backstop.try_acquire()
         if not decision.allowed:
+            # #934: tell a loop runner its spawn was dropped so it can terminate
+            # with the `paused` outcome instead of silently counting a no-op
+            # iteration. Inert for every non-loop caller (loop_sink is None).
+            if loop_sink is not None:
+                loop_sink["backstopTripped"] = True
             print(
                 f"[Runner:{self._agent_id}] Trigger {tid} dropped by backstop "
                 f"(reason={decision.reason}, active={decision.active}, "
@@ -4491,7 +4599,7 @@ class TriggerScheduler:
             return
         self._running.add(tid)
         try:
-            await self._execute_inner(trigger, ctx)
+            await self._execute_inner(trigger, ctx, loop_sink)
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] Trigger {tid} error: {exc}",
                   file=sys.stderr)
@@ -4559,7 +4667,8 @@ class TriggerScheduler:
         finally:
             self._clear_in_flight(marker_id)
 
-    async def _execute_inner(self, trigger: dict, ctx: dict | None) -> None:
+    async def _execute_inner(self, trigger: dict, ctx: dict | None,
+                             loop_sink: dict | None = None) -> None:
         tid = trigger.get("id", "?")
 
         # Optional preCheck — gates the LLM call.
@@ -4723,6 +4832,16 @@ class TriggerScheduler:
                 raise
         finally:
             _bump_active(-1, session)
+
+        # Loop token budget (#934): surface this iteration's output-token spend
+        # (accumulated onto run_context by _call_claude_once, including any
+        # --resume retry) to the loop runner via the sink it passed in. Inert
+        # for every non-loop trigger (loop_sink is None).
+        if loop_sink is not None:
+            loop_sink["outputTokens"] = (
+                loop_sink.get("outputTokens", 0)
+                + int(run_context.get("_loopOutputTokens", 0) or 0)
+            )
 
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only

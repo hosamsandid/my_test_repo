@@ -71,6 +71,7 @@ story end to end and are the closest thing to a user manual.
 | [model-providers.md](model-providers.md) | Connecting an LLM endpoint; API-key vs. Claude-subscription auth |
 | [mcp-servers.md](mcp-servers.md) | Connecting live knowledge sources via MCP |
 | [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) | **"My agent doesn't answer"** — the runbook. Start here when something is broken |
+| [collaboration-mode-faq.md](collaboration-mode-faq.md) | **Collaboration-mode FAQ** — the common questions about running Agent Studio with a team (concurrency, shared knowledge, credentials, access control), with resolutions and known gaps |
 | [guides/ace-plugin-installation.md](guides/ace-plugin-installation.md) | Installing the ACE plugin (only needed for Briefing-Pack agents) |
 | [guides/claude-code-vscode-setup.md](guides/claude-code-vscode-setup.md) | Claude Code in VS Code against your proxy |
 

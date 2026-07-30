@@ -208,6 +208,7 @@ The most-used pages:
 | Narrated product tour (6 chapters) | [docs/walkthrough/](./docs/walkthrough/01-team-setup.md) |
 | Deployment & hosting options | [docs/deployment.md](./docs/deployment.md) |
 | **"My agent doesn't answer"** — troubleshooting | [docs/agent-chat-troubleshooting.md](./docs/agent-chat-troubleshooting.md) |
+| **Collaboration-mode FAQ** — team collaboration open points & answers | [docs/collaboration-mode-faq.md](./docs/collaboration-mode-faq.md) |
 | Agent roles & team patterns | [docs/agent-roles.md](./docs/agent-roles.md) |
 | Working Environments | [docs/working-environments.md](./docs/working-environments.md) |
 | Triggers (cron, once, webhook, GitHub event) | [docs/triggers.md](./docs/triggers.md) |

@@ -178,6 +178,7 @@ function resolveLlmBinding(endpointId, modelPin, { context } = {}) {
   }
   return {
     endpointId: ep.id,
+    name: ep.name || ep.id,
     authType: ep.authType === "oauth-token" ? "oauth-token" : "api-key",
     baseUrl: ep.baseUrl || "",
     token,
@@ -200,6 +201,7 @@ function resolveLlmBindingForAgent(cfg, env) {
 
 const { execFile, execFileSync } = require("child_process");
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
+const { buildLlmProvenanceEnv } = require("./llm-provenance");
 const { reconcileSessionAppend } = require("./session-cursor");
 const {
   rotationConfig,
@@ -268,9 +270,6 @@ function startAgentProcess(config) {
       if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
     }
     if (llm.defaultModelId) childEnv.AGENT_DEFAULT_MODEL = llm.defaultModelId;
-    // Best-effort provider id for the runtime's usage records (#654); the
-    // orchestrator re-derives it authoritatively on ingest.
-    childEnv.AEE_LLM_PROVIDER_ID = llm.endpointId;
     const via = config.llmEndpointOverride ? ' (agent override)' : '';
     console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${llm.endpointId}${via} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
   } else if (config.llmEndpointOverride || env?.llmEndpointId) {
@@ -281,6 +280,16 @@ function startAgentProcess(config) {
   // default model. Fresh-read on each spawn so an admin can edit config.json
   // and restart to apply.
   if (config.modelOverride) childEnv.AGENT_DEFAULT_MODEL = config.modelOverride;
+
+  // Non-secret Model-Provider provenance (#980): the human-readable attributes
+  // of how this run is executed (provider name, auth type, sanitized base URL,
+  // requested model) so the agent runtime can stamp them onto the immutable
+  // `system_init` session-log row. Supersedes the bare AEE_LLM_PROVIDER_ID the
+  // usage records still read (buildLlmProvenanceEnv re-sets it when bound). The
+  // requested model mirrors the AGENT_DEFAULT_MODEL precedence above
+  // (modelOverride wins over the binding default). NEVER carries a token.
+  const endpointConfigured = !!(config.llmEndpointOverride || env?.llmEndpointId);
+  Object.assign(childEnv, buildLlmProvenanceEnv(llm, config, { endpointConfigured }));
 
   // If the agent's environment has a GitHub token attached, expose it as
   // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.

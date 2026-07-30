@@ -480,6 +480,93 @@ class ResultEventModelUsage(unittest.TestCase):
         self.assertIsNone(ev["modelUsage"])
 
 
+class SystemInitProvenance(unittest.TestCase):
+    """#980: the system_init row carries an immutable, non-secret record of how
+    the run was executed (provider, auth type, endpoint, requested model),
+    captured at run time from the AEE_LLM_* env the orchestrator injects."""
+
+    INIT_LINE = __import__("json").dumps({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "sess-123",
+        "model": "claude-opus-4-8",
+    })
+
+    def _init(self, line=None, **env):
+        with unittest.mock.patch.dict("os.environ", env, clear=False):
+            events = map_stream_json_line(line or self.INIT_LINE, "corr-1")
+        return next(e for e in events if e["type"] == "system_init")
+
+    def test_provenance_present_for_api_key_binding(self):
+        ev = self._init(
+            AEE_LLM_BINDING="bound",
+            AEE_LLM_PROVIDER_ID="db-endpoint",
+            AEE_LLM_PROVIDER_NAME="DB",
+            AEE_LLM_AUTH_TYPE="api-key",
+            AEE_LLM_BASE_URL="https://llm.example.com/v1",
+            AEE_LLM_REQUESTED_MODEL="claude-opus-4-8",
+        )
+        self.assertEqual(ev["model"], "claude-opus-4-8")  # effective, from CLI
+        prov = ev["provenance"]
+        self.assertEqual(prov["binding"], "bound")
+        self.assertEqual(prov["providerName"], "DB")
+        self.assertEqual(prov["authType"], "api-key")
+        self.assertEqual(prov["baseUrl"], "https://llm.example.com/v1")
+        self.assertEqual(prov["requestedModel"], "claude-opus-4-8")
+
+    def test_provenance_absent_when_env_unset_legacy_path(self):
+        # Clear the discriminator so the legacy/no-binding path is exercised even
+        # if the ambient environment happens to carry AEE_LLM_* vars.
+        with unittest.mock.patch.dict("os.environ", {}, clear=True):
+            events = map_stream_json_line(self.INIT_LINE, "corr-1")
+        ev = next(e for e in events if e["type"] == "system_init")
+        self.assertNotIn("provenance", ev)
+        # Legacy shape is otherwise unchanged (model + sessionId still present).
+        self.assertEqual(ev["model"], "claude-opus-4-8")
+        self.assertEqual(ev["sessionId"], "sess-123")
+
+    def test_env_fallback_binding_names_the_state(self):
+        ev = self._init(AEE_LLM_BINDING="env-fallback")
+        self.assertEqual(ev["provenance"]["binding"], "env-fallback")
+        self.assertIsNone(ev["provenance"]["providerName"])
+
+    def test_missing_binding_distinct_from_env_fallback(self):
+        ev = self._init(AEE_LLM_BINDING="missing")
+        self.assertEqual(ev["provenance"]["binding"], "missing")
+
+    def test_requested_model_arg_overrides_spawn_time_env(self):
+        # A mid-session model switch re-reads config.json per run; the actual
+        # --model value (passed as requested_model) wins over the spawn-time env.
+        with unittest.mock.patch.dict(
+                "os.environ",
+                {"AEE_LLM_BINDING": "bound",
+                 "AEE_LLM_REQUESTED_MODEL": "claude-opus-4-8"},
+                clear=False):
+            events = map_stream_json_line(
+                self.INIT_LINE, "corr-1", None, requested_model="opus-latest")
+        ev = next(e for e in events if e["type"] == "system_init")
+        self.assertEqual(ev["provenance"]["requestedModel"], "opus-latest")
+
+    def test_no_secret_material_in_row(self):
+        # AC8: even if a rogue token-ish env is set, provenance only reads the
+        # allow-listed non-secret keys — no token/authTokenId ever appears.
+        ev = self._init(
+            AEE_LLM_BINDING="bound",
+            AEE_LLM_PROVIDER_ID="sub",
+            AEE_LLM_AUTH_TYPE="oauth-token",
+            AEE_LLM_REQUESTED_MODEL="claude-sonnet-5",
+            ANTHROPIC_AUTH_TOKEN="sk-should-never-appear",
+            CLAUDE_CODE_OAUTH_TOKEN="oauth-should-never-appear",
+        )
+        blob = __import__("json").dumps(ev)
+        self.assertNotIn("sk-should-never-appear", blob)
+        self.assertNotIn("oauth-should-never-appear", blob)
+        # No secret-bearing keys leak (the `oauth-token` authType legitimately
+        # contains the word "token", so match on key names, not any substring).
+        for key in ev.get("provenance", {}):
+            self.assertNotIn("token", key.lower())
+
+
 class BuildUsageRecord(unittest.TestCase):
     """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
     (emitter) is asserted against the SAME golden fixture the JS aggregator uses

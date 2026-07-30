@@ -72,7 +72,21 @@ role's `{{vars}}` and the target repo are applied per member.
     }
   ],
   "gates":  [ { "label": "human:fdd-approved" } ],
-  "labels": [ { "name": "stage:fdd", "humanGate": false, "brake": false } ]
+  "labels": [ { "name": "stage:fdd", "humanGate": false, "brake": false } ],
+  "humans": [                              // named human roles (#987) — optional
+    {
+      "id": "issue-reviewer",
+      "name": "Issue Reviewer",
+      "description": "Triages incoming issues",   // optional
+      "stage": "triage",                           // optional — joins the layered layout
+      "emits": ["dispatch"],                       // labels this person applies (implicitly gates)
+      "consumes": [                                // what lands with the person
+        { "artifact": "issue", "from": "business-analyst" }, // an issue they review
+        { "label": "human-decision-required" },              // a brake they decide on
+        { "artifact": "file", "name": "risk-report" }        // a data-flow output they read
+      ]
+    }
+  ]
 }
 ```
 
@@ -207,6 +221,21 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   `human-label-as-outcome` (error). The materialiser/canvas wires it
   listener-only. A `brake` label is the deliberate exception — an agent may set it
   to pause the loop pending a human decision.
+- **Named human roles are first-class flow nodes (#987).** The optional top-level
+  `humans[]` declares people who act in the flow (an *Issue Reviewer*, a *Tech
+  Lead*) as named `kind: 'human'` boxes — purely declarative, they never
+  materialise into an agent and add no trigger (a `triggers.json` stays
+  byte-identical when only `humans[]` changes). A label a human `emits` is
+  *implicitly a gate* (an agent emitting it is a `gate-violation`); its `consumes`
+  bind the generic-`@human` gate/brake/delivery touchpoints (#981) to the named
+  node — `{ label }` a brake they decide on, `{ artifact:'pr'|'issue', from }` an
+  artifact they review, `{ artifact:'file', name }` a data-flow output they read.
+  First matching human in `humans[]` order wins a binding; a label emitted by two
+  humans draws both edges. Unbound touchpoints keep the generic `@human` actor, so
+  a flow with no `humans[]` renders exactly as before. Persisted on the team agent
+  like `stages`/`labels`; round-trips through export → materialise and
+  Edit-as-draft. Threaded into the graph builders as
+  `buildProcessGraph(agents, { labels, humans })`.
 - **No team-specifics in the bundle.** `repo`, credentials and Matrix tokens are
   intentionally excluded; they are bound at materialise time.
 - **Stability.** The format is versioned. Bumping shape ⇒ bump

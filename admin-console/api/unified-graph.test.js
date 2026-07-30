@@ -680,3 +680,95 @@ test('#981: artifact deliveries appear as file touchpoints, merged in order', ()
     { type: 'delivery', artifact: 'file', name: 'analysis-report', agentId: 'analyst' },
   ]);
 });
+
+// ── #987: named human roles routed onto first-class nodes ────────────────────
+
+test('#987: a human node joins the unified node set with its stage, not the actor column', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', triggers: [] }],
+    undefined,
+    { humans: [{ id: 'reviewer', name: 'Issue Reviewer', stage: 'triage' }] },
+  );
+  const hn = g.nodes.find(n => n.id === 'reviewer');
+  assert.ok(hn);
+  assert.equal(hn.kind, 'human');
+  assert.equal(hn.effectiveStage, 'triage');
+  // Not an actor node.
+  assert.notEqual(hn.role, 'actor');
+});
+
+test('#987: a gate emitted by a human routes reviewer → listener, and NO @human actor appears', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] }],
+    undefined,
+    { humans: [{ id: 'reviewer', name: 'Issue Reviewer', emits: ['dispatch'] }] },
+  );
+  const e = findEdge(g, x => x.on === 'label' && x.label === 'dispatch');
+  assert.equal(e.from, 'reviewer');
+  assert.equal(e.to, 'dispatcher');
+  assert.equal(e.gate, 'human');
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor when the gate is bound');
+});
+
+test('#987: a brake consumed by a human terminates on the named node, not @human', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['needs-decision'], triggers: [] }],
+    undefined,
+    {
+      labels: [{ name: 'needs-decision', brake: true }],
+      humans: [{ id: 'lead', name: 'Lead', consumes: [{ label: 'needs-decision' }] }],
+    },
+  );
+  const e = findEdge(g, x => x.handoff === 'human' && x.from === 'reworker');
+  assert.equal(e.to, 'lead');
+  assert.ok(!g.nodes.some(n => n.id === '@human'));
+});
+
+test('#987: a PR/issue delivery bound to a human routes to the named node (on:github)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', github: { producesPr: true }, triggers: [] }],
+    undefined,
+    { humans: [{ id: 'maintainer', name: 'Maintainer', consumes: [{ artifact: 'pr', from: 'dev' }] }] },
+  );
+  const e = findEdge(g, x => x.on === 'github' && x.audience === 'human' && x.from === 'dev');
+  assert.equal(e.to, 'maintainer');
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+});
+
+test('#987: a file output consumed by a human routes to the named node and clears unconsumed-output', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'analyst', outputs: [{ name: 'analysis-report' }], triggers: [] }],
+    undefined,
+    { humans: [{ id: 'stakeholder', name: 'Stakeholder', consumes: [{ artifact: 'file', name: 'analysis-report' }] }] },
+  );
+  const e = findEdge(g, x => x.on === 'artifact' && x.audience === 'human' && x.from === 'analyst');
+  assert.equal(e.to, 'stakeholder');
+  assert.ok(!lintCodes(g).includes('unconsumed-output'));
+  const tp = g.humanTouchpoints.find(t => t.type === 'delivery' && t.name === 'analysis-report');
+  assert.equal(tp.role, 'stakeholder');
+});
+
+test('#987: unbound touchpoints still fall back to the generic @human actor', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['needs-decision'], triggers: [] }],
+    undefined,
+    {
+      labels: [{ name: 'needs-decision', brake: true }],
+      humans: [{ id: 'reviewer', name: 'R', emits: ['other'] }], // does not consume the brake
+    },
+  );
+  const e = findEdge(g, x => x.handoff === 'human' && x.from === 'reworker');
+  assert.equal(e.to, '@human');
+  assert.ok(g.nodes.some(n => n.id === '@human'));
+});
+
+test('#987: no humans[] is byte-identical to omitting the option', () => {
+  const nodes = [
+    { id: 'analyst', outputs: [{ name: 'r', audience: 'human' }], triggers: [] },
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ];
+  const opts = { labels: [{ name: 'needs-decision', brake: true }] };
+  const withEmpty = buildUnifiedGraph(nodes, undefined, { ...opts, humans: [] });
+  const without = buildUnifiedGraph(nodes, undefined, opts);
+  assert.deepEqual(withEmpty, without);
+});

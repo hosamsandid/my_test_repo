@@ -29,7 +29,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -1539,7 +1539,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -1565,6 +1565,21 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       if (l.brake === true) entry.brake = true;
       normLabels.push(entry);
     }
+  }
+
+  // ── Named human roles (#987) ──────────────────────────────────────────────
+  // First-class human flow nodes, persisted on the TEAM agent like `labels` /
+  // `stages` — purely declarative, no runtime side-effect (AC9). Validated via
+  // the same rules the bundle uses so a live edit and an imported draft agree;
+  // normalized to the persisted shape. Ignored for non-team agents.
+  let normHumans = null;
+  if (humans !== undefined) {
+    if (humans !== null && !Array.isArray(humans)) {
+      return res.status(400).json({ error: 'humans must be an array of { id, name, description?, stage?, emits?, consumes? }' });
+    }
+    const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
+    if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
+    normHumans = normalizeHumans(humans || []);
   }
 
   // Validate the structured OUTCOMES port (#827) up front so a bad shape can't
@@ -1774,6 +1789,15 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (labels !== undefined && fresh.role === 'team') {
     if (normLabels && normLabels.length) fresh.labels = normLabels;
     else delete fresh.labels;
+  }
+
+  // Named human roles, team-agent only (#987) — validated into normHumans above.
+  // Mirrors the bundle's `humans[]`; `teamHumansRegistry` reads it so the live
+  // graph binds the #981 touchpoints to the named nodes. Declarative only — no
+  // trigger/reconcile side-effect (AC9). `null`/[] clears the registry.
+  if (humans !== undefined && fresh.role === 'team') {
+    if (normHumans && normHumans.length) fresh.humans = normHumans;
+    else delete fresh.humans;
   }
 
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────
@@ -3263,6 +3287,16 @@ function teamLabelRegistry(teamId) {
     : [];
 }
 
+// The named human roles of a LIVE team (#987). Persisted on the team agent like
+// `labels`/`stages`; the live graph builders bind the #981 gate/brake/delivery
+// touchpoints to these named nodes. Unknown team / no registry → [] (every
+// touchpoint keeps the generic `@human` actor).
+function teamHumansRegistry(teamId) {
+  if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
+  const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
+  return Array.isArray(cfg.humans) ? cfg.humans : [];
+}
+
 app.get('/api/process/graph', (req, res) => {
   const templatesParam = req.query.templates;
 
@@ -3317,7 +3351,8 @@ app.get('/api/process/graph', (req, res) => {
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
-  res.json({ level: 'live', team, ...buildProcessGraph(agents, { labels: teamLabelRegistry(team) }) });
+  const teamHumans = teamHumansRegistry(team);
+  res.json({ level: 'live', team, humans: teamHumans, ...buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans }) });
 });
 
 // Build a graph from an imported bundle (no persistence) so the canvas can
@@ -3343,8 +3378,10 @@ app.post('/api/process/graph', (req, res) => {
   }));
   res.json({
     level: 'template', team: null, imported: true, name: bundle.name,
-    // The bundle's own label registry is the gate/brake authority (#928).
-    ...buildProcessGraph(agents, { labels: bundle.labels }),
+    // The bundle's own registries are the authority: labels for gate/brake
+    // classification (#928), humans for the named-role bindings (#987).
+    humans: Array.isArray(bundle.humans) ? bundle.humans : [],
+    ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
 
@@ -5261,9 +5298,10 @@ app.get('/api/flows/graph', async (req, res) => {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), {});
     if (Array.isArray(teamCfg.stages)) stages = teamCfg.stages.filter(s => typeof s === 'string');
   }
+  const teamHumans = teamHumansRegistry(team);
   res.json({
-    unifiedFlowVersion: 1, source: 'live', team, stages,
-    ...buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team) }),
+    unifiedFlowVersion: 1, source: 'live', team, stages, humans: teamHumans,
+    ...buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans }),
   });
 });
 
@@ -5278,12 +5316,15 @@ app.post('/api/flows/graph', (req, res) => {
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
   const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
   const flow = processTemplateToUnified(bundle);
+  const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
   res.json({
     unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
     // Ordered stage names drive the layered layout on the client (#stage-order).
     stages: Array.isArray(bundle.stages) ? bundle.stages.filter(s => typeof s === 'string') : [],
-    // The bundle's own label registry is the gate/brake authority (#928).
-    ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels }),
+    // The bundle's own registries drive gate/brake classification (#928) and the
+    // named human-role bindings (#987).
+    humans: bundleHumans,
+    ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
 
@@ -5340,6 +5381,9 @@ app.get('/api/process/template', (req, res) => {
   res.json(buildProcessTemplate({
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
+    // Named human roles (#987) round-trip with the bundle so an exported team
+    // re-materialises its human boxes and Edit-as-draft carries them.
+    humans: teamHumansRegistry(team),
   }));
 });
 
@@ -9455,6 +9499,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       .filter(l => l && typeof l.name === 'string' && l.name.trim())
       .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
     : [];
+  // Named human roles (#987) — normalized to the persisted shape and stored on
+  // the team agent (like `stages`/`labels`) so the live graph binds the #981
+  // touchpoints to the named nodes. Never materialise into an agent.
+  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -9657,6 +9705,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           skills: initialSkills,
           // Ordered stage names for the process graph's layered layout (#stage-order).
           ...(bundleStages.length ? { stages: bundleStages } : {}),
+          // Named human roles (#987) — held on the team agent like stages/labels.
+          ...(bundleHumans.length ? { humans: bundleHumans } : {}),
           // Authoritative gate/brake label registry (#928): the live graph has no
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
@@ -9940,6 +9990,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       .filter(l => l && typeof l.name === 'string' && l.name.trim())
       .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
     : [];
+  // Named human roles (#987) — normalized to the persisted shape and stored on
+  // the team agent (like `stages`/`labels`) so the live graph binds the #981
+  // touchpoints to the named nodes. Never materialise into an agent.
+  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -10158,6 +10212,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           skills: initialSkills,
           // Ordered stage names for the process graph's layered layout.
           ...(bundleStages.length ? { stages: bundleStages } : {}),
+          // Named human roles (#987) — held on the team agent like stages/labels.
+          ...(bundleHumans.length ? { humans: bundleHumans } : {}),
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),

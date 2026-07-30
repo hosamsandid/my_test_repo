@@ -408,6 +408,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       outcomes: (n.outcomes && Array.isArray(n.outcomes.options) && n.outcomes.options.length) ? n.outcomes : null,
       _role: n.role,
       _isParent: n.isParent === true,
+      // Named human role (#987): a first-class, purely-declarative person node.
+      // Rendered as a distinct card (person icon, no trigger/session rows, no
+      // produce badges) and its emits/consumes drive the inspector.
+      _isHuman: n.kind === 'human' || n.role === 'human',
+      _emits: Array.isArray(n.emits) ? n.emits : [],
+      _consumes: Array.isArray(n.consumes) ? n.consumes : [],
+      _description: typeof n.description === 'string' ? n.description : '',
     }));
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
@@ -1091,15 +1098,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
       const node = document.createElement('div');
       const selected = state.selectedId === n.id;
-      node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '');
+      const isHuman = bp._isHuman === true;
+      node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '') + (isHuman ? ' bp-node-human' : '');
       node.dataset.id = n.id;
+      // A human role reads as a person, not an agent: a dashed accent border and
+      // a tinted surface set it apart from the solid agent cards (#987).
+      const humanBorder = selected ? '2px solid #7c3aed' : '1px dashed #7c3aed';
       node.style.cssText = `
         position:absolute;
         left:${pos.x}px;
         top:${pos.y}px;
         width:${NODE_W}px;
-        background:var(--eb-bg-surface);
-        border:${selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)'};
+        background:${isHuman ? 'rgba(124,58,237,0.06)' : 'var(--eb-bg-surface)'};
+        border:${isHuman ? humanBorder : (selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)')};
         border-radius:8px;
         padding:10px 12px;
         box-sizing:border-box;
@@ -1108,7 +1119,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         box-shadow:var(--eb-shadow-sm);
         cursor:pointer;
       `;
-      applyStatusBorderColor(node, bp.status);
+      if (!isHuman) applyStatusBorderColor(node, bp.status);
       node.addEventListener('mousedown', e => e.stopPropagation());
       // Select on click — but not when interacting with a button, link or the
       // inline editor inputs inside the card.
@@ -1123,9 +1134,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       const header = document.createElement('div');
       header.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
       header.innerHTML = `
-        <span style="flex:1;line-height:1.4;">${esc(bp.title)}</span>
+        <span style="flex:1;line-height:1.4;">${isHuman ? '👤 ' : ''}${esc(bp.title)}</span>
       `;
       node.appendChild(header);
+
+      // Human role subtitle + its emits/consumes chips (#987). A human role has
+      // no triggers, session policy, produce badges or outcome ports — its whole
+      // model is "which labels this person applies, and what lands with them".
+      if (isHuman) {
+        const sub = document.createElement('div');
+        sub.style.cssText = 'font-size:10px;color:#7c3aed;font-weight:600;letter-spacing:0.03em;text-transform:uppercase;margin-bottom:4px;';
+        sub.textContent = 'Human role';
+        node.appendChild(sub);
+        if (bp._description) {
+          const desc = document.createElement('div');
+          desc.style.cssText = 'font-size:11px;color:var(--eb-text-secondary);line-height:1.4;margin-bottom:6px;';
+          desc.textContent = bp._description;
+          node.appendChild(desc);
+        }
+        const chip = (text, title, color) =>
+          `<span title="${esc(title)}" style="font-size:9px;color:${color};background:rgba(124,58,237,0.10);border:1px solid rgba(124,58,237,0.35);border-radius:3px;padding:0 4px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(text)}</span>`;
+        const parts = [];
+        for (const e of bp._emits) parts.push(chip(`↦ ${e}`, `applies label “${e}” (a gate)`, '#6d28d9'));
+        for (const c of bp._consumes) {
+          if (c && c.label) parts.push(chip(`⏸ ${c.label}`, `decides on brake “${c.label}”`, '#6d28d9'));
+          else if (c && (c.artifact === 'pr' || c.artifact === 'issue')) parts.push(chip(`⇤ ${c.artifact} · ${c.from}`, `reviews ${c.artifact} from ${c.from}`, '#6d28d9'));
+          else if (c && c.artifact === 'file') parts.push(chip(`⇤ ${c.name}`, `reads output ${c.name}`, '#6d28d9'));
+        }
+        if (parts.length) {
+          const chips = document.createElement('div');
+          chips.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;';
+          chips.innerHTML = parts.join('');
+          node.appendChild(chips);
+        }
+      }
 
       // Badges
       const badgeParts = [];
@@ -1231,8 +1273,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       if (actions.childElementCount > 0) node.appendChild(actions);
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
-      // hand-off / link. Only when editable and a handler is wired.
-      if (state.editable && onConnect) {
+      // hand-off / link. Only when editable and a handler is wired. A human role
+      // carries no drag port (#987) — its emits/consumes are edited in the
+      // inspector, not by dragging an agent-style label hand-off off the card.
+      if (state.editable && onConnect && !isHuman) {
         const port = document.createElement('div');
         port.title = 'Drag to another node to connect them';
         port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';

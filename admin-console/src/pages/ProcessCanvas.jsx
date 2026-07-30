@@ -9,7 +9,7 @@ import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
-import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -570,6 +570,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           human={selectedHuman}
           stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
           ops={isDraft ? draftOps : liveHumanOps}
+          triggerOps={ops}
+          peers={displayGraph?.nodes || []}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
           onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); if (!isDraft) refetch(); }}
           onChanged={() => { if (!isDraft) refetch(); }}
@@ -631,12 +633,31 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           types={createTypesFor(caps, sourceKindOf(connectPair.from))}
           fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
           toNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.to) || null}
+          peers={displayGraph?.nodes || []}
+          humans={displayGraph?.humans || []}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />
       )}
 
-      {outcomeConnect && (
+      {/* Pre-typed outcome/badge drag (#1005, §4.3): the outcome's action picks
+          the form — a channel dialog for openPr/openIssue (and the produce
+          badges), the label hand-off for setLabel. Never the generic picker. */}
+      {outcomeConnect && (outcomeConnect.outcome?.artifact ? (
+        <CreateChannelDialog
+          from={outcomeConnect.from}
+          to={outcomeConnect.to}
+          fromName={nodeName(outcomeConnect.from)}
+          toName={nodeName(outcomeConnect.to)}
+          artifact={outcomeConnect.outcome.artifact}
+          lockArtifact
+          ops={ops}
+          humans={displayGraph?.humans || []}
+          humanOps={isDraft ? draftOps : liveHumanOps}
+          onClose={() => setOutcomeConnect(null)}
+          onDone={() => { setOutcomeConnect(null); afterEdit(); }}
+        />
+      ) : (
         <CreateHandoffDialog
           from={outcomeConnect.from}
           to={outcomeConnect.to}
@@ -649,7 +670,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           onClose={() => setOutcomeConnect(null)}
           onDone={() => { setOutcomeConnect(null); afterEdit(); }}
         />
-      )}
+      ))}
 
       {selectedEdge && (
         <EditHandoffDialog
@@ -657,6 +678,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           fromName={nodeName(selectedEdge.from)}
           toName={nodeName(selectedEdge.to)}
           ops={ops}
+          graph={displayGraph}
+          humanOps={isDraft ? draftOps : liveHumanOps}
           onOpenRouting={openRouting}
           onClose={() => setSelectedEdge(null)}
           onDone={() => { setSelectedEdge(null); afterEdit(); }}

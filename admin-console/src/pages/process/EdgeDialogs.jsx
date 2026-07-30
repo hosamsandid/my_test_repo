@@ -10,9 +10,14 @@ import { defaultGateKind } from './human-gate-ops';
 // collect input and render state; they never sequence ops calls themselves.
 import {
   wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
-  wireChannel, updateChannel as engineUpdateChannel, unwireChannel,
-  wireHumanDelivery, wireHumanGate, wireArtifactFlow,
+  updateChannel as engineUpdateChannel, unwireChannel,
+  wireArtifactFlow,
 } from './wiring-engine';
+import {
+  submitChannelWithApproval, submitAgentToPerson, submitPersonToAgent,
+  findReviewGate, setGateClaim, addRejectionPath, removeRejectionPath,
+  renameGateLabel, deleteReviewGate,
+} from './review-gate';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -235,84 +240,121 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
  * type-specific detail form, with Back always available. */
 export function CreateEdgeDialog({
   from, to, fromName, toName, labels, ops = liveOps, types, fromNode, toNode, humanOps,
-  onClose, onDone,
+  peers = [], humans = [], onClose, onDone,
 }) {
   const common = { from, to, fromName, toName, ops, onClose, onDone };
   // Legacy token: 'github' expands to the two explicit channel tiles.
   const allowed = (Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'])
     .flatMap(t => (t === 'github' ? ['github-pr', 'github-issue'] : [t]));
   const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
+  const [prefill, setPrefill] = useState(null); // one-click outcome tile → prefilled form
 
-  // Named human roles (#987): a person is never wired as a GitHub channel on a
-  // role (that lookup fails — "role <id> not found"). Route to the dedicated
-  // human forms, which write the human's `consumes` / `emits` via humanOps.
-  //   agent → human  = a delivery the person reviews.
-  //   human → agent  = a gate label the person applies.
+  // The four sentence-titled dialogs (#1005, §4.3) — direction + endpoint
+  // kinds fully determine which one opens:
+  //   agent → person  = "P reviews A's work" (delivery, optional S3 completion)
+  //   person → agent  = "P approves → B wakes" (gate, optional rejection path)
+  //   source → agent  = GitHub event / webhook (the existing forms, shell-titled)
+  //   agent → agent   = "How does B learn about A's work?" (below)
   if (toNode && toNode.kind === 'human') {
-    return <HumanDeliveryForm {...common} humanOps={humanOps} fromNode={fromNode} />;
+    return <AgentToPersonDialog {...common} humanOps={humanOps} fromNode={fromNode} peers={peers} labels={labels} />;
   }
   if (fromNode && fromNode.kind === 'human') {
-    return <HumanGateForm {...common} humanOps={humanOps} />;
+    return <PersonToAgentDialog {...common} humanOps={humanOps} peers={peers} />;
   }
 
-  const back = allowed.length > 1 ? () => setType(null) : undefined;
+  const back = allowed.length > 1 ? () => { setType(null); setPrefill(null); } : undefined;
 
   if (type === 'label') {
-    return <CreateHandoffDialog {...common} labels={labels} onBack={back} />;
+    return <CreateHandoffDialog {...common} labels={labels} onBack={back} initialLabel={prefill?.label || ''} />;
   }
   if (type === 'dependency') return <DependencyEdgeForm {...common} onBack={back} />;
   if (type === 'artifact') return <ArtifactEdgeForm {...common} onBack={back} />;
   if (type === 'hierarchy') return <HierarchyEdgeForm {...common} onBack={back} />;
   if (type === 'github-pr' || type === 'github-issue') {
-    return <CreateChannelDialog {...common} artifact={type === 'github-pr' ? 'pr' : 'issue'} lockArtifact onBack={back} />;
+    return <CreateChannelDialog {...common} artifact={type === 'github-pr' ? 'pr' : 'issue'} lockArtifact
+      humans={humans} humanOps={humanOps} onBack={back} />;
   }
   if (type === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={back} />;
   if (type === 'webhook') return <WebhookForm {...common} onBack={back} />;
 
-  const gh = (fromNode && fromNode.github) || {};
   const A = fromName || from;
   const B = toName || to;
-  const choices = [
-    {
-      id: 'github-pr', title: 'Pull-request channel',
-      desc: `${A} opens a pull request that wakes ${B} (optionally routed via a label / human approval).`,
-      recommended: !!gh.producesPr,
-    },
-    {
-      id: 'github-issue', title: 'Issue channel',
-      desc: `${A} opens an issue that wakes ${B} (optionally routed via a label / human approval).`,
-      recommended: !!gh.producesIssue,
-    },
+
+  // A's existing outcomes as one-click tiles (recommended, §4.3): picking one
+  // opens the matching form pre-typed by the outcome's action — never a
+  // second question about the type.
+  const outcomeTiles = (fromNode && fromNode.outcomes && Array.isArray(fromNode.outcomes.options)
+    ? fromNode.outcomes.options : [])
+    .map(o => {
+      const setLabel = (o.actions || []).find(a => a && a.type === 'setLabel' && a.label);
+      const opensPr = (o.actions || []).some(a => a && a.type === 'openPr');
+      const opensIssue = (o.actions || []).some(a => a && a.type === 'openIssue');
+      if (setLabel && allowed.includes('label')) {
+        return { id: `oc:${o.id}`, title: `${A} sets \`${setLabel.label}\``,
+          desc: `Outcome “${o.title || o.id}” — ${B} wakes on this label.`,
+          open: () => { setPrefill({ label: setLabel.label }); setType('label'); } };
+      }
+      if (opensPr && allowed.includes('github-pr')) {
+        return { id: `oc:${o.id}`, title: `${A} opens a pull request`,
+          desc: `Outcome “${o.title || o.id}” — ${B} reacts to the PR.`,
+          open: () => setType('github-pr') };
+      }
+      if (opensIssue && allowed.includes('github-issue')) {
+        return { id: `oc:${o.id}`, title: `${A} opens an issue`,
+          desc: `Outcome “${o.title || o.id}” — ${B} reacts to the issue.`,
+          open: () => setType('github-issue') };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  const createTiles = [
     { id: 'label', title: 'Label hand-off', desc: `${A} emits a label that wakes ${B}.` },
-    { id: 'dependency', title: 'Dependency', desc: `${B} is woken when ${A} pushes to the repo.` },
-    { id: 'artifact', title: 'Data flow / hand-off', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
-    { id: 'hierarchy', title: 'Parent / child', desc: `${A} groups ${B} as a child — it inherits its parent's stage.` },
+    { id: 'github-issue', title: 'Issue channel', desc: `${A} opens an issue that wakes ${B} (optionally routed via a label / human approval).` },
+    { id: 'github-pr', title: 'Pull-request channel', desc: `${A} opens a pull request that wakes ${B} (optionally routed via a label / human approval).` },
+    { id: 'artifact', title: 'File artifact', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
     { id: 'event', title: 'GitHub trigger', desc: `${B} wakes on a repo event (issue opened, PR opened, push, …) or on a label — including labels a human sets.` },
     { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${B} via an HTTP call.` },
   ].filter(c => allowed.includes(c.id));
-  // Context ranking (#411): recommended tiles (the source's PR/Issue badges) first.
-  choices.sort((a, b) => (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0));
+  const structureTiles = [
+    { id: 'dependency', title: 'Dependency', desc: `${B} is woken when ${A} pushes to the repo.` },
+    { id: 'hierarchy', title: 'Parent / child', desc: `${A} groups ${B} as a child — it inherits its parent's stage.` },
+  ].filter(c => allowed.includes(c.id));
+
+  const tileBtn = (c, recommended, onClick) => (
+    <button key={c.id} onClick={onClick} style={{
+      textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
+      border: recommended ? '1px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+      padding: 'var(--eb-space-3)', fontFamily: 'inherit', width: '100%',
+    }}>
+      <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+        {c.title}
+        {recommended && <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'normal' }}> — recommended</span>}
+      </div>
+      <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
+    </button>
+  );
 
   return (
-    <SidePanel open onClose={onClose} title="Create connection" width="520px">
-      <p style={hint}>
-        How should <strong>{B}</strong> be connected to <strong>{A}</strong>?
-      </p>
+    <SidePanel open onClose={onClose} title={`How does ${B} learn about ${A}'s work?`} width="520px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-        {choices.map(c => (
-          <button key={c.id} onClick={() => setType(c.id)} style={{
-            textAlign: 'left', background: 'var(--eb-bg-app)', cursor: 'pointer',
-            border: c.recommended ? '1px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            padding: 'var(--eb-space-3)', fontFamily: 'inherit',
-          }}>
-            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-              {c.title}
-              {c.recommended && <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'normal' }}> — recommended</span>}
+        {outcomeTiles.length > 0 && (
+          <>
+            <div style={{ ...small, fontWeight: 'var(--eb-font-medium)' }}>{A}'s existing outcomes</div>
+            {outcomeTiles.map(t => tileBtn(t, true, t.open))}
+            <div style={{ ...small, fontWeight: 'var(--eb-font-medium)', marginTop: 'var(--eb-space-2)' }}>…or create a new hand-off</div>
+          </>
+        )}
+        {createTiles.map(c => tileBtn(c, false, () => setType(c.id)))}
+        {structureTiles.length > 0 && (
+          <details>
+            <summary style={{ ...small, cursor: 'pointer', fontWeight: 'var(--eb-font-medium)' }}>Structure</summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-2)' }}>
+              {structureTiles.map(c => tileBtn(c, false, () => setType(c.id)))}
             </div>
-            <div style={{ ...small, marginTop: 2 }}>{c.desc}</div>
-          </button>
-        ))}
+          </details>
+        )}
       </div>
     </SidePanel>
   );
@@ -339,37 +381,43 @@ export function AddInputDialog({ node, peers = [], labels = [], ops = liveOps, o
   if (step === 'webhook') return <WebhookForm {...common} onBack={toTiles} />;
   if (step === 'schedule') return <ScheduleInputForm {...common} onBack={toTiles} />;
 
-  if (step === 'channel:pick' || step === 'artifact:pick') {
+  if (step === 'channel-pr:pick' || step === 'channel-issue:pick' || step === 'artifact:pick') {
     const artifactStep = step === 'artifact:pick';
+    const art = step === 'channel-pr:pick' ? 'pull request' : 'issue';
     return (
       <PeerPicker
-        title={artifactStep ? 'Artifact from another agent' : 'PR / issue from another agent'}
+        title={artifactStep ? 'File artifact' : (step === 'channel-pr:pick' ? 'Pull-request channel' : 'Issue channel')}
         prompt={artifactStep
           ? `Which agent's artifact wakes ${toName}?`
-          : `Which agent's pull request / issue wakes ${toName}?`}
+          : `Which agent's ${art} wakes ${toName}?`}
         peers={sources}
-        onPick={(p) => { setFromPeer(p); setStep(artifactStep ? 'artifact' : 'channel'); }}
+        onPick={(p) => { setFromPeer(p); setStep(artifactStep ? 'artifact' : (step === 'channel-pr:pick' ? 'channel-pr' : 'channel-issue')); }}
         onBack={toTiles}
         onClose={onClose}
       />
     );
   }
-  if (step === 'channel' && fromPeer) {
+  if ((step === 'channel-pr' || step === 'channel-issue') && fromPeer) {
     return <CreateChannelDialog {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
-      onBack={() => setStep('channel:pick')} />;
+      artifact={step === 'channel-pr' ? 'pr' : 'issue'} lockArtifact
+      onBack={() => setStep(`${step}:pick`)} />;
   }
   if (step === 'artifact' && fromPeer) {
     return <ArtifactEdgeForm {...common} from={fromPeer.id} fromName={fromPeer.displayName || fromPeer.id}
       onBack={() => setStep('artifact:pick')} />;
   }
 
+  // The same tiles, order and words as the canvas create dialog's create-new
+  // list (#1005 — one vocabulary across both entry points); `Label applied` and
+  // `Schedule` are consumer-side extras with no producer to pick.
   const choices = [
-    { id: 'event', title: 'GitHub event', desc: `${toName} wakes on a repo event (issue/PR opened, push, …).` },
     { id: 'label', title: 'Label applied', desc: `${toName} wakes when a specific label is set — by an agent or a human.` },
-    { id: 'channel:pick', title: 'PR / issue from another agent', desc: `${toName} reacts to a pull request or issue another agent opens.` },
-    { id: 'schedule', title: 'Schedule', desc: `${toName} wakes on a recurring cron or a one-shot time.` },
+    { id: 'channel-issue:pick', title: 'Issue channel', desc: `${toName} reacts to an issue another agent opens.` },
+    { id: 'channel-pr:pick', title: 'Pull-request channel', desc: `${toName} reacts to a pull request another agent opens.` },
+    { id: 'artifact:pick', title: 'File artifact', desc: `${toName} consumes an artifact another agent produces.` },
+    { id: 'event', title: 'GitHub trigger', desc: `${toName} wakes on a repo event (issue/PR opened, push, …).` },
     { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${toName} via an HTTP call.` },
-    { id: 'artifact:pick', title: 'Artifact from another agent', desc: `${toName} consumes an artifact another agent produces.` },
+    { id: 'schedule', title: 'Schedule', desc: `${toName} wakes on a recurring cron or a one-shot time.` },
   ];
 
   return (
@@ -453,10 +501,13 @@ function ScheduleInputForm({ to, toName, ops = liveOps, onBack, onClose, onDone 
  * derives the github-event trigger. An optional label + human-approval gate model
  * "A opens a PR → a human labels it → B is woken". Also ensures A is marked as
  * producing that artifact so the producer badge/prompt-block appear. */
-export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifact, fromName, toName, ops = liveOps, onBack, onClose, onDone }) {
+export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifact, fromName, toName, ops = liveOps, humans = [], humanOps, onBack, onClose, onDone }) {
   const [artifact, setArtifact] = useState(artifact0 === 'issue' ? 'issue' : 'pr');
   const [label, setLabel] = useState('');
   const [human, setHuman] = useState(false);
+  // Named approver (#1005, §4.3/§5 path A): picking a person turns the gated
+  // channel into the FULL review-gate triangle in this one dialog.
+  const [approver, setApprover] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
@@ -465,11 +516,13 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
     setSaving(true); setError(null);
     try {
-      // The engine flags the producer (badge + prompt block, audience flags
-      // preserved) and upserts the channel port on the consumer.
-      await wireChannel({ ops }, {
+      // With a NAMED approver the engine wires the whole S3 triangle
+      // (delivery + gate emit + claimed listener); otherwise a plain
+      // (optionally anonymously gated) channel.
+      await submitChannelWithApproval({ ops, humanOps }, {
         from, to, artifact, label,
-        ...(human ? { gate: 'human' } : {}),
+        human: human ? (approver || null) : null,
+        gate: human,
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -501,6 +554,18 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label (renders as a gate on the edge)
         </label>
+        {human && humans.length > 0 && humanOps && (
+          <Field label="Who approves?">
+            <select value={approver} onChange={e => setApprover(e.target.value)} style={input}>
+              <option value="">— anyone (anonymous gate) —</option>
+              {humans.map(h => <option key={h.id} value={h.id}>👤 {h.name || h.id}</option>)}
+            </select>
+            <small style={small}>
+              Picking a person wires the full review gate: {fromName || from}'s {noun} is
+              delivered to them, and their approval label wakes {toName || to} (claim stamped).
+            </small>
+          </Field>
+        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
@@ -512,12 +577,13 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
   );
 }
 
-/* ── Human delivery (agent → named human role, #987) ─────────────────────────
+/* ── "P reviews A's work" (agent → named human role, #987/#1005 §4.3) ───────
  * Drag an agent's ● port onto a human box: the producer's PR / issue / file
- * output is reviewed by that person. Writes the delivery to the human's
- * `consumes` via humanOps — never a GitHub channel on a role (dropping on a
- * human used to fail with "role <id> not found"). */
-export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, onBack, onClose, onDone }) {
+ * output is reviewed by that person. The artifact is pre-selected from A's
+ * outcomes; an optional inline "on approval, wake…" section completes the
+ * full S3 triangle (consumer + gate label → engine wireReviewGate) in this
+ * one dialog — the two-drag path stays available and converges (§4.5). */
+export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, peers = [], onBack, onClose, onDone }) {
   const outputs = (fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [])
     .map(a => ((a && (a.name || a.path)) ? { key: a.name || a.path } : null)).filter(Boolean);
   const options = [
@@ -526,24 +592,32 @@ export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, h
     ...outputs.map(o => ({ id: `file:${o.key}`, title: `Output · ${o.key}`, desc: `${toName || to} reads the ${o.key} artifact.` })),
   ];
   const [choice, setChoice] = useState(options[0].id);
+  // Optional S3 completion (§4.3): on approval, wake a consumer via a gate label.
+  const [wakeTo, setWakeTo] = useState('');
+  const [gateLabel, setGateLabel] = useState('ready');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const agentPeers = peers.filter(p => p && p.kind !== 'human' && p.id !== from);
+  const isArtifactChoice = choice === 'pr' || choice === 'issue';
 
   async function submit() {
     setSaving(true); setError(null);
     try {
-      // The engine flags the producer for PR/issue deliveries (audience flags
-      // preserved) and writes the consume onto the human role.
-      const entry = (choice === 'pr' || choice === 'issue')
+      const entry = isArtifactChoice
         ? { artifact: choice, from }
         : { artifact: 'file', name: choice.slice('file:'.length) };
-      await wireHumanDelivery({ ops, humanOps }, { human: to, entry });
+      // With a consumer + gate label the engine wires the whole triangle;
+      // otherwise just the delivery (the two-gesture path, §5 path B).
+      await submitAgentToPerson({ ops, humanOps }, {
+        from, human: to, entry,
+        ...(isArtifactChoice && wakeTo ? { wake: { to: wakeTo, gateLabel } } : {}),
+      });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Deliver to a human role" width="520px">
+    <SidePanel open onClose={onClose} title={`${toName || to} reviews ${fromName || from}'s work`} width="520px">
       <p style={hint}>
         <strong>{toName || to}</strong> (a person) reviews something <strong>{fromName || from}</strong> produces.
       </p>
@@ -554,6 +628,22 @@ export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, h
           </select>
           <small style={small}>{options.find(o => o.id === choice)?.desc}</small>
         </Field>
+        {isArtifactChoice && agentPeers.length > 0 && (
+          <Field label="On approval, wake… (optional)">
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <select value={wakeTo} onChange={e => setWakeTo(e.target.value)} style={{ ...input, flex: 1 }}>
+                <option value="">— nobody yet (wire later) —</option>
+                {agentPeers.map(p => <option key={p.id} value={p.id}>{p.displayName || p.id}</option>)}
+              </select>
+              <input value={gateLabel} onChange={e => setGateLabel(e.target.value)}
+                placeholder="gate label" style={{ ...input, width: 130 }} disabled={!wakeTo} />
+            </div>
+            <small style={small}>
+              Completes the review gate in one go: {toName || to} applies the label,
+              the consumer wakes (claim stamped). Leave empty to wire it later.
+            </small>
+          </Field>
+        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
@@ -565,44 +655,57 @@ export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, h
   );
 }
 
-/* ── Human gate (named human role → agent, #987) ─────────────────────────────
+/* ── "P approves → B wakes" (named human role → agent, #987/#1005 §4.3) ─────
  * Drag a human box's ● port onto an agent: the person applies a label that
  * wakes the agent (a gate). Adds the label to the human's `emits` (making it a
- * gate) AND creates the listener trigger on the agent so the edge draws. The
- * listener carries exactly ONE event — defaulted from the artifact the person
- * already reviews, overridable via the same Issue/PR kind selector the label
- * hand-off dialog uses — and the derived claim (#1000, D1–D3). */
-export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, humanOps, onBack, onClose, onDone }) {
+ * gate) AND creates the claimed single-event listener on the agent (#1000).
+ * The artifact context is inferred from what P already reviews (`consumes`);
+ * an optional rejection path ("on rejection, wake [producer]") wires the
+ * second gate leg — offered, off by default (concept §9 Q1). */
+export function PersonToAgentDialog({ from, to, fromName, toName, ops = liveOps, humanOps, peers = [], onBack, onClose, onDone }) {
   const [label, setLabel] = useState('');
   const [kind, setKind] = useState('issues'); // issues | pull_request
+  const [producerId, setProducerId] = useState(''); // whose artifact P reviews
+  const [rejectOn, setRejectOn] = useState(false);
+  const [rejectLabel, setRejectLabel] = useState('rework');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Default the gate's artifact kind from the human's `consumes`: a person who
-  // reviews a PR gates that PR; an issue reviewer gates the issue.
+  // Infer the gate's artifact kind AND the producer (for the rejection path)
+  // from the human's `consumes`: a person who reviews a PR gates that PR.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const human = await humanOps?.getHuman?.(from);
-        if (alive && human) setKind(defaultGateKind(human));
+        if (!alive || !human) return;
+        setKind(defaultGateKind(human));
+        const c = (Array.isArray(human.consumes) ? human.consumes : [])
+          .find(x => x && (x.artifact === 'pr' || x.artifact === 'issue') && x.from);
+        if (c) setProducerId(c.from);
       } catch { /* keep the issues default */ }
     })();
     return () => { alive = false; };
   }, [from]);
+
+  const producerName = peers.find(p => p.id === producerId)?.displayName || producerId;
 
   async function submit() {
     const l = label.trim();
     if (!l) { setError('Enter the label this person applies.'); return; }
     setSaving(true); setError(null);
     try {
-      await wireHumanGate({ ops, humanOps }, { human: from, to, label: l, kind });
+      await submitPersonToAgent({ ops, humanOps }, {
+        human: from, to, label: l, kind,
+        ...(rejectOn && producerId && rejectLabel.trim()
+          ? { reject: { to: producerId, label: rejectLabel.trim() } } : {}),
+      });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Human gate" width="520px">
+    <SidePanel open onClose={onClose} title={`${fromName || from} approves → ${toName || to} wakes`} width="520px">
       <p style={hint}>
         <strong>{fromName || from}</strong> (a person) applies a label that wakes <strong>{toName || to}</strong> — an approval gate.
       </p>
@@ -619,6 +722,18 @@ export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, human
           <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. approved-for-dispatch" style={input} />
           <small style={small}>Only this person may set it (an agent setting it is a gate-violation). {toName || to} wakes when it is applied to {kind === 'pull_request' ? 'a pull request' : 'an issue'}.</small>
         </Field>
+        {producerId && producerId !== to && (
+          <label style={check}>
+            <input type="checkbox" checked={rejectOn} onChange={e => setRejectOn(e.target.checked)} />
+            On rejection, wake <strong>{producerName}</strong> (the producer this person reviews)
+          </label>
+        )}
+        {rejectOn && producerId && (
+          <Field label="Rejection label">
+            <input value={rejectLabel} onChange={e => setRejectLabel(e.target.value)} placeholder="e.g. rework" style={input} />
+            <small style={small}>{producerName} wakes when the person applies this label instead.</small>
+          </Field>
+        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
@@ -751,6 +866,13 @@ function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, o
 export function EditHandoffDialog(props) {
   const on = props.edge?.on;
   const ops = props.ops || liveOps;
+  // The review gate is ONE editable object (#1005, §4.4): any edge of the S3
+  // triangle — the delivery to the person or a gate label edge originating at
+  // a named human role — opens the same three-party editor.
+  if (props.graph && props.humanOps) {
+    const gate = findReviewGate(props.edge, props.graph);
+    if (gate) return <ReviewGateEditor {...props} gate={gate} ops={ops} />;
+  }
   if (on === 'dependency') {
     return ops.removeDependency ? <RemoveEdgeDialog kind={on} {...props} /> : <ReadonlyEdgeDialog {...props} />;
   }
@@ -767,6 +889,124 @@ export function EditHandoffDialog(props) {
   if (on === 'webhook') return <EditWebhookDialog {...props} />;
   if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
   return <EditLabelHandoff {...props} />;
+}
+
+/* ── Review gate — one editable object (#1005, §4.4) ────────────────────────
+ * Opened from ANY edge of the S3 triangle. Shows all three parties (producer +
+ * artifact, reviewer, consumer), the gate label (renamable), the claim with
+ * its opt-out, and the optional rejection path. Every write composes engine
+ * ops (atomic, symmetric cleanup); Delete removes all three sides. */
+function ReviewGateEditor({ gate, ops = liveOps, humanOps, onClose, onDone }) {
+  const ctx = { ops, humanOps };
+  const kind = gate.artifact === 'pr' ? 'pull_request' : 'issues';
+  const [labelName, setLabelName] = useState(gate.gateLabel || '');
+  const [rejectLabel, setRejectLabel] = useState('rework');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const run = async (fn) => {
+    setSaving(true); setError(null);
+    try { await fn(); onDone?.(); }
+    catch (e) { setError(e.message); setSaving(false); }
+  };
+  const canRename = !!(gate.consumer && gate.gateTriggerId) && labelName.trim() && labelName.trim() !== gate.gateLabel;
+  const humanName = gate.human.displayName || gate.human.name || gate.human.id;
+  const noun = gate.artifact === 'pr' ? 'pull request' : 'issue';
+
+  return (
+    <SidePanel open onClose={onClose} title="Review gate" width="520px">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{ ...small, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span>
+            {gate.producer
+              ? <><strong>{gate.producer.displayName || gate.producer.id}</strong> opens a {noun} → reviewed by 👤 <strong>{humanName}</strong></>
+              : <>👤 <strong>{humanName}</strong> — no delivery wired yet (drag the producer onto the person to add one)</>}
+          </span>
+          <span>
+            {gate.consumer
+              ? <>on <code>{gate.gateLabel}</code> → <strong>{gate.consumer.displayName || gate.consumer.id}</strong> wakes
+                {gate.claim ? <> · ⇥ claims <code>{gate.claim.add}</code></> : <> · claim off</>}</>
+              : <>no consumer wired on approval yet</>}
+          </span>
+          {gate.rejectLabel && gate.producer && (
+            <span>on <code>{gate.rejectLabel}</code> → <strong>{gate.producer.displayName || gate.producer.id}</strong> reworks</span>
+          )}
+        </div>
+
+        {gate.consumer && (
+          <Field label="Gate label the person applies">
+            <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
+            {canRename && (
+              <button onClick={() => run(() => renameGateLabel(ctx, {
+                human: gate.human.id, to: gate.consumer.id,
+                oldLabel: gate.gateLabel, oldTriggerId: gate.gateTriggerId,
+                newLabel: labelName, kind,
+              }))} disabled={saving} style={{ ...ghost, alignSelf: 'flex-start' }}>
+                Rename label
+              </button>
+            )}
+          </Field>
+        )}
+
+        {gate.consumer && gate.gateTriggerId && (
+          <label style={check}>
+            <input type="checkbox" checked={!!gate.claim} disabled={saving}
+              onChange={e => run(() => setGateClaim(ctx, {
+                to: gate.consumer.id, triggerId: gate.gateTriggerId,
+                label: gate.gateLabel, on: e.target.checked,
+              }))} />
+            Claim the wake label on fire (<code>{gate.gateLabel}</code> → <code>{gate.gateLabel}:wip</code>)
+          </label>
+        )}
+
+        {gate.producer && (gate.rejectLabel ? (
+          <button onClick={() => run(() => removeRejectionPath(ctx, {
+            human: gate.human.id, producerId: gate.producer.id,
+            label: gate.rejectLabel, triggerId: gate.rejectTriggerId,
+          }))} disabled={saving} style={{ ...ghost, alignSelf: 'flex-start' }}>
+            Remove rejection path (<code>{gate.rejectLabel}</code>)
+          </button>
+        ) : (
+          <Field label="Add rejection path (optional)">
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <input value={rejectLabel} onChange={e => setRejectLabel(e.target.value)} placeholder="e.g. rework" style={{ ...input, flex: 1 }} />
+              <button onClick={() => rejectLabel.trim() && run(() => addRejectionPath(ctx, {
+                human: gate.human.id, producerId: gate.producer.id, label: rejectLabel.trim(), kind,
+              }))} disabled={saving || !rejectLabel.trim()} style={ghost}>Add</button>
+            </div>
+            <small style={small}>On this label, <strong>{gate.producer.displayName || gate.producer.id}</strong> wakes to rework.</small>
+          </Field>
+        ))}
+
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          <button onClick={() => setConfirmDelete(true)} disabled={saving}
+            style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>
+            Delete gate…
+          </button>
+          <button onClick={onClose} disabled={saving} style={ghost}>Close</button>
+        </div>
+        {confirmDelete && (
+          <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+            <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Remove the whole review gate?</strong>
+            <small style={small}>
+              Removes the delivery to {humanName}, the gate label{gate.rejectLabel ? 's' : ''} from their
+              emits, and the listener{gate.rejectTriggerId ? 's' : ''} — all three sides, no leftovers.
+              {gate.producer ? ' The producer’s outcome (what it opens) stays.' : ''}
+            </small>
+            <div style={actions}>
+              <button onClick={() => setConfirmDelete(false)} disabled={saving} style={ghost}>Keep</button>
+              <button onClick={() => run(() => deleteReviewGate(ctx, gate))} disabled={saving}
+                style={{ ...primary, background: 'var(--eb-status-error)' }}>
+                {saving ? 'Removing…' : 'Remove gate'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </SidePanel>
+  );
 }
 
 /* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────

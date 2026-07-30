@@ -2,33 +2,44 @@ import React, { useState } from 'react';
 import { ShieldCheck, OctagonPause } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 
-// Label registry editor (#981) — the gate/brake flags of every routing label
-// the graph knows. Gate/brake-ness is CONFIGURATION, not naming (#928): a
-// "Human gate" label may only be applied by a person (draws the @human → agent
-// gate edge, no orphan lint); a "Brake" label is agent-applied and pauses the
-// flow pending a human decision (draws the agent → @human hand-off edge, no
-// dead-end lint). Mode-agnostic: all writes go through the injected
+// Label registry editor (#981) — per routing label, WHO sets it and who reacts.
+// Gate/brake-ness is CONFIGURATION, not naming (#928), and the two flags encode
+// the two DIRECTIONS of a human hand-off — so the editor is a single three-way
+// choice, never two stackable checkboxes (both-set is meaningless; gate wins):
+//
+//   agent  — set and consumed by agents; the default, no registry entry.
+//   gate   — 👤 → flow: only a PERSON applies it (approval / work injection).
+//            An agent emitting it is a hard error (gate-violation).
+//   brake  — flow → 👤: an AGENT applies it to pause and hand the decision to
+//            a person. Agent-set by design, never an error.
+//
+// Mode-agnostic: all writes go through the injected
 // `ops.setLabelFlags(name, { humanGate, brake })` — draft ops persist the
 // bundle's `labels[]`, live ops persist the team agent's registry.
+const KINDS = [
+  { value: 'agent', title: 'Agent label', hint: 'set and consumed by agents (default)' },
+  { value: 'gate', title: 'Human gate · 👤 → flow', hint: 'only a person applies it — it admits or approves work; an agent setting it is an error' },
+  { value: 'brake', title: 'Brake · flow → 👤', hint: 'an agent applies it to pause and hand the decision to a person' },
+];
+const kindOf = (l) => (l.humanGate ? 'gate' : l.brake ? 'brake' : 'agent');
+
 export default function LabelRegistryPanel({ labels = [], ops, onClose, onChanged }) {
   // graph.labels is the full known set with current flags — keep a local copy
-  // so a toggle renders immediately while the write + refetch run.
+  // so a change renders immediately while the write + refetch run.
   const [rows, setRows] = useState(() =>
     labels
       .filter(l => l && typeof l.name === 'string' && l.name.trim())
-      .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
+      .map(l => ({ name: l.name.trim(), kind: kindOf(l) }))
       .sort((a, b) => a.name.localeCompare(b.name)));
   const [busy, setBusy] = useState(null); // label name being written
   const [error, setError] = useState(null);
 
-  const toggle = async (name, flag) => {
-    const row = rows.find(r => r.name === name);
-    if (!row || busy) return;
-    const next = { humanGate: row.humanGate, brake: row.brake, [flag]: !row[flag] };
+  const setKind = async (name, kind) => {
+    if (busy) return;
     setBusy(name); setError(null);
     try {
-      await ops.setLabelFlags(name, next);
-      setRows(rs => rs.map(r => (r.name === name ? { ...r, ...next } : r)));
+      await ops.setLabelFlags(name, { humanGate: kind === 'gate', brake: kind === 'brake' });
+      setRows(rs => rs.map(r => (r.name === name ? { ...r, kind } : r)));
       onChanged?.();
     } catch (e) {
       setError(e.message);
@@ -37,24 +48,17 @@ export default function LabelRegistryPanel({ labels = [], ops, onClose, onChange
     }
   };
 
-  const cellCheckbox = (row, flag) => (
-    <input
-      type="checkbox"
-      checked={row[flag]}
-      disabled={busy === row.name}
-      onChange={() => toggle(row.name, flag)}
-      style={{ cursor: busy ? 'wait' : 'pointer' }}
-    />
-  );
-
   return (
-    <SidePanel open onClose={onClose} title="Label registry" width="480px">
-      <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-        <ShieldCheck size={13} style={{ verticalAlign: '-2px' }} /> <strong>Human gate</strong> — only
-        a person applies this label (work injection / approval; agents emitting it is an error).
+    <SidePanel open onClose={onClose} title="Label registry" width="520px">
+      <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+        Per label: <strong>who sets it, and who reacts</strong>. The two human kinds are the two
+        directions of a hand-off:
         <br />
-        <OctagonPause size={13} style={{ verticalAlign: '-2px' }} /> <strong>Brake</strong> — an agent
-        applies it to pause the flow until a person decides.
+        <ShieldCheck size={13} style={{ verticalAlign: '-2px' }} /> <strong>Human gate</strong> (👤 → flow) —
+        only a person applies it, to admit or approve work. Agents setting it is a hard error.
+        <br />
+        <OctagonPause size={13} style={{ verticalAlign: '-2px' }} /> <strong>Brake</strong> (flow → 👤) —
+        an <em>agent</em> applies it to pause the flow and hand the decision to a person.
       </p>
       {error && (
         <div style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>{error}</div>
@@ -64,26 +68,32 @@ export default function LabelRegistryPanel({ labels = [], ops, onClose, onChange
           No routing labels in this flow yet — wire a label hand-off first.
         </p>
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
-          <thead>
-            <tr style={{ color: 'var(--eb-text-muted)', textAlign: 'left' }}>
-              <th style={{ padding: '4px 8px', fontWeight: 'var(--eb-font-medium)' }}>Label</th>
-              <th style={{ padding: '4px 8px', fontWeight: 'var(--eb-font-medium)' }}>Human gate</th>
-              <th style={{ padding: '4px 8px', fontWeight: 'var(--eb-font-medium)' }}>Brake</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(row => (
-              <tr key={row.name} style={{ borderTop: '1px solid var(--eb-border-default)' }}>
-                <td style={{ padding: '6px 8px' }}>
-                  <code style={{ fontSize: 'var(--eb-text-xs)' }}>{row.name}</code>
-                </td>
-                <td style={{ padding: '6px 8px' }}>{cellCheckbox(row, 'humanGate')}</td>
-                <td style={{ padding: '6px 8px' }}>{cellCheckbox(row, 'brake')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {rows.map(row => (
+            <div key={row.name} style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+              padding: '8px 4px', borderTop: '1px solid var(--eb-border-default)',
+            }}>
+              <code style={{ flex: 1, fontSize: 'var(--eb-text-xs)', overflowWrap: 'anywhere' }}>{row.name}</code>
+              <select
+                value={row.kind}
+                disabled={busy === row.name}
+                onChange={(e) => setKind(row.name, e.target.value)}
+                title={KINDS.find(k => k.value === row.kind)?.hint}
+                style={{
+                  background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
+                  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                  padding: '4px 6px', fontFamily: 'inherit', fontSize: 'var(--eb-text-xs)',
+                  cursor: busy ? 'wait' : 'pointer',
+                }}
+              >
+                {KINDS.map(k => (
+                  <option key={k.value} value={k.value} title={k.hint}>{k.title}</option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
       )}
     </SidePanel>
   );

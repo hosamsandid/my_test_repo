@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 import { systemEventSummary, systemEventHasDetail } from './system-event.js';
+import { buildSystemInitView } from './system-init.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -178,6 +179,10 @@ function hasExpansion(ev) {
     case 'system_event':
       // Expandable only when `raw` carries content beyond the subtype label.
       return systemEventHasDetail(ev);
+    case 'system_init':
+      // Expandable only when #980 provenance was captured (legacy rows have no
+      // extra detail to reveal).
+      return !!(ev.provenance);
     default:
       return false;
   }
@@ -317,18 +322,48 @@ function Body({ event, expanded }) {
           }}>{event.triggerId || event.id || 'unknown'}</code>
         </div>
       );
-    case 'system_init':
+    case 'system_init': {
+      // #980: model + Model-Provider provenance in one compact opening row;
+      // full detail (provider, auth, endpoint, requested vs effective model,
+      // session id) on expand. Legacy rows (no provenance) render as before.
+      const view = buildSystemInitView(event);
       return (
         <div style={baseStyle}>
           Session init: <code style={{
             fontFamily: 'var(--eb-font-mono)',
             color: 'var(--eb-text-primary)',
-          }}>{event.model || 'unknown'}</code>
-          {event.sessionId && (
-            <span style={{ color: 'var(--eb-text-muted)' }}> ({event.sessionId})</span>
+          }}>{view.model}</code>
+          {view.requestedModel && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> (requested: {view.requestedModel})</span>
+          )}
+          {view.providerText && (
+            <span style={{ color: 'var(--eb-text-secondary)' }}> · {view.providerText}</span>
+          )}
+          {view.sessionId && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> ({view.sessionId})</span>
+          )}
+          {expanded && view.detail && (
+            <div style={{
+              marginTop: 4,
+              paddingLeft: 8,
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              columnGap: 8,
+              rowGap: 1,
+              fontSize: 'var(--eb-text-xs)',
+              fontFamily: 'var(--eb-font-mono)',
+            }}>
+              {view.detail.map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <span style={{ color: 'var(--eb-text-muted)' }}>{k}</span>
+                  <span style={{ color: 'var(--eb-text-secondary)', overflowWrap: 'anywhere' }}>{v}</span>
+                </React.Fragment>
+              ))}
+            </div>
           )}
         </div>
       );
+    }
     case 'error': {
       const msg = event.message || '';
       const display = expanded ? msg : truncate(msg, COMPACT);

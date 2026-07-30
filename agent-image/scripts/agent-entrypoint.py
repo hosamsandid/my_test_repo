@@ -1332,8 +1332,43 @@ def build_usage_record(ctx: dict) -> dict:
     }
 
 
+def _llm_provenance(requested_model: str | None = None) -> dict | None:
+    """Non-secret Model-Provider provenance for a `system_init` row (#980).
+
+    Read from the AEE_LLM_* env the orchestrator injects at spawn (immutable for
+    the container's life — a provider switch respawns; a model switch is picked
+    up per-invocation via `requested_model`). Returns:
+
+      * None                — no orchestrator provenance in the env (AEE_LLM_BINDING
+                              unset). This is the legacy / pure-unit-test path: the
+                              caller then omits the `provenance` field entirely and
+                              the row renders exactly as pre-#980 (model + session).
+      * a dict with a `binding` discriminator otherwise:
+          'bound'        — a provider resolved; providerName/authType/baseUrl set.
+          'missing'      — an endpoint was configured but could not be resolved.
+          'env-fallback' — no provider configured; the inherited .env values run.
+
+    NEVER carries token / auth-token material — only the display name, auth type,
+    already-sanitized base URL, the opaque endpoint id, and the requested model
+    (the value actually passed to `--model` this run, falling back to the
+    spawn-time AEE_LLM_REQUESTED_MODEL)."""
+    binding = os.environ.get("AEE_LLM_BINDING") or None
+    if not binding:
+        return None
+    req = requested_model or os.environ.get("AEE_LLM_REQUESTED_MODEL") or None
+    return {
+        "binding": binding,
+        "providerId": os.environ.get("AEE_LLM_PROVIDER_ID") or None,
+        "providerName": os.environ.get("AEE_LLM_PROVIDER_NAME") or None,
+        "authType": os.environ.get("AEE_LLM_AUTH_TYPE") or None,
+        "baseUrl": os.environ.get("AEE_LLM_BASE_URL") or None,
+        "requestedModel": req,
+    }
+
+
 def _map_stream_json_line(line: str, correlation_id: str,
-                          usage_sink: dict | None = None) -> list[dict]:
+                          usage_sink: dict | None = None,
+                          requested_model: str | None = None) -> list[dict]:
     """Translate one NDJSON line from `claude --output-format stream-json --verbose`
     into normalized event objects. Mirrors session-log.js mapStreamJsonLine.
 
@@ -1371,12 +1406,21 @@ def _map_stream_json_line(line: str, correlation_id: str,
     if ptype == "system":
         sub = parsed.get("subtype")
         if sub == "init":
-            events.append({
+            init_ev = {
                 "type": "system_init",
                 "sessionId": parsed.get("session_id"),
                 "model": parsed.get("model"),
                 "correlationId": correlation_id,
-            })
+            }
+            # #980: stamp the immutable Model-Provider provenance (provider,
+            # auth type, endpoint, requested model) captured at run time, so a
+            # historical session stays auditable after the endpoint changes.
+            # Omitted entirely (legacy shape) when the runtime has no orchestrator
+            # provenance env — the renderer then never retrofits a current binding.
+            prov = _llm_provenance(requested_model)
+            if prov is not None:
+                init_ev["provenance"] = prov
+            events.append(init_ev)
         elif sub == "task_progress":
             pass  # noisy heartbeat
         else:
@@ -2596,7 +2640,8 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
         nonlocal last_api_status
-        for ev in _map_stream_json_line(line, correlation_id, context_usage):
+        for ev in _map_stream_json_line(line, correlation_id, context_usage,
+                                        requested_model=model_arg):
             if (ev.get("type") == "system_event"
                     and ev.get("subtype") == "thinking_tokens"):
                 # Throttle: persist only a sampled subset, never one line per

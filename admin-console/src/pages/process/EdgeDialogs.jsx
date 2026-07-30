@@ -480,7 +480,12 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
       // Ensure the producer is flagged so its badge + prompt block appear.
       if (ops.getRoleGithub && ops.setGithubProduces) {
         const g = (await ops.getRoleGithub(from)) || {};
-        const next = { pr: !!g.producesPr, issue: !!g.producesIssue };
+        // Carry the audience flags (#981) so flipping a produce flag never
+        // silently drops the producer's declared human audience.
+        const next = {
+          pr: !!g.producesPr, issue: !!g.producesIssue,
+          prAudience: g.prAudience, issueAudience: g.issueAudience,
+        };
         if (artifact === 'pr') next.pr = true; else next.issue = true;
         if (next.pr !== !!g.producesPr || next.issue !== !!g.producesIssue) {
           await ops.setGithubProduces(from, next);
@@ -719,7 +724,10 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
       await ops.removeChannel(to, { artifact, from });
       if (lastChannel && clearProduces && ops.getRoleGithub && ops.setGithubProduces) {
         const g = (await ops.getRoleGithub(from)) || {};
-        const next = { pr: !!g.producesPr, issue: !!g.producesIssue };
+        const next = {
+          pr: !!g.producesPr, issue: !!g.producesIssue,
+          prAudience: g.prAudience, issueAudience: g.issueAudience,
+        };
         if (artifact === 'pr') next.pr = false; else next.issue = false;
         await ops.setGithubProduces(from, next);
       }

@@ -170,6 +170,8 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
 
       <ArtifactsBlock node={node} peers={peers} ops={ops} onChanged={onChanged} focus={focusSection === 'artifacts'} />
 
+      <GithubArtifactsBlock node={node} ops={ops} onChanged={onChanged} />
+
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
@@ -587,6 +589,54 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
           <Plus size={13} /> Add artifact
         </button>
       ))}
+    </div>
+  );
+}
+
+// ── GitHub artifacts (#981) ─────────────────────────────────────────────────
+// Shown only when the node has produce flags (set by wiring a channel or an
+// openPr/openIssue outcome action). Per artifact, the audience checkbox
+// declares that a PERSON consumes it (review/merge) — that clears the
+// producer-unconsumed lint and draws the delivery edge to the @human actor.
+function GithubArtifactsBlock({ node, ops, onChanged }) {
+  const gh = node.github || {};
+  const [busy, setBusy] = useState(false);
+  if ((!gh.producesPr && !gh.producesIssue) || !ops.setGithubProduces) return null;
+
+  const setAudience = async (artifact, human) => {
+    setBusy(true);
+    try {
+      await ops.setGithubProduces(node.id, {
+        pr: !!gh.producesPr, issue: !!gh.producesIssue,
+        prAudience: artifact === 'pr' ? (human ? 'human' : undefined) : gh.prAudience,
+        issueAudience: artifact === 'issue' ? (human ? 'human' : undefined) : gh.issueAudience,
+      });
+      onChanged?.();
+    } catch (e) { window.alert(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const row = (artifact, Icon, noun) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', cursor: busy ? 'wait' : 'pointer' }}>
+      <Icon size={14} />
+      <span style={{ flex: 1 }}>Opens {noun}</span>
+      <input
+        type="checkbox"
+        disabled={busy}
+        checked={(artifact === 'pr' ? gh.prAudience : gh.issueAudience) === 'human'}
+        onChange={(e) => setAudience(artifact, e.target.checked)}
+      />
+      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>a person consumes them (review/merge)</span>
+    </label>
+  );
+
+  return (
+    <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
+        GitHub artifacts <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— who consumes them</span>
+      </div>
+      {gh.producesPr && row('pr', GitPullRequest, 'pull requests')}
+      {gh.producesIssue && row('issue', CircleDot, 'issues')}
     </div>
   );
 }

@@ -154,8 +154,10 @@ test('webhook edge (#410): http trigger runs from the @external actor', () => {
 });
 
 // #928 — the gate comes from the label registry's `humanGate` flag threaded in as
-// options.labels; the label itself is named as a plain action.
-test('gate flag: a FLAGGED listener edge is a gate from the @github actor (a human acts via a GitHub label)', () => {
+// options.labels; the label itself is named as a plain action. Since #981 the
+// edge originates at the explicit @human actor (a person applies the label),
+// no longer folded into @github.
+test('gate flag: a FLAGGED listener edge is a gate from the @human actor (a person applies the label)', () => {
   const g = buildUnifiedGraph(
     [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy', emits: [] }] }],
     undefined,
@@ -165,8 +167,8 @@ test('gate flag: a FLAGGED listener edge is a gate from the @github actor (a hum
   assert.ok(e);
   assert.equal(e.on, 'label');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@github');
-  assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
+  assert.equal(e.from, '@human');
+  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
 });
 
 test('gate flag: an UNFLAGGED `human:`-named listener is a plain orphan label (#928 AC8)', () => {
@@ -374,7 +376,7 @@ test('processTemplateToUnified carries labels[] so a bundle gate renders as a ga
   const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
   const e = findEdge(g, x => x.label === 'approved-for-deploy');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@github');
+  assert.equal(e.from, '@human'); // #981 — a person applies the gate label
 });
 
 // ── adapters ─────────────────────────────────────────────────────────────────
@@ -588,4 +590,48 @@ test('explicit manual hand-off edge passes through', () => {
   assert.ok(e);
   assert.equal(e.from, 'a');
   assert.equal(e.to, 'b');
+});
+
+// ── #981: the @human actor as explicit sink/source ───────────────────────────
+
+test('#981: a brake emit maps to an agent → @human hand-off edge and appends the actor node', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['human-decision-needed'], triggers: [] }],
+    undefined,
+    { labels: [{ name: 'human-decision-needed', brake: true }] },
+  );
+  const e = findEdge(g, x => x.label === 'human-decision-needed');
+  assert.ok(e);
+  assert.equal(e.from, 'reworker');
+  assert.equal(e.to, '@human');
+  assert.equal(e.handoff, 'human');
+  assert.ok(!e.gate, 'a hand-off is not an approval gate');
+  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor' && n.actor === 'human'));
+});
+
+test('#981: a human-audience PR producer maps to an agent → @human delivery edge (on:github)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', github: { producesPr: true, prAudience: 'human' }, triggers: [] }],
+  );
+  const e = findEdge(g, x => x.on === 'github' && x.to === '@human');
+  assert.ok(e);
+  assert.equal(e.from, 'dev');
+  assert.equal(e.artifact, 'pr');
+  assert.equal(e.audience, 'human');
+  assert.ok(!g.lints.some(l => l.code === 'producer-unconsumed'));
+});
+
+test('#981: humanTouchpoints pass through the unified graph', () => {
+  const g = buildUnifiedGraph(
+    [
+      { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+      { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    ],
+    undefined,
+    { labels: [{ name: 'ready-3', humanGate: true }, { name: 'human-decision-needed', brake: true }] },
+  );
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'injection', label: 'ready-3', agentId: 'dev3' },
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+  ]);
 });

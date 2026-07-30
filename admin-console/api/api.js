@@ -1539,7 +1539,33 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, github, channels } = req.body;
+
+  // ── Label registry (#928/#981) ────────────────────────────────────────────
+  // The gate/brake flags live on the TEAM agent (like `stages`) — the live
+  // Flow Editor writes them here. Validate up front so a bad shape can't
+  // half-apply: an array of { name, humanGate?, brake? }, deduped by trimmed
+  // name. Ignored for non-team agents.
+  let normLabels = null;
+  if (labels !== undefined) {
+    if (labels !== null && !Array.isArray(labels)) {
+      return res.status(400).json({ error: 'labels must be an array of { name, humanGate?, brake? }' });
+    }
+    const seenNames = new Set();
+    normLabels = [];
+    for (const l of (labels || [])) {
+      if (!l || typeof l !== 'object' || Array.isArray(l) || typeof l.name !== 'string' || !l.name.trim()) {
+        return res.status(400).json({ error: 'each label needs a non-empty name' });
+      }
+      const name = l.name.trim();
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+      const entry = { name };
+      if (l.humanGate === true) entry.humanGate = true;
+      if (l.brake === true) entry.brake = true;
+      normLabels.push(entry);
+    }
+  }
 
   // Validate the structured OUTCOMES port (#827) up front so a bad shape can't
   // half-apply. `null`/[]/{} clears it (handled at persist below); a non-empty
@@ -1738,6 +1764,15 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       : [];
   }
 
+  // Label registry, team-agent only (#981) — validated into normLabels above.
+  // Mirrors the bundle's `labels[]`; `teamLabelRegistry` reads it for gate/brake
+  // classification on every live graph build. Display/lint-only — no runtime
+  // side-effect. `null`/[] clears the registry.
+  if (labels !== undefined && fresh.role === 'team') {
+    if (normLabels && normLabels.length) fresh.labels = normLabels;
+    else delete fresh.labels;
+  }
+
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────
   // Produce flags (opens PRs/issues) drive the node badge/ports + the producer
   // instruction block; consumed channels drive the on:'github' edges and the
@@ -1748,6 +1783,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     const next = {};
     if (g.producesPr) next.producesPr = true;
     if (g.producesIssue) next.producesIssue = true;
+    // Artifact audience (#981): 'human' declares that a person (review/merge)
+    // consumes the artifact — the only supported value; anything else is
+    // dropped (= unspecified). Meaningless without the produce flag.
+    if (next.producesPr && g.prAudience === 'human') next.prAudience = 'human';
+    if (next.producesIssue && g.issueAudience === 'human') next.issueAudience = 'human';
     if (Object.keys(next).length) fresh.github = next; else delete fresh.github;
     githubChanged = true;
   }

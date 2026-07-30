@@ -26,12 +26,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   const ARTIFACT_H  = 70;
   const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
   const ACTOR_H     = 40;
-  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰' };
+  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰', human: '👤' };
   // Placeholder actors (#411): in an editable process view every source is
   // offered as a drag source even before it has edges, so the first event /
-  // label / webhook trigger can be wired on the canvas. @human and @timer are
-  // gone: human actions are GitHub label events (folded into @github) and
-  // schedules render inside the agent card instead of as an actor.
+  // label / webhook trigger can be wired on the canvas. @timer is gone
+  // (schedules render inside the agent card instead of as an actor). @human
+  // (#981) is NOT a drag source either — it appears exactly when the graph
+  // derives a human touchpoint (gate/brake labels, artifact audience).
   const DEFAULT_ACTORS = [
     { id: '@github', kind: 'actor', actor: 'github', displayName: 'GitHub' },
     { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
@@ -58,6 +59,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
     // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
     loop:       { color: '#d946ef', label: 'loop' },
+    // Brake hand-off to the @human actor (#981): the flow pauses pending a
+    // human decision. Rose + dashed so "waiting on a person" never reads as a
+    // gate listener (solid red) or a plain label hand-off (blue).
+    handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
   };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
@@ -268,8 +273,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       legendEl.innerHTML = _legendToggleBtn(true);
       return;
     }
-    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
-    const actorToggles = ['github', 'external'].map(kind => {
+    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    const actorToggles = ['github', 'external', 'human'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
         + 'background:none;border:1px solid var(--eb-border-default);border-radius:10px;padding:0 6px;'
@@ -357,11 +362,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     const g = graph || {};
     const allNodes = Array.isArray(g.nodes) ? g.nodes : [];
     // Actor pseudo-nodes (#410) live in their own "outside world" column —
-    // they never join the tree/layered layout of the agent cards. @timer and
-    // legacy @human actors are dropped here: schedules render inside the card,
-    // human label events come from @github.
-    state.actors = allNodes.filter(n => n && n.kind === 'actor'
-      && n.actor !== 'timer' && n.actor !== 'human');
+    // they never join the tree/layered layout of the agent cards. @timer is
+    // dropped here (schedules render inside the card); @human is back (#981)
+    // as the explicit source/sink of gate labels, brake hand-offs, and
+    // human-audience artifact deliveries.
+    state.actors = allNodes.filter(n => n && n.kind === 'actor' && n.actor !== 'timer');
     state.actorsById = {};
     state.actors.forEach(a => { state.actorsById[a.id] = a; });
     const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
@@ -635,7 +640,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // least one edge to a known node and its source kind is not toggled off in
   // the legend. (Editable placeholder actors for empty flows come with #411.)
   function actorHasEdges(a) {
-    return (state.extraEdges || []).some(e => e.from === a.id && state.byId[e.to]);
+    // An actor may source edges (@github events, @human gate labels) or sink
+    // them (@human brake hand-offs / deliveries, #981).
+    return (state.extraEdges || []).some(e =>
+      (e.from === a.id && state.byId[e.to]) || (e.to === a.id && state.byId[e.from]));
   }
   function actorsAsSources() {
     return !!(actorSources && state.editable && onConnect);
@@ -1436,7 +1444,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       el.addEventListener('mousedown', e => e.stopPropagation());
       // The same ● connect handle agents carry (#411): drag onto an agent to
       // create a trigger from this source (schedule, human label, event, hook).
-      if (actorsAsSources()) {
+      // @human (#981) is display-only — its edges are authored via the label
+      // registry (gate/brake flags) and the artifact-audience checkboxes, so it
+      // gets no drag port.
+      if (actorsAsSources() && a.actor !== 'human') {
         const port = document.createElement('div');
         port.title = 'Drag to an agent: it gets a trigger from this source';
         port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
@@ -1697,6 +1708,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           });
           return;
         }
+        // Edges INTO an actor (#981): brake hand-offs and human-audience
+        // artifact deliveries terminate on @human. Advisory display only —
+        // no hit payload, so clicking cannot open an edit dialog aimed at a
+        // pseudo-node.
+        const actorTo = state.actorsById[e.to];
+        if (actorTo) {
+          if (state.hiddenActorKinds.has(actorTo.actor)) return;
+          if (!visibleIds.has(e.from) || !state.actorPositions[e.to]) return;
+          const isDelivery = e.on === 'github';
+          const artifactTo = e.artifact === 'issue' ? 'issue' : 'pr';
+          list.push({
+            from: e.from, to: e.to,
+            color: isDelivery ? GH_COLOR[artifactTo] : EDGE_STYLES.handoff.color,
+            width: isDelivery ? 2 : 1.5,
+            dash: isDelivery ? '' : '6 4', opacity: 1,
+            labelText: isDelivery
+              ? `${artifactTo === 'issue' ? 'Issue' : 'PR'} → 👤`
+              : `👤 ${e.label || ''}`.trim(),
+            chip: true, gate: false,
+            hit: null,
+          });
+          return;
+        }
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
@@ -1766,7 +1800,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         if (e.opacity !== 1) path.setAttribute('opacity', String(e.opacity));
         path.setAttribute('fill', 'none');
         drawArrowHead(r.arrow.x, r.arrow.y, r.arrow.angle, e.color);
-        addEdgeHit(d, e.hit);
+        if (e.hit) addEdgeHit(d, e.hit);
         if (!e.labelText) return;
         const p = placeClearLabel(r.label.x, r.label.y, estChipWidth(e.labelText), e.chip ? 17 : 15);
         if (e.chip) drawEdgeChip(p.cx, p.cy, e.labelText, e.color, e.gate);

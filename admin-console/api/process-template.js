@@ -211,7 +211,15 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // github-event triggers are re-derived from these (expandGithubChannels),
       // so the derived `channel:true` triggers are dropped from the portable bundle.
       ...(r.github && (r.github.producesPr || r.github.producesIssue)
-        ? { github: { ...(r.github.producesPr ? { producesPr: true } : {}), ...(r.github.producesIssue ? { producesIssue: true } : {}) } }
+        ? { github: {
+          ...(r.github.producesPr ? { producesPr: true } : {}),
+          ...(r.github.producesIssue ? { producesIssue: true } : {}),
+          // Artifact audience (#981) — a person consumes the PR/issue; must
+          // round-trip or a re-materialised team regains the
+          // producer-unconsumed lint and loses its delivery touchpoint.
+          ...(r.github.producesPr && r.github.prAudience === 'human' ? { prAudience: 'human' } : {}),
+          ...(r.github.producesIssue && r.github.issueAudience === 'human' ? { issueAudience: 'human' } : {}),
+        } }
         : {}),
       ...(Array.isArray(r.channels) && r.channels.length
         ? { channels: r.channels.map(c => remapChannel(c, teamId)) } : {}),

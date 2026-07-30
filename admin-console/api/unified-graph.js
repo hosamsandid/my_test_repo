@@ -54,11 +54,17 @@ const ACTORS = {
   github: '@github',
   external: '@external',
   timer: '@timer',
+  // The human actor (#981) — partially un-folds #410: raw GitHub events stay
+  // @github, but edges whose semantic counterpart is a PERSON (gate/brake label
+  // applications, brake hand-offs, artifact deliveries to a human) originate at
+  // or terminate on @human, so human participation is explicit on the canvas.
+  human: '@human',
 };
 const ACTOR_META = {
   [ACTORS.github]: { actor: 'github', displayName: 'GitHub' },
   [ACTORS.external]: { actor: 'external', displayName: 'External system' },
   [ACTORS.timer]: { actor: 'timer', displayName: 'Schedule' },
+  [ACTORS.human]: { actor: 'human', displayName: 'Human' },
 };
 function isActorId(id) {
   return typeof id === 'string' && Object.prototype.hasOwnProperty.call(ACTOR_META, id);
@@ -140,6 +146,12 @@ function processEdgeToUnified(e) {
     // Raw GitHub event — the repo itself is the source (#410).
     return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
+  if (e.kind === 'delivery') {
+    // Artifact delivery to a person (#981): the producer's PR/issue is
+    // reviewed/merged by a human, not consumed by an agent. Same on:'github'
+    // shape as a channel edge so it shares the artifact styling.
+    return { from: e.from, to: ACTORS.human, on: 'github', artifact: e.artifact, audience: 'human' };
+  }
   // 'agent' label wiring, plus gate/brake (human-only) edges. The carrying
   // label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
@@ -151,15 +163,26 @@ function processEdgeToUnified(e) {
   // `kind` is already the authoritative, flag-derived classification (#928) —
   // no name re-match here (the old `isHumanGate(e.label) || isBrake(e.label)`
   // fallback keyed off the `human:*` convention and is gone).
+  // Brake hand-off (#981): an agent applied a brake label — the flow pauses on
+  // a HUMAN decision, so the edge terminates on the @human actor. Tagged
+  // `handoff` (deliberately NOT `gate` — the renderer styles "waiting on a
+  // person" distinctly from an approval-gate listener).
+  if (e.handoff === 'human' && e.from != null) {
+    u.to = ACTORS.human;
+    u.handoff = 'human';
+    delete u.triggerId; // emit-side edge — there is no listening trigger behind it
+    if (e.kind === 'brake') u.brake = true;
+    return u;
+  }
   if (e.kind === 'gate' || e.kind === 'brake') {
     u.gate = 'human';
   }
   // Human-approval gates and brakes have no agent emitter (from: null in the
-  // process graph); a human acts on them through a GitHub label, so they
-  // originate at the @github actor. (Source/origin filters were removed, so
-  // there is no longer any per-trigger `from`-based human inference for plain,
-  // non-gate labels — those simply stay orphans.)
-  if (u.from == null && u.gate === 'human') u.from = ACTORS.github;
+  // process graph); a human applies the label, so the edge originates at the
+  // @human actor (#981 — previously folded into @github by #410). (Source/origin
+  // filters were removed, so there is no longer any per-trigger `from`-based
+  // human inference for plain, non-gate labels — those simply stay orphans.)
+  if (u.from == null && u.gate === 'human') u.from = ACTORS.human;
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
   // Claim (#958): what the listener takes over when it wakes. Forwarded verbatim
@@ -357,7 +380,9 @@ function buildUnifiedGraph(nodes, edges, options) {
   // 5) Actor pseudo-nodes (#410): append one node per actor that some edge
   //    references, so every trigger source is visible on the canvas. Views
   //    without trigger edges (BriefingPacks) naturally get none.
-  const usedActors = new Set(unifiedEdges.map(e => e.from).filter(isActorId));
+  // An actor may be a source (@github events, @human gate labels) OR a sink
+  // (@human brake hand-offs / artifact deliveries, #981) — scan both ends.
+  const usedActors = new Set(unifiedEdges.flatMap(e => [e.from, e.to]).filter(isActorId));
   for (const [id, meta] of Object.entries(ACTOR_META)) {
     if (!usedActors.has(id)) continue;
     outNodes.push({
@@ -374,7 +399,10 @@ function buildUnifiedGraph(nodes, edges, options) {
     ...computeDataflowLints(list, unifiedEdges),
   ];
 
-  return { nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels, lints };
+  return {
+    nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels,
+    humanTouchpoints: pg.humanTouchpoints, lints,
+  };
 }
 
 // Data-flow + dependency lints layered on top of the Process lints (#365).

@@ -2414,6 +2414,64 @@ class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_mock.call_count, 1)
         scheduler._client.room_send.assert_not_awaited()
 
+    async def test_permanent_failure_not_retried_but_notice_posted(self):
+        # A config/4xx/stale-session failure fails identically on the retry, so
+        # it must fail immediately (call_count == 1) — but the event is still
+        # consumed, so the room notice still fires, flagged as permanent.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.claude_cause = "Error: No conversation found with session ID: abc"
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 1)  # NOT retried
+        scheduler._send_formatted.assert_not_awaited()
+        scheduler._client.room_send.assert_awaited_once()
+        body = scheduler._client.room_send.await_args.kwargs["content"]["body"]
+        self.assertIn("permanent error", body)
+        self.assertIn("No conversation found", body)
+
+
+class ClaudeFailureCause(unittest.TestCase):
+    """The concise cause helpers that stop the session log from saying only
+    'exit status 1' and gate the trigger retry."""
+
+    def test_summarize_prefers_result_errors_and_status(self):
+        cause = entrypoint._summarize_claude_failure(
+            {"subtype": "error_during_execution",
+             "errors": ["Error: invalid model"], "apiErrorStatus": 400},
+            None, "noise")
+        self.assertIn("invalid model", cause)
+        self.assertIn("api_error_status=400", cause)
+
+    def test_summarize_falls_back_to_last_api_status_then_stderr(self):
+        self.assertIn("last_api_retry_status=500",
+                      entrypoint._summarize_claude_failure(None, 500, ""))
+        self.assertEqual(
+            "boom", entrypoint._summarize_claude_failure(None, None, "a\nboom\n"))
+        self.assertEqual("", entrypoint._summarize_claude_failure(None, None, ""))
+
+    def test_permanent_classifier(self):
+        def perm(cause):
+            e = subprocess.CalledProcessError(1, "claude")
+            e.claude_cause = cause
+            return entrypoint._claude_error_is_permanent(e)
+        self.assertTrue(perm("Error: No conversation found with session ID: x"))
+        self.assertTrue(perm("invalid model"))
+        self.assertTrue(perm("api_error_status=401"))
+        self.assertTrue(perm("prompt is too long"))
+        # A sustained upstream 5xx is transient — must stay retryable.
+        self.assertFalse(perm("last_api_retry_status=500"))
+        self.assertFalse(perm(""))  # unknown cause stays retryable (#902 intent)
+        self.assertFalse(entrypoint._claude_error_is_permanent(
+            subprocess.CalledProcessError(1, "claude")))  # no cause attr
+
+    def test_error_detail_appends_cause_when_present(self):
+        e = subprocess.CalledProcessError(1, "claude")
+        self.assertEqual(str(e), entrypoint._claude_error_detail(e))
+        e.claude_cause = "api_error_status=500"
+        self.assertIn("api_error_status=500", entrypoint._claude_error_detail(e))
+
 
 class ClaimPlanResolution(unittest.TestCase):
     """`_claim_plan` turns the declarative `claim` trigger field into a concrete

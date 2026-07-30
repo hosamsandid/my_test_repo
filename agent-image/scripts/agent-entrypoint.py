@@ -461,6 +461,70 @@ TRIGGER_RETRY_DELAY_SEC = int(os.environ.get("TRIGGER_RETRY_DELAY_SEC", "60"))
 # observability, so it must never become a slow start gate.
 CLAIM_SWAP_TIMEOUT_SEC = int(os.environ.get("CLAIM_SWAP_TIMEOUT_SEC", "30"))
 
+# The claude CLI already retries transient upstream 5xx up to 10x internally
+# with exponential backoff; our trigger-level retry only helps when that budget
+# was exhausted by a *sustained* outage. A permanent failure (bad model id,
+# auth, a 4xx client error, a missing --resume session) fails identically on the
+# retry, so retrying it just burns a 60s delay and fires a scary failure-notice
+# DM for nothing. We retry unless the cause is positively identified as
+# permanent; an unknown/empty cause stays retryable (preserves the #902 intent —
+# a run that died mid-response with no diagnostic is exactly the transient case).
+_PERMANENT_CLAUDE_ERROR_RE = re.compile(
+    r"no conversation found"                      # stale/missing --resume session
+    r"|invalid[ _-]?(model|api[ _-]?key|request|x-api-key)"
+    r"|authentication|unauthorized|permission denied"
+    r"|not_found_error|invalid_request_error|authentication_error|permission_error"
+    r"|api_error_status[\"= :]+4\d\d"             # any 4xx api_error_status
+    r"|prompt is too long|context (length|window)|too many tokens|max_tokens"
+    r"|credit balance|insufficient|quota|billing",
+    re.IGNORECASE,
+)
+
+
+def _summarize_claude_failure(result_event: dict | None,
+                              last_api_status: int | str | None,
+                              stderr_blob: str | None) -> str:
+    """Concise, bounded cause string for a failed claude run — the api_error /
+    stderr detail the bare exit code hides (#953 follow-up). Best-effort; empty
+    when nothing usable was captured."""
+    parts: list[str] = []
+    if isinstance(result_event, dict):
+        sub = result_event.get("subtype")
+        if sub and sub != "success":
+            parts.append(str(sub))
+        errs = result_event.get("errors")
+        if isinstance(errs, list) and errs:
+            parts.append("; ".join(str(e) for e in errs[:3]))
+        aes = result_event.get("apiErrorStatus")
+        if aes not in (None, "", 0):
+            parts.append(f"api_error_status={aes}")
+    if last_api_status not in (None, "", 0) and not any("api" in p for p in parts):
+        parts.append(f"last_api_retry_status={last_api_status}")
+    if not parts:
+        lines = [ln for ln in (stderr_blob or "").splitlines() if ln.strip()]
+        if lines:
+            parts.append(lines[-1].strip()[:300])
+    return " | ".join(parts).strip()[:500]
+
+
+def _claude_error_detail(err: BaseException) -> str:
+    """Human-readable cause for a failed claude run: the concise cause attached
+    by _call_claude_once when available, else the bare exception text. Used at
+    every error-logging site so the session log stops saying only
+    'exit status 1'."""
+    cause = getattr(err, "claude_cause", None)
+    if cause:
+        return f"{err} — {cause}"
+    return str(err)
+
+
+def _claude_error_is_permanent(err: BaseException) -> bool:
+    """True when a failed claude run will fail identically on a retry (config /
+    4xx / stale session) — so the trigger retry should be skipped."""
+    cause = getattr(err, "claude_cause", None) or ""
+    return bool(_PERMANENT_CLAUDE_ERROR_RE.search(cause))
+
+
 # Module-level state shared with the SIGUSR1 handler.
 _active_claude_proc: subprocess.Popen | None = None
 _user_stop_requested = False
@@ -1367,7 +1431,7 @@ def _map_stream_json_line(line: str, correlation_id: str,
 
     elif ptype == "result":
         usage = parsed.get("usage") or {}
-        events.append({
+        result_ev = {
             "type": "result",
             "durationMs": parsed.get("duration_ms"),
             # Turn-wide aggregate — correct for cost accounting (#494's
@@ -1389,7 +1453,20 @@ def _map_stream_json_line(line: str, correlation_id: str,
             "sessionId": parsed.get("session_id"),
             "result": parsed.get("result"),
             "correlationId": correlation_id,
-        })
+        }
+        # Failure detail the bare exit code hides (#953 follow-up): only when the
+        # run actually errored do we carry the real cause — an upstream 5xx
+        # (`apiErrorStatus`), a permanent config error (`errors`), or the
+        # terminal subtype. _call_claude_once reads these to attach a concise
+        # cause to the CalledProcessError instead of "exit status 1". Kept off
+        # the happy path so a successful result event stays byte-identical
+        # (the fake-claude golden fixture asserts it verbatim).
+        if parsed.get("is_error") or (parsed.get("subtype") not in (None, "success")):
+            result_ev["subtype"] = parsed.get("subtype")
+            result_ev["isError"] = parsed.get("is_error")
+            result_ev["apiErrorStatus"] = parsed.get("api_error_status")
+            result_ev["errors"] = parsed.get("errors")
+        events.append(result_ev)
 
     else:
         events.append({"type": "unknown", "raw": parsed, "correlationId": correlation_id})
@@ -2507,6 +2584,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     final_result: str | None = None
     observed_session: str | None = None
     result_event: dict | None = None  # full result event for the usage record (#654)
+    last_api_status: int | str | None = None  # last upstream api_retry error_status (#953 follow-up)
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
@@ -2517,6 +2595,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
+        nonlocal last_api_status
         for ev in _map_stream_json_line(line, correlation_id, context_usage):
             if (ev.get("type") == "system_event"
                     and ev.get("subtype") == "thinking_tokens"):
@@ -2526,6 +2605,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 if gated is not None:
                     _append_event(room_id, gated)
                 continue
+            if (ev.get("type") == "system_event"
+                    and ev.get("subtype") == "api_retry"
+                    and isinstance(ev.get("raw"), dict)):
+                # Remember the upstream status of the CLI's own internal retries
+                # so a run that ultimately exhausts them carries the real cause
+                # (e.g. a sustained 500) rather than a bare exit code.
+                last_api_status = ev["raw"].get("error_status") or last_api_status
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
@@ -2639,6 +2725,10 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
             return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]
+        # Concise cause the bare exit code hides, so every logging site (session
+        # log, DM notice) and the retry gate can see *why* the run failed.
+        err.claude_cause = _summarize_claude_failure(  # type: ignore[attr-defined]
+            result_event, last_api_status, stderr_blob)
         raise err
 
     if ask_reply is not None:
@@ -4749,37 +4839,46 @@ class TriggerScheduler:
 
     async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
                                            err: Exception,
+                                           permanent: bool = False,
                                            restored_label: str | None = None
                                            ) -> None:
-        """Post one plain DM notice when a triggered run failed on both
-        attempts. Best-effort, no Claude call — the triggering event is
-        consumed and will not re-fire, so a silent failure would leave the
-        delivery chain stalled with nobody the wiser.
+        """Post one plain DM notice when a triggered run is given up. Best-effort,
+        no Claude call — the triggering event is consumed and will not re-fire,
+        so a silent failure would leave the delivery chain stalled with nobody
+        the wiser.
 
-        When the run had claimed the item and the claim was rolled back (#957),
-        `restored_label` names the wake label that is back on it: the poller
-        re-fires the chain by itself, so the notice must not ask for a manual
-        re-issue that would double-run the work."""
+        `permanent` distinguishes a config/4xx failure (retrying is pointless,
+        so the run was not retried) from a transient one that failed both
+        attempts. When the run had claimed the item and the claim was rolled
+        back (#957), `restored_label` names the wake label that is back on it:
+        the poller re-fires the chain by itself, so the notice must not ask for
+        a manual re-issue that would double-run the work."""
         if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
             return
         tid = trigger.get("id", "?")
         desc = trigger.get("description") or trigger.get("type") or "trigger"
+        gave_up = (
+            "failed with a permanent error and was not retried (a retry would "
+            "fail the same way)" if permanent else
+            "crashed twice and was given up"
+        )
+        detail = _claude_error_detail(err)
         if restored_label:
             body = (
-                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) crashed "
-                f"twice and was given up. The claim was rolled back: the "
-                f"`{restored_label}` label is back on the item, which re-fires "
-                f"this chain on its own — no manual step needed. If it keeps "
-                f"crashing, the conversation throttle stops the retries and it "
-                f"needs a human.\n\nLast error: {err}"
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The claim was rolled back: the `{restored_label}` "
+                f"label is back on the item, which re-fires this chain on its "
+                f"own — no manual step needed. If it keeps crashing, the "
+                f"conversation throttle stops the retries and it needs a human."
+                f"\n\nLast error: {detail}"
             )
         else:
             body = (
-                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) crashed "
-                f"twice and was given up. The event that fired it is consumed and "
-                f"will NOT re-fire on its own — the work it should have done is "
-                f"still open. Please re-issue the event (e.g. toggle the label) "
-                f"or hand me the task directly.\n\nLast error: {err}"
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The event that fired it is consumed and will NOT "
+                f"re-fire on its own — the work it should have done is still "
+                f"open. Please re-issue the event (e.g. toggle the label) or "
+                f"hand me the task directly.\n\nLast error: {detail}"
             )
         failure_block = {
             "triggerId": tid,
@@ -5002,20 +5101,27 @@ class TriggerScheduler:
                         )
                     break
                 except subprocess.CalledProcessError as err:
+                    detail = _claude_error_detail(err)
                     try:
                         _append_event(room_id, {
                             "type": "error",
                             "correlationId": correlation_id,
                             "stage": "claude",
                             "attempt": attempt,
-                            "message": str(err),
+                            "message": detail,
                         })
                     except Exception:
                         pass
                     user_aborted = bool(getattr(err, "user_aborted", False))
                     if user_aborted:
                         raise
-                    if attempt >= 2:
+                    # A permanent failure (bad model id, auth, 4xx, stale
+                    # --resume session) fails identically on the retry — skip the
+                    # 60s wait and give up now. Unknown/transient causes keep the
+                    # one retry (the #902 intent). Either way the event is
+                    # consumed, so on give-up we roll the claim back and notify.
+                    permanent = _claude_error_is_permanent(err)
+                    if attempt >= 2 or permanent:
                         # Roll the claim back (#957): the run is given up, so
                         # leave the item the way we found it. Re-adding the wake
                         # label re-emits a fresh `issues.labeled` event through
@@ -5048,7 +5154,7 @@ class TriggerScheduler:
                                 pass
                         try:
                             await self._post_trigger_failure_notice(
-                                trigger, room_id, err,
+                                trigger, room_id, err, permanent=permanent,
                                 restored_label=restored_label)
                         except Exception as exc:
                             print(
@@ -5061,7 +5167,7 @@ class TriggerScheduler:
                     print(
                         f"[Runner:{self._agent_id}] Trigger {tid}: claude run "
                         f"failed (attempt {attempt}) — retrying in {delay}s: "
-                        f"{err}",
+                        f"{detail}",
                         file=sys.stderr,
                     )
                     try:
@@ -5571,28 +5677,30 @@ async def run_dm_listener() -> None:
                     print(f"[Runner:{agent_id}] Could not post abort notice: {post_exc}",
                           file=sys.stderr)
             else:
+                detail = _claude_error_detail(err)
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,
-                    "stage": "claude", "message": str(err),
+                    "stage": "claude", "message": detail,
                 })
-                print(f"[Runner:{agent_id}] Error: {err}", file=sys.stderr)
+                print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
                 try:
                     await send_formatted(
                         room_id,
-                        f"⚠️ **Agent error**\n\n```\n{str(err)[:800]}\n```",
+                        f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                     )
                 except Exception:
                     pass
         except Exception as err:
+            detail = _claude_error_detail(err)
             _append_event(room_id, {
                 "type": "error", "correlationId": correlation_id,
-                "stage": "claude", "message": str(err),
+                "stage": "claude", "message": detail,
             })
-            print(f"[Runner:{agent_id}] Error: {err}", file=sys.stderr)
+            print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
             try:
                 await send_formatted(
                     room_id,
-                    f"⚠️ **Agent error**\n\n```\n{str(err)[:800]}\n```",
+                    f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                 )
             except Exception:
                 pass

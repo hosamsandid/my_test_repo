@@ -37,6 +37,8 @@ export default function NodeInspector({
   stages = [],
   lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
   labels = [],      // known label registry (label-name suggestions in the Add-input chooser)
+  humans = [],      // named human roles (#987) — the delivery-target picker in Routing
+  humanOps,         // scope-bound human wiring ops (#987): wire/unwireHumanConsume
   ops,
   teamId,           // live: binds a brand-new stage to the team's ordered list
   level,            // live: 'template' renders read-only
@@ -235,6 +237,8 @@ export default function NodeInspector({
               peers={peers}
               lints={lints}
               labels={labels}
+              humans={humans}
+              humanOps={humanOps}
               ops={ops}
               mode={mode}
               focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}

@@ -154,10 +154,10 @@ test('webhook edge (#410): http trigger runs from the @external actor', () => {
 });
 
 // #928 — the gate comes from the label registry's `humanGate` flag threaded in as
-// options.labels; the label itself is named as a plain action. Since #981 the
-// edge originates at the explicit @human actor (a person applies the label),
-// no longer folded into @github.
-test('gate flag: a FLAGGED listener edge is a gate from the @human actor (a person applies the label)', () => {
+// options.labels; the label itself is named as a plain action. #987 removed the
+// generic @human hub: an unbound gate (no named human role emits it) stays
+// `from: null` — dropped by the renderer + an `unbound-gate` advisory lint.
+test('gate flag: a FLAGGED unbound listener edge is a gate from null (no @human hub, #987)', () => {
   const g = buildUnifiedGraph(
     [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy', emits: [] }] }],
     undefined,
@@ -167,8 +167,9 @@ test('gate flag: a FLAGGED listener edge is a gate from the @human actor (a pers
   assert.ok(e);
   assert.equal(e.on, 'label');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@human');
-  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
+  assert.equal(e.from, null);
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-gate'));
 });
 
 test('gate flag: an UNFLAGGED `human:`-named listener is a plain orphan label (#928 AC8)', () => {
@@ -376,7 +377,7 @@ test('processTemplateToUnified carries labels[] so a bundle gate renders as a ga
   const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
   const e = findEdge(g, x => x.label === 'approved-for-deploy');
   assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@human'); // #981 — a person applies the gate label
+  assert.equal(e.from, null); // #987 — unbound gate; no generic @human hub
 });
 
 // ── adapters ─────────────────────────────────────────────────────────────────
@@ -592,9 +593,9 @@ test('explicit manual hand-off edge passes through', () => {
   assert.equal(e.to, 'b');
 });
 
-// ── #981: the @human actor as explicit sink/source ───────────────────────────
+// ── #987: no generic @human hub — unbound touchpoints draw nothing + lint ─────
 
-test('#981: a brake emit maps to an agent → @human hand-off edge and appends the actor node', () => {
+test('#987: an unbound brake emit terminates on null (no @human actor) + unbound-brake lint', () => {
   const g = buildUnifiedGraph(
     [{ id: 'reworker', emits: ['human-decision-needed'], triggers: [] }],
     undefined,
@@ -603,22 +604,20 @@ test('#981: a brake emit maps to an agent → @human hand-off edge and appends t
   const e = findEdge(g, x => x.label === 'human-decision-needed');
   assert.ok(e);
   assert.equal(e.from, 'reworker');
-  assert.equal(e.to, '@human');
+  assert.equal(e.to, null);
   assert.equal(e.handoff, 'human');
   assert.ok(!e.gate, 'a hand-off is not an approval gate');
-  assert.ok(g.nodes.some(n => n.id === '@human' && n.kind === 'actor' && n.actor === 'human'));
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-brake'));
 });
 
-test('#981: a human-audience PR producer maps to an agent → @human delivery edge (on:github)', () => {
+test('#987: an unbound human-audience PR clears producer-unconsumed, draws no @human, lints unbound-delivery', () => {
   const g = buildUnifiedGraph(
     [{ id: 'dev', github: { producesPr: true, prAudience: 'human' }, triggers: [] }],
   );
-  const e = findEdge(g, x => x.on === 'github' && x.to === '@human');
-  assert.ok(e);
-  assert.equal(e.from, 'dev');
-  assert.equal(e.artifact, 'pr');
-  assert.equal(e.audience, 'human');
-  assert.ok(!g.lints.some(l => l.code === 'producer-unconsumed'));
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  assert.ok(g.lints.some(l => l.code === 'unbound-delivery' && l.nodeId === 'dev'));
 });
 
 test('#981: humanTouchpoints pass through the unified graph', () => {
@@ -636,9 +635,9 @@ test('#981: humanTouchpoints pass through the unified graph', () => {
   ]);
 });
 
-// ── #981 follow-up: data-flow artifacts for a person ─────────────────────────
+// ── #987 follow-up: data-flow artifacts for a person (no @human hub) ──────────
 
-test('#981: a human-audience output clears unconsumed-output and draws artifact → @human', () => {
+test('#987: an unbound human-audience output clears unconsumed-output, draws no @human, lints unbound-delivery', () => {
   const before = buildUnifiedGraph([
     { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md' }], triggers: [] },
   ]);
@@ -648,21 +647,19 @@ test('#981: a human-audience output clears unconsumed-output and draws artifact 
     { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md', audience: 'human' }], triggers: [] },
   ]);
   assert.ok(!lintCodes(after).includes('unconsumed-output'));
-  const e = findEdge(after, x => x.on === 'artifact' && x.to === '@human');
-  assert.ok(e);
-  assert.equal(e.from, 'analyst');
-  assert.deepEqual(e.paths, ['analysis-report']);
-  assert.equal(e.audience, 'human');
-  assert.ok(after.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
+  assert.ok(!after.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(after.lints.some(l => l.code === 'unbound-delivery' && l.nodeId === 'analyst'));
+  // Still surfaced as a touchpoint (unassigned — no role) for the panel.
+  assert.ok(after.humanTouchpoints.some(t => t.type === 'delivery' && t.name === 'analysis-report' && !t.role));
 });
 
-test('#981: a human-audience output that an agent ALSO consumes keeps both edges', () => {
+test('#987: a human-audience output that an agent ALSO consumes keeps the agent edge; no @human', () => {
   const g = buildUnifiedGraph([
     { id: 'analyst', outputs: [{ name: 'report', audience: 'human' }], triggers: [] },
     { id: 'writer', inputs: [{ name: 'report' }], triggers: [] },
   ]);
   assert.ok(findEdge(g, x => x.on === 'artifact' && x.from === 'analyst' && x.to === 'writer'));
-  assert.ok(findEdge(g, x => x.on === 'artifact' && x.from === 'analyst' && x.to === '@human'));
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
   assert.ok(!lintCodes(g).includes('unconsumed-output'));
 });
 
@@ -748,7 +745,7 @@ test('#987: a file output consumed by a human routes to the named node and clear
   assert.equal(tp.role, 'stakeholder');
 });
 
-test('#987: unbound touchpoints still fall back to the generic @human actor', () => {
+test('#987: an unbound touchpoint draws no @human hub, just terminates on null + lints', () => {
   const g = buildUnifiedGraph(
     [{ id: 'reworker', emits: ['needs-decision'], triggers: [] }],
     undefined,
@@ -758,8 +755,11 @@ test('#987: unbound touchpoints still fall back to the generic @human actor', ()
     },
   );
   const e = findEdge(g, x => x.handoff === 'human' && x.from === 'reworker');
-  assert.equal(e.to, '@human');
-  assert.ok(g.nodes.some(n => n.id === '@human'));
+  assert.equal(e.to, null);
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-brake'));
+  // But the reviewer role itself is still a node on the canvas.
+  assert.ok(g.nodes.some(n => n.id === 'reviewer' && n.kind === 'human'));
 });
 
 test('#987: no humans[] is byte-identical to omitting the option', () => {

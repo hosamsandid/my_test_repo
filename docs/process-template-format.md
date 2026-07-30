@@ -231,11 +231,13 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   node — `{ label }` a brake they decide on, `{ artifact:'pr'|'issue', from }` an
   artifact they review, `{ artifact:'file', name }` a data-flow output they read.
   First matching human in `humans[]` order wins a binding; a label emitted by two
-  humans draws both edges. Unbound touchpoints keep the generic `@human` actor, so
-  a flow with no `humans[]` renders exactly as before. Persisted on the team agent
-  like `stages`/`labels`; round-trips through export → materialise and
-  Edit-as-draft. Threaded into the graph builders as
-  `buildProcessGraph(agents, { labels, humans })`.
+  humans draws both edges. The generic `@human` hub is GONE (#987 supersedes the
+  #981 actor): a gate/brake/delivery with no human role wired stays UNBOUND — its
+  edge endpoint is `null` (dropped by the renderer, no hub box) plus an advisory
+  `unbound-gate`/`unbound-brake`/`unbound-delivery` info lint — while still listing
+  as an unassigned touchpoint. Persisted on the team agent like `stages`/`labels`;
+  round-trips through export → materialise and Edit-as-draft. Threaded into the
+  graph builders as `buildProcessGraph(agents, { labels, humans })`.
 - **No team-specifics in the bundle.** `repo`, credentials and Matrix tokens are
   intentionally excluded; they are bound at materialise time.
 - **Stability.** The format is versioned. Bumping shape ⇒ bump

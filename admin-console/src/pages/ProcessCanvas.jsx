@@ -18,7 +18,7 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 // nodes when they have edges, but a drag can also start from a placeholder.
 // (@human/@timer are gone: human actions are GitHub label events, schedules
 // render inside the agent card.)
-const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule', '@human': 'Human' };
+const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
 // Inline-editable process name for the draft toolbar — the single rename
 // control for a draft (#581). Click to edit; Enter or blur commits, Escape
@@ -207,6 +207,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const liveHumanOps = useMemo(() => ({
     upsertHuman: (human) => liveOps.upsertHuman(scope, human),
     removeHuman: (id) => liveOps.removeHuman(scope, id),
+    getHuman: (id) => liveOps.getHuman(scope, id),
+    wireHumanConsume: (id, entry) => liveOps.wireHumanConsume(scope, id, entry),
+    unwireHumanConsume: (id, entry) => liveOps.unwireHumanConsume(scope, id, entry),
+    addHumanEmit: (id, label) => liveOps.addHumanEmit(scope, id, label),
   }), [scope]);
 
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
@@ -542,6 +546,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           stages={draftBundle?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}
+          humans={isDraft ? (draftBundle?.humans || []) : (displayGraph?.humans || [])}
+          humanOps={isDraft ? draftOps : liveHumanOps}
           focus={routingFocus}
           ops={draftOps}
           onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
@@ -559,6 +565,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           stages={displayGraph?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}
+          humans={displayGraph?.humans || []}
+          humanOps={liveHumanOps}
           focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
@@ -579,8 +587,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
+          humanOps={isDraft ? draftOps : liveHumanOps}
           types={createTypesFor(caps, sourceKindOf(connectPair.from))}
           fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
+          toNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.to) || null}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />

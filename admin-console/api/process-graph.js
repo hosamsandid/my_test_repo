@@ -598,12 +598,13 @@ function buildProcessGraph(agents, options) {
     }
   }
 
-  // Artifact deliveries to a person (#981/#987): a produce port whose PR/issue
-  // a human reviews/merges — drawn as an explicit delivery edge and exempted
-  // from `producer-unconsumed` in computeLints. The human is named when a human
-  // role `consumes` this producer's artifact (#987 — implies the audience
-  // semantics on its own); otherwise the generic audience flag (#981) routes the
-  // delivery to the `@human` actor (`to: null` here).
+  // Artifact deliveries to a person (#987): a produce port whose PR/issue a
+  // person reviews/merges. The human is a NAMED role when one `consumes` this
+  // producer's artifact (`to: <humanId>`); an `audience: 'human'` flag with no
+  // role wired stays UNBOUND (`to: null`) — it still lists as a touchpoint and
+  // suppresses `producer-unconsumed`, but draws no line (the generic `@human` hub
+  // is gone, #987) and raises the advisory `unbound-delivery` lint. Exempted from
+  // `producer-unconsumed` either way.
   for (const n of nodes) {
     const gh = n.github || {};
     for (const artifact of ['pr', 'issue']) {
@@ -743,6 +744,26 @@ function computeLints(nodes, edges, classifier) {
       }
     }
   }
+  // Unbound human touchpoints (#987, advisory). The generic `@human` hub is gone,
+  // so a gate/brake with no NAMED human role wired draws no edge — surface an
+  // `info` hint prompting the operator to add a human role. Deduped by label; a
+  // gate edge bound to a human (`from` set) or a brake bound to one (`to` set) is
+  // NOT unbound. Kept `info` so the shipped-bundle guard (which fails on
+  // error/warning) stays green for curated templates that predate human roles.
+  const unboundGate = new Set();
+  const unboundBrake = new Set();
+  for (const e of edges) {
+    if (e.kind === 'gate' && e.from == null && e.to && e.label) unboundGate.add(e.label);
+    if (e.kind === 'brake' && e.handoff === 'human' && e.to == null && e.from && e.label) unboundBrake.add(e.label);
+  }
+  for (const label of unboundGate) {
+    lints.push({ code: 'unbound-gate', severity: 'info', label,
+      message: `gate label \`${label}\` has no human role — wire a human role that applies it.` });
+  }
+  for (const label of unboundBrake) {
+    lints.push({ code: 'unbound-brake', severity: 'info', label,
+      message: `brake label \`${label}\` pauses for a human but no human role decides it — wire a human role.` });
+  }
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
   // consumes, and a channel that points at a role which doesn't produce that
   // artifact, are both advisory smells.
@@ -754,26 +775,38 @@ function computeLints(nodes, edges, classifier) {
       consumedArtifactsByProducer.get(ch.from).add(ch.artifact === 'issue' ? 'issue' : 'pr');
     }
   }
-  // Producer→human deliveries (#981/#987): a `kind: 'delivery'` edge means a
-  // person reviews/merges that producer's PR/issue, so it is a consumer — the
-  // delivery replaces the "nobody consumes this" smell whether the human is the
-  // generic `@human` (audience flag) or a named role that `consumes` it.
-  const deliveredArtifacts = new Set(); // `${producerId}|${pr|issue}`
+  // Producer→human deliveries (#987): a `kind: 'delivery'` edge means a person
+  // reviews/merges that producer's PR/issue — a consumer, so it clears the
+  // "nobody consumes this" smell. `to` set = a NAMED human role reviews it; `to`
+  // null = an `audience: 'human'` flag with no role wired yet (unbound → the
+  // advisory `unbound-delivery` lint below).
+  const deliveredArtifacts = new Set(); // `${producerId}|${pr|issue}` — any delivery
+  const unboundDelivery = new Set();    // `${producerId}|${pr|issue}` — flag, no role
   for (const e of edges) {
-    if (e.kind === 'delivery' && e.from && e.artifact) deliveredArtifacts.add(`${e.from}|${e.artifact}`);
+    if (e.kind !== 'delivery' || !e.from || !e.artifact) continue;
+    deliveredArtifacts.add(`${e.from}|${e.artifact}`);
+    if (e.to == null) unboundDelivery.add(`${e.from}|${e.artifact}`);
   }
   const nodeById = new Map(nodes.map(n => [n.id, n]));
   for (const n of nodes) {
     if (n.synthetic) continue;
     const gh = n.github || {};
     const consumed = consumedArtifactsByProducer.get(n.id) || new Set();
-    if (gh.producesPr && !consumed.has('pr') && !deliveredArtifacts.has(`${n.id}|pr`)) {
-      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
-        message: `\`${n.id}\` opens pull requests but no agent consumes them.` });
-    }
-    if (gh.producesIssue && !consumed.has('issue') && !deliveredArtifacts.has(`${n.id}|issue`)) {
-      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
-        message: `\`${n.id}\` opens issues but no agent consumes them.` });
+    for (const artifact of ['pr', 'issue']) {
+      const produces = artifact === 'pr' ? gh.producesPr : gh.producesIssue;
+      if (!produces) continue;
+      const key = `${n.id}|${artifact}`;
+      const noun = artifact === 'pr' ? 'pull requests' : 'issues';
+      // A delivery to a person (named role or unbound audience flag) is a
+      // consumer — it clears the "nobody consumes this" smell. An UNBOUND one
+      // (flag, no role) instead raises the advisory `unbound-delivery` (#987).
+      if (!consumed.has(artifact) && !deliveredArtifacts.has(key)) {
+        lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
+          message: `\`${n.id}\` opens ${noun} but no agent consumes them.` });
+      } else if (unboundDelivery.has(key)) {
+        lints.push({ code: 'unbound-delivery', severity: 'info', nodeId: n.id, artifact,
+          message: `\`${n.id}\` opens ${noun} for a person but no human role reviews them — wire a human role.` });
+      }
     }
     for (const ch of (n.channels || [])) {
       if (!ch || !ch.from) continue;

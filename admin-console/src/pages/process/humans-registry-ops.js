@@ -69,3 +69,56 @@ export function humansAfterRemove(cur, id) {
 export function slugifyHumanId(name) {
   return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
 }
+
+// ─── consume/emit wiring helpers (#987) ──────────────────────────────────────
+// Stable string key for a consume entry so add/remove dedupe consistently.
+export function consumeKey(c) {
+  if (!c || typeof c !== 'object') return '';
+  if (typeof c.label === 'string' && c.label.trim()) return `label:${c.label.trim()}`;
+  if ((c.artifact === 'pr' || c.artifact === 'issue') && typeof c.from === 'string' && c.from.trim()) {
+    return `${c.artifact}:${c.from.trim()}`;
+  }
+  if (c.artifact === 'file' && typeof c.name === 'string' && c.name.trim()) return `file:${c.name.trim()}`;
+  return '';
+}
+
+// Return the human role with `entry` added to its `consumes` (dedup by key). A
+// malformed entry is a no-op; the role is normalized on the way out.
+export function humanAfterConsumeAdd(human, entry) {
+  const norm = normalizeHumanRole(human) || (human && human.id ? { id: human.id, name: human.id } : null);
+  if (!norm) return human;
+  const key = consumeKey(entry);
+  if (!key) return norm;
+  const list = Array.isArray(norm.consumes) ? norm.consumes.slice() : [];
+  if (!list.some(c => consumeKey(c) === key)) list.push(entry);
+  return normalizeHumanRole({ ...norm, consumes: list });
+}
+
+// Return the human role with any consume matching `entry`'s key removed.
+export function humanAfterConsumeRemove(human, entry) {
+  const norm = normalizeHumanRole(human);
+  if (!norm) return human;
+  const key = consumeKey(entry);
+  const list = (Array.isArray(norm.consumes) ? norm.consumes : []).filter(c => consumeKey(c) !== key);
+  return normalizeHumanRole({ ...norm, consumes: list });
+}
+
+// Return the human role with `label` added to its `emits` (dedup, trimmed).
+export function humanAfterEmitAdd(human, label) {
+  const norm = normalizeHumanRole(human) || (human && human.id ? { id: human.id, name: human.id } : null);
+  if (!norm) return human;
+  const s = String(label || '').trim();
+  if (!s) return norm;
+  const list = Array.isArray(norm.emits) ? norm.emits.slice() : [];
+  if (!list.includes(s)) list.push(s);
+  return normalizeHumanRole({ ...norm, emits: list });
+}
+
+// Return the human role with `label` removed from its `emits`.
+export function humanAfterEmitRemove(human, label) {
+  const norm = normalizeHumanRole(human);
+  if (!norm) return human;
+  const s = String(label || '').trim();
+  const list = (Array.isArray(norm.emits) ? norm.emits : []).filter(e => e !== s);
+  return normalizeHumanRole({ ...norm, emits: list });
+}

@@ -55,17 +55,17 @@ const ACTORS = {
   github: '@github',
   external: '@external',
   timer: '@timer',
-  // The human actor (#981) — partially un-folds #410: raw GitHub events stay
-  // @github, but edges whose semantic counterpart is a PERSON (gate/brake label
-  // applications, brake hand-offs, artifact deliveries to a human) originate at
-  // or terminate on @human, so human participation is explicit on the canvas.
-  human: '@human',
+  // The generic `@human` actor (#981) is GONE (#987): a person is never an
+  // anonymous hub any more — every human touchpoint is a NAMED human-role node
+  // (`kind: 'human'`) or, when no role is wired yet, nothing at all plus an
+  // advisory lint. Gate/brake/delivery edges originate at or terminate on the
+  // named node; an unbound touchpoint keeps its `null` endpoint (the renderer
+  // drops it) so the canvas never grows a hub box again.
 };
 const ACTOR_META = {
   [ACTORS.github]: { actor: 'github', displayName: 'GitHub' },
   [ACTORS.external]: { actor: 'external', displayName: 'External system' },
   [ACTORS.timer]: { actor: 'timer', displayName: 'Schedule' },
-  [ACTORS.human]: { actor: 'human', displayName: 'Human' },
 };
 function isActorId(id) {
   return typeof id === 'string' && Object.prototype.hasOwnProperty.call(ACTOR_META, id);
@@ -148,12 +148,11 @@ function processEdgeToUnified(e) {
     return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
   if (e.kind === 'delivery') {
-    // Artifact delivery to a person (#981/#987): the producer's PR/issue is
-    // reviewed/merged by a human, not consumed by an agent. Same on:'github'
-    // shape as a channel edge so it shares the artifact styling. The human is a
-    // named role when buildProcessGraph bound one (`e.to` set), else the generic
-    // `@human` actor.
-    return { from: e.from, to: e.to != null ? e.to : ACTORS.human, on: 'github', artifact: e.artifact, audience: 'human' };
+    // Artifact delivery to a NAMED human role (#987): the producer's PR/issue is
+    // reviewed/merged by that person. Same on:'github' shape as a channel edge so
+    // it shares the artifact styling. buildProcessGraph only emits a delivery edge
+    // when a human role consumes it, so `e.to` is always a named node here.
+    return { from: e.from, to: e.to, on: 'github', artifact: e.artifact, audience: 'human' };
   }
   // 'agent' label wiring, plus gate/brake (human-only) edges. The carrying
   // label events (issue/PR × added/removed) ride along for display.
@@ -166,13 +165,14 @@ function processEdgeToUnified(e) {
   // `kind` is already the authoritative, flag-derived classification (#928) —
   // no name re-match here (the old `isHumanGate(e.label) || isBrake(e.label)`
   // fallback keyed off the `human:*` convention and is gone).
-  // Brake hand-off (#981/#987): an agent applied a brake label — the flow
-  // pauses on a HUMAN decision, so the edge terminates on the @human actor, or
-  // on a named human role when one `consumes` the brake label (`e.to` set by
-  // buildProcessGraph). Tagged `handoff` (deliberately NOT `gate` — the renderer
-  // styles "waiting on a person" distinctly from an approval-gate listener).
+  // Brake hand-off (#987): an agent applied a brake label — the flow pauses on a
+  // HUMAN decision. It terminates on a named human role when one `consumes` the
+  // brake label (`e.to` set by buildProcessGraph); otherwise `e.to` is null and
+  // the edge is dropped (an advisory `unbound-brake` lint prompts wiring a role —
+  // no generic @human hub). Tagged `handoff` (deliberately NOT `gate` — the
+  // renderer styles "waiting on a person" distinctly from an approval-gate).
   if (e.handoff === 'human' && e.from != null) {
-    u.to = e.to != null ? e.to : ACTORS.human;
+    u.to = e.to != null ? e.to : null;
     u.handoff = 'human';
     delete u.triggerId; // emit-side edge — there is no listening trigger behind it
     if (e.kind === 'brake') u.brake = true;
@@ -181,12 +181,11 @@ function processEdgeToUnified(e) {
   if (e.kind === 'gate' || e.kind === 'brake') {
     u.gate = 'human';
   }
-  // Human-approval gates and brakes have no agent emitter (from: null in the
-  // process graph); a human applies the label, so the edge originates at the
-  // @human actor (#981 — previously folded into @github by #410). (Source/origin
-  // filters were removed, so there is no longer any per-trigger `from`-based
-  // human inference for plain, non-gate labels — those simply stay orphans.)
-  if (u.from == null && u.gate === 'human') u.from = ACTORS.human;
+  // A gate label bound to a NAMED human role keeps `e.from = <humanId>` from
+  // buildProcessGraph and stays as-is. An UNBOUND gate (registry `humanGate` flag,
+  // no human role emitting it) keeps `from: null` — the renderer drops it and an
+  // advisory `unbound-gate` lint prompts wiring a human role. No generic @human
+  // hub is synthesised any more (#987 supersedes the #981 @human actor).
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
   // Claim (#958): what the listener takes over when it wakes. Forwarded verbatim
@@ -395,15 +394,17 @@ function buildUnifiedGraph(nodes, edges, options) {
       if (!a || typeof a !== 'object') continue;
       const k = artifactKey(a);
       if (!k) continue;
-      // A named human role that `consumes` this output by name (#987) is the
-      // consumer — implies the delivery semantics on its own; otherwise the
-      // generic `audience: 'human'` flag (#981) routes to the `@human` actor.
+      // A NAMED human role that `consumes` this output by name (#987) draws
+      // producer → role. An `audience: 'human'` flag with no role wired stays
+      // UNBOUND: it lists as a touchpoint and clears `unconsumed-output`, but its
+      // edge terminates on null (dropped by the renderer — no @human hub) and
+      // raises the advisory `unbound-delivery` lint.
       const boundHuman = humanFileConsumer.get(k);
       if (boundHuman) {
         push({ from: n.id, to: boundHuman, on: 'artifact', paths: [k], audience: 'human' });
         artifactDeliveries.push({ type: 'delivery', artifact: 'file', name: k, agentId: n.id, role: boundHuman });
       } else if (a.audience === 'human') {
-        push({ from: n.id, to: ACTORS.human, on: 'artifact', paths: [k], audience: 'human' });
+        push({ from: n.id, to: null, on: 'artifact', paths: [k], audience: 'human' });
         artifactDeliveries.push({ type: 'delivery', artifact: 'file', name: k, agentId: n.id });
       }
     }
@@ -479,14 +480,18 @@ function computeDataflowLints(nodes, edges) {
     for (const p of inputPaths(n)) allInputs.add(p);
   }
 
-  // Output paths delivered to a person (#981/#987): any `on: 'artifact'` edge
-  // tagged `audience: 'human'` — whether it lands on the generic `@human` actor
-  // (audience flag) or a named human role that `consumes` it. Either way it is a
-  // consumer, so it clears the `unconsumed-output` smell.
-  const humanDelivered = new Set();
+  // Output paths delivered to a person (#987): an `on: 'artifact'` edge tagged
+  // `audience: 'human'`. `to` set = a NAMED human role reads it; `to` null = an
+  // `audience: 'human'` flag with no role wired (unbound). Either way it is a
+  // declared consumer, so both clear the `unconsumed-output` smell — but an
+  // unbound one raises the advisory `unbound-delivery` prompting a role.
+  const humanDelivered = new Set(); // path -> delivered to some person
+  const unboundDelivered = new Map(); // path -> producerId (flag, no role)
   for (const e of asArray(edges)) {
-    if (e && e.on === 'artifact' && e.audience === 'human' && Array.isArray(e.paths)) {
-      for (const p of e.paths) humanDelivered.add(p);
+    if (!e || e.on !== 'artifact' || e.audience !== 'human' || !Array.isArray(e.paths)) continue;
+    for (const p of e.paths) {
+      humanDelivered.add(p);
+      if (e.to == null && e.from != null && !unboundDelivered.has(p)) unboundDelivered.set(p, e.from);
     }
   }
 
@@ -500,13 +505,18 @@ function computeDataflowLints(nodes, edges) {
       }
     }
     for (const p of outputPaths(n)) {
-      if (!allInputs.has(p) && !humanDelivered.has(p)) {
-        lints.push({
-          code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
-          message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,
-        });
-      }
+      if (allInputs.has(p) || humanDelivered.has(p)) continue;
+      lints.push({
+        code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
+        message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,
+      });
     }
+  }
+  for (const [p, producerId] of unboundDelivered) {
+    lints.push({
+      code: 'unbound-delivery', severity: 'info', nodeId: producerId, path: p,
+      message: `\`${producerId}\` marks output \`${p}\` for a person but no human role reads it — wire a human role.`,
+    });
   }
 
   // Dependency cycles — over `on:'dependency'` edges only (ordering constraint).

@@ -26,7 +26,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   const ARTIFACT_H  = 70;
   const ACTOR_W     = 150;   // actor pseudo-nodes (#410) — the "outside world" column
   const ACTOR_H     = 40;
-  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰', human: '👤' };
+  const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰' };
   // Placeholder actors (#411): in an editable process view every source is
   // offered as a drag source even before it has edges, so the first event /
   // label / webhook trigger can be wired on the canvas. @timer is gone
@@ -274,7 +274,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       return;
     }
     const keys = ['label', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
-    const actorToggles = ['github', 'external', 'human'].map(kind => {
+    const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
         + 'background:none;border:1px solid var(--eb-border-default);border-radius:10px;padding:0 6px;'
@@ -649,12 +649,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // least one edge to a known node and its source kind is not toggled off in
   // the legend. (Editable placeholder actors for empty flows come with #411.)
   function actorHasEdges(a) {
-    // An actor may source edges (@github events, @human gate labels) or sink
-    // them (@human brake hand-offs / deliveries, #981).
-    if (a.actor === 'human'
-        && Object.values(state.artifactRegistry || {}).some(r => r.humanAudience)) {
-      return true; // artifact delivery to a person — drawn from the artifact card
-    }
+    // Actors source edges (@github events) or receive webhooks (@external). The
+    // generic @human hub is gone (#987) — human touchpoints are named role nodes.
     return (state.extraEdges || []).some(e =>
       (e.from === a.id && state.byId[e.to]) || (e.to === a.id && state.byId[e.from]));
   }
@@ -1274,9 +1270,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
       // hand-off / link. Only when editable and a handler is wired. A human role
-      // carries no drag port (#987) — its emits/consumes are edited in the
-      // inspector, not by dragging an agent-style label hand-off off the card.
-      if (state.editable && onConnect && !isHuman) {
+      // carries the same port (#987): dragging FROM it onto an agent wires a
+      // human gate (the person applies a label the agent waits on); dropping an
+      // agent's port ONTO a human box wires a delivery — both handled by the
+      // human-aware CreateEdgeDialog.
+      if (state.editable && onConnect) {
         const port = document.createElement('div');
         port.title = 'Drag to another node to connect them';
         port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';

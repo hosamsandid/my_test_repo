@@ -200,7 +200,8 @@ function resolveLlmBindingForAgent(cfg, env) {
 }
 
 const { execFile, execFileSync } = require("child_process");
-const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
+// Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
 const { reconcileSessionAppend } = require("./session-cursor");
 const {

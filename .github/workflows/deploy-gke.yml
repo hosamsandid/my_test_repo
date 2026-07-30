@@ -1,0 +1,98 @@
+# Deploy Agent Studio to the GKE stage-1 cluster (agent-studio, europe-west3-b,
+# acn-projectroots).
+#
+# Auth is keyless: the workflow exchanges its GitHub OIDC token for the
+# agent-studio-deployer service account via Workload Identity Federation — no
+# GCP keys are stored in GitHub. The WIF provider only accepts tokens from THIS
+# repository (attribute-condition on the provider).
+#
+# Images are built natively on GitHub's amd64 runners — this replaces the local
+# cross-build path (Apple Silicon Macs build arm64 by default, which
+# crash-loops on GKE's x86 nodes with "exec format error").
+#
+# Trigger: manual (Actions tab -> "deploy-gke" -> Run workflow). Kept manual
+# for the same reason as deploy-gcp.yml: a deploy restarts services and
+# interrupts any agent session running at that moment.
+#
+# Scope: build + push + rollout of the app images. It does NOT create
+# infrastructure (cluster, AR repo, PVCs, secret) and does not run the Matrix
+# bootstrap — first-time setup is deploy/k8s/gke-up.sh from an operator machine.
+
+name: deploy-gke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for Workload Identity Federation
+
+concurrency:
+  group: gke-deploy
+  cancel-in-progress: false
+
+env:
+  PROJECT: acn-projectroots
+  ZONE: europe-west3-b
+  CLUSTER: agent-studio
+  AR: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio
+  WIF_PROVIDER: projects/594390336049/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER_SA: agent-studio-deployer@acn-projectroots.iam.gserviceaccount.com
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Orchestrator tests
+        run: cd orchestrator && npm install && npm test
+      - name: Admin-console API tests
+        run: cd admin-console/api && npm install && npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (WIF, keyless)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - name: Set up gcloud + GKE auth plugin
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west3-docker.pkg.dev --quiet
+
+      - name: Build and push images (linux/amd64)
+        run: |
+          set -euo pipefail
+          GIT_COMMIT="${GITHUB_SHA::8}"
+          docker build -t "$AR/agent-studio-orchestrator:latest"  orchestrator/
+          docker build -t "$AR/agent-studio-admin-console:latest" --build-arg "GIT_COMMIT=${GIT_COMMIT}" admin-console/
+          docker build -t "$AR/agent-studio-bp-explorer:latest"   bp-explorer/
+          docker build -t "$AR/as-agent:latest" -f agent-image/Dockerfile agent-image/
+          for img in agent-studio-orchestrator agent-studio-admin-console agent-studio-bp-explorer as-agent; do
+            docker push "$AR/$img:latest"
+          done
+
+      - name: Roll out to GKE
+        run: |
+          set -euo pipefail
+          gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT"
+          # imagePullPolicy is Always on the GKE deployments, so a restart
+          # pulls the images just pushed above.
+          kubectl -n agent-studio rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer
+          for d in orchestrator admin-console bp-explorer; do
+            kubectl -n agent-studio rollout status "deploy/$d" --timeout=300s
+          done
+          kubectl -n agent-studio get pods

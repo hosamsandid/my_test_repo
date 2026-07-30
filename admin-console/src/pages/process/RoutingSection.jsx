@@ -8,7 +8,7 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
-import { consumersFor } from './outcome-consumers.js';
+import { consumersFor, outcomeHandsOffToHuman } from './outcome-consumers.js';
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
 // Connections tab in #865) — ONE place for an agent's whole routing decision.
@@ -143,6 +143,7 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
               option={o}
               highlight={suggested || (focusOutcome && o.id === focusOutcome)}
               consumers={consumersFor(o, node, peers)}
+              humanHandoff={outcomeHandsOffToHuman(o, labels)}
               onChange={(next) => mutate({ ...outcomes, options: outcomes.options.map((x, j) => j === i ? next : x) })}
               onRemove={() => mutate({ ...outcomes, options: outcomes.options.filter((_, j) => j !== i) })}
             />
@@ -685,7 +686,7 @@ function artifactConsumers(output, node, peers) {
 }
 
 // ── one outcome row ──────────────────────────────────────────────────────────
-function OutcomeRow({ index, option, consumers, highlight, onChange, onRemove }) {
+function OutcomeRow({ index, option, consumers, humanHandoff, highlight, onChange, onRemove }) {
   const actions = Array.isArray(option.actions) && option.actions.length ? option.actions : [{ type: 'none' }];
   const setActions = (next) => onChange({ ...option, actions: next });
   const isNone = actions.every(a => a.type === 'none');
@@ -712,9 +713,12 @@ function OutcomeRow({ index, option, consumers, highlight, onChange, onRemove })
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {isNone
           ? 'Terminal outcome — no signal (dead-end by design).'
-          : consumers.length
-            ? <>consumers: {consumers.join(', ')}</>
-            : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer — nothing listens for this outcome's signal</span>}
+          : humanHandoff
+            // Brake label (#981): the hand-off to a person IS the consumer.
+            ? <>hands off to a person 👤 — the flow pauses for a decision{consumers.length ? <> · also wakes {consumers.join(', ')}</> : null}</>
+            : consumers.length
+              ? <>consumers: {consumers.join(', ')}</>
+              : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer — nothing listens for this outcome's signal</span>}
       </div>
     </div>
   );

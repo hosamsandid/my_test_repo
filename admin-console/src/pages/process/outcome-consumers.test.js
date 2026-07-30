@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { consumersFor, labelConsumers } from './outcome-consumers.js';
+import { consumersFor, labelConsumers, outcomeHandsOffToHuman } from './outcome-consumers.js';
 
 const node = { id: 'dev' };
 
@@ -70,4 +70,28 @@ test('labelConsumers is the flat-emit shorthand for a single label', () => {
   assert.deepEqual(labelConsumers('nobody-listens', node, peers), []);
   assert.deepEqual(labelConsumers('', node, peers), []);
   assert.deepEqual(labelConsumers(null, node, peers), []);
+});
+
+// ── #981: brake labels hand off to a person, never "no consumer" ─────────────
+
+test('outcomeHandsOffToHuman: true for a brake-flagged setLabel, false otherwise', () => {
+  const labels = [
+    { name: 'human-decision-required', humanGate: false, brake: true },
+    { name: 'ready-for-test', humanGate: false, brake: false },
+    { name: 'dispatch', humanGate: true, brake: false },
+  ];
+  const opt = (label) => ({ actions: [{ type: 'setLabel', label }] });
+  assert.equal(outcomeHandsOffToHuman(opt('human-decision-required'), labels), true);
+  assert.equal(outcomeHandsOffToHuman(opt('ready-for-test'), labels), false);
+  // A gate label is not a hand-off — an agent may not set it at all.
+  assert.equal(outcomeHandsOffToHuman(opt('dispatch'), labels), false);
+  // Unknown label / no registry → no hand-off.
+  assert.equal(outcomeHandsOffToHuman(opt('whatever'), labels), false);
+  assert.equal(outcomeHandsOffToHuman(opt('human-decision-required'), undefined), false);
+});
+
+test('outcomeHandsOffToHuman: trims and ignores non-setLabel actions', () => {
+  const labels = [{ name: 'needs-decision', brake: true }];
+  assert.equal(outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label: ' needs-decision ' }] }, labels), true);
+  assert.equal(outcomeHandsOffToHuman({ actions: [{ type: 'openPr' }] }, labels), false);
 });

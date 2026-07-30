@@ -22,7 +22,7 @@
  * must keep the same lenient rule (valid mode + at least one option).
  */
 
-import { consumersFor, labelConsumers } from '../process/outcome-consumers.js';
+import { consumersFor, labelConsumers, outcomeHandsOffToHuman } from '../process/outcome-consumers.js';
 
 export const OUTCOME_MODES = ['exactlyOne', 'anyOf'];
 
@@ -82,8 +82,12 @@ function isTerminal(option) {
  *               them every row simply reports no consumers (see
  *               `consumersResolved`), which is how the panel degrades when the
  *               team graph is unavailable rather than hiding the outcomes.
+ * @param labels the same graph's label registry (`graph.labels`,
+ *               [{ name, humanGate, brake }]). Optional; used to mark rows
+ *               that hand off to a person via a brake label (#981) so they
+ *               never read as "no consumer".
  */
-export function resolveOutcomeView(agent, peers) {
+export function resolveOutcomeView(agent, peers, labels) {
   const node = { id: agent?.id };
   const list = Array.isArray(peers) ? peers : [];
   const consumersResolved = list.length > 0;
@@ -98,6 +102,7 @@ export function resolveOutcomeView(agent, peers) {
       notifyDm: o.notify === 'dm',
       terminal: isTerminal(o),
       consumers: consumersFor(o, node, list),
+      humanHandoff: outcomeHandsOffToHuman(o, labels),
     }));
     return {
       kind: 'structured',
@@ -123,6 +128,7 @@ export function resolveOutcomeView(agent, peers) {
         notifyDm: false,
         terminal: false,
         consumers: labelConsumers(label, node, list),
+        humanHandoff: outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label }] }, labels),
       })),
       consumersResolved,
     };

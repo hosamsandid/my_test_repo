@@ -1112,6 +1112,21 @@ test('#987 AC5: a PR bound to a human suppresses producer-unconsumed and draws t
   assert.equal(e.artifact, 'pr');
 });
 
+test('#1003: produces* projection — an outcome-only producer graphs identically to a consistent flag-carrier', () => {
+  const outcomes = { mode: 'anyOf', options: [{ id: 'opens-pr', title: 'Opens PR', actions: [{ type: 'openPr' }] }] };
+  const consumer = { id: 'qa', triggers: [], channels: [{ artifact: 'pr', from: 'dev' }] };
+  // Outcome only (what the #1003 engine writes) vs. outcome + legacy flag
+  // (an already-consistent agent): node.github, edges and lints must agree.
+  const outcomeOnly = buildProcessGraph([{ id: 'dev', outcomes, triggers: [] }, consumer], {});
+  const withFlag = buildProcessGraph([{ id: 'dev', outcomes, github: { producesPr: true }, triggers: [] }, consumer], {});
+  const devA = outcomeOnly.nodes.find(n => n.id === 'dev');
+  const devB = withFlag.nodes.find(n => n.id === 'dev');
+  assert.deepEqual(devA.github, { producesPr: true });
+  assert.deepEqual(devA.github, devB.github);
+  assert.deepEqual(outcomeOnly.edges, withFlag.edges);
+  assert.deepEqual(outcomeOnly.lints, withFlag.lints);
+});
+
 test('#1001 (D4): an outcomes-authored openIssue reviewed by a bound human raises no consumer lint', () => {
   // The concept §1 D4 repro, via the outcomes port (not raw github flags): BA's
   // outcome opens an issue, a named human role reviews it. The reviewer IS the

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  matchesListener, ensureProduces,
+  matchesListener,
   wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
   wireChannel, unwireChannel,
   wireHumanDelivery, unwireHumanDelivery, moveHumanDelivery,
@@ -297,36 +297,52 @@ test('unwireLabelHandoff removes listener and emit symmetrically; last option cl
 
 // ── channel ─────────────────────────────────────────────────────────────────
 
-test('wireChannel: produce flag + channel port, idempotent, audience preserved', async () => {
+test('wireChannel: producer outcome (badge projection source) + channel port, idempotent', async () => {
   const state = await onBoth(async (ctx) => {
-    // Pre-existing human audience on the producer must survive the flag write.
-    await ctx.ops.setGithubProduces('ba', { pr: false, issue: true, issueAudience: 'human' });
     await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready', gate: 'human' });
     await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr', label: 'ready', gate: 'human' });
   });
-  assert.deepEqual(state.roles.ba.github, { producesPr: true, producesIssue: true, issueAudience: 'human' });
+  // #1003: the produce badge is a projection of the outcome — no github write.
+  assert.equal(state.roles.ba.github, null, 'engine never writes github.produces*');
+  assert.deepEqual(state.roles.ba.outcomes.options, [
+    { id: 'opens-pr', title: 'Opens PR', actions: [{ type: 'openPr' }] },
+  ]);
   assert.deepEqual(state.roles.dev.channels, [{ artifact: 'pr', from: 'ba', label: 'ready', gate: 'human' }]);
 });
 
-test('unwireChannel removes the port and clears the orphaned produce flag on request', async () => {
+test('wireChannel reuses an existing outcome carrying the action, whatever its id', async () => {
+  const state = await onBoth(async (ctx) => {
+    await ctx.ops.setRoleOutcomes('ba', {
+      mode: 'anyOf',
+      options: [{ id: 'ticket', title: 'Files a ticket', actions: [{ type: 'openIssue' }] }],
+    });
+    await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'issue' });
+  });
+  assert.equal(state.roles.ba.outcomes.options.length, 1, 'authored outcome reused, not duplicated');
+  assert.equal(state.roles.ba.outcomes.options[0].id, 'ticket');
+});
+
+test('unwireChannel removes the port; the producer outcome (and its badge) stays', async () => {
   const state = await onBoth(async (ctx) => {
     await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'issue', label: 'go' });
-    await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'issue', clearProduces: true });
+    await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'issue' });
   });
   assert.deepEqual(state.roles.dev.channels, []);
-  assert.deepEqual(state.roles.ba.github, { producesPr: false, producesIssue: false });
+  assert.ok(state.roles.ba.outcomes.options.some(o => o.actions.some(a => a.type === 'openIssue')),
+    'what a role opens is authored on the role, not implied by consumers');
 });
 
 // ── human delivery ──────────────────────────────────────────────────────────
 
-test('wireHumanDelivery: PR/issue flags the producer, file does not; move + unwire', async () => {
+test('wireHumanDelivery: PR/issue ensures the producer outcome, file does not; move + unwire', async () => {
   const state = await onBoth(async (ctx) => {
     await wireHumanDelivery(ctx, { human: 'p', entry: { artifact: 'issue', from: 'ba' } });
     await wireHumanDelivery(ctx, { human: 'p', entry: { artifact: 'file', name: 'report' } });
     await moveHumanDelivery(ctx, { entry: { artifact: 'file', name: 'report' }, fromHuman: 'p', toHuman: 'p' }); // same → no-op
     await unwireHumanDelivery(ctx, { human: 'p', entry: { artifact: 'file', name: 'report' } });
   });
-  assert.deepEqual(state.roles.ba.github, { producesPr: false, producesIssue: true });
+  assert.equal(state.roles.ba.github, null);
+  assert.ok(state.roles.ba.outcomes.options.some(o => o.actions.some(a => a.type === 'openIssue')));
   assert.deepEqual(state.humans[0].consumes, [{ artifact: 'issue', from: 'ba' }]);
 });
 
@@ -351,9 +367,9 @@ test('wireReviewGate wires the whole triangle in one call (+ rejection leg)', as
   const state = await onBoth(async (ctx) => {
     await wireReviewGate(ctx, { from: 'ba', human: 'p', to: 'dev', artifact: 'issue', gateLabel: 'ready', rejectLabel: 'rework' });
   });
-  // A: artifact outcome + produce flag.
+  // A: artifact outcome (whose projection is the produce badge — no flag write).
   assert.ok(state.roles.ba.outcomes.options.some(o => o.actions.some(a => a.type === 'openIssue')));
-  assert.equal(state.roles.ba.github.producesIssue, true);
+  assert.equal(state.roles.ba.github, null);
   // P: reviews the issue, owns the gate + rejection labels.
   assert.deepEqual(state.humans[0].consumes, [{ artifact: 'issue', from: 'ba' }]);
   assert.deepEqual(state.humans[0].emits, ['ready', 'rework']);
@@ -402,14 +418,14 @@ test('unwireReviewGate cleans up all legs — no leftovers', async () => {
       from: 'ba', human: 'p', to: 'dev', artifact: 'issue',
       gateLabel: 'ready', gateTriggerId: gate.id,
       rejectLabel: 'rework', rejectTriggerId: rej.id,
-      clearProduces: true,
     });
   });
   assert.deepEqual(state.roles.dev.triggers, []);
   assert.deepEqual(state.roles.ba.triggers, []);
   assert.equal(state.humans[0].consumes, undefined);
   assert.equal(state.humans[0].emits, undefined);
-  assert.equal(state.roles.ba.github.producesIssue, false);
+  // The producer's outcome stays — the gate is gone, what BA opens is not.
+  assert.ok(state.roles.ba.outcomes.options.some(o => o.actions.some(a => a.type === 'openIssue')));
 });
 
 // ── escalation ──────────────────────────────────────────────────────────────
@@ -467,12 +483,14 @@ test('matchesListener keys on (label, event) over github-event triggers only', (
   assert.equal(matchesListener(null, { label: 'x', event: 'issues.labeled' }), false);
 });
 
-test('ensureProduces writes only on change and preserves audience flags', async () => {
+test('the engine never calls setGithubProduces — produces* is a projection (#1003)', async () => {
   const bundle = freshBundle();
-  const { ops } = makeDraftLike(bundle);
-  let writes = 0;
-  const counting = { ...ops, setGithubProduces: async (...a) => { writes++; return ops.setGithubProduces(...a); } };
-  await ensureProduces(counting, 'ba', 'pr', true);
-  await ensureProduces(counting, 'ba', 'pr', true); // already set → no write
-  assert.equal(writes, 1);
+  const ctx = makeDraftLike(bundle);
+  let flagWrites = 0;
+  ctx.ops.setGithubProduces = async () => { flagWrites++; };
+  await wireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr' });
+  await wireHumanDelivery(ctx, { human: 'p', entry: { artifact: 'issue', from: 'ba' } });
+  await wireReviewGate(ctx, { from: 'ba', human: 'p', to: 'dev', artifact: 'pr', gateLabel: 'ok' });
+  await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr' });
+  assert.equal(flagWrites, 0);
 });

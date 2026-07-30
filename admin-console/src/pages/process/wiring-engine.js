@@ -52,20 +52,11 @@ function claimFor(event, label, autoClaim) {
   return deriveClaim(label);
 }
 
-// Ensure the producer's `github.produces*` flag is set (or cleared) without
-// dropping the audience flags — the read-modify-write every channel/delivery
-// path needs. No write when the flags already match.
-export async function ensureProduces(ops, roleId, artifact, on = true) {
-  if (!ops.getRoleGithub || !ops.setGithubProduces) return;
-  const g = (await ops.getRoleGithub(roleId)) || {};
-  const next = {
-    pr: !!g.producesPr, issue: !!g.producesIssue,
-    prAudience: g.prAudience, issueAudience: g.issueAudience,
-  };
-  if (artifact === 'pr') next.pr = !!on; else next.issue = !!on;
-  if (next.pr === !!g.producesPr && next.issue === !!g.producesIssue) return;
-  await ops.setGithubProduces(roleId, next);
-}
+// `github.produces*` is a pure projection of `openPr`/`openIssue` outcome
+// actions (#1003, finishes #784 decision 3): the engine records what a role
+// opens as an OUTCOME — the badge, channel-recommendation tiles, prompt blocks
+// and graph edges all read the projection (`outcomesToGithub` server-side).
+// No UI path writes the flags directly anymore.
 
 // Upsert a setLabel outcome on the producer — the structured successor to flat
 // `emits`. Keyed on the label (option id = label, matching every existing
@@ -183,14 +174,15 @@ export async function unwireLabelHandoff({ ops }, { from, to, triggerId, label, 
 // ── GitHub channel: A opens a PR/issue that wakes B ─────────────────────────
 
 /**
- * Wire "A opens a PR/issue that wakes B": produce flag on A + channel port on
- * B (the backend derives the listener, incl. the claim for labelled channels).
- * Idempotent: the channel port upserts on its (artifact, from, label) key and
- * the produce flag only writes on change.
+ * Wire "A opens a PR/issue that wakes B": an openPr/openIssue outcome on A
+ * (whose projection is the produce badge) + channel port on B (the backend
+ * derives the listener, incl. the claim for labelled channels). Idempotent:
+ * the channel port upserts on its (artifact, from, label) key and the outcome
+ * is reused when one already carries the action.
  */
 export async function wireChannel({ ops }, { from, to, artifact, label, gate, autoClaim, wakePrompt }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
-  await ensureProduces(ops, from, art, true);
+  await ensureArtifactOutcome(ops, from, art);
   await ops.addChannel(to, {
     artifact: art, from,
     ...(String(label || '').trim() ? { label: String(label).trim() } : {}),
@@ -206,25 +198,26 @@ export async function updateChannel({ ops }, { to, spec }) {
 }
 
 /**
- * Remove a channel and, when it was the producer's last consumed channel for
- * that artifact and the caller confirmed, the orphaned produce flag with it.
+ * Remove a channel port. The producer's outcome (and thus its projected
+ * produce badge) stays — what a role opens is authored on the role, not
+ * implied by who consumes it; edit it in the Outcomes editor.
  */
-export async function unwireChannel({ ops }, { from, to, artifact, label, clearProduces = false }) {
+export async function unwireChannel({ ops }, { from, to, artifact, label }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   await ops.removeChannel(to, { artifact: art, from, ...(label !== undefined ? { label } : {}) });
-  if (clearProduces) await ensureProduces(ops, from, art, false);
 }
 
 // ── human delivery: a person reviews A's PR / issue / file output ───────────
 
 /**
  * Wire a delivery to a named human role: `P.consumes` gains the entry; a
- * PR/issue delivery also ensures A's produce flag (mirrors the channel path).
+ * PR/issue delivery also ensures A's openPr/openIssue outcome (whose
+ * projection is the produce badge — mirrors the channel path).
  * `entry` is `{artifact: 'pr'|'issue', from}` or `{artifact: 'file', name}`.
  */
 export async function wireHumanDelivery({ ops, humanOps }, { human, entry }) {
   if ((entry.artifact === 'pr' || entry.artifact === 'issue') && entry.from) {
-    await ensureProduces(ops, entry.from, entry.artifact, true);
+    await ensureArtifactOutcome(ops, entry.from, entry.artifact);
   }
   await humanOps.wireHumanConsume(human, entry);
 }
@@ -289,10 +282,10 @@ export async function wireReviewGate(ctx, { from, human, to, artifact, gateLabel
 
 /**
  * Remove a review gate symmetrically: the gate emit + listener, the delivery
- * consume, optionally the rejection leg, and (when the caller confirmed) the
- * orphaned produce flag.
+ * consume, and optionally the rejection leg. The producer's outcome (and its
+ * projected badge) stays — edit it in the Outcomes editor.
  */
-export async function unwireReviewGate(ctx, { from, human, to, artifact, gateLabel, gateTriggerId, rejectLabel, rejectTriggerId, clearProduces = false }) {
+export async function unwireReviewGate(ctx, { from, human, to, artifact, gateLabel, gateTriggerId, rejectLabel, rejectTriggerId }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   if (gateTriggerId) await ctx.ops.deleteTrigger(to, gateTriggerId);
   if (ctx.humanOps.removeHumanEmit && String(gateLabel || '').trim()) {
@@ -303,7 +296,6 @@ export async function unwireReviewGate(ctx, { from, human, to, artifact, gateLab
     await ctx.humanOps.removeHumanEmit(human, String(rejectLabel).trim());
   }
   await unwireHumanDelivery(ctx, { human, entry: { artifact: art, from } });
-  if (clearProduces) await ensureProduces(ctx.ops, from, art, false);
 }
 
 // ── escalation: a brake outcome bound to a person ───────────────────────────

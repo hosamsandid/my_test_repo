@@ -266,19 +266,14 @@ export const liveOps = {
     await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitRemove(human, label)) });
   },
 
-  // ── GitHub artifact ports (#380): produce flags + consumed channels ──
-  // Produce flags drive the node badge/ports + the producer prompt block.
+  // ── GitHub artifact ports (#380): consumed channels ──
+  // `github.produces*` became a pure projection of openPr/openIssue outcome
+  // actions (#1003) — no UI write path exists any more; the badge, tiles and
+  // prompt blocks read the server-side projection (`outcomesToGithub`).
   getRoleGithub: async (roleId) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     return (a && a.github) || {};
   },
-  setGithubProduces: (roleId, { pr, issue, prAudience, issueAudience }) =>
-    apiCall('PUT', `/api/agents/${roleId}`, { github: {
-      producesPr: !!pr, producesIssue: !!issue,
-      // Artifact audience (#981): 'human' declares a person consumes the PR/issue.
-      ...(pr && prAudience === 'human' ? { prAudience: 'human' } : {}),
-      ...(issue && issueAudience === 'human' ? { issueAudience: 'human' } : {}),
-    } }),
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
   addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
@@ -734,24 +729,11 @@ export function makeDraftOps(getBundle, persist) {
       await persist(b);
     },
 
-    // ── GitHub artifact ports (#380): produce flags + consumed channels ──
+    // ── GitHub artifact ports (#380): consumed channels ──
+    // `github.produces*` is a projection of outcome actions (#1003) — no write op.
     getRoleGithub: async (roleId) => {
       const r = role(getBundle(), roleId);
       return (r && r.github) || {};
-    },
-    setGithubProduces: async (roleId, { pr, issue, prAudience, issueAudience }) => {
-      const b = clone(getBundle());
-      const r = role(b, roleId);
-      if (r) {
-        const g = {};
-        if (pr) g.producesPr = true;
-        if (issue) g.producesIssue = true;
-        // Artifact audience (#981): a person consumes the PR/issue.
-        if (pr && prAudience === 'human') g.prAudience = 'human';
-        if (issue && issueAudience === 'human') g.issueAudience = 'human';
-        if (Object.keys(g).length) r.github = g; else delete r.github;
-      }
-      await persist(b);
     },
     addChannel: async (roleId, spec) => {
       const b = clone(getBundle());

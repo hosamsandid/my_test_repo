@@ -9,7 +9,12 @@ import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
 import { consumersFor, outcomeHandsOffToHuman, outcomeHumanReviewers } from './outcome-consumers.js';
-import { moveHumanDelivery } from './wiring-engine.js';
+import {
+  moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
+} from './wiring-engine.js';
+import {
+  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates,
+} from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
@@ -155,6 +160,8 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
               consumers={consumersFor(o, node, peers)}
               humanHandoff={outcomeHandsOffToHuman(o, labels)}
               humanReviewers={outcomeHumanReviewers(o, node, humans)}
+              node={node} peers={peers} labels={labels} humans={humans}
+              ops={ops} humanOps={humanOps} dirty={dirty} onChanged={onChanged}
               onChange={(next) => mutate({ ...outcomes, options: outcomes.options.map((x, j) => j === i ? next : x) })}
               onRemove={() => mutate({ ...outcomes, options: outcomes.options.filter((_, j) => j !== i) })}
             />
@@ -181,8 +188,6 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
       </div>
 
       <ArtifactsBlock node={node} peers={peers} ops={ops} humans={humans} humanOps={humanOps} onChanged={onChanged} focus={focusSection === 'artifacts'} />
-
-      <GithubArtifactsBlock node={node} ops={ops} humans={humans} humanOps={humanOps} onChanged={onChanged} />
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -217,10 +222,6 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
   const closeEdits = () => { setEditTrigger(null); setEditChannel(null); setEditInput(null); };
   const afterEdit = () => { closeEdits(); onChanged?.(); };
-
-  // channel edit: how many channels consume THIS producer (for the #412 orphan-
-  // produce-flag cleanup offered on remove).
-  const producerChannelCount = (from) => channels.filter(c => c.from === from).length;
 
   const hasAny = channels.length || deps.length || inputs.length || manual.length || derived.length;
 
@@ -392,7 +393,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
         <EditHandoffDialog
           edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
-          ops={ops} producerChannelCount={producerChannelCount(editChannel.from)}
+          ops={ops}
           onClose={closeEdits} onDone={afterEdit} />
       )}
 
@@ -648,39 +649,9 @@ function ArtifactsBlock({ node, peers, ops, humans = [], humanOps, onChanged, fo
   );
 }
 
-// ── GitHub artifacts (#981/#987) ────────────────────────────────────────────
-// Shown only when the node has produce flags (set by wiring a channel or an
-// openPr/openIssue outcome action). Per artifact, a human-role picker (#987,
-// replaces the #981 audience checkbox) says which NAMED person reviews/merges
-// it — that clears the producer-unconsumed lint and draws producer → role.
-function GithubArtifactsBlock({ node, ops, humans = [], humanOps, onChanged }) {
-  const gh = node.github || {};
-  if (!gh.producesPr && !gh.producesIssue) return null;
-
-  const row = (artifact, Icon, noun) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-      <Icon size={14} />
-      <span style={{ flex: 1 }}>Opens {noun}</span>
-      <HumanDeliveryPicker humans={humans} humanOps={humanOps}
-        entry={{ artifact, from: node.id }} onChanged={onChanged} />
-    </div>
-  );
-
-  return (
-    <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
-        GitHub artifacts <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— who reviews them</span>
-      </div>
-      {gh.producesPr && row('pr', GitPullRequest, 'pull requests')}
-      {gh.producesIssue && row('issue', CircleDot, 'issues')}
-      {!humans.length && (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Add a human role (toolbar → “Add human”) to route review to a person.
-        </span>
-      )}
-    </div>
-  );
-}
+// The "GitHub artifacts — who reviews them" block was retired (#1003, concept
+// §4.2): the reviewer picker lives on the owning outcome row now, and the
+// produce badge is a projection of the openPr/openIssue outcome actions.
 
 // Scroll a focused section into view when the inspector opens on it (jump link).
 function useFocusScroll(ref, focus) {
@@ -708,10 +679,57 @@ function artifactConsumers(output, node, peers) {
 }
 
 // ── one outcome row ──────────────────────────────────────────────────────────
-function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [], highlight, onChange, onRemove }) {
+// Besides editing the outcome's content (title / when / actions — explicit
+// Save), the row routes its signal in place (#1003, concept §4.2): a consumer
+// picker wiring the listener/channel via the engine, and — for openPr/openIssue
+// actions — the reviewer picker that used to live in the retired GitHub-
+// artifacts block. Routing applies immediately; content stays save-gated.
+function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [], highlight, node, peers = [], labels = [], humans = [], ops, humanOps, dirty, onChanged, onChange, onRemove }) {
   const actions = Array.isArray(option.actions) && option.actions.length ? option.actions : [{ type: 'none' }];
   const setActions = (next) => onChange({ ...option, actions: next });
   const isNone = actions.every(a => a.type === 'none');
+  const [busy, setBusy] = useState(false);
+  const [wireError, setWireError] = useState(null);
+
+  const artifact = rowArtifact(option);
+  const wireSpec = wireConsumerSpec(option);
+  const wired = currentConsumers(option, node, peers);
+  const wiredIds = new Set(wired.map(w => w.id));
+  const candidates = consumerCandidates(node, peers).filter(c => !wiredIds.has(c.id));
+
+  const run = async (fn) => {
+    setBusy(true); setWireError(null);
+    try { await fn(); onChanged?.(); }
+    catch (e) { setWireError(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  const wireTo = (targetId) => run(async () => {
+    const target = peers.find(p => p.id === targetId);
+    if (wireSpec.kind === 'label') {
+      await wireLabelHandoff({ ops }, {
+        from: node.id, to: targetId, label: wireSpec.label, labels,
+        fromName: node.displayName || node.id, toName: target?.displayName || targetId,
+      });
+    } else {
+      await wireChannel({ ops }, { from: node.id, to: targetId, artifact: wireSpec.artifact });
+    }
+  });
+  const unwire = (w) => run(async () => {
+    if (w.spec.kind === 'label') {
+      await unwireLabelHandoff({ ops }, {
+        from: node.id, to: w.id, triggerId: w.spec.triggerId, label: w.spec.label,
+        removeListener: true, removeEmit: false, // the emit IS this outcome — keep it
+      });
+    } else {
+      await unwireChannel({ ops }, { from: node.id, to: w.id, artifact: w.spec.artifact, label: w.spec.label || '' });
+    }
+  });
+
+  // Routing is disabled while the outcome content has unsaved edits — the
+  // engine must wire against the persisted label/action, not a draft.
+  const routingDisabled = busy || dirty;
+  const noConsumerYet = !isNone && !humanHandoff && !wired.length && !humanReviewers.length;
+
   return (
     <div style={{ ...rowBox, ...(highlight ? { borderColor: 'var(--eb-accent-primary)', boxShadow: '0 0 0 1px var(--eb-accent-primary)' } : {}) }}>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -732,19 +750,46 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
           <Plus size={12} /> Add action
         </button>
       </div>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {isNone
           ? 'Terminal outcome — no signal (dead-end by design).'
           : humanHandoff
             // Brake label (#981): the hand-off to a person IS the consumer.
             ? <>hands off to a person 👤 — the flow pauses for a decision{consumers.length ? <> · also wakes {consumers.join(', ')}</> : null}</>
-            : humanReviewers.length
-              // Bound human reviewer of the opened PR/issue (#1001): a consumer,
-              // not a warning — mirrors the delivery edge the graph draws.
-              ? <>reviewed by 👤 {humanReviewers.join(', ')}{consumers.length ? <> · also wakes {consumers.join(', ')}</> : null}</>
-              : consumers.length
-                ? <>consumers: {consumers.join(', ')}</>
-                : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer — nothing listens for this outcome's signal</span>}
+            : (
+              <>
+                {noConsumerYet && (
+                  <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer yet —</span>
+                )}
+                {wired.map(w => (
+                  <span key={w.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    wakes <strong>{w.name}</strong>
+                    <button type="button" onClick={() => unwire(w)} disabled={routingDisabled}
+                      title={`Stop waking ${w.name}`} style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                ))}
+                {wireSpec && candidates.length > 0 && (
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    {wired.length ? 'also wake' : 'wake'}
+                    <select value="" disabled={routingDisabled} onChange={e => e.target.value && wireTo(e.target.value)}
+                      style={{ ...input, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+                      <option value="">— pick an agent —</option>
+                      {candidates.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                {artifact && (
+                  // Reviewer binding, per row (#1003 — replaces the retired
+                  // GitHub-artifacts block): which person reviews the PR/issue.
+                  <HumanDeliveryPicker humans={humans} humanOps={humanOps}
+                    entry={{ artifact, from: node.id }} onChanged={onChanged} disabled={routingDisabled} />
+                )}
+              </>
+            )}
+        {dirty && !isNone && !humanHandoff && (
+          <span style={{ color: 'var(--eb-text-muted)' }}>(save outcomes to route)</span>
+        )}
+        {wireError && <span style={{ color: 'var(--eb-status-error)' }}>{wireError}</span>}
       </div>
     </div>
   );

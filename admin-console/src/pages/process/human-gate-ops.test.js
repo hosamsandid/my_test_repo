@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CLAIM_SUFFIX, claimLabelFor, deriveClaim, defaultGateKind, buildGateListener, submitHumanGate,
+  CLAIM_SUFFIX, claimLabelFor, deriveClaim, defaultGateKind, buildGateListener,
 } from './human-gate-ops.js';
+// The submit sequence moved into the wiring engine (#1002); the adapter-mode
+// coverage for the gate gesture lives on here, against the engine entry point.
+import { wireHumanGate } from './wiring-engine.js';
 import { humansAfterUpsert, humanAfterEmitAdd } from './humans-registry-ops.js';
 // The server-side claim convention (CJS, dependency-free) — imported directly
 // so a drift between the client mirror and the single source of truth fails
@@ -73,7 +76,10 @@ function liveFakes() {
   const calls = { triggers: [], emits: [] };
   return {
     calls,
-    ops: { createTrigger: async (roleId, body) => { calls.triggers.push({ roleId, body }); return body; } },
+    ops: {
+      listTriggers: async () => calls.triggers.map(c => c.body),
+      createTrigger: async (roleId, body) => { calls.triggers.push({ roleId, body }); return body; },
+    },
     humanOps: { addHumanEmit: async (id, label) => { calls.emits.push({ id, label }); } },
   };
 }
@@ -84,6 +90,10 @@ function liveFakes() {
 function draftFakes(bundle) {
   return {
     ops: {
+      listTriggers: async (roleId) => {
+        const r = (bundle.roles || []).find(x => x.id === roleId);
+        return r ? (r.triggers || []).slice() : [];
+      },
       createTrigger: async (roleId, body) => {
         const r = (bundle.roles || []).find(x => x.id === roleId);
         if (!r) throw new Error(`role ${roleId} not found`);
@@ -102,9 +112,9 @@ function draftFakes(bundle) {
   };
 }
 
-test('submitHumanGate (live mode): single-event claimed listener on the agent, emit on the human', async () => {
+test('wireHumanGate (live mode): single-event claimed listener on the agent, emit on the human', async () => {
   const { calls, ops, humanOps } = liveFakes();
-  await submitHumanGate({ from: 'ba-human', to: 'developer', label: 'ready', kind: 'issues', ops, humanOps });
+  await wireHumanGate({ ops, humanOps }, { human: 'ba-human', to: 'developer', label: 'ready', kind: 'issues' });
 
   assert.deepEqual(calls.emits, [{ id: 'ba-human', label: 'ready' }]);
   assert.equal(calls.triggers.length, 1);
@@ -115,13 +125,13 @@ test('submitHumanGate (live mode): single-event claimed listener on the agent, e
   assert.deepEqual(body.claim, { remove: 'ready', add: 'ready:wip' });
 });
 
-test('submitHumanGate (draft mode): bundle carries the claimed single-event listener and the gate emit', async () => {
+test('wireHumanGate (draft mode): bundle carries the claimed single-event listener and the gate emit', async () => {
   const bundle = {
     roles: [{ id: 'developer', name: 'Developer' }],
     humans: [{ id: 'ba-human', name: 'BA Human', consumes: [{ artifact: 'pr', from: 'developer' }] }],
   };
   const { ops, humanOps } = draftFakes(bundle);
-  await submitHumanGate({ from: 'ba-human', to: 'developer', label: 'ship-it', kind: 'pull_request', ops, humanOps });
+  await wireHumanGate({ ops, humanOps }, { human: 'ba-human', to: 'developer', label: 'ship-it', kind: 'pull_request' });
 
   const t = bundle.roles[0].triggers[0];
   assert.deepEqual(t.events, ['pull_request.labeled']);

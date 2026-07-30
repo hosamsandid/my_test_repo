@@ -58,13 +58,6 @@ export function buildGateListener({ label, kind }) {
   };
 }
 
-// One submit for both dialog modes: record the label on the human's `emits`
-// (making it a gate) and create the agent's listener so the edge draws. `ops`
-// and `humanOps` are the mode's adapters (live HTTP or draft bundle — shape-
-// compatible by contract). Returns the created listener payload.
-export async function submitHumanGate({ from, to, label, kind, ops, humanOps }) {
-  const trigger = buildGateListener({ label, kind });
-  await humanOps.addHumanEmit(from, trigger.labelFilter);
-  await ops.createTrigger(to, trigger);
-  return trigger;
-}
+// The submit sequence moved into the wiring engine (`wireHumanGate` in
+// wiring-engine.js, #1002) — this module keeps only the pure payload builders
+// the engine composes, so the multi-write hand-off has exactly one home.

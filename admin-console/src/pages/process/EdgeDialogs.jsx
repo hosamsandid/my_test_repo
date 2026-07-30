@@ -5,6 +5,7 @@ import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 import { isGateLabel, isBrakeLabel } from './label-flags';
+import { defaultGateKind, submitHumanGate } from './human-gate-ops';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -614,27 +615,35 @@ export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, h
 /* ── Human gate (named human role → agent, #987) ─────────────────────────────
  * Drag a human box's ● port onto an agent: the person applies a label that
  * wakes the agent (a gate). Adds the label to the human's `emits` (making it a
- * gate) AND creates the listener trigger on the agent so the edge draws. */
+ * gate) AND creates the listener trigger on the agent so the edge draws. The
+ * listener carries exactly ONE event — defaulted from the artifact the person
+ * already reviews, overridable via the same Issue/PR kind selector the label
+ * hand-off dialog uses — and the derived claim (#1000, D1–D3). */
 export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, humanOps, onBack, onClose, onDone }) {
   const [label, setLabel] = useState('');
+  const [kind, setKind] = useState('issues'); // issues | pull_request
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Default the gate's artifact kind from the human's `consumes`: a person who
+  // reviews a PR gates that PR; an issue reviewer gates the issue.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const human = await humanOps?.getHuman?.(from);
+        if (alive && human) setKind(defaultGateKind(human));
+      } catch { /* keep the issues default */ }
+    })();
+    return () => { alive = false; };
+  }, [from]);
 
   async function submit() {
     const l = label.trim();
     if (!l) { setError('Enter the label this person applies.'); return; }
     setSaving(true); setError(null);
     try {
-      await humanOps.addHumanEmit(from, l);
-      // Create the agent's listener so the gate edge draws (fires on an issue or
-      // PR carrying the label).
-      await ops.createTrigger(to, {
-        type: 'github-event',
-        events: ['issues.labeled', 'pull_request.labeled'],
-        labelFilter: l,
-        enabled: true,
-        prompt: `A human applied \`${l}\` — proceed.`,
-      });
+      await submitHumanGate({ from, to, label: l, kind, ops, humanOps });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -645,9 +654,17 @@ export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, human
         <strong>{fromName || from}</strong> (a person) applies a label that wakes <strong>{toName || to}</strong> — an approval gate.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Label kind">
+          <select value={kind} onChange={e => setKind(e.target.value)} style={input}>
+            {LABEL_TARGETS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <small style={small}>
+            Listens on <code>{kind}.labeled</code> — what the person applies the label to.
+          </small>
+        </Field>
         <Field label="Gate label the person applies">
           <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. approved-for-dispatch" style={input} />
-          <small style={small}>Only this person may set it (an agent setting it is a gate-violation). {toName || to} wakes when it is applied.</small>
+          <small style={small}>Only this person may set it (an agent setting it is a gate-violation). {toName || to} wakes when it is applied to {kind === 'pull_request' ? 'a pull request' : 'an issue'}.</small>
         </Field>
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>

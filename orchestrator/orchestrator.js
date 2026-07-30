@@ -5572,6 +5572,13 @@ class Orchestrator {
               .filter(l => l && typeof l.name === 'string' && l.name.trim())
               .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake })),
           } : {}),
+        // Named human roles (#987) — first-class human flow nodes, held on the
+        // team agent like `stages`/`labels` (the live graph has no bundle to read
+        // them from). Passed through pre-normalized by the admin console; kept as
+        // objects with a string id.
+        ...(Array.isArray(extra.humans) && extra.humans.length
+          ? { humans: extra.humans.filter(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id.trim()) }
+          : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -10560,6 +10567,10 @@ async function main() {
           // authoritative source for which labels are human approval gates
           // (`humanGate`) and which pause the loop (`brake`).
           labels,
+          // For role: 'team' — named human roles (#987): first-class human flow
+          // nodes the process graph binds the #981 touchpoints to. Declarative
+          // only; never materialised into an agent.
+          humans,
           // Initial skill grant (team-owned skills, skill-grants.js): the
           // team's active set / the standalone agent's own list. The
           // environment no longer contributes skills.
@@ -10599,6 +10610,7 @@ async function main() {
         if (teamId) extra.teamId = teamId;
         if (Array.isArray(stages)) extra.stages = stages;
         if (Array.isArray(labels)) extra.labels = labels;
+        if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });

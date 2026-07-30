@@ -1018,3 +1018,161 @@ test('#981: one label listened by two triggers yields ONE injection touchpoint',
   ], { labels: [{ name: 'go', humanGate: true }] });
   assert.equal(g.humanTouchpoints.filter(t => t.type === 'injection').length, 1);
 });
+
+// ── #987: named human roles as first-class flow nodes ────────────────────────
+
+test('#987: a human role synthesizes a kind:human node, no triggers/session', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [] },
+  ], { humans: [{ id: 'reviewer', name: 'Issue Reviewer', description: 'reviews issues', stage: 'triage' }] });
+  const hn = g.nodes.find(n => n.id === 'reviewer');
+  assert.ok(hn, 'human node present');
+  assert.equal(hn.kind, 'human');
+  assert.equal(hn.role, 'human');
+  assert.equal(hn.displayName, 'Issue Reviewer');
+  assert.equal(hn.stage, 'triage');
+  assert.deepEqual(hn.triggers, []);
+  assert.equal(hn.sessionPolicy, null);
+  assert.equal(hn.synthetic, true);
+});
+
+test('#987 AC2: a gate label emitted by a human draws humanId → listener; classifies as gate with NO registry flag', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+  ], { humans: [{ id: 'reviewer', name: 'Issue Reviewer', emits: ['dispatch'] }] });
+  // No `labels` registry at all — the human's emit alone makes `dispatch` a gate.
+  const e = g.edges.find(x => x.label === 'dispatch' && x.to === 'dispatcher');
+  assert.ok(e, 'edge present');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, 'reviewer'); // bound to the named human, not null/@human
+  assert.ok(!lintCodes(g).includes('orphan-listener'));
+});
+
+test('#987 AC2: registry-flag gate path is unchanged (no human emits it → from null)', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved' }] },
+  ], { labels: [{ name: 'approved', humanGate: true }], humans: [{ id: 'reviewer', name: 'R', emits: ['other'] }] });
+  const e = g.edges.find(x => x.label === 'approved' && x.to === 'dispatcher');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null);
+});
+
+test('#987 AC3: a brake consumed by a human draws emitter → humanId; unbound brakes keep null', () => {
+  const bound = buildProcessGraph([
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ], {
+    labels: [{ name: 'needs-decision', brake: true }],
+    humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'needs-decision' }] }],
+  });
+  const be = bound.edges.find(x => x.label === 'needs-decision' && x.from === 'reworker');
+  assert.equal(be.kind, 'brake');
+  assert.equal(be.handoff, 'human');
+  assert.equal(be.to, 'lead');
+
+  const unbound = buildProcessGraph([
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ], { labels: [{ name: 'needs-decision', brake: true }] });
+  const ue = unbound.edges.find(x => x.label === 'needs-decision' && x.from === 'reworker');
+  assert.equal(ue.to, null); // generic @human
+});
+
+test('#987 AC4: Issue-Reviewer scenario renders BA → Issue Reviewer → Dispatcher, no @human', () => {
+  const g = buildProcessGraph([
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+  ], {
+    humans: [{
+      id: 'issue-reviewer', name: 'Issue Reviewer',
+      emits: ['dispatch'],
+      consumes: [{ artifact: 'issue', from: 'ba' }],
+    }],
+  });
+  // BA → Issue Reviewer (delivery of the issue).
+  const delivery = g.edges.find(e => e.kind === 'delivery' && e.from === 'ba');
+  assert.ok(delivery, 'delivery edge present');
+  assert.equal(delivery.to, 'issue-reviewer');
+  assert.equal(delivery.artifact, 'issue');
+  // Issue Reviewer → Dispatcher (the dispatch gate).
+  const gate = g.edges.find(e => e.kind === 'gate' && e.label === 'dispatch');
+  assert.equal(gate.from, 'issue-reviewer');
+  assert.equal(gate.to, 'dispatcher');
+  // No producer-unconsumed for the BA's issue (the human consumes it).
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  // No generic @human anywhere in this process graph (all edges named).
+  assert.ok(!g.edges.some(e => e.from === null && e.kind === 'gate'));
+});
+
+test('#987 AC5: a PR bound to a human suppresses producer-unconsumed and draws the delivery', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], { humans: [{ id: 'maintainer', name: 'Maintainer', consumes: [{ artifact: 'pr', from: 'dev' }] }] });
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  const e = g.edges.find(x => x.kind === 'delivery' && x.from === 'dev');
+  assert.equal(e.to, 'maintainer');
+  assert.equal(e.artifact, 'pr');
+});
+
+test('#987 AC6: gate-violation fires when an agent emits a human-emitted label', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['dispatch'], triggers: [] },
+  ], { humans: [{ id: 'reviewer', name: 'R', emits: ['dispatch'] }] });
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'rogue' && l.label === 'dispatch'));
+});
+
+test('#987 AC7: humanTouchpoints carry role when bound', () => {
+  const g = buildProcessGraph([
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], {
+    labels: [{ name: 'needs-decision', brake: true }],
+    humans: [{
+      id: 'reviewer', name: 'Issue Reviewer',
+      emits: ['dispatch'],
+      consumes: [{ artifact: 'issue', from: 'ba' }, { label: 'needs-decision' }, { artifact: 'pr', from: 'dev' }],
+    }],
+  });
+  const injection = g.humanTouchpoints.find(t => t.type === 'injection' && t.label === 'dispatch');
+  assert.equal(injection.role, 'reviewer');
+  const decision = g.humanTouchpoints.find(t => t.type === 'decision');
+  assert.equal(decision.role, 'reviewer');
+  const deliveries = g.humanTouchpoints.filter(t => t.type === 'delivery');
+  assert.ok(deliveries.every(d => d.role === 'reviewer'));
+});
+
+test('#987: a label emitted by two humans yields two gate edges + two injection touchpoints', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' }] },
+  ], { humans: [
+    { id: 'lead-a', name: 'Lead A', emits: ['go'] },
+    { id: 'lead-b', name: 'Lead B', emits: ['go'] },
+  ] });
+  const gates = g.edges.filter(e => e.kind === 'gate' && e.label === 'go');
+  assert.deepEqual(gates.map(e => e.from).sort(), ['lead-a', 'lead-b']);
+  assert.equal(g.humanTouchpoints.filter(t => t.type === 'injection').length, 2);
+});
+
+test('#987: first matching human in humans[] order wins for a consumed artifact', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], { humans: [
+    { id: 'first', name: 'First', consumes: [{ artifact: 'pr', from: 'dev' }] },
+    { id: 'second', name: 'Second', consumes: [{ artifact: 'pr', from: 'dev' }] },
+  ] });
+  const deliveries = g.edges.filter(e => e.kind === 'delivery' && e.from === 'dev');
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].to, 'first');
+});
+
+test('#987 AC8: a flow with no humans[] is byte-identical to omitting the option', () => {
+  const agents = [
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dev', emits: ['ready'], triggers: [] },
+    { id: 'qa', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ];
+  const opts = { labels: [{ name: 'ready', humanGate: false }] };
+  const withEmpty = buildProcessGraph(agents, { ...opts, humans: [] });
+  const without = buildProcessGraph(agents, opts);
+  assert.deepEqual(withEmpty, without);
+});

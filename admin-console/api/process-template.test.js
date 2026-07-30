@@ -1238,3 +1238,53 @@ test('templateToCustomRoles carries the claim into the member config (#958)', ()
   const member = buildMemberFromTemplate(roles[0], { teamId: 'acme', vars: { repoFullName: 'o/r' } });
   assert.deepEqual(member.triggers.find(t => t.id === 't').claim, { remove: 'ready', add: 'ready:wip' });
 });
+
+// ── #987: named human roles round-trip + validation ─────────────────────────
+
+test('#987: buildProcessTemplate emits a normalized humans[]; omitted when empty', () => {
+  const withHumans = buildProcessTemplate({
+    name: 'x', level: 'live', roles: [{ id: 'dev' }],
+    humans: [{
+      id: '  reviewer  ', name: '  Issue Reviewer  ', description: ' reviews ', stage: 'triage',
+      emits: ['dispatch', 'dispatch', ''], consumes: [
+        { label: ' needs-decision ' },
+        { artifact: 'issue', from: ' ba ' },
+        { artifact: 'file', name: ' report ' },
+        { artifact: 'bogus' }, // dropped
+      ],
+    }],
+  });
+  assert.deepEqual(withHumans.humans, [{
+    id: 'reviewer', name: 'Issue Reviewer', description: 'reviews', stage: 'triage',
+    emits: ['dispatch'],
+    consumes: [{ label: 'needs-decision' }, { artifact: 'issue', from: 'ba' }, { artifact: 'file', name: 'report' }],
+  }]);
+  const none = buildProcessTemplate({ name: 'x', level: 'live', roles: [{ id: 'dev' }] });
+  assert.ok(!('humans' in none));
+});
+
+test('#987: validateProcessTemplate accepts a well-formed humans[] and rejects bad shapes', () => {
+  const base = { processTemplateVersion: 1, roles: [{ id: 'dev' }] };
+  assert.ok(validateProcessTemplate({ ...base, humans: [{ id: 'r', name: 'R', emits: ['go'], consumes: [{ label: 'x' }] }] }).ok);
+  assert.equal(validateProcessTemplate({ ...base, humans: 'nope' }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, humans: [{ name: 'no id' }] }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, humans: [{ id: 'r' }] }).ok, false); // missing name
+  assert.equal(validateProcessTemplate({ ...base, humans: [{ id: 'r', name: 'R' }, { id: 'r', name: 'R2' }] }).ok, false); // dup id
+  assert.equal(validateProcessTemplate({ ...base, humans: [{ id: 'r', name: 'R', consumes: [{ artifact: 'pr' }] }] }).ok, false); // missing from
+  assert.equal(validateProcessTemplate({ ...base, humans: [{ id: 'r', name: 'R', emits: [1] }] }).ok, false); // non-string emit
+});
+
+test('#987 AC1: humans[] round-trips build → validate', () => {
+  const bundle = buildProcessTemplate({
+    name: 'flow', level: 'live', roles: [{ id: 'dev' }],
+    humans: [{ id: 'reviewer', name: 'Issue Reviewer', emits: ['dispatch'], consumes: [{ artifact: 'issue', from: 'ba' }] }],
+  });
+  assert.ok(validateProcessTemplate(bundle).ok);
+  // A second pass through build is idempotent.
+  const again = buildProcessTemplate({ name: 'flow', level: 'live', roles: [{ id: 'dev' }], humans: bundle.humans });
+  assert.deepEqual(again.humans, bundle.humans);
+});
+
+test('#987: emptyDraftBundle carries an empty humans[]', () => {
+  assert.deepEqual(emptyDraftBundle('x').humans, []);
+});

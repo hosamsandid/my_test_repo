@@ -258,15 +258,27 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
  * context: a PR/Issue producer sees its channel first); step 2 is the
  * type-specific detail form, with Back always available. */
 export function CreateEdgeDialog({
-  from, to, fromName, toName, labels, ops = liveOps, types, fromNode,
+  from, to, fromName, toName, labels, ops = liveOps, types, fromNode, toNode, humanOps,
   onClose, onDone,
 }) {
+  const common = { from, to, fromName, toName, ops, onClose, onDone };
   // Legacy token: 'github' expands to the two explicit channel tiles.
   const allowed = (Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'])
     .flatMap(t => (t === 'github' ? ['github-pr', 'github-issue'] : [t]));
   const [type, setType] = useState(allowed.length === 1 ? allowed[0] : null);
 
-  const common = { from, to, fromName, toName, ops, onClose, onDone };
+  // Named human roles (#987): a person is never wired as a GitHub channel on a
+  // role (that lookup fails — "role <id> not found"). Route to the dedicated
+  // human forms, which write the human's `consumes` / `emits` via humanOps.
+  //   agent → human  = a delivery the person reviews.
+  //   human → agent  = a gate label the person applies.
+  if (toNode && toNode.kind === 'human') {
+    return <HumanDeliveryForm {...common} humanOps={humanOps} fromNode={fromNode} />;
+  }
+  if (fromNode && fromNode.kind === 'human') {
+    return <HumanGateForm {...common} humanOps={humanOps} />;
+  }
+
   const back = allowed.length > 1 ? () => setType(null) : undefined;
 
   if (type === 'label') {
@@ -531,6 +543,117 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
           {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
           <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create channel'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Human delivery (agent → named human role, #987) ─────────────────────────
+ * Drag an agent's ● port onto a human box: the producer's PR / issue / file
+ * output is reviewed by that person. Writes the delivery to the human's
+ * `consumes` via humanOps — never a GitHub channel on a role (dropping on a
+ * human used to fail with "role <id> not found"). */
+export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, onBack, onClose, onDone }) {
+  const outputs = (fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [])
+    .map(a => ((a && (a.name || a.path)) ? { key: a.name || a.path } : null)).filter(Boolean);
+  const options = [
+    { id: 'pr', title: 'Pull request', desc: `${fromName || from} opens a PR that ${toName || to} reviews / merges.` },
+    { id: 'issue', title: 'Issue', desc: `${fromName || from} opens an issue that ${toName || to} reviews.` },
+    ...outputs.map(o => ({ id: `file:${o.key}`, title: `Output · ${o.key}`, desc: `${toName || to} reads the ${o.key} artifact.` })),
+  ];
+  const [choice, setChoice] = useState(options[0].id);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit() {
+    setSaving(true); setError(null);
+    try {
+      let entry;
+      if (choice === 'pr' || choice === 'issue') {
+        // Flag the producer so its badge / prompt block appear (mirrors the
+        // channel dialog); carry the audience flags so nothing is dropped.
+        if (ops.getRoleGithub && ops.setGithubProduces) {
+          const g = (await ops.getRoleGithub(from)) || {};
+          const next = { pr: !!g.producesPr, issue: !!g.producesIssue, prAudience: g.prAudience, issueAudience: g.issueAudience };
+          if (choice === 'pr') next.pr = true; else next.issue = true;
+          if (next.pr !== !!g.producesPr || next.issue !== !!g.producesIssue) await ops.setGithubProduces(from, next);
+        }
+        entry = { artifact: choice, from };
+      } else {
+        entry = { artifact: 'file', name: choice.slice('file:'.length) };
+      }
+      await humanOps.wireHumanConsume(to, entry);
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Deliver to a human role" width="520px">
+      <p style={hint}>
+        <strong>{toName || to}</strong> (a person) reviews something <strong>{fromName || from}</strong> produces.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="What does this person review?">
+          <select value={choice} onChange={e => setChoice(e.target.value)} style={input}>
+            {options.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
+          </select>
+          <small style={small}>{options.find(o => o.id === choice)?.desc}</small>
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Wire delivery'}</button>
+        </div>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* ── Human gate (named human role → agent, #987) ─────────────────────────────
+ * Drag a human box's ● port onto an agent: the person applies a label that
+ * wakes the agent (a gate). Adds the label to the human's `emits` (making it a
+ * gate) AND creates the listener trigger on the agent so the edge draws. */
+export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, humanOps, onBack, onClose, onDone }) {
+  const [label, setLabel] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit() {
+    const l = label.trim();
+    if (!l) { setError('Enter the label this person applies.'); return; }
+    setSaving(true); setError(null);
+    try {
+      await humanOps.addHumanEmit(from, l);
+      // Create the agent's listener so the gate edge draws (fires on an issue or
+      // PR carrying the label).
+      await ops.createTrigger(to, {
+        type: 'github-event',
+        events: ['issues.labeled', 'pull_request.labeled'],
+        labelFilter: l,
+        enabled: true,
+        prompt: `A human applied \`${l}\` — proceed.`,
+      });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Human gate" width="520px">
+      <p style={hint}>
+        <strong>{fromName || from}</strong> (a person) applies a label that wakes <strong>{toName || to}</strong> — an approval gate.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <Field label="Gate label the person applies">
+          <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. approved-for-dispatch" style={input} />
+          <small style={small}>Only this person may set it (an agent setting it is a gate-violation). {toName || to} wakes when it is applied.</small>
+        </Field>
+        {error && <span style={errStyle}>{error}</span>}
+        <div style={actions}>
+          {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={primary}>{saving ? 'Wiring…' : 'Create gate'}</button>
         </div>
       </div>
     </SidePanel>

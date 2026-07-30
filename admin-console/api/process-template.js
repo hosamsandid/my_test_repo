@@ -31,6 +31,42 @@ const {
 
 const VERSION = 1;
 
+// ─── named human roles (#987) ────────────────────────────────────────────────
+// Optional top-level `humans[]` on the bundle: first-class human flow nodes
+// [{ id, name, description?, stage?, emits?, consumes? }]. Purely declarative —
+// they never materialise into an agent; the graph builders bind them to the
+// #981 gate/brake/delivery touchpoints. Normalized to the persisted shape so a
+// re-import reads clean values and export→materialise round-trips.
+function normalizeHumans(humans) {
+  const out = [];
+  const seen = new Set();
+  for (const h of (Array.isArray(humans) ? humans : [])) {
+    if (!h || typeof h !== 'object' || Array.isArray(h)) continue;
+    const id = typeof h.id === 'string' ? h.id.trim() : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const entry = { id, name: (typeof h.name === 'string' && h.name.trim()) ? h.name.trim() : id };
+    if (typeof h.description === 'string' && h.description.trim()) entry.description = h.description.trim();
+    if (typeof h.stage === 'string' && h.stage.trim()) entry.stage = h.stage.trim();
+    const emits = (Array.isArray(h.emits) ? h.emits : [])
+      .filter(e => typeof e === 'string' && e.trim()).map(e => e.trim());
+    if (emits.length) entry.emits = [...new Set(emits)];
+    const consumes = [];
+    for (const c of (Array.isArray(h.consumes) ? h.consumes : [])) {
+      if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+      if (typeof c.label === 'string' && c.label.trim()) consumes.push({ label: c.label.trim() });
+      else if ((c.artifact === 'pr' || c.artifact === 'issue') && typeof c.from === 'string' && c.from.trim()) {
+        consumes.push({ artifact: c.artifact, from: c.from.trim() });
+      } else if (c.artifact === 'file' && typeof c.name === 'string' && c.name.trim()) {
+        consumes.push({ artifact: 'file', name: c.name.trim() });
+      }
+    }
+    if (consumes.length) entry.consumes = consumes;
+    out.push(entry);
+  }
+  return out;
+}
+
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
 // key (e.g. `acme-developer` → `developer`). Idempotent for ids without it.
 function roleKeyOf(id, teamId) {
@@ -171,7 +207,8 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans }) {
+  const normHumans = normalizeHumans(humans);
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
@@ -181,6 +218,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     ...(Array.isArray(stages) && stages.length
       ? { stages: stages.map(s => (typeof s === 'string' ? s : s && s.name)).filter(Boolean) }
       : {}),
+    // Named human roles (#987) — first-class human flow nodes, round-tripped so
+    // an exported team re-materialises its human boxes and Edit-as-draft carries
+    // them. Omitted when empty so a flow with no humans stays byte-identical.
+    ...(normHumans.length ? { humans: normHumans } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -293,6 +334,35 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     if (!Array.isArray(b.stages)) return { ok: false, error: 'stages must be an array' };
     if (!b.stages.every(s => typeof s === 'string')) return { ok: false, error: 'stages must be an array of strings' };
   }
+  // Named human roles (#987): unique slug ids, non-empty names, well-formed
+  // consume entries. Purely declarative — no trigger/runtime shape to check.
+  if (b.humans !== undefined) {
+    if (!Array.isArray(b.humans)) return { ok: false, error: 'humans must be an array' };
+    const seenH = new Set();
+    for (const h of b.humans) {
+      if (!h || typeof h !== 'object' || Array.isArray(h)) return { ok: false, error: 'each human must be an object' };
+      if (typeof h.id !== 'string' || !h.id.trim()) return { ok: false, error: 'each human needs a non-empty string id' };
+      const id = h.id.trim();
+      if (seenH.has(id)) return { ok: false, error: `duplicate human id \`${id}\`` };
+      seenH.add(id);
+      if (typeof h.name !== 'string' || !h.name.trim()) return { ok: false, error: `human ${id}: name must be a non-empty string` };
+      if (h.emits !== undefined && (!Array.isArray(h.emits) || !h.emits.every(e => typeof e === 'string'))) {
+        return { ok: false, error: `human ${id}: emits must be an array of strings` };
+      }
+      if (h.consumes !== undefined) {
+        if (!Array.isArray(h.consumes)) return { ok: false, error: `human ${id}: consumes must be an array` };
+        for (const c of h.consumes) {
+          if (!c || typeof c !== 'object' || Array.isArray(c)) return { ok: false, error: `human ${id}: each consume must be an object` };
+          const isLabel = typeof c.label === 'string' && c.label.trim();
+          const isArtifact = (c.artifact === 'pr' || c.artifact === 'issue') && typeof c.from === 'string' && c.from.trim();
+          const isFile = c.artifact === 'file' && typeof c.name === 'string' && c.name.trim();
+          if (!isLabel && !isArtifact && !isFile) {
+            return { ok: false, error: `human ${id}: each consume needs { label } or { artifact: 'pr'|'issue', from } or { artifact: 'file', name }` };
+          }
+        }
+      }
+    }
+  }
   return { ok: true };
 }
 
@@ -306,6 +376,7 @@ function emptyDraftBundle(name) {
     gates: [],
     labels: [],
     stages: [],
+    humans: [],
   };
 }
 
@@ -1109,7 +1180,7 @@ module.exports = {
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
-  emptyDraftBundle, roleKeyOf, VERSION,
+  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958)

@@ -45,12 +45,11 @@ const PROCESS_CREATE_TYPES = {
 };
 
 // Actor pseudo-node id → source kind (#411). Everything else is an agent.
-// @human (#981) is display-only (no drag port, no create types) — mapping it
-// here keeps the fallback from misclassifying it as an agent source.
+// The generic @human hub is gone (#987) — human roles are named nodes, wired via
+// the human-aware CreateEdgeDialog (which branches on the node's `kind`).
 const ACTOR_SOURCE_KINDS = {
   '@github': 'github',
   '@external': 'external',
-  '@human': 'human',
 };
 
 /** The drag-source kind of a node id: an actor kind or 'agent'. */

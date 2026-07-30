@@ -5,6 +5,8 @@ import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
 import LabelRegistryPanel from './process/LabelRegistryPanel';
+import HumanRegistryPanel from './process/HumanRegistryPanel';
+import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
@@ -16,7 +18,7 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 // nodes when they have edges, but a drag can also start from a placeholder.
 // (@human/@timer are gone: human actions are GitHub label events, schedules
 // render inside the agent card.)
-const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule', '@human': 'Human' };
+const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
 
 // Inline-editable process name for the draft toolbar — the single rename
 // control for a draft (#581). Click to edit; Enter or blur commits, Escape
@@ -141,6 +143,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
+  const [humansOpen, setHumansOpen] = useState(false);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -197,6 +200,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // LabelRegistryPanel keeps its name-first contract in both modes.
   const liveLabelOps = useMemo(() => ({
     setLabelFlags: (name, flags) => liveOps.setLabelFlags(scope, name, flags),
+  }), [scope]);
+
+  // Live human-role ops (#987): same teamId binding, so HumanRegistryPanel keeps
+  // its name-first contract in both modes (draft mutates the bundle's humans[]).
+  const liveHumanOps = useMemo(() => ({
+    upsertHuman: (human) => liveOps.upsertHuman(scope, human),
+    removeHuman: (id) => liveOps.removeHuman(scope, id),
+    getHuman: (id) => liveOps.getHuman(scope, id),
+    wireHumanConsume: (id, entry) => liveOps.wireHumanConsume(scope, id, entry),
+    unwireHumanConsume: (id, entry) => liveOps.unwireHumanConsume(scope, id, entry),
+    addHumanEmit: (id, label) => liveOps.addHumanEmit(scope, id, label),
   }), [scope]);
 
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
@@ -305,6 +319,19 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const selectedRole = isDraft && draftBundle
     ? (draftBundle.roles || []).find(r => r.id === selectedId) || null
     : null;
+  // A selected first-class human role (#987). Draft humans live on the bundle's
+  // `humans[]`; live humans arrive as `kind:'human'` graph nodes — normalize both
+  // to the { id, name, description, stage, emits, consumes } editor shape.
+  const selectedHuman = useMemo(() => {
+    if (!selectedId) return null;
+    if (isDraft) return (draftBundle?.humans || []).find(h => h.id === selectedId) || null;
+    const n = (displayGraph?.nodes || []).find(x => x.id === selectedId && x.kind === 'human');
+    if (!n) return null;
+    return {
+      id: n.id, name: n.displayName || n.id, description: n.description || '',
+      stage: n.stage || '', emits: n.emits || [], consumes: n.consumes || [],
+    };
+  }, [selectedId, isDraft, draftBundle, displayGraph]);
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
@@ -417,6 +444,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         {isDraft && (
           <>
             <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}>Add human</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
@@ -426,6 +454,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         {isTeamScope && !imported && (
           <>
             <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}>Add human</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
@@ -492,8 +521,23 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         </div>
       </div>
 
+      {/* Human-role inspector (#987): a person node has no prompt/triggers, so a
+          focused variant handles it in both modes; the agent inspector below is
+          suppressed for it. */}
+      {selectedHuman && (
+        <HumanNodeInspector
+          key={`human:${selectedHuman.id}`}
+          human={selectedHuman}
+          stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
+          ops={isDraft ? draftOps : liveHumanOps}
+          onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
+          onDeleted={() => { setSelectedId(null); graphRef.current?.setSelected(null); if (!isDraft) refetch(); }}
+          onChanged={() => { if (!isDraft) refetch(); }}
+        />
+      )}
+
       {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
-      {isDraft && selectedRole && (
+      {isDraft && !selectedHuman && selectedRole && (
         <NodeInspector
           key={`${selectedRole.id}:${routingFocus?.outcome || ''}`}
           mode="draft"
@@ -502,6 +546,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           stages={draftBundle?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}
+          humans={isDraft ? (draftBundle?.humans || []) : (displayGraph?.humans || [])}
+          humanOps={isDraft ? draftOps : liveHumanOps}
           focus={routingFocus}
           ops={draftOps}
           onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
@@ -510,7 +556,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           onChanged={() => {}}
         />
       )}
-      {!isDraft && selectedNode && (
+      {!isDraft && !selectedHuman && selectedNode && (
         <NodeInspector
           key={`${selectedNode.id}:${routingFocus?.outcome || ''}`}
           mode="live"
@@ -519,6 +565,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           stages={displayGraph?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}
+          humans={displayGraph?.humans || []}
+          humanOps={liveHumanOps}
           focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
@@ -539,8 +587,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           toName={nodeName(connectPair.to)}
           labels={displayGraph?.labels || []}
           ops={ops}
+          humanOps={isDraft ? draftOps : liveHumanOps}
           types={createTypesFor(caps, sourceKindOf(connectPair.from))}
           fromNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.from) || null}
+          toNode={(displayGraph?.nodes || []).find(n => n.id === connectPair.to) || null}
           onClose={() => setConnectPair(null)}
           onDone={() => { setConnectPair(null); afterEdit(); }}
         />
@@ -601,6 +651,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           labels={displayGraph?.labels || []}
           ops={isDraft ? draftOps : liveLabelOps}
           onClose={() => setLabelsOpen(false)}
+          onChanged={() => { if (!isDraft) refetch(); }}
+        />
+      )}
+
+      {humansOpen && (isDraft || (isTeamScope && !imported)) && (
+        <HumanRegistryPanel
+          key={JSON.stringify(displayGraph?.humans || [])}
+          humans={isDraft ? (draftBundle?.humans || []) : (displayGraph?.humans || [])}
+          stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
+          ops={isDraft ? draftOps : liveHumanOps}
+          onClose={() => setHumansOpen(false)}
           onChanged={() => { if (!isDraft) refetch(); }}
         />
       )}

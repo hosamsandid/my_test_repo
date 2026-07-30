@@ -13,6 +13,10 @@ import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
 import { labelsAfterSet } from './label-registry-ops';
+import {
+  humansAfterUpsert, humansAfterRemove,
+  humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd,
+} from './humans-registry-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
@@ -214,6 +218,46 @@ export const liveOps = {
   setLabelFlags: async (teamId, name, flags) => {
     const cur = await liveOps.listLabels(teamId);
     await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
+  },
+
+  // ── named human roles (#987): first-class human flow nodes, TEAM-agent only ──
+  // Same binding pattern as stages/labels: teamId first, ProcessCanvas wraps.
+  // Purely declarative — the PUT touches only the team config's `humans[]`, no
+  // trigger/reconcile side-effect (AC9).
+  listHumans: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.humans) ? a.humans.slice() : [];
+  },
+  upsertHuman: async (teamId, human) => {
+    const cur = await liveOps.listHumans(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, human) });
+  },
+  removeHuman: async (teamId, id) => {
+    const cur = await liveOps.listHumans(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterRemove(cur, id) });
+  },
+  // Wiring helpers (#987): read the human off the team registry, mutate its
+  // consumes/emits, PUT the whole registry back. `humanId` is the ROLE id (the
+  // registry lives on the team agent = teamId), not an agent config of its own.
+  getHuman: async (teamId, id) => {
+    const cur = await liveOps.listHumans(teamId);
+    return cur.find(h => h && h.id === id) || null;
+  },
+  wireHumanConsume: async (teamId, id, entry) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id) || { id, name: id };
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterConsumeAdd(human, entry)) });
+  },
+  unwireHumanConsume: async (teamId, id, entry) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id);
+    if (!human) return;
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterConsumeRemove(human, entry)) });
+  },
+  addHumanEmit: async (teamId, id, label) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id) || { id, name: id };
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitAdd(human, label)) });
   },
 
   // ── GitHub artifact ports (#380): produce flags + consumed channels ──
@@ -547,6 +591,41 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const next = labelsAfterSet(b.labels, name, flags);
       if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
+    // ── named human roles (#987): first-class human flow nodes on the bundle ──
+    listHumans: () => (getBundle().humans || []).slice(),
+    upsertHuman: async (human) => {
+      const b = clone(getBundle());
+      const next = humansAfterUpsert(b.humans, human);
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    removeHuman: async (id) => {
+      const b = clone(getBundle());
+      const next = humansAfterRemove(b.humans, id);
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    getHuman: (id) => ((getBundle().humans || []).find(h => h && h.id === id) || null),
+    wireHumanConsume: async (id, entry) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id) || { id, name: id };
+      b.humans = humansAfterUpsert(b.humans, humanAfterConsumeAdd(human, entry));
+      await persist(b);
+    },
+    unwireHumanConsume: async (id, entry) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id);
+      if (!human) return;
+      const next = humansAfterUpsert(b.humans, humanAfterConsumeRemove(human, entry));
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    addHumanEmit: async (id, label) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id) || { id, name: id };
+      b.humans = humansAfterUpsert(b.humans, humanAfterEmitAdd(human, label));
       await persist(b);
     },
     // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the

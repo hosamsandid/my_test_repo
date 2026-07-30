@@ -9,6 +9,15 @@ import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
 import { consumersFor, outcomeHandsOffToHuman } from './outcome-consumers.js';
+import { consumeKey } from './humans-registry-ops';
+
+// The human role currently wired to consume `entry` (or '' if none). #987.
+function humanConsuming(humans, entry) {
+  const key = consumeKey(entry);
+  if (!key) return '';
+  const h = (humans || []).find(r => (r.consumes || []).some(c => consumeKey(c) === key));
+  return h ? h.id : '';
+}
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
 // Connections tab in #865) — ONE place for an agent's whole routing decision.
@@ -40,7 +49,7 @@ import { consumersFor, outcomeHandsOffToHuman } from './outcome-consumers.js';
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], labels = [], ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -169,9 +178,9 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
         </div>
       </div>
 
-      <ArtifactsBlock node={node} peers={peers} ops={ops} onChanged={onChanged} focus={focusSection === 'artifacts'} />
+      <ArtifactsBlock node={node} peers={peers} ops={ops} humans={humans} humanOps={humanOps} onChanged={onChanged} focus={focusSection === 'artifacts'} />
 
-      <GithubArtifactsBlock node={node} ops={ops} onChanged={onChanged} />
+      <GithubArtifactsBlock node={node} ops={ops} humans={humans} humanOps={humanOps} onChanged={onChanged} />
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -526,7 +535,38 @@ function InputRow({ icon, text, subtitle, onEdit, onRemove, busy }) {
 // The data-flow outputs this agent produces (dataFlow.outputs) — name, hint,
 // computed consumers, remove (#865). Below Outcomes so the reader goes
 // inputs → decisions → produced artifacts top to bottom.
-function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
+// A dropdown that wires an artifact delivery to a NAMED human role (#987) — the
+// replacement for the #981 "a person consumes this" checkbox. Selecting a role
+// adds the delivery to that role's `consumes`; switching moves it; "— none —"
+// removes it. Mode-agnostic through humanOps. Hidden when no human roles exist
+// (add one via the toolbar's "Add human" first).
+function HumanDeliveryPicker({ humans = [], humanOps, entry, onChanged, disabled }) {
+  const [busy, setBusy] = useState(false);
+  if (!humanOps || !humans.length) return null;
+  const current = humanConsuming(humans, entry);
+  const change = async (next) => {
+    if (busy || next === current) return;
+    setBusy(true);
+    try {
+      if (current) await humanOps.unwireHumanConsume(current, entry);
+      if (next) await humanOps.wireHumanConsume(next, entry);
+      onChanged?.();
+    } catch (e) { window.alert(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+      reviewed by
+      <select value={current} disabled={busy || disabled} onChange={e => change(e.target.value)}
+        style={{ ...input, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+        <option value="">— nobody —</option>
+        {humans.map(h => <option key={h.id} value={h.id}>👤 {h.name || h.id}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function ArtifactsBlock({ node, peers, ops, humans = [], humanOps, onChanged, focus }) {
   const ref = useRef(null);
   useFocusScroll(ref, focus);
   const outputs = Array.isArray(node.outputs) ? node.outputs : [];
@@ -559,22 +599,16 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
         const key = `out:${artifactKey(a)}`;
         const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
         const consumers = artifactConsumers(a, node, peers);
-        const humanAudience = a && typeof a === 'object' && a.audience === 'human';
-        // Audience toggle (#981): a person consumes this output (a report, a
-        // review document) — clears the unconsumed-output lint and draws the
-        // delivery edge to the @human actor.
+        // Human delivery picker (#987, replaces the #981 audience checkbox): a
+        // named person reads this output (a report, a review document). Wiring a
+        // role clears the unconsumed-output lint and draws producer → role.
+        const deliveryEntry = { artifact: 'file', name: artifactKey(a) };
+        const reviewer = humanConsuming(humans, deliveryEntry);
         const subtitle = (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            {consumers.length ? `consumers: ${consumers.join(', ')}${humanAudience ? ' + a person' : ''}`
-              : humanAudience ? 'consumer: a person 👤' : 'no consumer yet'}
-            {ops.setArtifactAudience && (
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: busy === key ? 'wait' : 'pointer' }}>
-                <input type="checkbox" checked={humanAudience} disabled={busy === key}
-                  onChange={(e) => run(key, () => ops.setArtifactAudience(node.id,
-                    { name: a && a.name, path: a && a.path, audience: e.target.checked ? 'human' : null }))} />
-                a person consumes it
-              </label>
-            )}
+            {consumers.length ? `consumers: ${consumers.join(', ')}${reviewer ? ' + a person' : ''}`
+              : reviewer ? 'read by a person 👤' : 'no consumer yet'}
+            <HumanDeliveryPicker humans={humans} humanOps={humanOps} entry={deliveryEntry} onChanged={onChanged} disabled={busy === key} />
           </span>
         );
         return (
@@ -612,50 +646,36 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
   );
 }
 
-// ── GitHub artifacts (#981) ─────────────────────────────────────────────────
+// ── GitHub artifacts (#981/#987) ────────────────────────────────────────────
 // Shown only when the node has produce flags (set by wiring a channel or an
-// openPr/openIssue outcome action). Per artifact, the audience checkbox
-// declares that a PERSON consumes it (review/merge) — that clears the
-// producer-unconsumed lint and draws the delivery edge to the @human actor.
-function GithubArtifactsBlock({ node, ops, onChanged }) {
+// openPr/openIssue outcome action). Per artifact, a human-role picker (#987,
+// replaces the #981 audience checkbox) says which NAMED person reviews/merges
+// it — that clears the producer-unconsumed lint and draws producer → role.
+function GithubArtifactsBlock({ node, ops, humans = [], humanOps, onChanged }) {
   const gh = node.github || {};
-  const [busy, setBusy] = useState(false);
-  if ((!gh.producesPr && !gh.producesIssue) || !ops.setGithubProduces) return null;
-
-  const setAudience = async (artifact, human) => {
-    setBusy(true);
-    try {
-      await ops.setGithubProduces(node.id, {
-        pr: !!gh.producesPr, issue: !!gh.producesIssue,
-        prAudience: artifact === 'pr' ? (human ? 'human' : undefined) : gh.prAudience,
-        issueAudience: artifact === 'issue' ? (human ? 'human' : undefined) : gh.issueAudience,
-      });
-      onChanged?.();
-    } catch (e) { window.alert(e?.message || String(e)); }
-    finally { setBusy(false); }
-  };
+  if (!gh.producesPr && !gh.producesIssue) return null;
 
   const row = (artifact, Icon, noun) => (
-    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', cursor: busy ? 'wait' : 'pointer' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
       <Icon size={14} />
       <span style={{ flex: 1 }}>Opens {noun}</span>
-      <input
-        type="checkbox"
-        disabled={busy}
-        checked={(artifact === 'pr' ? gh.prAudience : gh.issueAudience) === 'human'}
-        onChange={(e) => setAudience(artifact, e.target.checked)}
-      />
-      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>a person consumes them (review/merge)</span>
-    </label>
+      <HumanDeliveryPicker humans={humans} humanOps={humanOps}
+        entry={{ artifact, from: node.id }} onChanged={onChanged} />
+    </div>
   );
 
   return (
     <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
-        GitHub artifacts <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— who consumes them</span>
+        GitHub artifacts <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— who reviews them</span>
       </div>
       {gh.producesPr && row('pr', GitPullRequest, 'pull requests')}
       {gh.producesIssue && row('issue', CircleDot, 'issues')}
+      {!humans.length && (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Add a human role (toolbar → “Add human”) to route review to a person.
+        </span>
+      )}
     </div>
   );
 }

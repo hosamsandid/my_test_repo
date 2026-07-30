@@ -239,6 +239,12 @@ function buildProcessGraph(agents, options) {
     const ocGh = authored ? outcomesToGithub(a.outcomes) : {};
     const producesPr = baseGh.producesPr || ocGh.producesPr;
     const producesIssue = baseGh.producesIssue || ocGh.producesIssue;
+    // Artifact audience (#981): the producer declares that a person (not an
+    // agent) consumes the PR/issue — review/merge is a human touchpoint, not a
+    // wiring gap. Only the explicit 'human' value is carried; absent means
+    // unspecified (today's behavior).
+    const prAudience = producesPr && baseGh.prAudience === 'human' ? 'human' : null;
+    const issueAudience = producesIssue && baseGh.issueAudience === 'human' ? 'human' : null;
     return {
       id: a.id,
       role: a.role || 'agent',
@@ -256,7 +262,12 @@ function buildProcessGraph(agents, options) {
       // the consumed channels drive the on:'github' edges (built in unified-graph
       // from these ports, not from the derived triggers).
       github: (producesPr || producesIssue)
-        ? { ...(producesPr ? { producesPr: true } : {}), ...(producesIssue ? { producesIssue: true } : {}) }
+        ? {
+          ...(producesPr ? { producesPr: true } : {}),
+          ...(producesIssue ? { producesIssue: true } : {}),
+          ...(prAudience ? { prAudience } : {}),
+          ...(issueAudience ? { issueAudience } : {}),
+        }
         : null,
       channels: Array.isArray(a.channels) ? a.channels : [],
       // Structured OUTCOMES port (#827) — surfaced only when authored so a legacy
@@ -447,7 +458,10 @@ function buildProcessGraph(agents, options) {
     }
   }
 
-  // Dead-end emitters: a label emitted but no trigger listens on it.
+  // Dead-end emitters: a label emitted but no trigger listens on it. Gate
+  // emits stay skipped (an agent emitting a gate label is a `gate-violation`
+  // error, not an edge); brake emits are no longer dropped — they become the
+  // explicit hand-off edges below (#981).
   for (const [label, emitters] of emitIndex) {
     if (isHumanGate(label) || isBrake(label)) continue;
     if (!allListenKeys.has(label)) {
@@ -458,10 +472,100 @@ function buildProcessGraph(agents, options) {
     }
   }
 
+  // Brake hand-offs (#981): an agent applying a brake label pauses the flow
+  // pending a human decision — that is a hand-off TO the human, not a dead end.
+  // Drawn for EVERY brake emitter (listened or not): even when a downstream
+  // agent re-listens on the label, the human sits in between (they decide, then
+  // release), so the emit side always routes through the human. Never a lint.
+  for (const [label, emitters] of emitIndex) {
+    if (!isBrake(label) || isHumanGate(label)) continue;
+    for (const s of emitters) {
+      const oc = ocOf(label, s);
+      edges.push({ from: s, to: null, label, kind: 'brake', handoff: 'human', ...(oc ? { outcome: oc } : {}) });
+    }
+  }
+
+  // Artifact deliveries to a person (#981): a produce port whose audience is
+  // 'human' hands its PR/issue to a human (review/merge) — drawn as an explicit
+  // delivery edge and exempted from `producer-unconsumed` in computeLints.
+  for (const n of nodes) {
+    const gh = n.github || {};
+    if (gh.producesPr && gh.prAudience === 'human') {
+      edges.push({ from: n.id, to: null, kind: 'delivery', artifact: 'pr', handoff: 'human' });
+    }
+    if (gh.producesIssue && gh.issueAudience === 'human') {
+      edges.push({ from: n.id, to: null, kind: 'delivery', artifact: 'issue', handoff: 'human' });
+    }
+  }
+
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
-  return { nodes, edges, gates, labels, lints: computeLints(nodes, edges, classifier) };
+  return {
+    nodes, edges, gates, labels,
+    humanTouchpoints: computeHumanTouchpoints(nodes, edges),
+    lints: computeLints(nodes, edges, classifier),
+  };
+}
+
+// ─── human touchpoints (#981) ────────────────────────────────────────────────
+//
+// The derived list of every place a PERSON acts in the flow — computed purely
+// from nodes/edges, never hand-maintained. Three types (generic human, no named
+// roles by design):
+//
+//   injection — a human applies a gate label (or approves a gated channel),
+//               waking an agent: work enters / passes a gate.
+//   decision  — an agent applies a brake label: the flow pauses until a human
+//               decides.
+//   delivery  — an agent opens a PR/issue whose declared audience is a human
+//               (review/merge).
+//
+// Sorted deterministically (type, then label/artifact, then agent) and deduped
+// so N triggers on one label yield one touchpoint.
+const TOUCHPOINT_ORDER = { injection: 0, decision: 1, delivery: 2 };
+function computeHumanTouchpoints(nodes, edges) {
+  const out = [];
+  const seen = new Set();
+  const add = (t) => {
+    // Keyed by label when there is one (a labelled gate channel and an explicit
+    // label listener on the same label are ONE touchpoint), else by artifact.
+    const key = `${t.type}|${t.label || t.artifact || ''}|${t.agentId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+  for (const e of edges) {
+    // Gate label listeners (from: null, kind 'gate'): human applies the label.
+    if (e.kind === 'gate' && e.from == null && e.to) {
+      add({ type: 'injection', label: e.label, agentId: e.to });
+    }
+    // Brake hand-offs (from an agent, handoff: 'human'): human decides.
+    if (e.kind === 'brake' && e.from && e.handoff === 'human') {
+      add({ type: 'decision', label: e.label, agentId: e.from, ...(e.outcome ? { outcome: e.outcome } : {}) });
+    }
+    // Artifact deliveries: human reviews/merges the PR or issue.
+    if (e.kind === 'delivery' && e.from) {
+      add({ type: 'delivery', artifact: e.artifact, agentId: e.from });
+    }
+  }
+  // Gated channels (`gate: 'human'`) never appear as gate listener edges in
+  // this builder (their consumer's derived trigger is `channel: true`, and the
+  // producer→consumer edge is drawn in unified-graph) — read the ports directly.
+  for (const n of nodes) {
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (!ch || ch.gate !== 'human') continue;
+      add({
+        type: 'injection', agentId: n.id,
+        ...(typeof ch.label === 'string' && ch.label.trim() ? { label: ch.label.trim() } : {}),
+        ...(ch.artifact === 'issue' ? { artifact: 'issue' } : { artifact: 'pr' }),
+      });
+    }
+  }
+  return out.sort((a, b) =>
+    (TOUCHPOINT_ORDER[a.type] - TOUCHPOINT_ORDER[b.type])
+    || String(a.label || a.artifact || '').localeCompare(String(b.label || b.artifact || ''))
+    || String(a.agentId).localeCompare(String(b.agentId)));
 }
 
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
@@ -510,11 +614,13 @@ function computeLints(nodes, edges, classifier) {
     if (n.synthetic) continue;
     const gh = n.github || {};
     const consumed = consumedArtifactsByProducer.get(n.id) || new Set();
-    if (gh.producesPr && !consumed.has('pr')) {
+    // A declared human audience (#981) is a consumer — the delivery edge to the
+    // human replaces the "nobody consumes this" smell.
+    if (gh.producesPr && !consumed.has('pr') && gh.prAudience !== 'human') {
       lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
         message: `\`${n.id}\` opens pull requests but no agent consumes them.` });
     }
-    if (gh.producesIssue && !consumed.has('issue')) {
+    if (gh.producesIssue && !consumed.has('issue') && gh.issueAudience !== 'human') {
       lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
         message: `\`${n.id}\` opens issues but no agent consumes them.` });
     }
@@ -670,4 +776,4 @@ function computeLints(nodes, edges, classifier) {
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, makeLabelClassifier };
+module.exports = { buildProcessGraph, computeLints, computeHumanTouchpoints, listenKeys, classifyKind, makeLabelClassifier };

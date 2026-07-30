@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2 } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
+import LabelRegistryPanel from './process/LabelRegistryPanel';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
@@ -15,7 +16,7 @@ import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './pr
 // nodes when they have edges, but a drag can also start from a placeholder.
 // (@human/@timer are gone: human actions are GitHub label events, schedules
 // render inside the agent card.)
-const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule' };
+const ACTOR_NAMES = { '@github': 'GitHub', '@external': 'External system', '@timer': 'Schedule', '@human': 'Human' };
 
 // Inline-editable process name for the draft toolbar — the single rename
 // control for a draft (#581). Click to edit; Enter or blur commits, Escape
@@ -139,6 +140,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [materializeOpen, setMaterializeOpen] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -189,6 +191,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     renameStage: (oldName, newName) => liveOps.renameStage(scope, oldName, newName),
     removeStage: (name) => liveOps.removeStage(scope, name),
     reorderStages: (names) => liveOps.reorderStages(scope, names),
+  }), [scope]);
+
+  // Live label-registry ops (#981): same teamId binding as the stage ops, so
+  // LabelRegistryPanel keeps its name-first contract in both modes.
+  const liveLabelOps = useMemo(() => ({
+    setLabelFlags: (name, flags) => liveOps.setLabelFlags(scope, name, flags),
   }), [scope]);
 
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
@@ -410,6 +418,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <>
             <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
+            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
@@ -418,6 +427,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <>
             <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
+            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           </>
         )}
@@ -469,10 +479,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <Overlay tone="error">Could not load graph: {error}</Overlay>
         )}
 
-        <LintsPanel
-          lints={displayGraph?.lints || []}
-          onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
-        />
+        <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 20, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, maxWidth: 360 }}>
+          <LintsPanel
+            lints={displayGraph?.lints || []}
+            onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
+          />
+          <HumanTouchpointsPanel
+            touchpoints={displayGraph?.humanTouchpoints || []}
+            nodes={displayGraph?.nodes || []}
+            onFocus={(nodeId) => { if (nodeId) { setSelectedId(nodeId); graphRef.current?.setSelected(nodeId); } }}
+          />
+        </div>
       </div>
 
       {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
@@ -575,6 +592,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
+        />
+      )}
+
+      {labelsOpen && (isDraft || (isTeamScope && !imported)) && (
+        <LabelRegistryPanel
+          key={JSON.stringify(displayGraph?.labels || [])}
+          labels={displayGraph?.labels || []}
+          ops={isDraft ? draftOps : liveLabelOps}
+          onClose={() => setLabelsOpen(false)}
+          onChanged={() => { if (!isDraft) refetch(); }}
         />
       )}
 
@@ -891,7 +918,7 @@ function LintsPanel({ lints, onFocus }) {
   const accent = errors > 0 ? 'var(--eb-status-error)' : 'var(--eb-status-warning)';
 
   return (
-    <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 20, maxWidth: 360 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
       <button
         onClick={() => setOpen(o => !o)}
         style={{
@@ -927,6 +954,69 @@ function LintsPanel({ lints, onFocus }) {
                 fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', textTransform: 'uppercase',
               }}>{l.code}</span>
               <div style={{ marginTop: 2, lineHeight: 1.4 }}>{stripTicks(l.message)}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Human touchpoints (#981) — the derived list of every place a PERSON acts in
+// the flow, computed server-side (graph.humanTouchpoints): work injection
+// (gate labels / gated channels), decisions (brake hand-offs), and artifact
+// deliveries (PRs/issues whose audience is a human). Read-only; clicking an
+// entry focuses the involved agent.
+const TOUCHPOINT_TEXT = {
+  injection: (t, name) => <>Human applies <code>{t.label || t.artifact}</code> → wakes <strong>{name}</strong></>,
+  decision: (t, name) => <><strong>{name}</strong> pauses on <code>{t.label}</code> — human decides</>,
+  delivery: (t, name) => <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
+};
+function HumanTouchpointsPanel({ touchpoints, nodes, onFocus }) {
+  const [open, setOpen] = useState(false);
+  if (!touchpoints || touchpoints.length === 0) return null;
+  const nameOf = (id) => (nodes || []).find(n => n.id === id)?.displayName || id;
+  const accent = 'var(--eb-accent-primary)';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'var(--eb-bg-elevated)', border: `1px solid ${accent}`,
+          color: accent, borderRadius: 'var(--eb-radius-md)', padding: '4px 10px',
+          fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', cursor: 'pointer',
+          marginLeft: 'auto',
+        }}
+      >
+        <User size={14} />
+        {touchpoints.length} human touchpoint{touchpoints.length === 1 ? '' : 's'}
+      </button>
+      {open && (
+        <div style={{
+          marginTop: 6, background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxHeight: '50vh', overflowY: 'auto',
+        }}>
+          {touchpoints.map((t, i) => (
+            <button
+              key={i}
+              onClick={() => onFocus(t.agentId)}
+              title="Focus agent"
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                background: 'none', border: 'none', borderTop: i ? '1px solid var(--eb-border-default)' : 'none',
+                padding: 'var(--eb-space-2) var(--eb-space-3)', cursor: 'pointer',
+                fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              <span style={{
+                color: accent, fontSize: 'var(--eb-text-xs)',
+                fontWeight: 'var(--eb-font-medium)', textTransform: 'uppercase',
+              }}>{t.type}</span>
+              <div style={{ marginTop: 2, lineHeight: 1.4 }}>
+                {(TOUCHPOINT_TEXT[t.type] || TOUCHPOINT_TEXT.injection)(t, nameOf(t.agentId))}
+              </div>
             </button>
           ))}
         </div>

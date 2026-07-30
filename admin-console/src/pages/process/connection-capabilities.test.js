@@ -34,8 +34,11 @@ test('live and draft are fully editable with the process type set', () => {
 test('sourceKindOf maps actor ids and falls back to agent', () => {
   assert.equal(sourceKindOf('@github'), 'github');
   assert.equal(sourceKindOf('@external'), 'external');
-  // Former actors resolve like any unknown id — plain agents (no dialogs offered).
-  assert.equal(sourceKindOf('@human'), 'agent');
+  // @human (#981) is a display-only actor: a distinct kind with NO create
+  // types, so it can never be misread as an agent drag source.
+  assert.equal(sourceKindOf('@human'), 'human');
+  assert.deepEqual(createTypesFor(capabilitiesFor('live'), 'human'), []);
+  // @timer stays a former actor — resolves like any unknown id (plain agent).
   assert.equal(sourceKindOf('@timer'), 'agent');
   assert.equal(sourceKindOf('developer'), 'agent');
 });

@@ -893,3 +893,128 @@ test('#958: a malformed claim is not surfaced on the graph', () => {
   // ...and it still counts as unclaimed, so the blind spot stays visible.
   assert.ok(g.lints.some(x => x.code === 'unclaimed-listener' && x.nodeId === 'b'));
 });
+
+// ── #981: explicit human touchpoints ─────────────────────────────────────────
+
+test('#981: flagging a listened-but-unemitted label humanGate clears orphan-listener and draws the gate edge', () => {
+  const mk = (labels) => buildProcessGraph([
+    { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+  ], labels ? { labels } : undefined);
+  const before = mk(null);
+  assert.ok(lintCodes(before).includes('orphan-listener'));
+  const after = mk([{ name: 'ready-3', humanGate: true }]);
+  assert.ok(!lintCodes(after).includes('orphan-listener'));
+  const e = after.edges.find(x => x.label === 'ready-3' && x.to === 'dev3');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null); // a human applies it — unified-graph pins it to @human
+});
+
+test('#981: a brake emit becomes a hand-off edge instead of a dropped dead-end (no lint)', () => {
+  const mk = (labels) => buildProcessGraph([
+    { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+  ], labels ? { labels } : undefined);
+  const before = mk(null);
+  assert.ok(lintCodes(before).includes('dead-end-emitter'));
+  const after = mk([{ name: 'human-decision-needed', brake: true }]);
+  assert.ok(!lintCodes(after).includes('dead-end-emitter'));
+  assert.ok(!lintCodes(after).includes('outcome-without-consumer'));
+  const e = after.edges.find(x => x.label === 'human-decision-needed' && x.from === 'reworker');
+  assert.ok(e, 'the emit is VISIBLE as a hand-off, not dropped (pre-#981 regression)');
+  assert.equal(e.kind, 'brake');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.to, null);
+  assert.ok(!e.deadEnd);
+});
+
+test('#981: an OUTCOME setting a brake label hands off with its outcome id (no outcome-without-consumer)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'exactlyOne', options: [
+      { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready-for-test' }] },
+      { id: 'blocked', title: 'Blocked', actions: [{ type: 'setLabel', label: 'human-decision-required' }] },
+    ] } },
+    { id: 'qa', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-for-test' }] },
+  ], { labels: [{ name: 'human-decision-required', brake: true }] });
+  assert.ok(!lintCodes(g).some(c => c === 'outcome-without-consumer'));
+  const e = g.edges.find(x => x.label === 'human-decision-required' && x.from === 'dev');
+  assert.equal(e.kind, 'brake');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.outcome, 'blocked');
+});
+
+test('#981: a brake emit hands off to the human even when another agent re-listens on the label', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['needs-decision'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'needs-decision' }] },
+  ], { labels: [{ name: 'needs-decision', brake: true }] });
+  // Emit side: a → human. Listen side: human (null) → b. The human sits in between.
+  assert.ok(g.edges.some(e => e.from === 'a' && e.handoff === 'human' && e.label === 'needs-decision'));
+  assert.ok(g.edges.some(e => e.from === null && e.to === 'b' && e.kind === 'brake' && e.label === 'needs-decision'));
+});
+
+test('#981: prAudience human clears producer-unconsumed and draws the delivery edge; unset lints as before', () => {
+  const before = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ]);
+  assert.ok(lintCodes(before).includes('producer-unconsumed'));
+  const after = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true, prAudience: 'human' }, triggers: [] },
+  ]);
+  assert.ok(!lintCodes(after).includes('producer-unconsumed'));
+  const e = after.edges.find(x => x.kind === 'delivery' && x.from === 'dev');
+  assert.equal(e.artifact, 'pr');
+  assert.equal(e.handoff, 'human');
+  // The audience flag rides on the node's github port (round-trip via export).
+  assert.equal(after.nodes[0].github.prAudience, 'human');
+});
+
+test('#981: issueAudience is independent of prAudience', () => {
+  const g = buildProcessGraph([
+    { id: 'triage', github: { producesPr: true, producesIssue: true, issueAudience: 'human' }, triggers: [] },
+  ]);
+  const deliveries = g.edges.filter(x => x.kind === 'delivery');
+  assert.deepEqual(deliveries.map(d => d.artifact), ['issue']);
+  // The PR side still lints — only the issue side declared a human consumer.
+  assert.ok(g.lints.some(l => l.code === 'producer-unconsumed' && /pull requests/.test(l.message)));
+});
+
+test('#981: gate-violation still fires when an agent declares an emit of a humanGate label', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['ready-3'], triggers: [] },
+  ], { labels: [{ name: 'ready-3', humanGate: true }] });
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'rogue'));
+});
+
+test('#981: humanTouchpoints enumerates injection / decision / delivery; empty without flags', () => {
+  const g = buildProcessGraph([
+    { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+    { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    { id: 'merger', github: { producesPr: true, prAudience: 'human' }, triggers: [] },
+    { id: 'dispatcher', channels: [{ artifact: 'issue', from: 'analyst', label: 'dispatch', gate: 'human' }], triggers: [] },
+    { id: 'analyst', github: { producesIssue: true }, triggers: [] },
+  ], { labels: [
+    { name: 'ready-3', humanGate: true },
+    { name: 'human-decision-needed', brake: true },
+  ] });
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'injection', agentId: 'dispatcher', label: 'dispatch', artifact: 'issue' },
+    { type: 'injection', label: 'ready-3', agentId: 'dev3' },
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+    { type: 'delivery', artifact: 'pr', agentId: 'merger' },
+  ]);
+
+  const none = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ]);
+  assert.deepEqual(none.humanTouchpoints, []);
+});
+
+test('#981: one label listened by two triggers yields ONE injection touchpoint', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' },
+      { id: 't2', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'go' },
+    ] },
+  ], { labels: [{ name: 'go', humanGate: true }] });
+  assert.equal(g.humanTouchpoints.filter(t => t.type === 'injection').length, 1);
+});

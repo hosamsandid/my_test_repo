@@ -459,6 +459,21 @@ test('buildProcessTemplate carries github + channels; drops derived channel trig
   assert.equal(rev.triggers.length, 0); // derived channel trigger dropped from the portable bundle
 });
 
+test('#981: buildProcessTemplate round-trips the artifact audience flags', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-dev', displayName: 'Dev',
+        github: { producesPr: true, prAudience: 'human', producesIssue: true, issueAudience: 'human' }, triggers: [] },
+      // An audience without its produce flag is meaningless and must be dropped.
+      { id: 'acme-odd', displayName: 'Odd', github: { producesPr: true, issueAudience: 'human' }, triggers: [] },
+    ],
+  });
+  assert.deepEqual(b.roles.find(r => r.id === 'dev').github,
+    { producesPr: true, producesIssue: true, prAudience: 'human', issueAudience: 'human' });
+  assert.deepEqual(b.roles.find(r => r.id === 'odd').github, { producesPr: true });
+});
+
 test('an agent-studio-shaped bundle (custom role ids, gates) validates', () => {
   const bundle = {
     processTemplateVersion: 1,

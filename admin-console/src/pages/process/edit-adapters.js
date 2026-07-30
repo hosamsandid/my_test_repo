@@ -12,6 +12,7 @@ import { upsertChannel, removeChannelFrom } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
+import { labelsAfterSet } from './label-registry-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
@@ -187,14 +188,30 @@ export const liveOps = {
     await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterReorder(cur, names) });
   },
 
+  // ── label registry (#981): gate/brake flags, TEAM-agent only ──
+  // Same binding pattern as the stage ops: teamId first, ProcessCanvas wraps.
+  listLabels: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.labels) ? a.labels.slice() : [];
+  },
+  setLabelFlags: async (teamId, name, flags) => {
+    const cur = await liveOps.listLabels(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
+  },
+
   // ── GitHub artifact ports (#380): produce flags + consumed channels ──
   // Produce flags drive the node badge/ports + the producer prompt block.
   getRoleGithub: async (roleId) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     return (a && a.github) || {};
   },
-  setGithubProduces: (roleId, { pr, issue }) =>
-    apiCall('PUT', `/api/agents/${roleId}`, { github: { producesPr: !!pr, producesIssue: !!issue } }),
+  setGithubProduces: (roleId, { pr, issue, prAudience, issueAudience }) =>
+    apiCall('PUT', `/api/agents/${roleId}`, { github: {
+      producesPr: !!pr, producesIssue: !!issue,
+      // Artifact audience (#981): 'human' declares a person consumes the PR/issue.
+      ...(pr && prAudience === 'human' ? { prAudience: 'human' } : {}),
+      ...(issue && issueAudience === 'human' ? { issueAudience: 'human' } : {}),
+    } }),
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
   addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
@@ -507,6 +524,14 @@ export function makeDraftOps(getBundle, persist) {
       b.stages = (names || []).filter(n => existing.has(n));
       await persist(b);
     },
+    // ── label registry (#981): gate/brake flags on the bundle ──
+    listLabels: () => (getBundle().labels || []).slice(),
+    setLabelFlags: async (name, flags) => {
+      const b = clone(getBundle());
+      const next = labelsAfterSet(b.labels, name, flags);
+      if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
     // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the
     // grouping node of `child`; clear with a falsy parentId. Self-parenting and
     // direct cycles (parent already a descendant) are rejected.
@@ -594,13 +619,16 @@ export function makeDraftOps(getBundle, persist) {
       const r = role(getBundle(), roleId);
       return (r && r.github) || {};
     },
-    setGithubProduces: async (roleId, { pr, issue }) => {
+    setGithubProduces: async (roleId, { pr, issue, prAudience, issueAudience }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
       if (r) {
         const g = {};
         if (pr) g.producesPr = true;
         if (issue) g.producesIssue = true;
+        // Artifact audience (#981): a person consumes the PR/issue.
+        if (pr && prAudience === 'human') g.prAudience = 'human';
+        if (issue && issueAudience === 'human') g.issueAudience = 'human';
         if (Object.keys(g).length) r.github = g; else delete r.github;
       }
       await persist(b);

@@ -1214,3 +1214,38 @@ test('#987 AC8: a flow with no humans[] is byte-identical to omitting the option
   const without = buildProcessGraph(agents, opts);
   assert.deepEqual(withEmpty, without);
 });
+
+test('#1004: a marked outcome is an endpoint, not a dead-end — no lint, endpoint edge', () => {
+  const mk = (extra) => buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'archived' }], ...extra },
+    ] } },
+  ], {});
+  // Unmarked: the dead-end warning fires (outcome-without-consumer, #830).
+  const open = mk({});
+  assert.ok(lintCodes(open).includes('outcome-without-consumer'));
+  assert.ok(open.edges.some(e => e.label === 'archived' && e.deadEnd));
+  // Terminal: a proper endpoint — edge carries `endpoint`, no lint.
+  const term = mk({ terminal: true });
+  assert.ok(!lintCodes(term).includes('outcome-without-consumer'));
+  const te = term.edges.find(e => e.label === 'archived');
+  assert.equal(te.endpoint, 'terminal');
+  assert.ok(!te.deadEnd);
+  // External with note: endpoint + note forwarded for the port chip.
+  const ext = mk({ external: { note: 'state marker for the org board' } });
+  assert.ok(!lintCodes(ext).includes('outcome-without-consumer'));
+  const ee = ext.edges.find(e => e.label === 'archived');
+  assert.equal(ee.endpoint, 'external');
+  assert.equal(ee.note, 'state marker for the org board');
+});
+
+test('#1004: a marked artifact outcome suppresses producer-unconsumed', () => {
+  const mk = (extra) => buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', title: 'Ships PR', actions: [{ type: 'openPr' }], ...extra },
+    ] } },
+  ], {});
+  assert.ok(lintCodes(mk({})).includes('producer-unconsumed'), 'unmarked producer still lints');
+  assert.ok(!lintCodes(mk({ terminal: true })).includes('producer-unconsumed'), 'the merged PR IS the product');
+  assert.ok(!lintCodes(mk({ external: {} })).includes('producer-unconsumed'), 'external consumer declared');
+});

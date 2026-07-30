@@ -100,6 +100,23 @@ function validateOutcomes(outcomes, sources) {
     if (o.notify !== undefined && typeof o.notify !== 'string') {
       return { ok: false, error: `option ${id}: notify must be a string` };
     }
+    // Open-end markers (#1004, concept §4.7): `terminal: true` ("this is the
+    // end product") and `external: {note?}` ("consumed outside this flow").
+    // Mutually exclusive — an outcome is one kind of endpoint, not both.
+    if (o.terminal !== undefined && o.terminal !== true) {
+      return { ok: false, error: `option ${id}: terminal must be true when present` };
+    }
+    if (o.external !== undefined) {
+      if (!o.external || typeof o.external !== 'object' || Array.isArray(o.external)) {
+        return { ok: false, error: `option ${id}: external must be an object ({note?})` };
+      }
+      if (o.external.note !== undefined && typeof o.external.note !== 'string') {
+        return { ok: false, error: `option ${id}: external.note must be a string` };
+      }
+    }
+    if (o.terminal === true && o.external !== undefined) {
+      return { ok: false, error: `option ${id}: terminal and external are mutually exclusive` };
+    }
     if (!Array.isArray(o.actions)) {
       return { ok: false, error: `option ${id}: actions must be an array` };
     }
@@ -133,7 +150,8 @@ function isAuthoredOutcomes(outcomes) {
 // Canonical stored shape: drop unknown fields, coerce known ones. Used by the
 // PUT persistence + the edit adapters + the bundle transforms so the port
 // round-trips losslessly for its documented fields (id/title/when/notify/mode +
-// actions[].type/label). Assumes an already-validated port.
+// actions[].type/label + the #1004 open-end markers terminal/external).
+// Assumes an already-validated port.
 function normalizeOutcomes(outcomes) {
   return {
     mode: outcomes.mode,
@@ -147,6 +165,14 @@ function normalizeOutcomes(outcomes) {
           ? { label: a.label.trim() } : {}),
       })),
       ...(typeof o.notify === 'string' && o.notify ? { notify: o.notify } : {}),
+      // Open-end markers (#1004): terminal XOR external ({note?}).
+      ...(o.terminal === true ? { terminal: true } : {}),
+      ...(o.terminal !== true && o.external && typeof o.external === 'object' && !Array.isArray(o.external)
+        ? { external: {
+            ...(typeof o.external.note === 'string' && o.external.note.trim()
+              ? { note: o.external.note.trim() } : {}),
+          } }
+        : {}),
     })),
   };
 }
@@ -232,6 +258,12 @@ function substituteOutcomes(outcomes, subst) {
         ...(a.type === 'setLabel' && typeof a.label === 'string' ? { label: f(a.label) } : {}),
       })),
       ...(typeof o.notify === 'string' && o.notify ? { notify: o.notify } : {}),
+      // Open-end markers (#1004) ride through materialise; the note is
+      // template-bearing free text like `when`.
+      ...(o.terminal === true ? { terminal: true } : {}),
+      ...(o.external && typeof o.external === 'object' && !Array.isArray(o.external)
+        ? { external: { ...(typeof o.external.note === 'string' && o.external.note ? { note: f(o.external.note) } : {}) } }
+        : {}),
     })),
   };
 }

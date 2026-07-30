@@ -243,7 +243,12 @@ function OutcomeCard({ index, row, showConsumers }) {
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
           {row.terminal
             ? 'Terminal outcome — no signal (dead-end by design).'
-            : row.humanHandoff
+            : row.marker === 'terminal'
+              // Declared open end (#1004): a proper endpoint, never "no consumer".
+              ? '⏹ Terminal by design — the end product.'
+              : row.marker === 'external'
+                ? <>↗ external{row.markerNote ? <>: {row.markerNote}</> : ' — consumed outside this flow'}</>
+                : row.humanHandoff
               // Brake label (#981): the hand-off to a person IS the consumer.
               ? <>hands off to a person 👤 — the flow pauses for a decision{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
               : (row.humanReviewers || []).length

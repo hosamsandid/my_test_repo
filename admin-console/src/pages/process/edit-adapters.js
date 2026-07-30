@@ -60,6 +60,20 @@ const setAudienceOn = (a, audience) => {
   if (audience === 'human') base.audience = 'human'; else delete base.audience;
   return base;
 };
+// Set/clear an artifact output's open-end marker (#1004): `marker` is
+// `{terminal: true}`, `{external: {note?}}` or null. Terminal XOR external.
+const setMarkerOn = (a, marker) => {
+  const base = typeof a === 'string' ? { path: a } : { ...a };
+  delete base.terminal; delete base.external;
+  if (marker && marker.terminal === true) base.terminal = true;
+  else if (marker && marker.external && typeof marker.external === 'object') {
+    base.external = {
+      ...(typeof marker.external.note === 'string' && marker.external.note.trim()
+        ? { note: marker.external.note.trim() } : {}),
+    };
+  }
+  return base;
+};
 async function liveDataFlow(roleId) {
   const a = await apiCall('GET', `/api/agents/${roleId}`);
   const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
@@ -166,6 +180,15 @@ export const liveOps = {
     const df = await liveDataFlow(roleId);
     df.outputs = df.outputs.map(a => (artKey(a) === key
       ? setAudienceOn(a, audience) : a));
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Open-end marker on an output artifact (#1004): `marker` is
+  // `{terminal: true}`, `{external: {note?}}` or null (unmark).
+  setArtifactMarker: async (roleId, { name, path, marker }) => {
+    const key = String(name || path || '').trim();
+    if (!key) return;
+    const df = await liveDataFlow(roleId);
+    df.outputs = df.outputs.map(a => (artKey(a) === key ? setMarkerOn(a, marker) : a));
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
   // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
@@ -725,6 +748,16 @@ export function makeDraftOps(getBundle, persist) {
       if (r && key) {
         r.outputs = (r.outputs || []).map(a => (artKey(a) === key
           ? setAudienceOn(a, audience) : a));
+      }
+      await persist(b);
+    },
+    // Open-end marker on an output (#1004) — see liveOps.setArtifactMarker.
+    setArtifactMarker: async (roleId, { name, path, marker }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      const key = String(name || path || '').trim();
+      if (r && key) {
+        r.outputs = (r.outputs || []).map(a => (artKey(a) === key ? setMarkerOn(a, marker) : a));
       }
       await persist(b);
     },

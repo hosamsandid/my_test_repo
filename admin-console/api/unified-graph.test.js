@@ -772,3 +772,12 @@ test('#987: no humans[] is byte-identical to omitting the option', () => {
   const without = buildUnifiedGraph(nodes, undefined, opts);
   assert.deepEqual(withEmpty, without);
 });
+
+test('#1004: a marked output artifact is an endpoint — no unconsumed-output lint', () => {
+  const mk = (out) => buildUnifiedGraph([
+    { id: 'analyst', outputs: [out], triggers: [] },
+  ], undefined, {});
+  assert.ok(lintCodes(mk({ name: 'report' })).includes('unconsumed-output'), 'unmarked output still lints');
+  assert.ok(!lintCodes(mk({ name: 'report', terminal: true })).includes('unconsumed-output'));
+  assert.ok(!lintCodes(mk({ name: 'report', external: { note: 'org dashboard' } })).includes('unconsumed-output'));
+});

@@ -1024,6 +1024,9 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
       displayName: cfg.displayName || id,
       emits: _flowLiftEmits(cfg.emits, triggers),
       github: cfg.github || null,
+      // Open-end markers (#1004): a terminal/external outcome makes a silent
+      // run legitimate — the detector drops the output-missing expectation.
+      outcomes: cfg.outcomes || null,
       triggers,
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);

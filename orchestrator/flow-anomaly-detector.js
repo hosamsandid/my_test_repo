@@ -106,12 +106,17 @@ function buildFlowModel(members, options = {}) {
     let c = consumers.get(m.id);
     if (!c) {
       const gh = m.github && typeof m.github === 'object' ? m.github : {};
+      // A declared open end (#1004, concept §4.7): an outcome marked
+      // `terminal: true` or `external: {…}` makes a run that sets no forward
+      // label and opens no PR legitimate — no output-missing expectation.
+      const options = m.outcomes && Array.isArray(m.outcomes.options) ? m.outcomes.options : [];
       c = {
         id: m.id,
         displayName: str(m.displayName) || m.id,
         emits: new Set((Array.isArray(m.emits) ? m.emits : []).map(str).filter(Boolean)),
         producesPr: !!gh.producesPr,
         producesIssue: !!gh.producesIssue,
+        openEnd: options.some((o) => o && (o.terminal === true || o.external)),
         consumesLabels: new Set(),
       };
       consumers.set(m.id, c);
@@ -186,6 +191,7 @@ function buildFlowModel(members, options = {}) {
           emits: [...c.emits],
           producesPr: c.producesPr,
           producesIssue: c.producesIssue,
+          openEnd: !!c.openEnd,
           consumesLabels: [...c.consumesLabels],
         },
       ]),
@@ -376,6 +382,9 @@ function detectFlowAnomalies(args = {}) {
       const run = completedRunFor(sessions, agentId, object);
       if (!run) continue;
       const c = consumers[agentId];
+      // Declared open end (#1004): this agent may legitimately end a run
+      // without a forward signal — never an output-missing anomaly.
+      if (c.openEnd) continue;
       const producedLabel = (c.emits || []).some((l) => present.has(l));
       const producedPr =
         c.producesPr && object.kind === 'issue' &&

@@ -1304,10 +1304,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         bp.outcomes.options.forEach((o) => {
           const title = o.title || o.id;
           const setLabelAction = (o.actions || []).find(a => a.type === 'setLabel' && a.label);
+          // Open-end markers (#1004): a declared endpoint renders as a proper
+          // terminus glyph on the port tag instead of looking unfinished.
+          const marker = o.terminal === true ? 'terminal' : (o.external ? 'external' : null);
           const row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;gap:4px;';
           const tag = document.createElement('span');
-          tag.textContent = title;
+          tag.textContent = marker === 'terminal' ? `⏹ ${title}` : marker === 'external' ? `↗ ${title}` : title;
+          if (marker) {
+            tag.title = marker === 'terminal'
+              ? 'Terminal by design — the end product'
+              : `External consumer${o.external && o.external.note ? `: ${o.external.note}` : ' — consumed outside this flow'}`;
+          }
           tag.style.cssText = 'font-size:9px;color:#a16207;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.4);border-radius:3px;padding:0 4px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
           const dot = document.createElement('div');
           dot.title = `Outcome “${title}” — drag to the agent it routes to`;

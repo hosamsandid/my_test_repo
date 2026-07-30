@@ -328,3 +328,39 @@ test('gate-violation still fires if a FLAGGED gate label reaches the emit index 
   const plain = buildProcessGraph([{ id: 'rogue', role: 'agent', triggers: [], emits: ['approved-for-dispatch'] }]);
   assert.ok(!plain.lints.some(l => l.code === 'gate-violation'));
 });
+
+// ─── #1004: open-end markers (terminal / external) ───────────────────────────
+
+test('#1004: validateOutcomes accepts and gates the open-end markers', () => {
+  const opt = (extra) => ({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'openPr' }], ...extra }] });
+  assert.equal(validateOutcomes(opt({ terminal: true })).ok, true);
+  assert.equal(validateOutcomes(opt({ external: {} })).ok, true);
+  assert.equal(validateOutcomes(opt({ external: { note: 'CI workflow' } })).ok, true);
+  // Gated shapes.
+  assert.match(validateOutcomes(opt({ terminal: false })).error, /terminal must be true/);
+  assert.match(validateOutcomes(opt({ external: 'yes' })).error, /external must be an object/);
+  assert.match(validateOutcomes(opt({ external: { note: 42 } })).error, /note must be a string/);
+  assert.match(validateOutcomes(opt({ terminal: true, external: {} })).error, /mutually exclusive/);
+});
+
+test('#1004: normalizeOutcomes round-trips the markers and trims the note', () => {
+  const n = normalizeOutcomes({ mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'openPr' }], terminal: true },
+    { id: 'b', actions: [{ type: 'openIssue' }], external: { note: '  platform team  ' } },
+    { id: 'c', actions: [{ type: 'none' }] },
+  ] });
+  assert.equal(n.options[0].terminal, true);
+  assert.deepEqual(n.options[1].external, { note: 'platform team' });
+  assert.ok(!('terminal' in n.options[2]) && !('external' in n.options[2]));
+  // Idempotent — a second normalize changes nothing.
+  assert.deepEqual(normalizeOutcomes(n), n);
+});
+
+test('#1004: substituteOutcomes carries the markers and substitutes the note', () => {
+  const s = substituteOutcomes({ mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'openPr' }], terminal: true },
+    { id: 'b', actions: [{ type: 'openIssue' }], external: { note: 'CI on {{repoFullName}}' } },
+  ] }, (t) => t.replace('{{repoFullName}}', 'org/repo'));
+  assert.equal(s.options[0].terminal, true);
+  assert.deepEqual(s.options[1].external, { note: 'CI on org/repo' });
+});

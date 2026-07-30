@@ -572,12 +572,31 @@ function buildProcessGraph(agents, options) {
   // emits stay skipped (an agent emitting a gate label is a `gate-violation`
   // error, not an edge); brake emits are no longer dropped — they become the
   // explicit hand-off edges below (#981).
+  //
+  // An outcome MARKED as an open end (#1004, §4.7 — `terminal: true` or
+  // `external: {note?}`) is a declared endpoint, not a dead-end: its edge
+  // carries `endpoint` (+ note) instead of `deadEnd`, so it renders as a
+  // proper terminus and raises no lint.
+  const markerOf = (agentId, outcomeId) => {
+    const n = nodes.find(x => x.id === agentId);
+    const o = (n && n.outcomes && Array.isArray(n.outcomes.options) ? n.outcomes.options : [])
+      .find(x => x && x.id === outcomeId);
+    if (!o) return null;
+    if (o.terminal === true) return { endpoint: 'terminal' };
+    if (o.external) return { endpoint: 'external', ...(o.external.note ? { note: o.external.note } : {}) };
+    return null;
+  };
   for (const [label, emitters] of emitIndex) {
     if (isHumanGate(label) || isBrake(label)) continue;
     if (!allListenKeys.has(label)) {
       for (const s of emitters) {
         const oc = ocOf(label, s);
-        edges.push({ from: s, to: null, label, kind: classify(label), ...(oc ? { outcome: oc } : {}), deadEnd: true });
+        const marker = oc ? markerOf(s, oc) : null;
+        edges.push({
+          from: s, to: null, label, kind: classify(label),
+          ...(oc ? { outcome: oc } : {}),
+          ...(marker || { deadEnd: true }),
+        });
       }
     }
   }
@@ -797,6 +816,14 @@ function computeLints(nodes, edges, classifier) {
       if (!produces) continue;
       const key = `${n.id}|${artifact}`;
       const noun = artifact === 'pr' ? 'pull requests' : 'issues';
+      // A declared open end (#1004, §4.7): the outcome carrying this artifact
+      // action is marked terminal ("the merged PR IS the product") or external
+      // ("consumed outside this flow") — a proper endpoint, not a smell.
+      const action = artifact === 'pr' ? 'openPr' : 'openIssue';
+      const marked = (n.outcomes && Array.isArray(n.outcomes.options) ? n.outcomes.options : [])
+        .some(o => o && (o.terminal === true || o.external)
+          && (o.actions || []).some(a => a && a.type === action));
+      if (marked) continue;
       // A delivery to a person (named role or unbound audience flag) is a
       // consumer — it clears the "nobody consumes this" smell. An UNBOUND one
       // (flag, no role) instead raises the advisory `unbound-delivery` (#987).

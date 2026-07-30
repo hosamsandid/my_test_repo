@@ -5305,6 +5305,23 @@ app.get('/api/flows/graph', async (req, res) => {
   });
 });
 
+// GET /api/teams/:teamId/flow-anomalies — observe-only stall detection (#959).
+// Team-scoped proxy to the orchestrator's deterministic detector; the anomaly
+// panel in the Flows view renders the result. Read-only, no repair.
+app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-anomalies`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* Derive a unified graph from a draft/imported bundle (#367) — the editable
  * counterpart of POST /api/process/graph. Maps the process-template bundle
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the

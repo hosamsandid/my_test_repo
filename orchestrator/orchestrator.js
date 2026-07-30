@@ -63,6 +63,8 @@ const prTokenComment = require("./pr-token-comment");
 const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
 const pendingQueue = require("./pending-queue");
+const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
+const flowAnomalySweep = require("./flow-anomaly-sweep");
 
 // ============================================================
 // Config
@@ -932,6 +934,217 @@ function loadEnvironment(envId) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// ============================================================
+// Flow-anomaly sweep (#959, concept §4.1/§4.3)
+// ============================================================
+// Best-effort GitHub + run-state gather feeding the pure detector. All I/O is
+// wrapped so a single failed fetch/read degrades to a partial result rather than
+// a 500 — this is an observe-only surface, never a gate.
+
+// A minimal GitHub GET returning parsed JSON, mirroring the poller's `_fetchJson`
+// but path-based so it honours GITHUB_API_BASE (the E2E fake-github seam, #710).
+function _flowGithubGetJson(apiPath, token) {
+  const { resolveGithubApiTarget } = require("./github-api-base");
+  const api = resolveGithubApiTarget();
+  return new Promise((resolve, reject) => {
+    const req = api.transport.request(
+      {
+        hostname: api.hostname,
+        port: api.port,
+        path: `${api.basePath}${apiPath}`,
+        method: "GET",
+        headers: {
+          "User-Agent": "agent-studio-poller",
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout: 15_000,
+      },
+      (resp) => {
+        let body = "";
+        resp.on("data", (c) => (body += c));
+        resp.on("end", () => {
+          if (resp.statusCode !== 200) {
+            return reject(new Error(`GitHub ${apiPath} → HTTP ${resp.statusCode}`));
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (err) {
+            reject(new Error(`GitHub ${apiPath} → bad JSON: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error(`GitHub ${apiPath} → timeout`)));
+    req.end();
+  });
+}
+
+function _flowLiftEmits(cfgEmits, triggers) {
+  const base = Array.isArray(cfgEmits) ? cfgEmits.filter((e) => typeof e === "string" && e) : [];
+  const lifted = [];
+  for (const t of Array.isArray(triggers) ? triggers : []) {
+    if (t && Array.isArray(t.emits)) for (const e of t.emits) if (typeof e === "string" && e) lifted.push(e);
+  }
+  return lifted.length ? [...new Set([...base, ...lifted])] : base;
+}
+
+// Gather the team's flow model + a GitHub/run-state snapshot, then classify.
+// Returns `{ teamId, generatedAt, thresholds, repos, model, anomalies }`.
+async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const thresholds = flowAnomalySweep.resolveThresholds(teamCfg.anomalyThresholds);
+
+  // 1) Members (+ their triggers) of this team.
+  const members = [];
+  const envIds = new Set();
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch {
+      /* no triggers yet */
+    }
+    members.push({
+      id,
+      displayName: cfg.displayName || id,
+      emits: _flowLiftEmits(cfg.emits, triggers),
+      github: cfg.github || null,
+      triggers,
+    });
+    if (cfg.environmentId) envIds.add(cfg.environmentId);
+  }
+
+  const model = buildFlowModel(members, { labels });
+
+  // Which labels the detector cares about — bound the (expensive) timeline
+  // fetches to objects that actually carry one.
+  const interesting = new Set([
+    ...model.wakeEdges.map((w) => w.label),
+    ...model.wakeEdges.map((w) => w.claimLabel),
+    ...model.claimEdges.map((c) => c.claimLabel),
+    ...model.gateLabels,
+  ]);
+
+  // 2) Resolve one token per repo across the team's environments.
+  const repoToken = new Map();
+  const allowNonGithubHost = String(process.env.AEE_ALLOW_NON_GITHUB_REPO_HOST || "") === "1";
+  for (const envId of envIds) {
+    const env = loadEnvironment(envId);
+    if (!env || !env.githubTokenId) continue;
+    let token = null;
+    try {
+      token = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), "utf8").trim();
+    } catch {
+      continue;
+    }
+    if (!token) continue;
+    for (const r of Array.isArray(env.repositories) ? env.repositories : []) {
+      const full = ghParseRepoFullName(r && r.url, { allowNonGithubHost });
+      if (full && !repoToken.has(full)) repoToken.set(full, token);
+    }
+  }
+
+  // 3) Sweep GitHub for open issues/PRs, enriching interesting objects.
+  const objects = [];
+  const errors = [];
+  for (const [repo, token] of repoToken) {
+    const [owner, name] = repo.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    let issues = [];
+    let openPrs = [];
+    try {
+      issues = await _flowGithubGetJson(`${seg}/issues?state=open&per_page=100`, token);
+    } catch (err) {
+      errors.push(`${repo}: ${err.message}`);
+      continue;
+    }
+    try {
+      openPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    } catch {
+      openPrs = [];
+    }
+    for (const it of Array.isArray(issues) ? issues : []) {
+      const names = (Array.isArray(it.labels) ? it.labels : []).map((l) =>
+        typeof l === "string" ? l : l && l.name,
+      );
+      let timeline = null;
+      if (names.some((n) => interesting.has(n))) {
+        try {
+          timeline = await _flowGithubGetJson(`${seg}/issues/${it.number}/timeline`, token);
+        } catch {
+          timeline = null; // fall back to updated/created time
+        }
+      }
+      const linked =
+        flowAnomalySweep.objectKind(it) === "issue"
+          ? flowAnomalySweep.prsForIssue(openPrs, it.number)
+          : [];
+      objects.push(flowAnomalySweep.issueToDetectorObject(it, { timeline, linkedPrNumbers: linked }));
+    }
+  }
+
+  // 4) Per-consumer run state (running-sessions registry + session logs).
+  const sessions = {};
+  for (const id of Object.keys(model.consumers)) {
+    const active = new Set();
+    let running = false;
+    try {
+      const reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
+      if (Array.isArray(reg)) {
+        running = reg.length > 0;
+        for (const s of reg) if (s && s.correlationId) active.add(s.correlationId);
+      }
+    } catch {
+      /* no active sessions */
+    }
+    const events = [];
+    try {
+      const dir = agentStatePath(id, "sessions");
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const raw = fs.readFileSync(path.join(dir, f), "utf8");
+        for (const line of raw.split("\n")) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            events.push(JSON.parse(t));
+          } catch {
+            /* skip malformed line */
+          }
+        }
+      }
+    } catch {
+      /* no session logs */
+    }
+    sessions[id] = { running, runs: flowAnomalySweep.runsFromSessionEvents(events, active) };
+  }
+
+  const { anomalies } = detectFlowAnomalies({ model, github: { objects }, sessions, thresholds, now });
+  return {
+    teamId,
+    generatedAt: new Date(now).toISOString(),
+    thresholds,
+    repos: [...repoToken.keys()],
+    swept: objects.length,
+    errors,
+    model,
+    anomalies,
+  };
 }
 
 // Enrich a token-usage record (#654) with the authoritative control-plane
@@ -10359,6 +10572,37 @@ async function main() {
         console.error(`[Orchestrator] digest-status error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // GET /internal/teams/:teamId/flow-anomalies — observe-only stall detection
+    // (#959, concept §4.1/§4.3). Derives the team's expected label state machine
+    // from member ports, sweeps GitHub + run state with the poller's PAT, and
+    // returns the classified anomaly list. Skipped during maintenance mode (the
+    // sweep is a poll, and repairs — a later phase — must not fire in the window).
+    const flowAnomaliesMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/flow-anomalies(?:\?.*)?$/);
+    if (flowAnomaliesMatch) {
+      const teamId = decodeURIComponent(flowAnomaliesMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, anomalies: [], generatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await computeTeamFlowAnomalies(teamId);
+          return sendJson(res, 200, { maintenance: false, ...result });
+        } catch (err) {
+          console.error(`[Orchestrator] flow-anomalies error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned

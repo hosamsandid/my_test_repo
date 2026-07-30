@@ -1,11 +1,13 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
 import StageManager from './process/StageManager';
 import LabelRegistryPanel from './process/LabelRegistryPanel';
 import HumanRegistryPanel from './process/HumanRegistryPanel';
+import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
+import { anomalyCountByNode } from './process/flow-anomalies-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog } from './process/EdgeDialogs';
 import MaterializeDialog from './process/MaterializeDialog';
@@ -144,6 +146,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [humansOpen, setHumansOpen] = useState(false);
+  const [anomaliesOpen, setAnomaliesOpen] = useState(false);
+  // Per-node anomaly counts (#959) — overlaid as a badge on the canvas cards.
+  const [anomalyCounts, setAnomalyCounts] = useState({});
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -272,9 +277,39 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     graphRef.current.setData(displayGraph);
   }, [displayGraph, imported, isDraft, caps]);
 
+  // Overlay a per-node anomaly badge on the canvas cards (#959). Runs AFTER
+  // setData so it decorates freshly-rendered `.bp-node` elements; re-runs
+  // whenever the counts or graph change, and removes stale badges each pass.
+  useEffect(() => {
+    const root = viewportRef.current;
+    if (!root) return;
+    const stale = root.querySelectorAll('.bp-anomaly-badge');
+    stale.forEach((el) => el.remove());
+    for (const [id, count] of Object.entries(anomalyCounts || {})) {
+      if (!count) continue;
+      const node = root.querySelector(`.bp-node[data-id="${(window.CSS && window.CSS.escape) ? window.CSS.escape(id) : id}"]`);
+      if (!node) continue;
+      if (getComputedStyle(node).position === 'static') node.style.position = 'relative';
+      const badge = document.createElement('div');
+      badge.className = 'bp-anomaly-badge';
+      badge.title = `${count} flow anomal${count === 1 ? 'y' : 'ies'} — open the Anomalies panel`;
+      badge.textContent = String(count);
+      badge.style.cssText =
+        'position:absolute;top:-8px;right:-8px;min-width:18px;height:18px;padding:0 5px;' +
+        'border-radius:999px;background:var(--eb-status-warning,#d97706);color:#fff;font-size:11px;' +
+        'font-weight:700;display:flex;align-items:center;justify-content:center;z-index:5;' +
+        'box-shadow:0 1px 3px rgba(0,0,0,0.3);pointer-events:none;';
+      node.appendChild(badge);
+    }
+    return () => {
+      if (viewportRef.current) viewportRef.current.querySelectorAll('.bp-anomaly-badge').forEach((el) => el.remove());
+    };
+  }, [anomalyCounts, displayGraph]);
+
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
   // scope change from the parent also drops any imported blueprint preview.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported]);
+  useEffect(() => { setAnomaliesOpen(false); setAnomalyCounts({}); }, [scope]);
   useEffect(() => { setImported(null); setImportError(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the
@@ -457,6 +492,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}>Add human</ToolbarButton>
             <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
+            <ToolbarButton onClick={() => setAnomaliesOpen(true)} icon={Activity}
+              badge={Object.keys(anomalyCounts).length ? Object.values(anomalyCounts).reduce((a, b) => a + b, 0) : null}>
+              Anomalies
+            </ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           </>
         )}
@@ -663,6 +702,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           ops={isDraft ? draftOps : liveHumanOps}
           onClose={() => setHumansOpen(false)}
           onChanged={() => { if (!isDraft) refetch(); }}
+        />
+      )}
+
+      {anomaliesOpen && isTeamScope && !imported && (
+        <FlowAnomaliesPanel
+          teamId={scope}
+          onClose={() => setAnomaliesOpen(false)}
+          onData={(data) => setAnomalyCounts(anomalyCountByNode(data && data.anomalies))}
         />
       )}
 
@@ -958,7 +1005,7 @@ function AddRoleDialog({ onClose, onCreate }) {
   );
 }
 
-function ToolbarButton({ onClick, icon: Icon, disabled, children }) {
+function ToolbarButton({ onClick, icon: Icon, disabled, children, badge }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
       display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -968,6 +1015,13 @@ function ToolbarButton({ onClick, icon: Icon, disabled, children }) {
       cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
     }}>
       <Icon size={14} /> {children}
+      {badge != null && badge > 0 && (
+        <span style={{
+          marginLeft: 2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999,
+          background: 'var(--eb-status-warning, #d97706)', color: '#fff', fontSize: 10,
+          fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        }}>{badge}</span>
+      )}
     </button>
   );
 }

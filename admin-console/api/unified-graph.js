@@ -188,6 +188,10 @@ function processEdgeToUnified(e) {
   // hub is synthesised any more (#987 supersedes the #981 @human actor).
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
+  // Declared open ends (#1004): a terminal/external outcome edge is a proper
+  // endpoint, not a dead-end — forwarded so the canvas renders the terminus.
+  if (e.endpoint) u.endpoint = e.endpoint;
+  if (e.note) u.note = e.note;
   // Claim (#958): what the listener takes over when it wakes. Forwarded verbatim
   // so the canvas can render the claim badge on the listener edge — same
   // pass-through shape as the loop stop-contract blob (#936).
@@ -504,8 +508,13 @@ function computeDataflowLints(nodes, edges) {
         });
       }
     }
+    // Outputs marked as declared open ends (#1004): terminal ("the end
+    // product") or external ("consumed outside this flow") — no smell.
+    const markedOutputs = new Set(asArray(n.outputs)
+      .filter(a => a && typeof a === 'object' && (a.terminal === true || a.external))
+      .map(a => artifactKey(a)).filter(Boolean));
     for (const p of outputPaths(n)) {
-      if (allInputs.has(p) || humanDelivered.has(p)) continue;
+      if (allInputs.has(p) || humanDelivered.has(p) || markedOutputs.has(p)) continue;
       lints.push({
         code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
         message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,

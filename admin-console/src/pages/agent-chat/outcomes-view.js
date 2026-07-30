@@ -108,6 +108,9 @@ export function resolveOutcomeView(agent, peers, labels, humans) {
       consumers: consumersFor(o, node, list),
       humanHandoff: outcomeHandsOffToHuman(o, labels),
       humanReviewers: outcomeHumanReviewers(o, node, humans),
+      // Open-end marker (#1004): 'terminal' | 'external' | null (+ note).
+      marker: o.terminal === true ? 'terminal' : (o.external ? 'external' : null),
+      markerNote: (o.external && typeof o.external.note === 'string') ? o.external.note : '',
     }));
     return {
       kind: 'structured',
@@ -135,6 +138,7 @@ export function resolveOutcomeView(agent, peers, labels, humans) {
         consumers: labelConsumers(label, node, list),
         humanHandoff: outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label }] }, labels),
         humanReviewers: [], // a flat emit sets a label — there is no artifact to review
+        marker: null, markerNote: '', // flat emits carry no open-end markers
       })),
       consumersResolved,
     };

@@ -607,10 +607,39 @@ function ArtifactsBlock({ node, peers, ops, humans = [], humanOps, onChanged, fo
         // role clears the unconsumed-output lint and draws producer → role.
         const deliveryEntry = { artifact: 'file', name: artifactKey(a) };
         const reviewer = humanConsuming(humans, deliveryEntry);
+        // Open-end marker (#1004): a declared terminal/external output is a
+        // proper endpoint, not "no consumer yet".
+        const marker = a && typeof a === 'object' ? (a.terminal === true ? 'terminal' : (a.external ? 'external' : null)) : null;
+        const setMarker = (m) => ops.setArtifactMarker
+          && run(key, () => ops.setArtifactMarker(node.id, { name: a && a.name, path: a && a.path, marker: m }));
         const subtitle = (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            {consumers.length ? `consumers: ${consumers.join(', ')}${reviewer ? ' + a person' : ''}`
-              : reviewer ? 'read by a person 👤' : 'no consumer yet'}
+            {marker === 'terminal' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                ⏹ Terminal by design — the end product.
+                {ops.setArtifactMarker && <button type="button" onClick={() => setMarker(null)} title="Unmark" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>}
+              </span>
+            ) : marker === 'external' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                ↗ external{a.external && a.external.note ? `: ${a.external.note}` : ' — consumed outside this flow'}
+                {ops.setArtifactMarker && <button type="button" onClick={() => setMarker(null)} title="Unmark" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>}
+              </span>
+            ) : consumers.length ? `consumers: ${consumers.join(', ')}${reviewer ? ' + a person' : ''}`
+              : reviewer ? 'read by a person 👤' : (
+                // Open-end CTA (#1004): wire a person below, or declare the end.
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  no consumer yet
+                  {ops.setArtifactMarker && (
+                    <>
+                      — <button type="button" onClick={() => setMarker({ terminal: true })} style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark terminal</button>
+                      <button type="button" onClick={() => {
+                        const note = window.prompt('Who consumes this outside the flow? (optional note)') || '';
+                        setMarker({ external: note.trim() ? { note: note.trim() } : {} });
+                      }} style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark external…</button>
+                    </>
+                  )}
+                </span>
+              )}
             <HumanDeliveryPicker humans={humans} humanOps={humanOps} entry={deliveryEntry} onChanged={onChanged} disabled={busy === key} />
           </span>
         );
@@ -728,7 +757,10 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   // Routing is disabled while the outcome content has unsaved edits — the
   // engine must wire against the persisted label/action, not a draft.
   const routingDisabled = busy || dirty;
-  const noConsumerYet = !isNone && !humanHandoff && !wired.length && !humanReviewers.length;
+  // Open-end markers (#1004, concept §4.7): a declared endpoint is content
+  // (edited via onChange + explicit Save), not wiring.
+  const marker = option.terminal === true ? 'terminal' : (option.external ? 'external' : null);
+  const noConsumerYet = !isNone && !humanHandoff && !marker && !wired.length && !humanReviewers.length;
 
   return (
     <div style={{ ...rowBox, ...(highlight ? { borderColor: 'var(--eb-accent-primary)', boxShadow: '0 0 0 1px var(--eb-accent-primary)' } : {}) }}>
@@ -758,8 +790,33 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
             ? <>hands off to a person 👤 — the flow pauses for a decision{consumers.length ? <> · also wakes {consumers.join(', ')}</> : null}</>
             : (
               <>
+                {marker === 'terminal' && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    ⏹ Terminal by design — the end product.
+                    <button type="button" onClick={() => { const { terminal, ...rest } = option; onChange(rest); }}
+                      title="Unmark — this outcome is not the end product" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                )}
+                {marker === 'external' && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    ↗ external:
+                    <input value={option.external?.note || ''} placeholder="who consumes this (e.g. CI workflow)"
+                      onChange={e => onChange({ ...option, external: e.target.value ? { note: e.target.value } : {} })}
+                      style={{ ...input, width: 180, padding: '1px 4px', fontSize: 'var(--eb-text-xs)' }} />
+                    <button type="button" onClick={() => { const { external, ...rest } = option; onChange(rest); }}
+                      title="Unmark — this outcome is consumed inside this flow" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                )}
                 {noConsumerYet && (
-                  <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer yet —</span>
+                  // Open-end CTA (#1004): three ways to close the question —
+                  // wire a consumer, or declare the open end intentional.
+                  <>
+                    <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer yet —</span>
+                    <button type="button" onClick={() => onChange({ ...option, terminal: true })}
+                      style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark terminal</button>
+                    <button type="button" onClick={() => onChange({ ...option, external: {} })}
+                      style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark external…</button>
+                  </>
                 )}
                 {wired.map(w => (
                   <span key={w.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>

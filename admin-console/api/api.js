@@ -1736,6 +1736,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
           // Artifact audience (#981): 'human' declares a person consumes this
           // output (delivery touchpoint) — the only supported value.
           ...(a.audience === 'human' ? { audience: 'human' } : {}),
+          // Open-end markers (#1004, concept §4.7): terminal XOR external.
+          ...(a.terminal === true ? { terminal: true } : {}),
+          ...(a.terminal !== true && a.external && typeof a.external === 'object' && !Array.isArray(a.external)
+            ? { external: {
+                ...(typeof a.external.note === 'string' && a.external.note.trim()
+                  ? { note: a.external.note.trim() } : {}),
+              } }
+            : {}),
         };
       })
       .filter(a => a.name || a.path);

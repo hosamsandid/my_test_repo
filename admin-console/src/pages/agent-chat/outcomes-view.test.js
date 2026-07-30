@@ -89,6 +89,7 @@ test('a structured port yields one row per option with derived consumers', () =>
     consumers: ['Code Reviewer'],
     humanHandoff: false, // #981 — no brake label set, no registry threaded in
     humanReviewers: [],  // #1001 — no humans registry threaded in
+    marker: null, markerNote: '', // #1004 — no open-end marker set
   });
   assert.deepEqual(view.rows[1].consumers, ['QA']);
   assert.equal(view.rows[1].when, '');
@@ -255,4 +256,24 @@ test('a bound human reviewer surfaces on openIssue/openPr rows, never on label r
   // Legacy flat emits carry no artifact — reviewers stay empty.
   const legacy = resolveOutcomeView({ id: 'dev', emits: ['x'] }, peers, undefined, humans);
   assert.deepEqual(legacy.rows[0].humanReviewers, []);
+});
+
+/* ── #1004: open-end markers on rows ───────────────────────────────────── */
+
+test('terminal/external markers surface on structured rows; legacy rows stay unmarked', () => {
+  const agent = {
+    id: 'dev',
+    outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', actions: [{ type: 'openPr' }], terminal: true },
+      { id: 'report', actions: [{ type: 'openIssue' }], external: { note: 'org board' } },
+      { id: 'plain', actions: [{ type: 'setLabel', label: 'x' }] },
+    ] },
+  };
+  const view = resolveOutcomeView(agent, peers);
+  assert.equal(view.rows[0].marker, 'terminal');
+  assert.equal(view.rows[1].marker, 'external');
+  assert.equal(view.rows[1].markerNote, 'org board');
+  assert.equal(view.rows[2].marker, null);
+  const legacy = resolveOutcomeView({ id: 'dev', emits: ['x'] }, peers);
+  assert.equal(legacy.rows[0].marker, null);
 });

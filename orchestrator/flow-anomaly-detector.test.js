@@ -328,3 +328,37 @@ test('DEFAULT_THRESHOLDS are the documented T1/T2/T3', () => {
   assert.equal(DEFAULT_THRESHOLDS.claimStalledMs, 2 * 60 * 60 * 1000);
   assert.equal(DEFAULT_THRESHOLDS.gateIdleMs, 24 * 60 * 60 * 1000);
 });
+
+test('#1004: a terminal/external outcome drops the output-missing expectation', () => {
+  // Same #949 dead-end fixture, but the Merger declares a marked outcome —
+  // "the merged PR IS the product" — so a run that sets no forward label and
+  // opens no PR is legitimate, never an anomaly.
+  const membersWithMarker = MEMBERS.map((m) => (m.id === 'team-merger'
+    ? { ...m, outcomes: { mode: 'anyOf', options: [
+        { id: 'merged', title: 'Merged', actions: [{ type: 'none' }], terminal: true },
+      ] } }
+    : m));
+  const model = buildFlowModel(membersWithMarker, { labels: WAKE_LABELS });
+  const github = { objects: [
+    { kind: 'pr', number: 949, url: 'https://gh/pull/949', title: 'Merge me', state: 'open',
+      createdAt: hoursAgo(4), updatedAt: hoursAgo(1),
+      labels: [{ name: 'ready-to-merge', appliedAt: hoursAgo(1) }] },
+  ] };
+  const sessions = {
+    'team-merger': { running: false, runs: [{ kind: 'pr', number: 949, ranAt: minsAgo(50), finishedAt: minsAgo(45), active: false }] },
+  };
+  const { anomalies } = detectFlowAnomalies({ model, github, sessions, now: NOW });
+  assert.equal(anomalies.filter((a) => a.class === 'output-missing').length, 0);
+  // The external marker behaves the same.
+  const membersExternal = MEMBERS.map((m) => (m.id === 'team-merger'
+    ? { ...m, outcomes: { mode: 'anyOf', options: [
+        { id: 'handoff', actions: [{ type: 'none' }], external: { note: 'release pipeline' } },
+      ] } }
+    : m));
+  const modelExt = buildFlowModel(membersExternal, { labels: WAKE_LABELS });
+  const extRun = detectFlowAnomalies({ model: modelExt, github, sessions, now: NOW });
+  assert.equal(extRun.anomalies.filter((a) => a.class === 'output-missing').length, 0);
+  // Sanity: without the marker the same fixture still fires (the #949 test above).
+  const base = detectFlowAnomalies({ model: MODEL, github, sessions, now: NOW });
+  assert.equal(base.anomalies.filter((a) => a.class === 'output-missing').length, 1);
+});

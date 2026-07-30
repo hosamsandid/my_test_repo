@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User, Trash2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import { wireHumanGate } from './wiring-engine';
 
 // Inspector variant for a first-class human role node (#987). A human role is
 // purely declarative — no prompt, no triggers, no session — so this is a focused
@@ -22,7 +23,42 @@ function consumeLabel(c) {
   return '';
 }
 
-export default function HumanNodeInspector({ human, stages = [], ops, onClose, onDeleted, onChanged }) {
+// "On approval, wake…" for one gate label (#1005, A9): shows who already wakes
+// on it; the picker wires a new consumer through the engine (claimed listener).
+function GateWakePicker({ label, human, peers, ops, humanOps, busy, onChanged }) {
+  const [wiring, setWiring] = useState(false);
+  const [error, setError] = useState(null);
+  const agents = peers.filter(p => p && p.kind !== 'human');
+  const listeners = agents.filter(p => (p.triggers || []).some(t =>
+    t && t.type === 'github-event' && t.labelFilter === label));
+  const listenerIds = new Set(listeners.map(p => p.id));
+  const candidates = agents.filter(p => !listenerIds.has(p.id));
+  const wake = async (targetId) => {
+    if (!targetId) return;
+    setWiring(true); setError(null);
+    try {
+      await wireHumanGate({ ops, humanOps }, { human: human.id, to: targetId, label });
+      onChanged?.();
+    } catch (e) { setError(e.message); }
+    finally { setWiring(false); }
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexWrap: 'wrap' }}>
+      <code>{label}</code> — on approval, wake
+      {listeners.map(p => <strong key={p.id} style={{ color: 'var(--eb-text-secondary)' }}>{p.displayName || p.id}</strong>)}
+      {candidates.length > 0 && (
+        <select value="" disabled={busy || wiring} onChange={e => wake(e.target.value)}
+          style={{ ...inputStyle, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+          <option value="">{listeners.length ? '＋ also…' : '— pick an agent —'}</option>
+          {candidates.map(p => <option key={p.id} value={p.id}>{p.displayName || p.id}</option>)}
+        </select>
+      )}
+      {error && <span style={{ color: 'var(--eb-status-error)' }}>{error}</span>}
+    </div>
+  );
+}
+
+export default function HumanNodeInspector({ human, stages = [], ops, triggerOps, peers = [], onClose, onDeleted, onChanged }) {
   const [name, setName] = useState(human.name || human.id);
   const [description, setDescription] = useState(human.description || '');
   const [stage, setStage] = useState(human.stage || '');
@@ -88,6 +124,13 @@ export default function HumanNodeInspector({ human, stages = [], ops, onClose, o
           <p style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 4, lineHeight: 1.5 }}>
             A label a human applies is a gate — an agent emitting it is a hard error.
           </p>
+          {/* "On approval, wake…" (#1005, concept A9): the same picker the gate
+              dialog offers, so a gate label authored here is routable in place —
+              picking an agent wires the claimed listener via the engine. */}
+          {triggerOps && (human.emits || []).map(l => (
+            <GateWakePicker key={l} label={l} human={human} peers={peers}
+              ops={triggerOps} humanOps={ops} busy={busy} onChanged={onChanged} />
+          ))}
         </div>
         <div>
           <label style={labelStyle}>Consumes (wired)</label>

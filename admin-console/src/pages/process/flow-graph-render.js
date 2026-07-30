@@ -1170,19 +1170,47 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       if (bp.rigor)    badgeParts.push(`<span class="bp-badge bp-badge-rigor-${esc(bp.rigor)}">${esc(bp.rigor)}</span>`);
       if (bp.revision && parseInt(bp.revision) > 1)
         badgeParts.push(`<span class="bp-badge bp-badge-revision" title="Revised">Rev ${esc(String(bp.revision))}</span>`);
-      // GitHub produce badges (#380) — visible before any wiring.
-      if (bp.github && bp.github.producesPr)
-        badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
-      if (bp.github && bp.github.producesIssue)
-        badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
+      // GitHub produce badges (#380) — visible before any wiring. Draggable
+      // outcome ports again (#1005 heals the #411 amputation): dragging a badge
+      // onto another node opens the channel form pre-typed by the artifact.
+      const draggableBadges = [];
+      const badgeDraggable = state.editable && !!onConnectOutcome;
+      if (bp.github && bp.github.producesPr) {
+        draggableBadges.push({ cls: 'bp-badge bp-badge-gh-pr', text: '⇅ PR', artifact: 'pr',
+          title: badgeDraggable ? 'Opens pull requests — drag to the agent that reacts to them' : 'Opens pull requests' });
+      }
+      if (bp.github && bp.github.producesIssue) {
+        draggableBadges.push({ cls: 'bp-badge bp-badge-gh-issue', text: '◉ Issue', artifact: 'issue',
+          title: badgeDraggable ? 'Opens issues — drag to the agent that reacts to them' : 'Opens issues' });
+      }
       // Switch badge (#828): an exactlyOne outcomes port picks exactly one branch
       // per run — render the ◇ glyph so the node reads as a switch.
       if (bp.outcomes && bp.outcomes.mode === 'exactlyOne')
         badgeParts.push(`<span class="bp-badge bp-badge-outcome" title="Switch — exactly one outcome per run">◇ switch</span>`);
-      if (badgeParts.length > 0) {
+      if (badgeParts.length > 0 || draggableBadges.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
-        badges.innerHTML = badgeParts.join('');
+        for (const b of draggableBadges) {
+          const el = document.createElement('span');
+          el.className = b.cls;
+          el.textContent = b.text;
+          el.title = b.title;
+          if (badgeDraggable) {
+            el.style.cursor = 'crosshair';
+            el.addEventListener('mousedown', (ev) => {
+              ev.stopPropagation();
+              ev.preventDefault();
+              startConnect(n.id, { artifact: b.artifact });
+            });
+          }
+          badges.appendChild(el);
+        }
+        if (badgeParts.length > 0) {
+          const rest = document.createElement('span');
+          rest.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+          rest.innerHTML = badgeParts.join('');
+          badges.appendChild(rest);
+        }
         node.appendChild(badges);
       }
 
@@ -1323,7 +1351,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           dot.addEventListener('mousedown', (ev) => {
             ev.stopPropagation();
             ev.preventDefault();
-            startConnect(n.id, { id: o.id, title, label: setLabelAction ? setLabelAction.label : '' });
+            // Pre-typed drag (#1005): the outcome's action determines the form —
+            // `artifact` set → channel dialog, else the label hand-off.
+            const opensPr = (o.actions || []).some(a => a && a.type === 'openPr');
+            const opensIssue = (o.actions || []).some(a => a && a.type === 'openIssue');
+            startConnect(n.id, {
+              id: o.id, title,
+              label: setLabelAction ? setLabelAction.label : '',
+              artifact: setLabelAction ? null : (opensPr ? 'pr' : (opensIssue ? 'issue' : null)),
+            });
           });
           row.appendChild(tag);
           row.appendChild(dot);

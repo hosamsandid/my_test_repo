@@ -486,6 +486,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         if (art.direction === 'output') {
           if (!reg[path].producers.includes(bp.id)) reg[path].producers.push(bp.id);
           if (art.ac && !reg[path].acs.includes(art.ac)) reg[path].acs.push(art.ac);
+          // Audience (#981): a person consumes this output — badge + @human edge.
+          if (art.audience === 'human') reg[path].humanAudience = true;
         } else if (art.direction === 'input') {
           if (!reg[path].consumers.includes(bp.id)) reg[path].consumers.push(bp.id);
         }
@@ -642,6 +644,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   function actorHasEdges(a) {
     // An actor may source edges (@github events, @human gate labels) or sink
     // them (@human brake hand-offs / deliveries, #981).
+    if (a.actor === 'human'
+        && Object.values(state.artifactRegistry || {}).some(r => r.humanAudience)) {
+      return true; // artifact delivery to a person — drawn from the artifact card
+    }
     return (state.extraEdges || []).some(e =>
       (e.from === a.id && state.byId[e.to]) || (e.to === a.id && state.byId[e.from]));
   }
@@ -1531,6 +1537,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         meta.innerHTML += `<span style="background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b55;border-radius:3px;padding:1px 5px;font-size:10px;">${esc(ac)}</span>`;
       });
 
+      // Human audience (#981): a person consumes this artifact.
+      if (reg.humanAudience) {
+        meta.innerHTML += `<span title="A person consumes this artifact" style="background:#e11d4822;color:#e11d48;border:1px solid #e11d4855;border-radius:3px;padding:1px 5px;font-size:10px;">👤 for a person</span>`;
+      }
+
       node.appendChild(meta);
 
       const desc = reg.descriptions.find(d => d && !d.startsWith('From bp:')) || reg.descriptions[0];
@@ -2076,6 +2087,25 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
               EDGE_STYLES.artifact.color, 1.5, '', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
+
+      // Delivery to a person (#981): the artifact's declared audience is a
+      // human — draw artifact → @human so the hand-off is explicit (same
+      // dashed consumer-arm styling, rose like the other human hand-offs).
+      const humanPos = state.actorPositions['@human'];
+      if (reg.humanAudience && humanPos && !state.hiddenActorKinds.has('human')) {
+        const hCx = humanPos.x + ACTOR_W / 2;
+        const hCy = humanPos.y + ACTOR_H / 2;
+        const d = vertical
+          ? drawBezierEdge(
+              topAnchorX(artPos, hCx), artPos.y,
+              hCx, humanPos.y + ACTOR_H,
+              EDGE_STYLES.handoff.color, 1.5, '4 3', true, 'vertical')
+          : drawBezierEdge(
+              artPos.x, leftAnchorY(artPos, artH, hCy),
+              humanPos.x + ACTOR_W, hCy,
+              EDGE_STYLES.handoff.color, 1.5, '4 3', true, 'horizontal');
+        void d; // display-only — no edge hit, the audience is edited in the Routing tab
+      }
 
       // Input edges: artifact → BP (data-flow green, dashed to read as the
       // consumer arm), back out of the lane.

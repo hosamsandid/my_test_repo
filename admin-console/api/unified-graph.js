@@ -40,6 +40,7 @@
 
 const {
   buildProcessGraph,
+  compareHumanTouchpoints,
 } = require('./process-graph');
 const {
   buildProcessTemplate,
@@ -350,6 +351,21 @@ function buildUnifiedGraph(nodes, edges, options) {
     push({ from, to, on: 'artifact', paths: [...paths].sort() });
   }
 
+  // 3a) Artifact deliveries to a person (#981): an output whose declared
+  //     `audience` is 'human' is consumed by a PERSON (a report, a review
+  //     document), not by an agent — drawn as producer → @human and exempted
+  //     from `unconsumed-output` in computeDataflowLints.
+  const artifactDeliveries = [];
+  for (const n of list) {
+    for (const a of asArray(n.outputs)) {
+      if (!a || typeof a !== 'object' || a.audience !== 'human') continue;
+      const k = artifactKey(a);
+      if (!k) continue;
+      push({ from: n.id, to: ACTORS.human, on: 'artifact', paths: [k], audience: 'human' });
+      artifactDeliveries.push({ type: 'delivery', artifact: 'file', name: k, agentId: n.id });
+    }
+  }
+
   // 3b) GitHub channel edges (#380): a consumer's `channels` port declares which
   //     producer's PR/issue it reacts to. Producer → consumer, tagged with the
   //     artifact, the optional routing label, and the optional human-approval
@@ -401,7 +417,10 @@ function buildUnifiedGraph(nodes, edges, options) {
 
   return {
     nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels,
-    humanTouchpoints: pg.humanTouchpoints, lints,
+    // Process-level touchpoints plus the data-flow artifact deliveries (#981),
+    // merged into the one deterministic order.
+    humanTouchpoints: [...pg.humanTouchpoints, ...artifactDeliveries].sort(compareHumanTouchpoints),
+    lints,
   };
 }
 
@@ -426,8 +445,13 @@ function computeDataflowLints(nodes, edges) {
         });
       }
     }
+    // A declared human audience (#981) is a consumer — the delivery edge to
+    // @human replaces the "nothing consumes it" smell.
+    const humanKeys = new Set(asArray(n.outputs)
+      .filter(a => a && typeof a === 'object' && a.audience === 'human')
+      .map(artifactKey).filter(Boolean));
     for (const p of outputPaths(n)) {
-      if (!allInputs.has(p)) {
+      if (!allInputs.has(p) && !humanKeys.has(p)) {
         lints.push({
           code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
           message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,

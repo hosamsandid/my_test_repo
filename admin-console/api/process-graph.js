@@ -524,6 +524,13 @@ function buildProcessGraph(agents, options) {
 // Sorted deterministically (type, then label/artifact, then agent) and deduped
 // so N triggers on one label yield one touchpoint.
 const TOUCHPOINT_ORDER = { injection: 0, decision: 1, delivery: 2 };
+// Shared comparator so unified-graph can merge its data-flow delivery
+// touchpoints (#981 follow-up) and keep the one deterministic order.
+function compareHumanTouchpoints(a, b) {
+  return (TOUCHPOINT_ORDER[a.type] - TOUCHPOINT_ORDER[b.type])
+    || String(a.label || a.name || a.artifact || '').localeCompare(String(b.label || b.name || b.artifact || ''))
+    || String(a.agentId).localeCompare(String(b.agentId));
+}
 function computeHumanTouchpoints(nodes, edges) {
   const out = [];
   const seen = new Set();
@@ -562,10 +569,7 @@ function computeHumanTouchpoints(nodes, edges) {
       });
     }
   }
-  return out.sort((a, b) =>
-    (TOUCHPOINT_ORDER[a.type] - TOUCHPOINT_ORDER[b.type])
-    || String(a.label || a.artifact || '').localeCompare(String(b.label || b.artifact || ''))
-    || String(a.agentId).localeCompare(String(b.agentId)));
+  return out.sort(compareHumanTouchpoints);
 }
 
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
@@ -776,4 +780,4 @@ function computeLints(nodes, edges, classifier) {
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, computeHumanTouchpoints, listenKeys, classifyKind, makeLabelClassifier };
+module.exports = { buildProcessGraph, computeLints, computeHumanTouchpoints, compareHumanTouchpoints, listenKeys, classifyKind, makeLabelClassifier };

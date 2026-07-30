@@ -970,7 +970,9 @@ function LintsPanel({ lints, onFocus }) {
 const TOUCHPOINT_TEXT = {
   injection: (t, name) => <>Human applies <code>{t.label || t.artifact}</code> → wakes <strong>{name}</strong></>,
   decision: (t, name) => <><strong>{name}</strong> pauses on <code>{t.label}</code> — human decides</>,
-  delivery: (t, name) => <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
+  delivery: (t, name) => t.artifact === 'file'
+    ? <><strong>{name}</strong> delivers <code>{t.name}</code> to a person</>
+    : <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
 };
 function HumanTouchpointsPanel({ touchpoints, nodes, onFocus }) {
   const [open, setOpen] = useState(false);

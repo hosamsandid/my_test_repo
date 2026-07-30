@@ -635,3 +635,48 @@ test('#981: humanTouchpoints pass through the unified graph', () => {
     { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
   ]);
 });
+
+// ── #981 follow-up: data-flow artifacts for a person ─────────────────────────
+
+test('#981: a human-audience output clears unconsumed-output and draws artifact → @human', () => {
+  const before = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md' }], triggers: [] },
+  ]);
+  assert.ok(lintCodes(before).includes('unconsumed-output'));
+
+  const after = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md', audience: 'human' }], triggers: [] },
+  ]);
+  assert.ok(!lintCodes(after).includes('unconsumed-output'));
+  const e = findEdge(after, x => x.on === 'artifact' && x.to === '@human');
+  assert.ok(e);
+  assert.equal(e.from, 'analyst');
+  assert.deepEqual(e.paths, ['analysis-report']);
+  assert.equal(e.audience, 'human');
+  assert.ok(after.nodes.some(n => n.id === '@human' && n.kind === 'actor'));
+});
+
+test('#981: a human-audience output that an agent ALSO consumes keeps both edges', () => {
+  const g = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'report', audience: 'human' }], triggers: [] },
+    { id: 'writer', inputs: [{ name: 'report' }], triggers: [] },
+  ]);
+  assert.ok(findEdge(g, x => x.on === 'artifact' && x.from === 'analyst' && x.to === 'writer'));
+  assert.ok(findEdge(g, x => x.on === 'artifact' && x.from === 'analyst' && x.to === '@human'));
+  assert.ok(!lintCodes(g).includes('unconsumed-output'));
+});
+
+test('#981: artifact deliveries appear as file touchpoints, merged in order', () => {
+  const g = buildUnifiedGraph(
+    [
+      { id: 'analyst', outputs: [{ name: 'analysis-report', audience: 'human' }], triggers: [] },
+      { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    ],
+    undefined,
+    { labels: [{ name: 'human-decision-needed', brake: true }] },
+  );
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+    { type: 'delivery', artifact: 'file', name: 'analysis-report', agentId: 'analyst' },
+  ]);
+});

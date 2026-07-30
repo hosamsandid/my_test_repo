@@ -6,6 +6,7 @@ import {
   eventsAreLabelFilterable,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
+  claimBodyFor,
   summarizeLoopEdge,
   hasClaim,
   summarizeClaimEdge,
@@ -195,4 +196,26 @@ test('claimTooltip spells the swap out in full', () => {
   assert.equal(claimTooltip({ remove: 'ready', add: 'ready:wip' }),
     'Claims the label when it wakes: ready → ready:wip');
   assert.equal(claimTooltip(null), '');
+});
+
+/* ── #1006: raw-layer claim stamping (claimBodyFor) ─────────────────────── */
+
+test('claimBodyFor stamps the derived claim on claimed .labeled listeners', () => {
+  assert.deepEqual(
+    claimBodyFor({ labelFilter: 'ready', events: ['issues.labeled'], claimOn: true, isEdit: false }),
+    { remove: 'ready', add: 'ready:wip' },
+  );
+  assert.deepEqual(
+    claimBodyFor({ labelFilter: 'go', events: ['pull_request.labeled'], claimOn: true, isEdit: true }),
+    { remove: 'go', add: 'go:wip' },
+  );
+});
+
+test('claimBodyFor: opt-out preserved; unlabeled/raw events never claim', () => {
+  // Opt-out on create → field omitted; on edit → explicit null clears.
+  assert.equal(claimBodyFor({ labelFilter: 'x', events: ['issues.labeled'], claimOn: false, isEdit: false }), undefined);
+  assert.equal(claimBodyFor({ labelFilter: 'x', events: ['issues.labeled'], claimOn: false, isEdit: true }), null);
+  // An .unlabeled or raw event has no wake label to take over.
+  assert.equal(claimBodyFor({ labelFilter: 'x', events: ['issues.unlabeled'], claimOn: true, isEdit: false }), undefined);
+  assert.equal(claimBodyFor({ labelFilter: null, events: ['issues.labeled'], claimOn: true, isEdit: false }), undefined);
 });

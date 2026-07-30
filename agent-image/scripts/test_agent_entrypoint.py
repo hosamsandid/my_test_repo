@@ -2855,3 +2855,34 @@ class GhSwapLabels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonconformantTriggerReasonTest(unittest.TestCase):
+    """#1006 — the raw-layer wiring guard (mirror of rawTriggerError in
+    admin-console/api/process-template.js)."""
+
+    def test_multi_event_flagged(self):
+        t = {"type": "github-event",
+             "events": ["issues.labeled", "pull_request.labeled"],
+             "labelFilter": "go"}
+        reason = entrypoint._nonconformant_trigger_reason(t)
+        self.assertIn("exactly ONE event", reason)
+
+    def test_single_event_and_valid_claim_pass(self):
+        t = {"type": "github-event", "events": ["issues.labeled"],
+             "labelFilter": "go", "claim": {"remove": "go", "add": "go:wip"}}
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason(t))
+
+    def test_claim_shape_violations_flagged(self):
+        base = {"type": "github-event", "events": ["issues.labeled"]}
+        self.assertIn("labelFilter", entrypoint._nonconformant_trigger_reason(
+            {**base, "claim": {"remove": "x", "add": "x:wip"}}))
+        self.assertIn("claim.remove", entrypoint._nonconformant_trigger_reason(
+            {**base, "labelFilter": "go", "claim": {"remove": "other", "add": "go:wip"}}))
+        self.assertIn(":wip", entrypoint._nonconformant_trigger_reason(
+            {**base, "labelFilter": "go", "claim": {"remove": "go", "add": "done"}}))
+
+    def test_non_github_types_never_checked(self):
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason(
+            {"type": "cron", "events": ["a", "b"]}))
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))

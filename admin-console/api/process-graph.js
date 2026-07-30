@@ -28,7 +28,7 @@ const {
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
 // process-template requires only ./outcomes, never this module.
-const { CLAIM_SUFFIX } = require('./process-template');
+const { CLAIM_SUFFIX, rawTriggerError } = require('./process-template');
 
 // ─── gate/brake classification (#928) ────────────────────────────────────────
 //
@@ -894,6 +894,24 @@ function computeLints(nodes, edges, classifier) {
         message: `\`${n.id}\` has ${group.length} triggers listening on the same event`
           + `${label ? ` + label \`${label}\`` : 's'}${ids.length ? ` (${ids.map(i => `\`${i}\``).join(', ')})` : ''}`
           + ` — they fire redundantly.`,
+      });
+    }
+  }
+
+  // raw-trigger-nonconformant (#1006, concept §4.8). The raw layers (agent
+  // self-managed triggers.json, direct file/API edits) may deviate from the
+  // wiring rules — but VISIBLY, never silently: a multi-event github-event
+  // trigger or a malformed claim surfaces as this advisory lint. Same rule
+  // helper as the write-side validators, so the rule set cannot drift.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    for (const t of (n.triggers || [])) {
+      const te = rawTriggerError(t);
+      if (!te) continue;
+      lints.push({
+        code: 'raw-trigger-nonconformant', severity: 'info', nodeId: n.id,
+        ...(t.id ? { triggerIds: [t.id] } : {}),
+        message: `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
       });
     }
   }

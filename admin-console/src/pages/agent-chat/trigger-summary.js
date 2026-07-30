@@ -164,3 +164,17 @@ export function summarizeGithubEventTrigger(trigger) {
     : null;
   return { events, label };
 }
+
+// The claim payload a TriggersPanel save carries (#1006): the raw layer follows
+// the same `<wake>:wip` convention as the engine paths. Returns the claim
+// object when the listener is a claimed `.labeled` label listener, `null` to
+// clear a stored claim on edit, and `undefined` (field omitted) on an
+// unclaimed create. Pure — unit-tested against the server-side validator's
+// expectations.
+export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
+  const lf = String(labelFilter || '').trim();
+  const labeled = (Array.isArray(events) ? events : [])
+    .some(e => e === 'issues.labeled' || e === 'pull_request.labeled');
+  if (lf && labeled && claimOn) return { remove: lf, add: `${lf}:wip` };
+  return isEdit ? null : undefined;
+}

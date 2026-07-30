@@ -1249,3 +1249,17 @@ test('#1004: a marked artifact outcome suppresses producer-unconsumed', () => {
   assert.ok(!lintCodes(mk({ terminal: true })).includes('producer-unconsumed'), 'the merged PR IS the product');
   assert.ok(!lintCodes(mk({ external: {} })).includes('producer-unconsumed'), 'external consumer declared');
 });
+
+test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', triggers: [
+      { id: 't-two', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
+      { id: 't-ok', type: 'github-event', events: ['issues.labeled'], labelFilter: 'fine', claim: { remove: 'fine', add: 'fine:wip' } },
+      { id: 't-badclaim', type: 'github-event', events: ['issues.labeled'], labelFilter: 'x', claim: { remove: 'x', add: 'nope' } },
+    ] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.equal(raws.length, 2);
+  assert.ok(raws.every(l => l.severity === 'info'), 'advisory, never blocking');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
+});

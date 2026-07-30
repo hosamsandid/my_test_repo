@@ -14,7 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
-import { summarizeLoopEdge } from '../agent-chat/trigger-summary';
+import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
@@ -1892,11 +1892,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // Label listener sourced from GitHub (incl. human-set labels and gates).
     const gate = e.gate === 'human';
     const evs = Array.isArray(e.events) && e.events.length ? ` (${e.events.join(', ')})` : '';
+    // Claim (#958) — the full swap belongs in the tooltip; the chip carries only
+    // the compact `⇥ wip` badge (see labelChipText).
+    const claimTip = claimTooltip(e.claim);
     return {
       icon: gate ? '👤✓' : '🏷',
       text: labelChipText(e),
       color: gate ? EDGE_STYLES.gate.color : EDGE_STYLES.label.color,
-      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs,
+      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs
+        + (claimTip ? ` — ${claimTip}` : ''),
     };
   }
 
@@ -1929,7 +1933,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // the canvas shows WHICH label change (issue vs PR, added vs removed) fires.
   function labelChipText(e) {
     const tag = labelEventTag(e.events);
-    return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
+    const base = tag ? `${e.label || ''} · ${tag}` : (e.label || '');
+    // Claim badge (#958): the listener takes its wake label over as `<wake>:wip`
+    // when it fires. Appended to the same chip rather than drawn as a second
+    // badge — one chip per edge keeps the routed-label placement (and
+    // estChipWidth) honest.
+    const claim = summarizeClaimEdge(e.claim);
+    return claim ? `${base} ${claim}` : base;
   }
   // The producer's title for an outcome-keyed edge (#828): resolve the outcome
   // option's title from the source node so the edge reads `◇ Accepted` rather

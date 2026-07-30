@@ -1760,6 +1760,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Claim opt-out (#958) — must survive the live port write, otherwise
+        // reconcileTeamGithubChannels re-stamps the claim the author just turned
+        // off. Only the non-default is persisted.
+        ...(c.autoClaim === false ? { autoClaim: false } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -3233,6 +3237,7 @@ app.get('/api/process/graph', (req, res) => {
       const triggers = (t.triggers || []).map(tr => ({
         id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
         cron: tr.cron, at: tr.at, enabled: tr.enabled, channel: tr.channel,
+        claim: tr.claim, // #958 — else the preview graph lints every listener as unclaimed
       }));
       agents.push({
         id: t.id, role: 'template', displayName: t.displayName || t.id,

@@ -456,6 +456,11 @@ VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
 # the retry the whole delivery chain silently stalls (#902 incident).
 TRIGGER_RETRY_DELAY_SEC = int(os.environ.get("TRIGGER_RETRY_DELAY_SEC", "60"))
 
+# Claim-label swap (#957): one `gh issue edit` PATCH. Bounded tightly — the
+# swap sits between the preCheck gate and the invoke, and claiming is
+# observability, so it must never become a slow start gate.
+CLAIM_SWAP_TIMEOUT_SEC = int(os.environ.get("CLAIM_SWAP_TIMEOUT_SEC", "30"))
+
 # The claude CLI already retries transient upstream 5xx up to 10x internally
 # with exponential backoff; our trigger-level retry only helps when that budget
 # was exhausted by a *sustained* outage. A permanent failure (bad model id,
@@ -2323,6 +2328,86 @@ def _usage_github_and_key(gh: dict | None) -> tuple[dict | None, str | None]:
         ref = payload.get("ref") if isinstance(payload.get("ref"), str) else None
         key = f"push:{ref}" if ref else None
     return block, key
+
+
+# --- Claim labels (#957) ---------------------------------------------------
+# "An agent is working on this" used to exist only inside a container's session
+# log. Swapping the wake label for a claim label ("ready" -> "ready:wip") when a
+# run starts turns GitHub itself into the state machine and separates the three
+# stall modes that are otherwise indistinguishable from outside: never started
+# (wake label still set), died after claiming (claim label stuck), finished
+# without emitting (claim label gone, no outcome label).
+#
+# The claim is deliberately a DECLARATIVE trigger field executed mechanically by
+# the runner, never prompt prose — a claim the agent is *asked* to perform just
+# moves "the agent forgot the label" one step earlier.
+
+def _claim_plan(trigger: dict, gh: dict | None) -> dict | None:
+    """Resolve a `github-event` trigger's optional declarative claim field
+    (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) against the event
+    that fired it, into `{repo, number, remove, add}`.
+
+    Returns None when there is nothing to claim: no (or a malformed) `claim`
+    field, a non-`github-event` trigger (`cron`/`once`/`http` have no wake label
+    to swap or restore), or an event carrying no issue/PR to label. Pure — does
+    no I/O, so the decision is unit-testable without a `gh` binary."""
+    if not isinstance(trigger, dict) or trigger.get("type") != "github-event":
+        return None
+    claim = trigger.get("claim")
+    if not isinstance(claim, dict):
+        return None
+    remove, add = claim.get("remove"), claim.get("add")
+    if not (isinstance(remove, str) and remove.strip()):
+        return None
+    if not (isinstance(add, str) and add.strip()):
+        return None
+    gh = gh if isinstance(gh, dict) else {}
+    repo = gh.get("repo")
+    if not (isinstance(repo, str) and "/" in repo):
+        return None
+    payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+    pr = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else {}
+    number = issue.get("number")
+    if number is None:
+        number = pr.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        return None
+    return {"repo": repo, "number": number,
+            "remove": remove.strip(), "add": add.strip()}
+
+
+def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
+    """Swap one label for another on an issue/PR via the `gh` CLI (the
+    spawn-time PAT is already in the container env). A single `gh issue edit` is
+    one PATCH, so there is no window in which neither label is set; `gh issue
+    edit` accepts PR numbers too, so one code path covers both.
+
+    Best-effort: returns False on any failure instead of raising, because
+    claiming is observability and must never gate the start of a run. The catch
+    is deliberately broad — this runs inside `asyncio.to_thread`, so anything
+    escaping it would abort the run before the invoke, and at the rollback site
+    it would mask the CalledProcessError the failure notice reports on."""
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        print("[Runner] label swap skipped: no GH_TOKEN/GITHUB_TOKEN in env",
+              file=sys.stderr)
+        return False
+    what = f"{repo}#{number} -{remove} +{add}"
+    try:
+        proc = subprocess.run(
+            ["gh", "issue", "edit", str(number), "--repo", repo,
+             "--remove-label", remove, "--add-label", add],
+            capture_output=True, text=True, env={**os.environ},
+            timeout=CLAIM_SWAP_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        print(f"[Runner] label swap {what} error: {exc}", file=sys.stderr)
+        return False
+    if proc.returncode != 0:
+        print(f"[Runner] label swap {what} failed (rc={proc.returncode}): "
+              f"{(proc.stderr or '').strip()}", file=sys.stderr)
+        return False
+    return True
 
 
 def _resolve_repo_dir() -> Path | None:
@@ -4754,12 +4839,20 @@ class TriggerScheduler:
 
     async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
                                            err: Exception,
-                                           permanent: bool = False) -> None:
+                                           permanent: bool = False,
+                                           restored_label: str | None = None
+                                           ) -> None:
         """Post one plain DM notice when a triggered run is given up. Best-effort,
         no Claude call — the triggering event is consumed and will not re-fire,
         so a silent failure would leave the delivery chain stalled with nobody
-        the wiser. `permanent` distinguishes a config/4xx failure (retrying is
-        pointless) from a transient one that failed both attempts."""
+        the wiser.
+
+        `permanent` distinguishes a config/4xx failure (retrying is pointless,
+        so the run was not retried) from a transient one that failed both
+        attempts. When the run had claimed the item and the claim was rolled
+        back (#957), `restored_label` names the wake label that is back on it:
+        the poller re-fires the chain by itself, so the notice must not ask for
+        a manual re-issue that would double-run the work."""
         if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
             return
         tid = trigger.get("id", "?")
@@ -4769,20 +4862,34 @@ class TriggerScheduler:
             "fail the same way)" if permanent else
             "crashed twice and was given up"
         )
-        body = (
-            f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) {gave_up}. "
-            f"The event that fired it is consumed and will NOT re-fire on its "
-            f"own — the work it should have done is still open. Please re-issue "
-            f"the event (e.g. toggle the label) or hand me the task directly."
-            f"\n\nLast error: {_claude_error_detail(err)}"
-        )
+        detail = _claude_error_detail(err)
+        if restored_label:
+            body = (
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The claim was rolled back: the `{restored_label}` "
+                f"label is back on the item, which re-fires this chain on its "
+                f"own — no manual step needed. If it keeps crashing, the "
+                f"conversation throttle stops the retries and it needs a human."
+                f"\n\nLast error: {detail}"
+            )
+        else:
+            body = (
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The event that fired it is consumed and will NOT "
+                f"re-fire on its own — the work it should have done is still "
+                f"open. Please re-issue the event (e.g. toggle the label) or "
+                f"hand me the task directly.\n\nLast error: {detail}"
+            )
+        failure_block = {
+            "triggerId": tid,
+            "triggerType": trigger.get("type"),
+        }
+        if restored_label:
+            failure_block["claimRolledBack"] = restored_label
         content = {
             "msgtype": "m.notice",
             "body": body,
-            "io.aee.triggerFailure": {
-                "triggerId": tid,
-                "triggerType": trigger.get("type"),
-            },
+            "io.aee.triggerFailure": failure_block,
         }
         await self._client.room_send(
             room_id=room_id,
@@ -4911,6 +5018,36 @@ class TriggerScheduler:
             if gh:
                 fired_event["github"] = gh
             _append_event(room_id, fired_event)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
+                  file=sys.stderr)
+
+        # Claim the work (#957) — after the preCheck gate, before the invoke.
+        # A failed swap is logged and the run proceeds; `claimed` then stays
+        # False so nothing is rolled back later either — the wake label was
+        # never removed, so there is nothing to restore.
+        claim = _claim_plan(trigger, gh)
+        claimed = False
+        if claim:
+            claimed = await asyncio.to_thread(
+                _gh_swap_labels, claim["repo"], claim["number"],
+                claim["remove"], claim["add"],
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "trigger.claimed",
+                    "correlationId": correlation_id,
+                    "triggerId": tid,
+                    "repo": claim["repo"],
+                    "number": claim["number"],
+                    "removed": claim["remove"],
+                    "added": claim["add"],
+                    "ok": claimed,
+                })
+            except Exception:
+                pass
+
+        try:
             _append_event(room_id, {
                 "type": "claude.invoke",
                 "correlationId": correlation_id,
@@ -4980,14 +5117,45 @@ class TriggerScheduler:
                         raise
                     # A permanent failure (bad model id, auth, 4xx, stale
                     # --resume session) fails identically on the retry — skip the
-                    # 60s wait and fail loudly now. The event is still consumed,
-                    # so the room notice fires either way. Unknown/transient
-                    # causes keep the one retry (the #902 intent).
+                    # 60s wait and give up now. Unknown/transient causes keep the
+                    # one retry (the #902 intent). Either way the event is
+                    # consumed, so on give-up we roll the claim back and notify.
                     permanent = _claude_error_is_permanent(err)
                     if attempt >= 2 or permanent:
+                        # Roll the claim back (#957): the run is given up, so
+                        # leave the item the way we found it. Re-adding the wake
+                        # label re-emits a fresh `issues.labeled` event through
+                        # the poller, so the chain restarts itself event-natively
+                        # with no reconciler involved; the conversation throttle
+                        # (5 events/h per issue) is the crash-loop brake. Only
+                        # when we actually claimed — a failed swap already left
+                        # the wake label in place. A user abort re-raises above,
+                        # so an aborted run never rolls back.
+                        restored_label = None
+                        if claim and claimed:
+                            rolled_back = await asyncio.to_thread(
+                                _gh_swap_labels, claim["repo"], claim["number"],
+                                claim["add"], claim["remove"],
+                            )
+                            if rolled_back:
+                                restored_label = claim["remove"]
+                            try:
+                                _append_event(room_id, {
+                                    "type": "trigger.claim-rolled-back",
+                                    "correlationId": correlation_id,
+                                    "triggerId": tid,
+                                    "repo": claim["repo"],
+                                    "number": claim["number"],
+                                    "removed": claim["add"],
+                                    "added": claim["remove"],
+                                    "ok": rolled_back,
+                                })
+                            except Exception:
+                                pass
                         try:
                             await self._post_trigger_failure_notice(
-                                trigger, room_id, err, permanent=permanent)
+                                trigger, room_id, err, permanent=permanent,
+                                restored_label=restored_label)
                         except Exception as exc:
                             print(
                                 f"[Runner:{self._agent_id}] Could not post "

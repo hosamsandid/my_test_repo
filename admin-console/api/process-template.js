@@ -45,6 +45,76 @@ function cleanWakePrompt(v) {
   return typeof v === 'string' && v.trim() ? v.trim() : '';
 }
 
+// Claim labels (#958, concept §3.4). A label listener's claim is DERIVED by
+// convention — `<wakeLabel>:wip` — never authored: Layer 3 reconciliation has to
+// be able to compute the claim label from the wake label alone (a
+// `wake-not-claimed` probe looks for exactly `<wake>:wip`), so an arbitrary
+// `add` would make stalls invisible again. The validator enforces the convention
+// rather than merely tolerating it, for that reason.
+const CLAIM_SUFFIX = ':wip';
+
+// The claim label a given wake label maps to.
+function claimLabelFor(wakeLabel) {
+  return `${wakeLabel}${CLAIM_SUFFIX}`;
+}
+
+/**
+ * Derive the `claim` field for a label listener, or null when the trigger is not
+ * claimable. Pure — the single source of truth for the convention, shared by the
+ * draft expanders, the live reconcilers (which delegate to those) and the weaver.
+ *
+ * Not claimable: a missing/blank label filter (a raw event listener has no wake
+ * label to take over), or a listener that already waits on a claim label — that
+ * would derive `ready:wip:wip` and claim its own claim.
+ */
+function deriveClaim(labelFilter) {
+  const wake = typeof labelFilter === 'string' ? labelFilter.trim() : '';
+  if (!wake) return null;
+  if (wake.endsWith(CLAIM_SUFFIX)) return null;
+  return { remove: wake, add: claimLabelFor(wake) };
+}
+
+/**
+ * Validate a trigger's `claim` against its own `labelFilter` (#958, concept §3.5).
+ * Returns an error string, or null when the claim is absent (optional field) or
+ * well-formed. Shared by the bundle validator and the export whitelist.
+ */
+function claimError(claim, labelFilter, type) {
+  if (claim === undefined || claim === null) return null; // optional
+  if (typeof claim !== 'object' || Array.isArray(claim)) return 'claim must be an object';
+  if (type !== 'github-event') return 'claim is only valid on a github-event trigger';
+  const wake = typeof labelFilter === 'string' ? labelFilter.trim() : '';
+  if (!wake) return 'claim requires a labelFilter (only a label listener can be claimed)';
+  if (typeof claim.remove !== 'string' || !claim.remove.trim()) return 'claim.remove must be a non-empty string';
+  if (typeof claim.add !== 'string' || !claim.add.trim()) return 'claim.add must be a non-empty string';
+  // The runtime swap removes the wake label it just woke on — a `remove` that
+  // disagrees with the listener would strip an unrelated label (concept §3.2).
+  if (claim.remove.trim() !== wake) {
+    return `claim.remove (\`${claim.remove.trim()}\`) must equal labelFilter (\`${wake}\`)`;
+  }
+  // Naming convention `<wakeLabel>:wip` (concept §3.4) — enforced, not merely
+  // derived, so reconciliation can always compute the claim label.
+  const expected = claimLabelFor(wake);
+  if (claim.add.trim() !== expected) {
+    return `claim.add (\`${claim.add.trim()}\`) must follow the \`<wakeLabel>:wip\` convention (\`${expected}\`)`;
+  }
+  return null;
+}
+
+function isValidClaim(claim, labelFilter) {
+  return !!claim && claimError(claim, labelFilter, 'github-event') === null;
+}
+
+// Whether a channel port opts OUT of the derived claim (#958). Default is ON, so
+// only an explicit `autoClaim: false` disables it. The opt-out lives on the PORT,
+// not on the derived trigger: channel/data-flow triggers are stripped and
+// regenerated on every reconcile, so a trigger-level flag would be silently
+// wiped on the next port write — the same reason the authored wake-prompt
+// override (#868) lives on the channel.
+function channelAutoClaim(ch) {
+  return !(ch && ch.autoClaim === false);
+}
+
 // Remap a channel's `from` role reference through roleKeyOf so an exported team's
 // GitHub-channel wiring uses portable role keys (#380).
 function remapChannel(ch, teamId) {
@@ -57,6 +127,9 @@ function remapChannel(ch, teamId) {
     // Optional authored wake-prompt override (#868) — carried on the portable
     // bundle so an exported team round-trips its override.
     ...(wakePrompt ? { wakePrompt } : {}),
+    // Claim opt-out (#958) — only the non-default is carried, so a bundle stays
+    // free of `autoClaim: true` noise on every channel.
+    ...(channelAutoClaim(ch) ? {} : { autoClaim: false }),
   };
 }
 
@@ -68,6 +141,10 @@ function bundleTrigger(t) {
   if (t.type === 'github-event') {
     out.events = Array.isArray(t.events) ? t.events : [];
     if (t.labelFilter) out.labelFilter = t.labelFilter;
+    // Claim (#958) — carried on the portable bundle so the claim survives
+    // export → materialise → edit-as-draft. Derived listeners get it re-stamped
+    // by the expanders anyway; a hand-authored claim would otherwise be lost.
+    if (isValidClaim(t.claim, t.labelFilter)) out.claim = { remove: t.claim.remove, add: t.claim.add };
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -158,6 +235,12 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
+    // Claim shape + `claim.remove === labelFilter` + `<wakeLabel>:wip` (#958).
+    for (const t of (r.triggers || [])) {
+      if (!t || typeof t !== 'object') continue;
+      const ce = claimError(t.claim, t.labelFilter, t.type);
+      if (ce) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${ce}` };
+    }
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome
       // may not set a `humanGate` label, whatever it is named.
@@ -284,6 +367,11 @@ function templateToCustomRoles(bundle) {
       enabled: t.enabled !== false,
       events: t.events,
       labelFilter: t.labelFilter,
+      // Claim (#958) — MUST survive into the member config: this is the field the
+      // container runtime (`_claim_plan` in agent-entrypoint.py, #957) reads to
+      // swap the wake label for `<wake>:wip`. Dropping it here made the whole
+      // feature a silent no-op at runtime even though the graph rendered it.
+      ...(t.claim ? { claim: t.claim } : {}),
       cron: t.cron,
       at: t.at,
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
@@ -611,7 +699,13 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, wakePrompt: '', sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, sources: [] }; groups.set(key, g); }
+      // Claim opt-out (#958): several channels consolidate into ONE derived
+      // listener, and the claim is a property of that single listener — so an
+      // explicit opt-out on any contributing channel wins, mirroring the
+      // any-channel-gates-it rule for `human` below. Silently claiming when one
+      // author asked not to would be the surprising direction.
+      if (!channelAutoClaim(ch)) g.autoClaim = false;
       // Gated iff any contributing channel gates it (a mixed gated/ungated set on
       // the same label is degenerate — treat as gated, matching the old behaviour
       // where the labelled trigger already reacted to the label change).
@@ -629,11 +723,17 @@ function expandGithubChannels(bundle, _opts = {}) {
       const events = (g.label ? CHANNEL_EVENTS[g.artifact].labeled : CHANNEL_EVENTS[g.artifact].open).slice();
       const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
       const producerLabel = producerNames.join(', ') || 'an upstream';
+      const claim = g.autoClaim ? deriveClaim(g.label) : null;
       b.triggers.push({
         id,
         type: 'github-event',
         events,
         ...(g.label ? { labelFilter: g.label } : {}),
+        // Derived claim (#958, concept §3.4) — zero authoring cost: every derived
+        // LABEL listener takes over its wake label as `<wake>:wip` when it fires.
+        // An unlabelled channel listener (PR/issue opened) has no wake label to
+        // claim, so deriveClaim returns null and no field is stamped.
+        ...(claim ? { claim } : {}),
         // No origin filter: the trigger fires on any matching PR/issue event.
         // A human gate is expressed by the channel's `gate: 'human'` flag and/or
         // the label registry's `humanGate` flag (#928) — humans apply the label,
@@ -863,6 +963,9 @@ function expandDataFlowSteps(bundle) {
         // editable "push from <upstream>" hand-off) rather than a raw push
         // trigger. The poller ignores unknown fields. (#379)
         dataFlow: true,
+        // No `claim` (#958): a data-flow step wakes on `push`, not on a label, so
+        // there is no wake label to take over. The claim convention applies to
+        // LABEL listeners only — asserted by test rather than left implicit.
         enabled: true,
         description: `Data flow: wake on push from ${byId.get(upId)?.displayName || upId}`,
         // Authored override (#868) wins over the generated prompt when present.
@@ -919,6 +1022,14 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       out.repo = vars ? vars.repoFullName : undefined;
       if (typeof tr.labelFilter === 'string' && tr.labelFilter.trim()) {
         out.labelFilter = subst(tr.labelFilter);
+      }
+      // Claim (#958). Re-derived from the SUBSTITUTED label filter rather than
+      // copied: a template's labelFilter may be a `{{var}}`, and the claim has to
+      // name the concrete runtime label the entrypoint will swap. Absence of a
+      // claim on the template is preserved (an opt-out stays opted out).
+      if (tr.claim && out.labelFilter) {
+        const c = deriveClaim(out.labelFilter);
+        if (c) out.claim = c;
       }
       // Data-flow (agent dependency) marker so the trigger UI renders it as an
       // editable "push from <upstream>" hand-off rather than a raw push (#379).
@@ -993,4 +1104,6 @@ module.exports = {
   emptyDraftBundle, roleKeyOf, VERSION,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
+  // Claim labels (#958)
+  deriveClaim, claimLabelFor, claimError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
 };

@@ -88,6 +88,7 @@ test('a structured port yields one row per option with derived consumers', () =>
     terminal: false,
     consumers: ['Code Reviewer'],
     humanHandoff: false, // #981 — no brake label set, no registry threaded in
+    humanReviewers: [],  // #1001 — no humans registry threaded in
   });
   assert.deepEqual(view.rows[1].consumers, ['QA']);
   assert.equal(view.rows[1].when, '');
@@ -230,4 +231,28 @@ test('resolveOutcomeView marks brake-label rows as humanHandoff', () => {
   // Without a registry the row degrades to the old behavior.
   const bare = resolveOutcomeView(agent, peers);
   assert.equal(bare.rows.find(r => r.key === 'blocked').humanHandoff, false);
+});
+
+/* ── #1001 (D4): bound human reviewers on artifact outcomes ────────────── */
+
+test('a bound human reviewer surfaces on openIssue/openPr rows, never on label rows', () => {
+  const humans = [
+    { id: 'ba-human', name: 'BA Human', consumes: [{ artifact: 'issue', from: 'dev' }] },
+  ];
+  const agent = {
+    id: 'dev',
+    outcomes: {
+      mode: 'anyOf',
+      options: [
+        { id: 'ticket', title: 'Opens issue', actions: [{ type: 'openIssue' }] },
+        { id: 'flag', title: 'Flags', actions: [{ type: 'setLabel', label: 'nobody-listens' }] },
+      ],
+    },
+  };
+  const view = resolveOutcomeView(agent, peers, undefined, humans);
+  assert.deepEqual(view.rows[0].humanReviewers, ['BA Human']);
+  assert.deepEqual(view.rows[1].humanReviewers, []);
+  // Legacy flat emits carry no artifact — reviewers stay empty.
+  const legacy = resolveOutcomeView({ id: 'dev', emits: ['x'] }, peers, undefined, humans);
+  assert.deepEqual(legacy.rows[0].humanReviewers, []);
 });

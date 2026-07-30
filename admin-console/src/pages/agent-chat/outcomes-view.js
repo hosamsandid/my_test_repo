@@ -22,7 +22,7 @@
  * must keep the same lenient rule (valid mode + at least one option).
  */
 
-import { consumersFor, labelConsumers, outcomeHandsOffToHuman } from '../process/outcome-consumers.js';
+import { consumersFor, labelConsumers, outcomeHandsOffToHuman, outcomeHumanReviewers } from '../process/outcome-consumers.js';
 
 export const OUTCOME_MODES = ['exactlyOne', 'anyOf'];
 
@@ -86,8 +86,12 @@ function isTerminal(option) {
  *               [{ name, humanGate, brake }]). Optional; used to mark rows
  *               that hand off to a person via a brake label (#981) so they
  *               never read as "no consumer".
+ * @param humans the same graph's human-role registry (`graph.humans`,
+ *               [{ id, name, consumes?, emits? }]). Optional; a bound human
+ *               reviewer of an opened PR/issue is a consumer (#1001, D4), so
+ *               those rows never read as "no consumer" either.
  */
-export function resolveOutcomeView(agent, peers, labels) {
+export function resolveOutcomeView(agent, peers, labels, humans) {
   const node = { id: agent?.id };
   const list = Array.isArray(peers) ? peers : [];
   const consumersResolved = list.length > 0;
@@ -103,6 +107,7 @@ export function resolveOutcomeView(agent, peers, labels) {
       terminal: isTerminal(o),
       consumers: consumersFor(o, node, list),
       humanHandoff: outcomeHandsOffToHuman(o, labels),
+      humanReviewers: outcomeHumanReviewers(o, node, humans),
     }));
     return {
       kind: 'structured',
@@ -129,6 +134,7 @@ export function resolveOutcomeView(agent, peers, labels) {
         terminal: false,
         consumers: labelConsumers(label, node, list),
         humanHandoff: outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label }] }, labels),
+        humanReviewers: [], // a flat emit sets a label — there is no artifact to review
       })),
       consumersResolved,
     };

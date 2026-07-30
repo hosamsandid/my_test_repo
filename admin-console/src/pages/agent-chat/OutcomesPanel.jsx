@@ -38,11 +38,12 @@ export default function OutcomesPanel({ agentId, active }) {
   const [agent, setAgent] = useState(null);
   const [peers, setPeers] = useState(null);
   const [labels, setLabels] = useState(null); // graph label registry (#981) — brake/gate flags
+  const [humans, setHumans] = useState(null); // graph human-role registry (#1001) — artifact reviewers
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const fetchAll = useCallback(async (id) => {
-    if (!id) { setAgent(null); setPeers(null); setLabels(null); return; }
+    if (!id) { setAgent(null); setPeers(null); setLabels(null); setHumans(null); return; }
     setLoading(true);
     setError(null);
     try {
@@ -51,12 +52,13 @@ export default function OutcomesPanel({ agentId, active }) {
       // Consumers are a property of the team graph, so they need the siblings.
       // A failure here is not fatal: the outcomes themselves are already known.
       const team = typeof cfg?.parentTeamId === 'string' ? cfg.parentTeamId.trim() : '';
-      if (!team) { setPeers(null); setLabels(null); return; }
+      if (!team) { setPeers(null); setLabels(null); setHumans(null); return; }
       try {
         const graph = await apiCall('GET', `/api/process/graph?team=${encodeURIComponent(team)}`);
         setPeers(Array.isArray(graph?.nodes) ? graph.nodes : null);
         setLabels(Array.isArray(graph?.labels) ? graph.labels : null);
-      } catch { setPeers(null); setLabels(null); }
+        setHumans(Array.isArray(graph?.humans) ? graph.humans : null);
+      } catch { setPeers(null); setLabels(null); setHumans(null); }
     } catch (e) {
       setError(e.message);
     } finally {
@@ -71,7 +73,7 @@ export default function OutcomesPanel({ agentId, active }) {
     return () => clearInterval(timer);
   }, [agentId, active, fetchAll]);
 
-  const view = resolveOutcomeView(agent, peers, labels);
+  const view = resolveOutcomeView(agent, peers, labels, humans);
   const href = flowEditorRoutingHref(agent);
 
   /* ── Toolbar ──────────────────────────────────────────────────────── */
@@ -244,11 +246,15 @@ function OutcomeCard({ index, row, showConsumers }) {
             : row.humanHandoff
               // Brake label (#981): the hand-off to a person IS the consumer.
               ? <>hands off to a person 👤 — the flow pauses for a decision{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
-              : row.consumers.length
-                ? <><span style={fieldLabel}>wakes</span> {row.consumers.join(', ')}</>
-                : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>
-                    no consumer — nothing listens for this outcome&apos;s signal
-                  </span>}
+              : (row.humanReviewers || []).length
+                // Bound human reviewer of the opened PR/issue (#1001): a
+                // consumer, not a warning — mirrors the Routing tab.
+                ? <>reviewed by 👤 {row.humanReviewers.join(', ')}{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
+                : row.consumers.length
+                  ? <><span style={fieldLabel}>wakes</span> {row.consumers.join(', ')}</>
+                  : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>
+                      no consumer — nothing listens for this outcome&apos;s signal
+                    </span>}
         </div>
       )}
     </div>

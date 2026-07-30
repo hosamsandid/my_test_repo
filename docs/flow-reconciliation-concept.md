@@ -1,9 +1,10 @@
 # Flow Reconciliation & Claim Labels — Concept
 
-> Status: **Layers 1 and 2 implemented** (PR #953, PR #974); Layer 3 is design.
+> Status: **Layers 1 and 2 implemented** (PR #953, PR #974); **Layer 3 Phase 3 (detector + observe panel) implemented** (PR #993); Phase 4 (responder/reaction ladder) is design.
 > Layer 1: runner retry + loud failure (`agent-image/scripts/agent-entrypoint.py`).
 > Layer 2: declarative `claim` field on `github-event` triggers — runtime label swap + rollback
 > on final failure (`agent-image/scripts/agent-entrypoint.py`, PR #974).
+> Layer 3 Phase 3: pure deterministic detector (`orchestrator/flow-anomaly-detector.js`) + sweep adapter (`orchestrator/flow-anomaly-sweep.js`) + endpoint `GET /api/teams/:teamId/flow-anomalies` + observe-only **Anomalies** panel in the Flows view (PR #993).
 > Grounded in a real production stall analyzed on 2026-07-29 (issue #902 / PR #949 in the Agent Studio team's repo).
 
 ## 1. The incident that motivates this
@@ -215,8 +216,7 @@ event-transparency log with the reconciler's attribution.
 2. **Phase 2**: `claim` field — runner execution + rollback, schema validation,
    auto-derivation in the weaver/reconcile paths, editor badge + lint. Pilot on
    the Agent Studio team's `ready`/`ready-2` chains.
-3. **Phase 3**: detector module + `GET /internal/teams/:teamId/flow-anomalies`;
-   surface as a panel in the Flows view before any auto-repair is enabled.
+3. **Phase 3 (done — PR #993)**: `flow-anomaly-detector.js` (pure, golden-fixture tested) + `flow-anomaly-sweep.js` (GitHub/session-log → detector objects, I/O-free core) + `GET /internal/teams/:teamId/flow-anomalies` (best-effort gather, skipped in maintenance mode); observe-only **Anomalies** toolbar panel in the Flows view (`FlowAnomaliesPanel.jsx`) with count badge on affected canvas nodes + Refresh. No auto-repair. Per-team threshold overrides via `anomalyThresholds` on the team-agent config (defaults: T₁ = 15 min, T₂ = 2 h, T₃ = 24 h).
 4. **Phase 4**: responder agent with the reaction ladder; replace the
    Dispatcher's hand-rolled reconcile cron.
 

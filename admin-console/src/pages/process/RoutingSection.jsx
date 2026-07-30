@@ -9,6 +9,7 @@ import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
 import { consumersFor, outcomeHandsOffToHuman, outcomeHumanReviewers } from './outcome-consumers.js';
+import { moveHumanDelivery } from './wiring-engine.js';
 import { consumeKey } from './humans-registry-ops';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
@@ -549,8 +550,8 @@ function HumanDeliveryPicker({ humans = [], humanOps, entry, onChanged, disabled
     if (busy || next === current) return;
     setBusy(true);
     try {
-      if (current) await humanOps.unwireHumanConsume(current, entry);
-      if (next) await humanOps.wireHumanConsume(next, entry);
+      // The engine moves the delivery between roles (unwire old, wire new).
+      await moveHumanDelivery({ humanOps }, { entry, fromHuman: current, toHuman: next });
       onChanged?.();
     } catch (e) { window.alert(e?.message || String(e)); }
     finally { setBusy(false); }

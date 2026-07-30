@@ -5,7 +5,14 @@ import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 import { isGateLabel, isBrakeLabel } from './label-flags';
-import { defaultGateKind, submitHumanGate } from './human-gate-ops';
+import { defaultGateKind } from './human-gate-ops';
+// Every multi-write hand-off goes through the wiring engine (#1002) — dialogs
+// collect input and render state; they never sequence ops calls themselves.
+import {
+  wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
+  wireChannel, updateChannel as engineUpdateChannel, unwireChannel,
+  wireHumanDelivery, wireHumanGate, wireArtifactFlow,
+} from './wiring-engine';
 
 // Only these GitHub events carry a label name, so a labelFilter is meaningful.
 const LABEL_EVENTS = [
@@ -90,7 +97,6 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  const [toTriggers, setToTriggers] = useState([]);
   // `initialLabel` pre-fills the label when the dialog is opened from an outcome
   // port drag (#828): the source already declares the emit via its outcome, so
   // `emitSource` is false there and only the listener on the target is created.
@@ -108,7 +114,6 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
         if (!alive) return;
         const fl = Array.isArray(ft) ? ft : [];
         const tl = Array.isArray(tt) ? tt : [];
-        setToTriggers(tl);
         setRepo(firstRepo(fl, tl));
       } catch (e) {
         if (alive) setError(e.message);
@@ -140,43 +145,13 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
     if (!trimmed) { setError('Enter the label name.'); return; }
     setSaving(true); setError(null);
     try {
-      // 1. Listener on B — skip if one already filters on this label + event.
-      const existing = toTriggers.find(t =>
-        t.type === 'github-event' && t.labelFilter === trimmed &&
-        Array.isArray(t.events) && t.events.includes(event));
-      if (!existing) {
-        await ops.createTrigger(to, {
-          type: 'github-event',
-          events: [event],
-          repo: repo || undefined,
-          labelFilter: trimmed,
-          enabled: true,
-          description: humanLabel
-            ? `Wait for human gate \`${trimmed}\``
-            : `Wake when \`${trimmed}\` is ${verb} ${targetNoun} (from ${fromName || from})`,
-          prompt: effectivePrompt,
-        });
-      }
-      // 2. Record A as emitting the label via an outcome — the structured successor
-      // to flat `emits`. Skipped for human gates/brakes (no agent emits those) and
-      // for outcome-port drags (#828) where A already declares the emit through its
-      // outcomes port (`emitSource = false`).
-      if (!humanLabel && emitSource) {
-        const existing = await ops.getRoleOutcomes(from);
-        const cur = existing || { mode: 'anyOf', options: [] };
-        const alreadyHas = (cur.options || []).some(o =>
-          (o.actions || []).some(a => a.type === 'setLabel' && a.label === trimmed));
-        if (!alreadyHas) {
-          await ops.setRoleOutcomes(from, {
-            ...cur,
-            options: [...(cur.options || []), {
-              id: trimmed,
-              title: trimmed,
-              actions: [{ type: 'setLabel', label: trimmed }],
-            }],
-          });
-        }
-      }
+      // The engine wires both sides: single-event listener (+claim) on B —
+      // reusing an existing matching one — and the setLabel outcome on A
+      // (skipped for human gates/brakes and for outcome-port drags, #828).
+      await wireLabelHandoff({ ops }, {
+        from, to, label: trimmed, target, action, repo,
+        prompt: effectivePrompt, labels, emitSource, fromName, toName,
+      });
       onDone?.();
     } catch (e) {
       setError(e.message);
@@ -490,23 +465,10 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
     setSaving(true); setError(null);
     try {
-      // Ensure the producer is flagged so its badge + prompt block appear.
-      if (ops.getRoleGithub && ops.setGithubProduces) {
-        const g = (await ops.getRoleGithub(from)) || {};
-        // Carry the audience flags (#981) so flipping a produce flag never
-        // silently drops the producer's declared human audience.
-        const next = {
-          pr: !!g.producesPr, issue: !!g.producesIssue,
-          prAudience: g.prAudience, issueAudience: g.issueAudience,
-        };
-        if (artifact === 'pr') next.pr = true; else next.issue = true;
-        if (next.pr !== !!g.producesPr || next.issue !== !!g.producesIssue) {
-          await ops.setGithubProduces(from, next);
-        }
-      }
-      await ops.addChannel(to, {
-        artifact, from,
-        ...(label.trim() ? { label: label.trim() } : {}),
+      // The engine flags the producer (badge + prompt block, audience flags
+      // preserved) and upserts the channel port on the consumer.
+      await wireChannel({ ops }, {
+        from, to, artifact, label,
         ...(human ? { gate: 'human' } : {}),
       });
       onDone?.();
@@ -570,21 +532,12 @@ export function HumanDeliveryForm({ from, to, fromName, toName, ops = liveOps, h
   async function submit() {
     setSaving(true); setError(null);
     try {
-      let entry;
-      if (choice === 'pr' || choice === 'issue') {
-        // Flag the producer so its badge / prompt block appear (mirrors the
-        // channel dialog); carry the audience flags so nothing is dropped.
-        if (ops.getRoleGithub && ops.setGithubProduces) {
-          const g = (await ops.getRoleGithub(from)) || {};
-          const next = { pr: !!g.producesPr, issue: !!g.producesIssue, prAudience: g.prAudience, issueAudience: g.issueAudience };
-          if (choice === 'pr') next.pr = true; else next.issue = true;
-          if (next.pr !== !!g.producesPr || next.issue !== !!g.producesIssue) await ops.setGithubProduces(from, next);
-        }
-        entry = { artifact: choice, from };
-      } else {
-        entry = { artifact: 'file', name: choice.slice('file:'.length) };
-      }
-      await humanOps.wireHumanConsume(to, entry);
+      // The engine flags the producer for PR/issue deliveries (audience flags
+      // preserved) and writes the consume onto the human role.
+      const entry = (choice === 'pr' || choice === 'issue')
+        ? { artifact: choice, from }
+        : { artifact: 'file', name: choice.slice('file:'.length) };
+      await wireHumanDelivery({ ops, humanOps }, { human: to, entry });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -643,7 +596,7 @@ export function HumanGateForm({ from, to, fromName, toName, ops = liveOps, human
     if (!l) { setError('Enter the label this person applies.'); return; }
     setSaving(true); setError(null);
     try {
-      await submitHumanGate({ from, to, label: l, kind, ops, humanOps });
+      await wireHumanGate({ ops, humanOps }, { human: from, to, label: l, kind });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -715,20 +668,10 @@ function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, on
   async function submit() {
     setSaving(true); setError(null);
     try {
-      if (!nm && !h) {
-        // No artifact at all — a plain ordering dependency (still wakes the
-        // consumer on the producer's push).
-        await ops.addDependency(to, from);
-      } else if (nm) {
-        // Named artifact: matched by name, path is just a hint (resolved from the
-        // manifest at runtime).
-        await ops.addArtifact(from, { direction: 'output', name: nm, hint: h, description });
-        await ops.addArtifact(to, { direction: 'input', name: nm, hint: h, description });
-      } else {
-        // Only a concrete path given → a path-keyed artifact (BriefingPack-style).
-        await ops.addArtifact(from, { direction: 'output', path: h, description });
-        await ops.addArtifact(to, { direction: 'input', path: h, description });
-      }
+      // The engine writes both ports (or the plain dependency when no artifact
+      // is given) — named artifacts are matched by name, a bare path is a
+      // path-keyed artifact (BriefingPack-style).
+      await wireArtifactFlow({ ops }, { from, to, name: nm, hint: h, description });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -849,28 +792,21 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
     setSaving(true); setError(null);
     try {
-      await (ops.updateChannel || ops.addChannel)(to, {
+      await engineUpdateChannel({ ops }, { to, spec: {
         artifact, from,
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
         ...(wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
-      });
+      } });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
   async function remove() {
     setSaving(true); setError(null);
     try {
-      await ops.removeChannel(to, { artifact, from });
-      if (lastChannel && clearProduces && ops.getRoleGithub && ops.setGithubProduces) {
-        const g = (await ops.getRoleGithub(from)) || {};
-        const next = {
-          pr: !!g.producesPr, issue: !!g.producesIssue,
-          prAudience: g.prAudience, issueAudience: g.issueAudience,
-        };
-        if (artifact === 'pr') next.pr = false; else next.issue = false;
-        await ops.setGithubProduces(from, next);
-      }
+      // The engine drops the port and, when confirmed, the orphaned produce
+      // flag with it (audience flags preserved).
+      await unwireChannel({ ops }, { from, to, artifact, clearProduces: lastChannel && clearProduces });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -989,31 +925,14 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
     if (!newLabel) { setError('Enter the label name.'); return; }
     setSaving(true); setError(null);
     try {
-      await ops.updateTrigger(to, triggerId, {
-        events: [event], labelFilter: newLabel,
-        // Persist the prompt verbatim (AC4) — the seeded default when untouched,
-        // the operator's text otherwise (incl. an intentionally empty value).
-        // Never regenerated on a label rename (saved as-is per the edge cases).
-        prompt: effectivePrompt,
-      });
-      // Renaming the label keeps the source's outcomes in sync (agent-sourced
+      // The engine updates the listener (prompt persisted verbatim — the
+      // seeded default when untouched, the operator's text otherwise) and, on
+      // a label rename, keeps the source's outcomes in sync (agent-sourced
       // hand-offs only — human-set labels have no emitter to rewrite).
-      if (newLabel !== label && !humanSource && ops.getRoleOutcomes && ops.setRoleOutcomes) {
-        const cur = await ops.getRoleOutcomes(from);
-        if (cur) {
-          const updated = {
-            ...cur,
-            options: (cur.options || []).map(o => ({
-              ...o,
-              actions: (o.actions || []).map(a =>
-                a.type === 'setLabel' && a.label === label ? { ...a, label: newLabel } : a),
-              id: o.id === label ? newLabel : o.id,
-              title: o.title === label ? newLabel : o.title,
-            })),
-          };
-          await ops.setRoleOutcomes(from, updated);
-        }
-      }
+      await updateLabelHandoff({ ops }, {
+        from, to, triggerId, label, newLabel, target, action,
+        prompt: effectivePrompt, humanSource,
+      });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -1021,23 +940,12 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   async function doDelete() {
     setSaving(true); setError(null);
     try {
-      if (delListener) {
-        await ops.deleteTrigger(to, triggerId);
-      }
-      if (delEmit && !humanSource) {
-        // Strip the label from the source's outcomes port — the emit surface
-        // now that trigger-level and flat emits are retired (#783/#831).
-        if (ops.getRoleOutcomes && ops.setRoleOutcomes) {
-          const cur = await ops.getRoleOutcomes(from);
-          if (cur) {
-            const filtered = (cur.options || []).filter(o =>
-              !(o.actions || []).some(a => a.type === 'setLabel' && a.label === label));
-            await ops.setRoleOutcomes(from, filtered.length
-              ? { ...cur, options: filtered }
-              : null);
-          }
-        }
-      }
+      // Symmetric cleanup via the engine: the listener on B and/or the
+      // setLabel outcome on A (#783/#831 — outcomes are the emit surface).
+      await unwireLabelHandoff({ ops }, {
+        from, to, triggerId, label,
+        removeListener: delListener, removeEmit: delEmit, humanSource,
+      });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }

@@ -216,6 +216,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     wireHumanConsume: (id, entry) => liveOps.wireHumanConsume(scope, id, entry),
     unwireHumanConsume: (id, entry) => liveOps.unwireHumanConsume(scope, id, entry),
     addHumanEmit: (id, label) => liveOps.addHumanEmit(scope, id, label),
+    removeHumanEmit: (id, label) => liveOps.removeHumanEmit(scope, id, label),
   }), [scope]);
 
   const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;

@@ -15,7 +15,7 @@ import {
 import { labelsAfterSet } from './label-registry-ops';
 import {
   humansAfterUpsert, humansAfterRemove,
-  humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd,
+  humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
@@ -258,6 +258,12 @@ export const liveOps = {
     const cur = await liveOps.listHumans(teamId);
     const human = cur.find(h => h && h.id === id) || { id, name: id };
     await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitAdd(human, label)) });
+  },
+  removeHumanEmit: async (teamId, id, label) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id);
+    if (!human) return;
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitRemove(human, label)) });
   },
 
   // ── GitHub artifact ports (#380): produce flags + consumed channels ──
@@ -626,6 +632,13 @@ export function makeDraftOps(getBundle, persist) {
       const b = clone(getBundle());
       const human = (b.humans || []).find(h => h && h.id === id) || { id, name: id };
       b.humans = humansAfterUpsert(b.humans, humanAfterEmitAdd(human, label));
+      await persist(b);
+    },
+    removeHumanEmit: async (id, label) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id);
+      if (!human) return;
+      b.humans = humansAfterUpsert(b.humans, humanAfterEmitRemove(human, label));
       await persist(b);
     },
     // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the

@@ -49,6 +49,13 @@ async function resolveAgentRepo(roleId) {
 }
 // An artifact port's match key: its logical name when set, else its path (#382).
 const artKey = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
+// Set/clear an artifact's human audience (#981); string-shaped legacy ports are
+// lifted to objects so the flag has somewhere to live.
+const setAudienceOn = (a, audience) => {
+  const base = typeof a === 'string' ? { path: a } : { ...a };
+  if (audience === 'human') base.audience = 'human'; else delete base.audience;
+  return base;
+};
 async function liveDataFlow(roleId) {
   const a = await apiCall('GET', `/api/agents/${roleId}`);
   const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
@@ -145,6 +152,16 @@ export const liveOps = {
     const df = await liveDataFlow(roleId);
     const k = direction === 'output' ? 'outputs' : 'inputs';
     df[k] = df[k].filter(a => artKey(a) !== key);
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Artifact audience (#981): declare that a PERSON consumes this output —
+  // clears the unconsumed-output lint and draws the delivery edge to @human.
+  setArtifactAudience: async (roleId, { name, path, audience }) => {
+    const key = String(name || path || '').trim();
+    if (!key) return;
+    const df = await liveDataFlow(roleId);
+    df.outputs = df.outputs.map(a => (artKey(a) === key
+      ? setAudienceOn(a, audience) : a));
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
   // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
@@ -610,6 +627,17 @@ export function makeDraftOps(getBundle, persist) {
         const k = direction === 'output' ? 'outputs' : 'inputs';
         const key = String(name || path || '').trim();
         r[k] = (r[k] || []).filter(a => artKey(a) !== key);
+      }
+      await persist(b);
+    },
+    // Artifact audience (#981) — see liveOps.setArtifactAudience.
+    setArtifactAudience: async (roleId, { name, path, audience }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      const key = String(name || path || '').trim();
+      if (r && key) {
+        r.outputs = (r.outputs || []).map(a => (artKey(a) === key
+          ? setAudienceOn(a, audience) : a));
       }
       await persist(b);
     },

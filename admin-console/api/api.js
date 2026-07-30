@@ -1718,6 +1718,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
           ...(hint ? { hint } : {}),
           ...(p ? { path: p } : {}),
           ...(a.description ? { description: a.description } : {}),
+          // Artifact audience (#981): 'human' declares a person consumes this
+          // output (delivery touchpoint) — the only supported value.
+          ...(a.audience === 'human' ? { audience: 'human' } : {}),
         };
       })
       .filter(a => a.name || a.path);

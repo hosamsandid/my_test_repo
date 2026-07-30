@@ -558,11 +558,29 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
         const key = `out:${artifactKey(a)}`;
         const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
         const consumers = artifactConsumers(a, node, peers);
+        const humanAudience = a && typeof a === 'object' && a.audience === 'human';
+        // Audience toggle (#981): a person consumes this output (a report, a
+        // review document) — clears the unconsumed-output lint and draws the
+        // delivery edge to the @human actor.
+        const subtitle = (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {consumers.length ? `consumers: ${consumers.join(', ')}${humanAudience ? ' + a person' : ''}`
+              : humanAudience ? 'consumer: a person 👤' : 'no consumer yet'}
+            {ops.setArtifactAudience && (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: busy === key ? 'wait' : 'pointer' }}>
+                <input type="checkbox" checked={humanAudience} disabled={busy === key}
+                  onChange={(e) => run(key, () => ops.setArtifactAudience(node.id,
+                    { name: a && a.name, path: a && a.path, audience: e.target.checked ? 'human' : null }))} />
+                a person consumes it
+              </label>
+            )}
+          </span>
+        );
         return (
           <InputRow key={key} busy={busy === key} icon={<Package size={14} />}
             onRemove={ops.removeArtifact ? () => run(key, () => ops.removeArtifact(node.id, { direction: 'output', name: a && a.name, path: a && a.path })) : null}
             text={<><code style={codeChip}>{artifactKey(a)}</code>{h ? ` · ${h}` : ''}</>}
-            subtitle={consumers.length ? `consumers: ${consumers.join(', ')}` : 'no consumer yet'} />
+            subtitle={subtitle} />
         );
       })}
 

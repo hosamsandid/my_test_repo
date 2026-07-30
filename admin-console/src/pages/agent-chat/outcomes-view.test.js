@@ -87,6 +87,7 @@ test('a structured port yields one row per option with derived consumers', () =>
     notifyDm: false,
     terminal: false,
     consumers: ['Code Reviewer'],
+    humanHandoff: false, // #981 — no brake label set, no registry threaded in
   });
   assert.deepEqual(view.rows[1].consumers, ['QA']);
   assert.equal(view.rows[1].when, '');
@@ -205,4 +206,28 @@ test('hasTeamContext gates the tab on team membership', () => {
   assert.equal(hasTeamContext({ parentTeamId: '   ' }), false);
   assert.equal(hasTeamContext({}), false);
   assert.equal(hasTeamContext(null), false);
+});
+
+// ── #981: a brake-label outcome is a hand-off to a person, not "no consumer" ──
+
+test('resolveOutcomeView marks brake-label rows as humanHandoff', () => {
+  const agent = {
+    id: 'dev',
+    outcomes: { mode: 'exactlyOne', options: [
+      { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready-for-test' }] },
+      { id: 'blocked', title: 'Blocker', actions: [{ type: 'setLabel', label: 'human-decision-required' }] },
+    ] },
+  };
+  const peers = [{ id: 'qa', displayName: 'QA', triggers: [{ labelFilter: 'ready-for-test' }] }];
+  const labels = [{ name: 'human-decision-required', humanGate: false, brake: true }];
+  const view = resolveOutcomeView(agent, peers, labels);
+  const done = view.rows.find(r => r.key === 'done');
+  const blocked = view.rows.find(r => r.key === 'blocked');
+  assert.equal(done.humanHandoff, false);
+  assert.deepEqual(done.consumers, ['QA']);
+  assert.equal(blocked.humanHandoff, true);
+  assert.deepEqual(blocked.consumers, []);
+  // Without a registry the row degrades to the old behavior.
+  const bare = resolveOutcomeView(agent, peers);
+  assert.equal(bare.rows.find(r => r.key === 'blocked').humanHandoff, false);
 });

@@ -37,3 +37,17 @@ export function labelConsumers(label, node, peers) {
   if (typeof label !== 'string' || !label) return [];
   return consumersFor({ actions: [{ type: 'setLabel', label }] }, node, peers);
 }
+
+// Does this outcome hand off to a PERSON (#981)? True when any of its setLabel
+// actions sets a brake-flagged label (`labels` = the graph's label registry,
+// [{ name, humanGate, brake }]). A brake is the agent pausing the flow for a
+// human decision — a consumer by design, so "no consumer" warnings must not
+// fire for it. Gate labels don't count: an agent may not set those at all
+// (that is a validation error, not a hand-off).
+export function outcomeHandsOffToHuman(option, labels) {
+  const regs = Array.isArray(labels) ? labels : [];
+  const actions = Array.isArray(option?.actions) ? option.actions : [];
+  return actions.some(a => a && a.type === 'setLabel' && typeof a.label === 'string'
+    && regs.some(l => l && typeof l.name === 'string'
+      && l.name.trim() === a.label.trim() && l.brake && !l.humanGate));
+}

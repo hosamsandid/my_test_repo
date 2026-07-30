@@ -95,3 +95,50 @@ test('outcomeHandsOffToHuman: trims and ignores non-setLabel actions', () => {
   assert.equal(outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label: ' needs-decision ' }] }, labels), true);
   assert.equal(outcomeHandsOffToHuman({ actions: [{ type: 'openPr' }] }, labels), false);
 });
+
+// ── #1001 (D4): a bound human reviewer is an artifact consumer ───────────────
+
+import { outcomeHumanReviewers } from './outcome-consumers.js';
+
+const humans = [
+  { id: 'ba-human', name: 'BA Human', consumes: [{ artifact: 'issue', from: 'dev' }] },
+  { id: 'maintainer', name: 'Maintainer', consumes: [{ artifact: 'pr', from: 'dev' }] },
+  { id: 'other', name: 'Elsewhere', consumes: [{ artifact: 'issue', from: 'someone-else' }] },
+  { id: 'label-only', name: 'Decider', consumes: [{ label: 'hold' }] },
+];
+
+test('outcomeHumanReviewers matches the artifact kind and the producing node', () => {
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'openIssue' }] }, node, humans), ['BA Human']);
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'openPr' }] }, node, humans), ['Maintainer']);
+  // Both artifact actions union their reviewers.
+  assert.deepEqual(
+    outcomeHumanReviewers({ actions: [{ type: 'openIssue' }, { type: 'openPr' }] }, node, humans),
+    ['BA Human', 'Maintainer'],
+  );
+});
+
+test('outcomeHumanReviewers ignores non-artifact actions, other producers, label consumes', () => {
+  // setLabel-only outcome: nothing to review.
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'setLabel', label: 'ready' }] }, node, humans), []);
+  // A consume bound to a different producer does not count.
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'openIssue' }] }, { id: 'qa' }, humans), []);
+  // Degenerate inputs stay empty.
+  assert.deepEqual(outcomeHumanReviewers(null, node, humans), []);
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'openIssue' }] }, node, null), []);
+  assert.deepEqual(outcomeHumanReviewers({ actions: [{ type: 'openIssue' }] }, node, [null, {}]), []);
+});
+
+test('outcomeHumanReviewers falls back displayName → name → id and accepts graph human nodes', () => {
+  // Raw registry entry without a name.
+  assert.deepEqual(
+    outcomeHumanReviewers({ actions: [{ type: 'openPr' }] }, node,
+      [{ id: 'rev', consumes: [{ artifact: 'pr', from: 'dev' }] }]),
+    ['rev'],
+  );
+  // A graph `kind: 'human'` node carries displayName instead of name.
+  assert.deepEqual(
+    outcomeHumanReviewers({ actions: [{ type: 'openPr' }] }, node,
+      [{ id: 'rev', displayName: 'Reviewer', kind: 'human', consumes: [{ artifact: 'pr', from: 'dev' }] }]),
+    ['Reviewer'],
+  );
+});

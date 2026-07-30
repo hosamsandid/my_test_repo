@@ -38,6 +38,30 @@ export function labelConsumers(label, node, peers) {
   return consumersFor({ actions: [{ type: 'setLabel', label }] }, node, peers);
 }
 
+// Named human reviewers of an outcome's artifact (#1001, concept §1 D4): a
+// bound human role counts as a consumer of an `openPr`/`openIssue` action when
+// the humans registry carries a matching `{artifact: 'pr'|'issue', from:
+// thisAgent}` consume — the same binding that draws the delivery edge and
+// suppresses `producer-unconsumed` server-side (process-graph.js, #987), so
+// the Routing tab and the Flows lint list agree. Returns display names.
+// `humans` accepts the raw registry (graph.humans / bundle.humans) or the
+// graph's `kind: 'human'` nodes — both carry `consumes` and a name.
+export function outcomeHumanReviewers(option, node, humans) {
+  const actions = Array.isArray(option?.actions) ? option.actions : [];
+  const opensPr = actions.some(a => a && a.type === 'openPr');
+  const opensIssue = actions.some(a => a && a.type === 'openIssue');
+  if (!opensPr && !opensIssue) return [];
+  const names = new Set();
+  for (const h of (Array.isArray(humans) ? humans : [])) {
+    if (!h || !h.id) continue;
+    const consumed = (Array.isArray(h.consumes) ? h.consumes : []).some(c => c
+      && c.from === node?.id
+      && ((opensPr && c.artifact === 'pr') || (opensIssue && c.artifact === 'issue')));
+    if (consumed) names.add(h.displayName || h.name || h.id);
+  }
+  return [...names];
+}
+
 // Does this outcome hand off to a PERSON (#981)? True when any of its setLabel
 // actions sets a brake-flagged label (`labels` = the graph's label registry,
 // [{ name, humanGate, brake }]). A brake is the agent pausing the flow for a

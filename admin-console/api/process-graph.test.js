@@ -1112,6 +1112,29 @@ test('#987 AC5: a PR bound to a human suppresses producer-unconsumed and draws t
   assert.equal(e.artifact, 'pr');
 });
 
+test('#1001 (D4): an outcomes-authored openIssue reviewed by a bound human raises no consumer lint', () => {
+  // The concept §1 D4 repro, via the outcomes port (not raw github flags): BA's
+  // outcome opens an issue, a named human role reviews it. The reviewer IS the
+  // consumer — the graph must draw the delivery and raise neither
+  // producer-unconsumed nor outcome-without-consumer.
+  const roles = [
+    { id: 'ba', outcomes: { mode: 'anyOf', options: [{ id: 'ticket', title: 'Opens issue', actions: [{ type: 'openIssue' }] }] }, triggers: [] },
+    { id: 'dev', triggers: [] },
+  ];
+  const withHuman = buildProcessGraph(roles, {
+    humans: [{ id: 'ba-human', name: 'BA Human', consumes: [{ artifact: 'issue', from: 'ba' }] }],
+  });
+  assert.ok(!lintCodes(withHuman).includes('producer-unconsumed'));
+  assert.ok(!lintCodes(withHuman).includes('outcome-without-consumer'));
+  const e = withHuman.edges.find(x => x.kind === 'delivery' && x.from === 'ba');
+  assert.equal(e.to, 'ba-human');
+  assert.equal(e.artifact, 'issue');
+  // Without the binding the advisory smell fires — the suppression is the
+  // reviewer, not the outcome shape.
+  const withoutHuman = buildProcessGraph(roles, { humans: [{ id: 'ba-human', name: 'BA Human' }] });
+  assert.ok(lintCodes(withoutHuman).includes('producer-unconsumed'));
+});
+
 test('#987 AC6: gate-violation fires when an agent emits a human-emitted label', () => {
   const g = buildProcessGraph([
     { id: 'rogue', emits: ['dispatch'], triggers: [] },

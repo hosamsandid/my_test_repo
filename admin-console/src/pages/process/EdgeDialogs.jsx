@@ -772,7 +772,7 @@ export function EditHandoffDialog(props) {
 /* ── Edit / remove a GitHub channel edge (#380) ─────────────────────────────
  * The channel is a port on the consumer; editing changes the routing label +
  * human-gate, removing drops the port (the backend re-derives the trigger). */
-function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChannelCount, onClose, onDone, onOpenRouting }) {
+function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onDone, onOpenRouting }) {
   const { from, to, artifact: art } = edge;
   const artifact = art === 'issue' ? 'issue' : 'pr';
   const [label, setLabel] = useState(edge.label || '');
@@ -783,10 +783,6 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
-  // Produce-flag cleanup (#412): when this is the last channel consuming the
-  // producer's PR/issue, offer to clear the orphaned produce flag with it.
-  const lastChannel = typeof producerChannelCount === 'number' && producerChannelCount <= 1;
-  const [clearProduces, setClearProduces] = useState(true);
 
   async function save() {
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
@@ -804,9 +800,10 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
   async function remove() {
     setSaving(true); setError(null);
     try {
-      // The engine drops the port and, when confirmed, the orphaned produce
-      // flag with it (audience flags preserved).
-      await unwireChannel({ ops }, { from, to, artifact, clearProduces: lastChannel && clearProduces });
+      // The engine drops the port. The producer's "opens PR/issue" outcome
+      // stays (#1003 — the badge is a projection of the outcome, edited in
+      // the Outcomes editor, not implied by who consumes it).
+      await unwireChannel({ ops }, { from, to, artifact });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -834,12 +831,6 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, producerChan
             Replaces the auto-generated prompt the derived listener wakes {toName || to} with. Empty keeps the default.
           </span>
         </Field>
-        {lastChannel && (
-          <label style={check}>
-            <input type="checkbox" checked={clearProduces} onChange={e => setClearProduces(e.target.checked)} />
-            On remove: also clear “opens {noun}s” on {fromName || from} (nothing consumes it any more)
-          </label>
-        )}
         {error && <span style={errStyle}>{error}</span>}
         <div style={actions}>
           <button onClick={remove} disabled={saving}

@@ -1288,3 +1288,40 @@ test('#987 AC1: humans[] round-trips build → validate', () => {
 test('#987: emptyDraftBundle carries an empty humans[]', () => {
   assert.deepEqual(emptyDraftBundle('x').humans, []);
 });
+
+// ─── #1006: the raw-layer wiring rules (one event, claim shape) ──────────────
+
+test('#1006: rawTriggerError — one event per github-event trigger, legacy passthrough on update', () => {
+  const { rawTriggerError } = require('./process-template');
+  const two = { type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'x' };
+  // Create (no prev): rejected with an actionable message.
+  assert.match(rawTriggerError(two), /exactly ONE event/);
+  // Unchanged legacy multi-event passing through an update: tolerated.
+  assert.equal(rawTriggerError(two, { ...two }), null);
+  // Changing events but staying multi: rejected.
+  assert.match(rawTriggerError(two, { ...two, events: ['issues.labeled', 'push'] }), /exactly ONE event/);
+  // Single event: fine; non-github types: never checked.
+  assert.equal(rawTriggerError({ type: 'github-event', events: ['issues.labeled'], labelFilter: 'x' }), null);
+  assert.equal(rawTriggerError({ type: 'cron', events: ['a', 'b'] }), null);
+  // Claim shape folds in (same claimError as the bundle validator).
+  assert.match(
+    rawTriggerError({ type: 'github-event', events: ['issues.labeled'], labelFilter: 'x', claim: { remove: 'x', add: 'wrong' } }),
+    /:wip/,
+  );
+});
+
+test('#1006: the bundle validator deliberately TOLERATES multi-event triggers until #1008', () => {
+  // The weaver's companion listener and curated templates still ship
+  // multi-event triggers; hard-rejecting at the bundle validator would brick
+  // materialise for every not-yet-migrated bundle. The deviation stays
+  // VISIBLE via the `raw-trigger-nonconformant` graph lint, and the live
+  // trigger endpoints hard-reject via `rawTriggerError`. #1008 flips the
+  // validator to `rawTriggerError` when it migrates the generators.
+  const bundle = {
+    processTemplateVersion: 1,
+    roles: [{ id: 'r', name: 'R', prompt: 'x', triggers: [
+      { id: 't', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
+    ] }],
+  };
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+});

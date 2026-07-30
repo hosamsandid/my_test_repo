@@ -11,6 +11,7 @@ import {
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
+  claimBodyFor,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 
@@ -569,6 +570,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     verifyMode:    deriveVerifyMode(initialValues?.verify),
     verifyCommand: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.command) || '',
     verifyAgentId: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.agentId) || '',
+    // Claim (#1006): a label listener takes its wake label over as `<wake>:wip`
+    // when it fires — ON by default for new listeners (the platform convention
+    // the engine/channel paths follow); an edit reflects the stored state.
+    claimOn:       isEdit ? !!initialValues?.claim : true,
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -749,6 +754,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+      // Claim stamping (#1006): the raw layer follows the same convention as
+      // the engine paths — a `.labeled` label listener claims its wake label
+      // unless the author opted out. On edit, `null` clears a stored claim;
+      // on create the field is simply omitted (undefined drops from JSON).
+      body.claim = claimBodyFor({
+        labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
+      });
     }
     await onSave(body);
   }
@@ -1047,6 +1059,15 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               />
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Only fire when the {form.events.includes('issues.unlabeled') || form.events.includes('pull_request.unlabeled') ? 'removed' : 'added'} label matches this name exactly. Saves a Claude invocation on every other label change.
+              </div>
+              {form.labelFilter.trim() && form.events.some(e => e === 'issues.labeled' || e === 'pull_request.labeled') && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
+                  Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
+                </label>
+              )}
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.
               </div>
             </div>
           )}

@@ -2889,6 +2889,50 @@ _MATRIX_ROOM_ID_RE = re.compile(r"^![a-zA-Z0-9._~-]+(:[a-zA-Z0-9._:-]+)?$")
 _MAX_EVENT_FIELD_CHARS = 4000
 
 
+# The claim-label convention `<wake>:wip` (#958) — a documented mirror of
+# admin-console/api/process-template.js CLAIM_SUFFIX. Keep in sync.
+CLAIM_SUFFIX = ":wip"
+
+
+def _nonconformant_trigger_reason(trigger) -> str | None:
+    """Raw-layer wiring guard (#1006, concept §4.8) — a DOCUMENTED MIRROR of
+    `rawTriggerError` in admin-console/api/process-template.js (the orchestrator
+    and this runtime cannot require an admin-console module; keep the two in
+    sync). A self-managed `triggers.json` edit MAY deviate from the wiring
+    rules — self-management is a feature — but the deviation must be VISIBLE:
+    the trigger still runs; the runner posts a one-time advisory DM and the
+    graph shows the `raw-trigger-nonconformant` lint.
+
+    Rules: a github-event trigger carries exactly ONE event; a `claim` must be
+    `{remove: <labelFilter>, add: "<labelFilter>:wip"}` on a label listener.
+    Returns a human-readable reason, or None when conformant.
+    """
+    if not isinstance(trigger, dict) or trigger.get("type") != "github-event":
+        return None
+    events = trigger.get("events")
+    if isinstance(events, list) and len(events) > 1:
+        return (
+            f"it listens on {len(events)} events ({', '.join(map(str, events))}) — "
+            "a github-event trigger carries exactly ONE event; create one trigger per event"
+        )
+    claim = trigger.get("claim")
+    if claim is None:
+        return None
+    if not isinstance(claim, dict):
+        return "its claim must be an object"
+    label = trigger.get("labelFilter")
+    wake = label.strip() if isinstance(label, str) else ""
+    if not wake:
+        return "its claim requires a labelFilter (only a label listener can be claimed)"
+    remove = claim.get("remove")
+    add = claim.get("add")
+    if not isinstance(remove, str) or remove.strip() != wake:
+        return f"its claim.remove must equal the labelFilter (`{wake}`)"
+    if not isinstance(add, str) or add.strip() != f"{wake}{CLAIM_SUFFIX}":
+        return f"its claim.add must follow the `<wakeLabel>{CLAIM_SUFFIX}` convention (`{wake}{CLAIM_SUFFIX}`)"
+    return None
+
+
 def _load_triggers() -> list[dict]:
     p = _agent_workdir() / _TRIGGERS_FILENAME
     try:
@@ -3458,6 +3502,9 @@ class TriggerScheduler:
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        # Raw-layer guard (#1006): trigger ids already flagged as deviating
+        # from the wiring rules — each gets ONE advisory DM, never a repeat.
+        self._nonconformant_notified: set[str] = set()
         self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
@@ -3724,6 +3771,17 @@ class TriggerScheduler:
             tid = trigger.get("id")
             if not isinstance(tid, str) or not tid:
                 continue
+
+            # Raw-layer guard (#1006, §4.8): a self-managed edit that deviates
+            # from the wiring rules is flagged ONCE (stderr + advisory DM) and
+            # then left alone — the trigger still runs, nothing is rewritten
+            # (self-management is a feature; workspace-transparency principle).
+            reason = _nonconformant_trigger_reason(trigger)
+            if reason and tid not in self._nonconformant_notified:
+                self._nonconformant_notified.add(tid)
+                print(f"[Runner:{self._agent_id}] trigger {tid} deviates from "
+                      f"the wiring rules: {reason}", file=sys.stderr)
+                await self._notify_nonconformant_trigger(tid, reason)
 
             ttype = trigger.get("type")
             if ttype == "cron":
@@ -4036,6 +4094,23 @@ class TriggerScheduler:
                 last_verify_output=last_verify_output)
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] loop {tid} outcome DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _notify_nonconformant_trigger(self, tid: str, reason: str) -> None:
+        """One-time advisory DM for a wiring-rule deviation (#1006). Best-effort:
+        no DM room yet → the stderr log line is the only trace this pass."""
+        room_id = _load_dm_room_id()
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(
+                room_id,
+                f"⚠️ **Trigger `{tid}` deviates from the wiring rules** — {reason}.\n\n"
+                "It still runs unchanged (self-managed triggers are never rewritten). "
+                "Edit it in the Flow Editor or `triggers.json` to conform.",
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] nonconformant-trigger DM failed: {exc}",
                   file=sys.stderr)
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,

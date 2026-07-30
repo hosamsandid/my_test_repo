@@ -29,7 +29,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -3178,6 +3178,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
+  // Raw-layer guard (#1006, concept §4.8): one event per github-event trigger
+  // + claim shape — enforced server-side so no surface (engine dialog, panel,
+  // direct API) can persist a non-conformant listener unchallenged again.
+  const te = rawTriggerError(newTrigger);
+  if (te) return res.status(400).json({ error: te });
   if (newTrigger.type === 'github-event') {
     const now = new Date().toISOString();
     if (!newTrigger.createdAt) newTrigger.createdAt = now;
@@ -3208,6 +3213,11 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
   delete merged.emits;
   delete merged.emitsDerived;
+  // Raw-layer guard (#1006, §4.8): reject a multi-event github-event trigger /
+  // invalid claim — except a pre-existing multi-event trigger passing through
+  // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
+  const te = rawTriggerError(merged, prev);
+  if (te) return res.status(400).json({ error: te });
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a

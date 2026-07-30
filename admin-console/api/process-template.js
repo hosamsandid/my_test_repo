@@ -137,6 +137,37 @@ function claimError(claim, labelFilter, type) {
   return null;
 }
 
+/**
+ * The raw-layer wiring rules in one place (#1006, concept §4.8): what a
+ * `github-event` trigger must satisfy REGARDLESS of which surface wrote it —
+ * the engine, the TriggersPanel, a draft bundle, a direct API call, or a
+ * hand-edited triggers.json. Shared by the live trigger endpoints, the bundle
+ * validator and the `raw-trigger-nonconformant` graph lint, so the rule set
+ * cannot drift between enforcement points.
+ *
+ * Rules: exactly ONE event per github-event trigger (the 2026-07-05 migration,
+ * whose absence server-side let the #987 two-event regression persist), and a
+ * well-formed claim (`claimError`). `prev` is the stored trigger on an update:
+ * a pre-existing multi-event trigger passing through UNCHANGED is tolerated
+ * (the LegacyMultiEventNote migration flow keeps working); changing the events
+ * of one must shrink it to a single event.
+ *
+ * Returns an actionable error string, or null when conformant.
+ */
+function rawTriggerError(t, prev) {
+  if (!t || typeof t !== 'object' || t.type !== 'github-event') return null;
+  const events = Array.isArray(t.events) ? t.events : [];
+  if (events.length > 1) {
+    const prevEvents = prev && Array.isArray(prev.events) ? prev.events : null;
+    const unchanged = prevEvents && prevEvents.length === events.length
+      && prevEvents.every((e, i) => e === events[i]);
+    if (!unchanged) {
+      return `a github-event trigger carries exactly ONE event (got ${events.length}: ${events.join(', ')}) — create one trigger per event`;
+    }
+  }
+  return claimError(t.claim, t.labelFilter, t.type);
+}
+
 function isValidClaim(claim, labelFilter) {
   return !!claim && claimError(claim, labelFilter, 'github-event') === null;
 }
@@ -289,6 +320,14 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       if (!t || typeof t !== 'object') continue;
       const ce = claimError(t.claim, t.labelFilter, t.type);
       if (ce) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${ce}` };
+      // One-event enforcement (#1006, §4.8) deliberately stays OUT of the
+      // bundle validator for now: the weaver's companion listener and the
+      // curated templates still ship multi-event triggers until the #1008
+      // migration lands — hard-rejecting here would brick materialise for
+      // every not-yet-migrated bundle. Until then the deviation is VISIBLE
+      // (the `raw-trigger-nonconformant` graph lint); the live trigger
+      // endpoints already hard-reject new multi-event triggers. #1008 flips
+      // this to `rawTriggerError(t)` when it migrates the generators.
     }
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome
@@ -1184,5 +1223,5 @@ module.exports = {
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958)
-  deriveClaim, claimLabelFor, claimError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
+  deriveClaim, claimLabelFor, claimError, rawTriggerError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
 };

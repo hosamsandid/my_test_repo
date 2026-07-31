@@ -7398,6 +7398,13 @@ class Orchestrator {
     for (const id of toEnable) {
       try {
         await this.enableAgent(id);
+        // Deliberate asymmetry vs. disableTeam's rollback: if this tag-clear
+        // write fails after enableAgent() already succeeded, the member is
+        // left enabled but still tagged disabledByTeam. That's harmless — the
+        // member is already up and working, and the stale tag self-heals on
+        // the next disable/enable cycle. disableTeam rolls back instead
+        // because leaving a member disabled-and-untagged there would make it
+        // invisible to future enableTeam calls, which matters more.
         const cfg = loadAgentConfig(id);
         const { disabledByTeam, ...rest } = cfg;
         saveAgentConfig(id, rest);

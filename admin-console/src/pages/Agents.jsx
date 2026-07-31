@@ -2669,7 +2669,7 @@ export default function Agents() {
               This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
             </p>
             <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-              {teamActionPrompt.members.filter(m => m.disabledByTeam).map(m => (
+              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
                 <li key={m.id}>{m.displayName}</li>
               ))}
             </ul>

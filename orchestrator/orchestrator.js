@@ -49,7 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
-const { isTeamDisabled, planTeamDisable, planTeamEnable } = require('./team-disable');
+const { isTeamDisabled, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
@@ -2094,25 +2094,19 @@ function teamMemberConfigs(teamId) {
 // busy-warning path and the team-members preview listing, so both report
 // identical state for the same agent.
 function agentBusyState(id) {
-  let busy = false;
+  let statusJson = null;
   try {
-    const status = JSON.parse(
+    statusJson = JSON.parse(
       fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
     );
-    busy = status?.state === 'busy';
   } catch { /* no status file = idle */ }
 
-  let activeTriggers = [];
+  let triggers = null;
   try {
-    const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
-    if (Array.isArray(triggers)) {
-      activeTriggers = triggers
-        .filter(t => t.enabled !== false && t.id)
-        .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
-    }
+    triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
   } catch { /* no triggers file */ }
 
-  return { busy, activeTriggers };
+  return deriveBusyState(statusJson, triggers);
 }
 
 // ============================================================
@@ -7136,9 +7130,8 @@ class Orchestrator {
   // (PUT /api/agents/:id, the internal /enable|/disable routes, or any
   // future caller).
   _assertNotLockedByTeam(cfg) {
-    if (cfg.role !== "team-member" || !cfg.parentTeamId) return;
-    const teamCfg = loadAgentConfig(cfg.parentTeamId);
-    if (isTeamDisabled(teamCfg)) {
+    const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+    if (isMemberLockedByTeam(cfg, teamCfg)) {
       const err = new Error(`Team '${cfg.parentTeamId}' is disabled — enable the team first`);
       err.code = 'team-disabled';
       err.teamId = cfg.parentTeamId;

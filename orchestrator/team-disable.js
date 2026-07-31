@@ -44,4 +44,30 @@ function planTeamEnable(memberConfigs) {
   return { toEnable, skip };
 }
 
-module.exports = { isTeamDisabled, planTeamDisable, planTeamEnable };
+// True when a team-member's own enable/disable toggle must be locked
+// because its parent team is currently disabled.
+function isMemberLockedByTeam(memberCfg, teamCfg) {
+  if (!memberCfg || memberCfg.role !== 'team-member' || !memberCfg.parentTeamId) return false;
+  return isTeamDisabled(teamCfg);
+}
+
+// Classifies raw status/triggers data (already read from disk by the
+// caller) into the { busy, activeTriggers } shape used by the
+// busy-warning path and the team-members preview listing.
+function deriveBusyState(statusJson, triggers) {
+  const busy = statusJson?.state === 'busy';
+  const activeTriggers = Array.isArray(triggers)
+    ? triggers
+        .filter(t => t.enabled !== false && t.id)
+        .map(t => ({ id: t.id, type: t.type, description: t.description || null }))
+    : [];
+  return { busy, activeTriggers };
+}
+
+module.exports = {
+  isTeamDisabled,
+  planTeamDisable,
+  planTeamEnable,
+  isMemberLockedByTeam,
+  deriveBusyState,
+};

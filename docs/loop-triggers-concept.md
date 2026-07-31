@@ -153,6 +153,23 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
 
 ### 4.5 UI (decided)
 
+> **Revised by #1020 (manual loops are launched runs, not list triggers).**
+> A *chat-launched* loop is no longer authored/left in the chat Triggers list.
+> It is started from a loop control in the chat composer (left of the mic) via
+> the shared loop configuration form (`TriggerForm` in a locked "loop-launch"
+> mode) and posted as a `loop` trigger tagged **`launched: true`**. Such a loop:
+> self-removes from `triggers.json` on any terminal outcome (no lingering
+> `enabled` entry — AC6); is pruned, never resumed, if still present at
+> container startup (no auto-resume — AC7); is limited to one active per agent
+> (AC8); and is stopped by deleting its trigger + stopping the in-flight
+> session. The chat Triggers list now holds only standing subscriptions
+> (`cron`/`once`/`http`/`github-event`/`data-flow`); loop stays a selectable
+> type only in the Flows canvas edge editor (declarative flow loops are
+> unchanged). The engine (`_loop_runner`, verifier, budget, outcome DM) is
+> untouched. The self-edge visualisation below still applies to declarative
+> canvas loops.
+
+
 The trigger model already unifies the two surfaces, so this is **not** an either/or:
 
 - **Editing — reuse the shared `TriggerForm`.** `TriggersPanel.jsx:503` is the

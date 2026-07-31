@@ -172,6 +172,16 @@ function isValidClaim(claim, labelFilter) {
   return !!claim && claimError(claim, labelFilter, 'github-event') === null;
 }
 
+// At most one active chat-launched loop per agent (#1020 AC8). A launched loop
+// is a one-off "run until done" tagged `launched: true`; starting a second one
+// while one runs would race two runners. Returns true when `candidate` is a
+// launched loop AND `existing` already holds one. Pure — unit-tested.
+function launchedLoopConflict(existing, candidate) {
+  const isLaunchedLoop = (t) => !!t && t.type === 'loop' && !!t.launched;
+  if (!isLaunchedLoop(candidate)) return false;
+  return (Array.isArray(existing) ? existing : []).some(isLaunchedLoop);
+}
+
 // Whether a channel port opts OUT of the derived claim (#958). Default is ON, so
 // only an explicit `autoClaim: false` disables it. The opt-out lives on the PORT,
 // not on the derived trigger: channel/data-flow triggers are stripped and
@@ -1321,4 +1331,6 @@ module.exports = {
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958)
   deriveClaim, claimLabelFor, claimError, rawTriggerError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
+  // Chat-launched loops (#1020)
+  launchedLoopConflict,
 };

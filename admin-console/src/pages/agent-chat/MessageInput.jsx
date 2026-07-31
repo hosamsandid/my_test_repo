@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send, Paperclip, Loader2, Mic, Square } from 'lucide-react';
+import { Send, Paperclip, Loader2, Mic, Square, Repeat } from 'lucide-react';
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 
 /**
@@ -25,8 +25,12 @@ import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
  * @param {(files:FileList|File[])=>Promise<Array<{name:string,ref:string}>>} [onUpload]
  *        Uploads files and resolves to the uploaded descriptors (empty on failure).
  * @param {boolean} [uploading]          true while an upload is in flight
+ * @param {()=>void} [onLoopClick]        Launch a loop (or stop the running one).
+ *        When provided, a loop control renders immediately left of the mic.
+ * @param {boolean} [loopRunning]         true while a chat-launched loop runs
+ * @param {boolean} [loopBusy]            true while a loop launch/stop is in flight
  */
-export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false }) {
+export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false }) {
   const [value, setValue] = useState('');
   const [dragging, setDragging] = useState(false);
   const taRef = useRef(null);
@@ -154,6 +158,10 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     : 'Message…  (⌘↩ to send)';
 
   const canAttach = !!onUpload && !disabled && !uploading;
+  // The loop control stays clickable even while the composer is disabled IF a
+  // loop is running — so a launched loop can always be stopped (#1020 AC5).
+  // Launching, by contrast, follows the composer's disabled state.
+  const canLoop = !!onLoopClick && !loopBusy && (loopRunning || !disabled);
 
   return (
     <div style={{
@@ -162,7 +170,7 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
       background: 'var(--eb-bg-surface)',
       flexShrink: 0,
     }}>
-      {voiceState === 'recording' && (
+      {(voiceState === 'recording' || loopRunning) && (
         <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }'}</style>
       )}
       <div
@@ -261,6 +269,33 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
             padding: '4px 6px',
           }}
         />
+        {onLoopClick && (
+          <button
+            onClick={() => canLoop && onLoopClick()}
+            disabled={!canLoop}
+            aria-label={loopRunning ? 'Stop the running loop' : 'Start a loop'}
+            title={loopRunning ? 'Stop the running loop' : 'Start a loop — run this agent until the goal is met'}
+            style={{
+              width: 32, height: 32,
+              background: loopRunning ? 'var(--eb-status-warning-bg, #fffbeb)' : 'transparent',
+              color: loopRunning
+                ? 'var(--eb-status-warning, #b45309)'
+                : canLoop ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+              border: 'none',
+              borderRadius: 'var(--eb-radius-md)',
+              cursor: canLoop ? 'pointer' : 'not-allowed',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+              animation: loopRunning ? 'stt-pulse 1.6s ease-in-out infinite' : 'none',
+            }}
+          >
+            {loopBusy
+              ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
+              : loopRunning
+                ? <Square size={13} />
+                : <Repeat size={15} />}
+          </button>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
           {voiceState === 'recording' && (
             <span style={{

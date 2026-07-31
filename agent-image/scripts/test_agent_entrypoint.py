@@ -1068,6 +1068,87 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sink.get("backstopTripped"))
 
 
+class LaunchedLoopLifecycle(unittest.IsolatedAsyncioTestCase):
+    """#1020: a chat-launched loop (`launched: true`) is a one-off run, not a
+    standing subscription. It self-removes from triggers.json on any terminal
+    outcome (no lingering enabled entry) and is never auto-resumed after a
+    container restart. A declarative (non-launched) loop keeps its legacy
+    persist-and-re-run posture untouched."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 2, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_launched_loop_self_removes_on_terminal_outcome(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(launched=True)
+        entrypoint._save_triggers([trigger])
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        # AC6: no enabled entry left behind once the run ends.
+        self.assertEqual(entrypoint._load_triggers(), [])
+        # The terminal outcome DM still fires (it reads the in-memory snapshot).
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_declarative_loop_is_not_removed_on_completion(self):
+        # Backward-compat: a loop WITHOUT `launched` keeps persisting (a
+        # declarative flow loop must survive to re-run on the next lifetime).
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger()  # no `launched`
+        entrypoint._save_triggers([trigger])
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual([t["id"] for t in entrypoint._load_triggers()], ["lp"])
+
+    async def test_stale_launched_loop_pruned_and_not_armed(self):
+        # AC7: a launched loop still present at startup was interrupted — it is
+        # pruned (AC6) and never armed (no auto-resume from iteration 0).
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([self._loop_trigger(launched=True)])
+        scheduler._capture_stale_launched_loops()  # startup snapshot
+        self.assertEqual(scheduler._stale_launched_loops, {"lp"})
+        with patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        self.assertEqual(entrypoint._load_triggers(), [])
+        self.assertNotIn("lp", scheduler._loop_tasks)
+        runner_mock.assert_not_awaited()
+
+    async def test_fresh_launched_loop_arms_and_persists(self):
+        # A launch that arrives AFTER startup (not in the stale set) arms
+        # normally and stays in the file while it runs.
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([self._loop_trigger(launched=True)])
+        # No _capture_stale_launched_loops() → the fresh launch is not stale.
+        with patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            await asyncio.sleep(0)  # let the spawned runner task start
+            self.assertIn("lp", scheduler._loop_tasks)
+        self.assertEqual([t["id"] for t in entrypoint._load_triggers()], ["lp"])
+        runner_mock.assert_awaited_once()
+        await scheduler.stop()
+
+
 class VerifySpecValidation(unittest.TestCase):
     """#933: `verify` must take exactly one of command / agentId / selfGraded."""
 

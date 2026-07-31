@@ -11,6 +11,8 @@ import {
   hasClaim,
   summarizeClaimEdge,
   claimTooltip,
+  isLaunchedLoop,
+  isStandingSubscription,
   CLAIM_MARKER,
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
@@ -218,4 +220,23 @@ test('claimBodyFor: opt-out preserved; unlabeled/raw events never claim', () => 
   // An .unlabeled or raw event has no wake label to take over.
   assert.equal(claimBodyFor({ labelFilter: 'x', events: ['issues.unlabeled'], claimOn: true, isEdit: false }), undefined);
   assert.equal(claimBodyFor({ labelFilter: null, events: ['issues.labeled'], claimOn: true, isEdit: false }), undefined);
+});
+
+test('isLaunchedLoop: only a loop tagged launched=true qualifies (#1020)', () => {
+  assert.equal(isLaunchedLoop({ type: 'loop', launched: true }), true);
+  assert.equal(isLaunchedLoop({ type: 'loop' }), false);           // declarative loop
+  assert.equal(isLaunchedLoop({ type: 'loop', launched: false }), false);
+  assert.equal(isLaunchedLoop({ type: 'cron', launched: true }), false);
+  assert.equal(isLaunchedLoop(null), false);
+  assert.equal(isLaunchedLoop(undefined), false);
+});
+
+test('isStandingSubscription: the chat Triggers list excludes every loop (#1020 AC4)', () => {
+  for (const type of ['cron', 'once', 'http', 'github-event']) {
+    assert.equal(isStandingSubscription({ type }), true, `${type} is a standing subscription`);
+  }
+  // Both a declarative and a chat-launched loop are kept OUT of the list.
+  assert.equal(isStandingSubscription({ type: 'loop' }), false);
+  assert.equal(isStandingSubscription({ type: 'loop', launched: true }), false);
+  assert.equal(isStandingSubscription(null), false);
 });

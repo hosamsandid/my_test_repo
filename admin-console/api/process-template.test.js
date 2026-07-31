@@ -1407,3 +1407,18 @@ test('#1007: materialise second pass — a producer EARLIER in the list sees lat
   const again = expandGithubChannels(out, { repoFullName: 'o/r' });
   assert.equal(again.roles.find(r => r.id === 'ba').systemPrompt, ba.systemPrompt);
 });
+
+test('launchedLoopConflict: rejects a second launched loop, allows the first (#1020 AC8)', () => {
+  const { launchedLoopConflict } = require('./process-template');
+  const launched = { type: 'loop', launched: true, maxIterations: 5 };
+  // First launch — no existing launched loop.
+  assert.equal(launchedLoopConflict([], launched), false);
+  assert.equal(launchedLoopConflict([{ type: 'cron' }, { type: 'loop' }], launched), false);
+  // Second launch while one runs — conflict.
+  assert.equal(launchedLoopConflict([{ type: 'loop', launched: true }], launched), true);
+  // A declarative loop (no `launched`) is not counted, and the candidate must
+  // itself be a launched loop for a conflict to arise.
+  assert.equal(launchedLoopConflict([{ type: 'loop', launched: true }], { type: 'cron' }), false);
+  assert.equal(launchedLoopConflict([{ type: 'loop', launched: true }], { type: 'loop' }), false);
+  assert.equal(launchedLoopConflict(null, launched), false);
+});

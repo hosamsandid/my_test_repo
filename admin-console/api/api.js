@@ -8106,6 +8106,23 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// Returns enabled, materialized agents whose effective LLM endpoint is :id.
+// Used by the UI to prompt a respawn after credential rotation.
+app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const agents = listAgentDirs()
+    .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
+    .filter(cfg => {
+      if (!cfg || cfg.enabled === false || !cfg.token) return false;
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      return effectiveEndpointId(cfg, env) === ep.id;
+    })
+    .map(cfg => ({ id: cfg.id, displayName: cfg.displayName || cfg.id, role: cfg.role || 'agent' }));
+  res.json({ agents });
+});
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always

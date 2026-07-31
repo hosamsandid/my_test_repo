@@ -1,0 +1,47 @@
+'use strict';
+
+// Pure planning helpers for the team-wide enable/disable feature
+// (docs/superpowers/specs/2026-07-31-team-wide-disable-design.md). No I/O —
+// callers pass in already-loaded config objects and apply the resulting
+// id lists via the existing per-agent enableAgent/disableAgent primitives.
+
+// A team (role: "team") config is disabled iff its own `enabled` field is
+// exactly `false`. Absent or `true` means enabled, matching how every other
+// role's `enabled` field defaults.
+function isTeamDisabled(teamCfg) {
+  return !!teamCfg && teamCfg.enabled === false;
+}
+
+// Partitions a team's member configs for a team-disable action.
+// `toDisable` — members currently enabled (enabled !== false): the bulk
+//   action must disableAgent() each one and tag it disabledByTeam.
+// `skip` — members already enabled === false: left completely untouched
+//   (no tag written) since they were off on their own before this action.
+function planTeamDisable(memberConfigs) {
+  const toDisable = [];
+  const skip = [];
+  for (const cfg of memberConfigs) {
+    if (!cfg) continue;
+    if (cfg.enabled !== false) toDisable.push(cfg.id);
+    else skip.push(cfg.id);
+  }
+  return { toDisable, skip };
+}
+
+// Partitions a team's member configs for a team-enable action.
+// `toEnable` — members tagged disabledByTeam === true: the bulk action must
+//   enableAgent() each one and clear the tag.
+// `skip` — everyone else (independently disabled, already enabled, or a
+//   stub never activated): left exactly as they are.
+function planTeamEnable(memberConfigs) {
+  const toEnable = [];
+  const skip = [];
+  for (const cfg of memberConfigs) {
+    if (!cfg) continue;
+    if (cfg.disabledByTeam === true) toEnable.push(cfg.id);
+    else skip.push(cfg.id);
+  }
+  return { toEnable, skip };
+}
+
+module.exports = { isTeamDisabled, planTeamDisable, planTeamEnable };

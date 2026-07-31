@@ -21,21 +21,43 @@ cd infra/gcp
 export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
 
 terraform init
-terraform plan    # first run: 4 to import, 5 to add, 0 to change, 0 to destroy
+terraform plan
 terraform apply
 ```
 
-**Safety rule for the first apply:** the plan must show only imports (plus at
-most in-place metadata updates). Any destroy/replace means the config drifted
-from reality — stop and reconcile, never apply through it.
+**Safety rule:** a routine plan shows only the changes you authored. Any
+destroy/replace of an imported resource means the config drifted from
+reality — stop and reconcile, never apply through it.
 
 ## State
 
-Local state for the initial import. Before anyone else runs this module,
-switch `versions.tf` to the team's GCS backend (align conventions with the
-accessio Terraform setup, which manages sibling resources in this project).
+Remote state in the project-shared GCS bucket
+`acn-projectroots-tfstate-5c615c28` under prefix `env/agent-studio`
+(`versions.tf`). The bucket is owned by the accessio Terraform setup, which
+manages sibling resources in this project: its `infra/bootstrap/` created it
+(versioned, CMEK-encrypted) precisely to be shared, one prefix per stack —
+accessio itself uses `auth`, `env/uat` and `env/uat-k8s`. Migrating an
+existing local state into it is one command: `terraform init -migrate-state`
+(the old `terraform.tfstate` stays on disk, gitignored, as a fallback).
+
+## CI
+
+`.github/workflows/terraform-plan.yml` runs `fmt`/`validate` and a full
+`terraform plan` on every PR touching `infra/gcp/**`, using the same keyless
+WIF identity as `deploy-gke.yml`. **Plan-only by design**: the deployer SA
+holds just `roles/viewer` + read access to the state bucket (`deployer.tf`),
+and applies stay on operator machines. Upgrading to accessio's
+apply-on-merge pattern would mean granting the SA admin roles over
+everything this module manages — deliberate, not an oversight.
 
 ## Out of scope / next
+
+- **The accessio Terraform supermodule**
+  (`313498_terraform-google-deployment`, spec-driven via
+  `google.auto.tfvars.json`) — evaluated and deliberately not adopted:
+  rewriting this small module onto it would force re-importing every
+  resource into new module addresses and add a PAT for the private module
+  repo, for no functional gain at this size. Revisit if the module grows.
 
 - **IAP/SSO ingress** for the admin console (planned next; follows the
   accessio pattern — OAuth consent, external HTTPS LB, IdP wiring)

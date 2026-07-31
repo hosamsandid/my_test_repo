@@ -8,14 +8,13 @@ terraform {
     }
   }
 
-  # State is local for the initial import. Before this module is shared,
-  # switch to the team's GCS state bucket (align with the accessio
-  # conventions in acn-projectroots):
-  #
-  # backend "gcs" {
-  #   bucket = "<state-bucket>"
-  #   prefix = "agent-studio"
-  # }
+  # Shared project state bucket, one prefix per stack (accessio convention;
+  # its bootstrap created the bucket — versioned + CMEK — and uses the
+  # sibling prefixes "auth", "env/uat", "env/uat-k8s").
+  backend "gcs" {
+    bucket = "acn-projectroots-tfstate-5c615c28"
+    prefix = "env/agent-studio"
+  }
 }
 
 provider "google" {

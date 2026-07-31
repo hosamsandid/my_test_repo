@@ -3506,6 +3506,14 @@ class TriggerScheduler:
         # from the wiring rules — each gets ONE advisory DM, never a repeat.
         self._nonconformant_notified: set[str] = set()
         self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
+        # Chat-launched loops (#1020): a loop launched from the composer is a
+        # one-off "run until done", NOT a standing subscription. It carries
+        # `launched: true` and, unlike a declarative loop trigger, must never be
+        # re-armed by a container restart (decision 1: no auto-resume). Any
+        # launched loop already present in triggers.json when the scheduler
+        # starts was interrupted (crash/restart) — its id is captured here so
+        # the sync loop prunes it instead of re-running it from iteration 0.
+        self._stale_launched_loops: set[str] = set()
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
         # Blast-radius backstop (#611): caps concurrent + per-window triggered
@@ -3533,6 +3541,7 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] SIGUSR2 handler not installed: {exc}",
                   file=sys.stderr)
         await self._reconcile_in_flight()
+        self._capture_stale_launched_loops()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -3677,6 +3686,49 @@ class TriggerScheduler:
                 pass
 
         _save_in_flight([])
+
+    # -- launched-loop reconciliation (#1020) --------------------------------
+
+    def _capture_stale_launched_loops(self) -> None:
+        """Snapshot chat-launched loops present at startup as *stale* (#1020).
+
+        A `launched` loop in triggers.json at process start was left behind by
+        an interrupted run (container restart / crash). Decision 1 says a
+        launched loop runs once as launched — it is never auto-resumed — so the
+        sync loop prunes these ids instead of arming them. Called once, before
+        the first `_sync`, so a fresh launch that arrives later (via SIGUSR2)
+        is NOT in the set and arms normally.
+        """
+        stale = {
+            t.get("id")
+            for t in _load_triggers()
+            if isinstance(t, dict) and t.get("type") == "loop"
+            and t.get("launched") and t.get("id")
+        }
+        self._stale_launched_loops = stale
+        if stale:
+            print(f"[Runner:{self._agent_id}] launched loops from a prior "
+                  f"lifetime will not be resumed (#1020): {sorted(stale)}",
+                  file=sys.stderr)
+
+    def _remove_trigger_locally(self, tid: str) -> None:
+        """Drop a single trigger id from triggers.json + the canonical copy.
+
+        Mirrors the `once` self-removal path so a completed/interrupted
+        launched loop leaves no lingering `enabled` entry in the list (#1020
+        AC6). On the shared volume the local write is authoritative; on an
+        isolated volume the orchestrator owns the canonical copy, so also POST
+        `/consumed` to keep the next pull from bringing it back.
+        """
+        remaining = [t for t in _load_triggers() if t.get("id") != tid]
+        _save_triggers(remaining)
+        if _PER_AGENT_VOLUME:
+            asyncio.create_task(asyncio.to_thread(
+                self._orch_post_json,
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}"
+                f"/triggers/{urllib.parse.quote(tid, safe='')}/consumed",
+                {},
+            ))
 
     # -- signal --------------------------------------------------------------
 
@@ -3875,6 +3927,17 @@ class TriggerScheduler:
                 if not ok:
                     print(f"[Runner:{self._agent_id}] Invalid loop trigger "
                           f"{tid}: {reason} — skipping", file=sys.stderr)
+                    continue
+                # A chat-launched loop (#1020) is a one-off run, not a standing
+                # subscription: if it was already in triggers.json at startup it
+                # was interrupted, so prune it instead of resuming (decision 1,
+                # no auto-resume). A freshly-launched loop is never in the stale
+                # set, so it falls through and arms normally.
+                if trigger.get("launched") and tid in self._stale_launched_loops:
+                    print(f"[Runner:{self._agent_id}] pruning interrupted "
+                          f"launched loop (no auto-resume, #1020): {tid}",
+                          file=sys.stderr)
+                    self._remove_trigger_locally(tid)
                     continue
                 active_loop_ids.add(tid)
                 # A loop that already reached a terminal state this lifetime is
@@ -4086,6 +4149,18 @@ class TriggerScheduler:
             return
 
         self._loop_done.add(tid)
+        # A chat-launched loop is a run that simply ends — on any terminal
+        # outcome it leaves NO enabled entry behind (#1020 AC6). Remove it
+        # before the outcome DM so the trigger list is clean immediately; the
+        # DM below reads the in-memory snapshot, not the file.
+        if trigger.get("launched"):
+            try:
+                self._remove_trigger_locally(tid)
+                print(f"[Runner:{self._agent_id}] launched loop finished, "
+                      f"removed from triggers (#1020): {tid}", file=sys.stderr)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] launched loop {tid} "
+                      f"self-remove failed: {exc}", file=sys.stderr)
         try:
             await self._post_loop_outcome(
                 trigger, outcome, iterations, last_until_output,

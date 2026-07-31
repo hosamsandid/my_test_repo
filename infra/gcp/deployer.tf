@@ -55,12 +55,6 @@ resource "google_project_iam_member" "deployer_viewer" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-resource "google_storage_bucket_iam_member" "deployer_state_reader" {
-  bucket = "acn-projectroots-tfstate-5c615c28"
-  role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${google_service_account.deployer.email}"
-}
-
 # Only workflows from var.github_repository may impersonate the deployer SA.
 resource "google_service_account_iam_member" "deployer_wif_user" {
   service_account_id = google_service_account.deployer.name

@@ -169,6 +169,9 @@ services:
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
       STT_URL: "${STT_URL:-http://stt:9000}"
+      # Max simultaneous orchestrator respawn calls fired by
+      # POST /api/llm-endpoints/:id/respawn-agents (see .env.example).
+      RESPAWN_CONCURRENCY: "${RESPAWN_CONCURRENCY:-}"
     depends_on:
       conduwuit:
         condition: service_started

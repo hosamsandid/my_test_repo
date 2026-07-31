@@ -20,6 +20,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
@@ -8107,65 +8108,49 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
 });
 
 // Returns enabled, materialized agents whose effective LLM endpoint is :id.
-// Used by the UI to prompt a respawn after credential rotation.
+// Used by the UI to prompt a respawn after credential rotation. Discovery
+// logic lives in respawn-agents.js (pure, unit-tested) — this route only
+// does I/O (loading configs) and wires the result into a JSON response.
 app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const agents = listAgentDirs()
-    .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-    .filter(cfg => {
-      if (!cfg || cfg.enabled === false || !cfg.token) return false;
-      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-      return effectiveEndpointId(cfg, env) === ep.id;
-    })
-    .map(cfg => {
-      const teamId = typeof cfg.parentTeamId === 'string' ? cfg.parentTeamId : null;
-      const teamCfg = teamId ? readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null) : null;
-      return {
-        id: cfg.id,
-        displayName: cfg.displayName || cfg.id,
-        role: cfg.role || 'agent',
-        teamId,
-        teamName: teamCfg ? (teamCfg.displayName || teamId) : null,
-      };
-    });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
   res.json({ agents });
 });
 
 // Respawn all enabled agents bound to :id so they pick up the rotated credential
-// without requiring a manual disable→enable cycle.
+// without requiring a manual disable→enable cycle. Discovery + the bounded
+// worker-pool both live in respawn-agents.js (pure, unit-tested); this route
+// does I/O and decides the default concurrency policy.
 app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  const agentIds = listAgentDirs()
-    .map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null))
-    .filter(cfg => {
-      if (!cfg || cfg.enabled === false || !cfg.token) return false;
-      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-      return effectiveEndpointId(cfg, env) === ep.id;
-    })
-    .map(cfg => cfg.id);
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
   // Bounded concurrency: an unbounded Promise.all here would fan out one
   // stop+recreate container-lifecycle call per agent simultaneously, which
   // can overwhelm the orchestrator's libpod socket and the host's container
   // runtime on a large squad (observed directly while load-testing this
   // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
   // for their hardware; the default is conservative for a local Podman host.
-  const concurrency = Math.max(1, Number(process.env.RESPAWN_CONCURRENCY) || 5);
-  const results = new Array(agentIds.length);
-  let next = 0;
-  async function worker() {
-    while (next < agentIds.length) {
-      const i = next++;
-      results[i] = await respawnAgentBestEffort(agentIds[i], 'llm-credential-rotated');
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, agentIds.length) }, worker));
-  const respawned = agentIds.filter((_, i) => results[i]);
-  const skipped   = agentIds.filter((_, i) => !results[i]);
+  const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
+  const { respawned, skipped } = await respawnWithConcurrency(
+    agents.map(a => a.id),
+    requestedConcurrency,
+    id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
+  );
   res.json({ respawned, skipped });
 });
 

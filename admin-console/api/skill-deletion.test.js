@@ -30,6 +30,17 @@ test('planDeletion: accepts the legacy `source` alias and query-string cascade',
   assert.deepStrictEqual(p.permission, { needsSystemAdmin: false, teamAdminOf: ['payments'] });
 });
 
+test('planDeletion: normalises the `pool` source alias to the global tier (#1044)', () => {
+  // `GET /api/skills` tags global skills `source: 'pool'`; the delete must not
+  // trip the TIERS check for that established vocabulary.
+  const p = planDeletion({ source: 'pool', name: 'jcl-tips' });
+  assert.strictEqual(p.ok, true);
+  assert.strictEqual(p.tier, 'global');
+  assert.deepStrictEqual(p.permission, { needsSystemAdmin: true, teamAdminOf: [] });
+  // Explicit `tier: 'pool'` is aliased too (belt and braces for any caller).
+  assert.strictEqual(planDeletion({ tier: 'pool', name: 'jcl-tips' }).tier, 'global');
+});
+
 test('planDeletion: agent tier requires an agentId and is System-Admin gated', () => {
   const bad = planDeletion({ tier: 'agent', name: 'jcl-tips' });
   assert.strictEqual(bad.ok, false);

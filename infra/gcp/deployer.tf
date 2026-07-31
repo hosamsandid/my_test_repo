@@ -46,6 +46,15 @@ resource "google_project_iam_member" "deployer_container_developer" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Read-only plan rights for CI (workflow: .github/workflows/terraform-plan.yml).
+# The PR plan needs to read the state and every managed resource; it runs with
+# -lock=false, so no write access anywhere. Applies stay on operator machines.
+resource "google_project_iam_member" "deployer_viewer" {
+  project = var.project
+  role    = "roles/viewer"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # Only workflows from var.github_repository may impersonate the deployer SA.
 resource "google_service_account_iam_member" "deployer_wif_user" {
   service_account_id = google_service_account.deployer.name

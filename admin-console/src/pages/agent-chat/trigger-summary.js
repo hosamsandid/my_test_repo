@@ -178,3 +178,19 @@ export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
   if (lf && labeled && claimOn) return { remove: lf, add: `${lf}:wip` };
   return isEdit ? null : undefined;
 }
+
+// A chat-launched loop (#1020): a one-off "run until done" started from the
+// composer, not a standing subscription. It is a `loop`-type trigger tagged
+// `launched: true` while it runs (the runtime removes it on any terminal
+// outcome). Pure predicate — used to reflect the composer's running state.
+export function isLaunchedLoop(trigger) {
+  return !!trigger && trigger.type === 'loop' && !!trigger.launched;
+}
+
+// Whether a trigger belongs in the chat Triggers list (#1020 AC4). A loop is a
+// launched run, not a standing subscription, so it never appears there — the
+// list holds only cron / once / http / github-event / data-flow. Loops are
+// authored from the composer (chat-launched) or the Flows canvas (declarative).
+export function isStandingSubscription(trigger) {
+  return !!trigger && trigger.type !== 'loop';
+}

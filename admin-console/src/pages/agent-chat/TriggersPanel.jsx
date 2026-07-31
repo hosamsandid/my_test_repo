@@ -12,6 +12,7 @@ import {
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
+  isStandingSubscription,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 
@@ -533,18 +534,26 @@ function pickDefaultVerifier(siblings) {
 // `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
 // `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
 // turning a schedule into a different trigger kind, re-deriving the edge).
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
+  // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
+  // a single type, hiding the type selector, the id field and the enabled
+  // toggle — a launched loop is a run you start, not a stored, toggleable
+  // subscription. `lockType` forces the type; `submitLabel` relabels the
+  // primary button (e.g. "Start loop").
+  const lockedMode = !!lockType;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
   const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
-  const initialType = startedAsDataFlow
-    ? 'data-flow'
-    : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
+  const initialType = lockType
+    ? lockType
+    : startedAsDataFlow
+      ? 'data-flow'
+      : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
@@ -768,38 +777,44 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <FormInput
-        label={isEdit ? 'ID' : 'ID (optional)'}
-        value={form.id}
-        onChange={v => !isEdit && set('id', v)}
-        placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
-        disabled={isEdit}
-      />
+      {!lockedMode && (
+        <FormInput
+          label={isEdit ? 'ID' : 'ID (optional)'}
+          value={form.id}
+          onChange={v => !isEdit && set('id', v)}
+          placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
+          disabled={isEdit}
+        />
+      )}
 
-      <div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
-          Type
+      {!lockedMode && (
+        <div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
+            Type
+          </div>
+          <select
+            value={form.type}
+            onChange={e => changeType(e.target.value)}
+            disabled={typeLocked}
+            style={{
+              width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
+              fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
+              opacity: typeLocked ? 0.6 : 1,
+            }}
+          >
+            <option value="cron">Cron (recurring)</option>
+            <option value="once">Once (one-shot)</option>
+            {/* Loop is authored from the composer / Flows canvas, not the chat
+                Triggers form (#1020 AC4) — the chat panel passes allowLoopType=false. */}
+            {allowLoopType && <option value="loop">Loop (re-run until done)</option>}
+            <option value="http">HTTP webhook</option>
+            <option value="github-event">GitHub event</option>
+            <option value="data-flow">Data flow (agent dependency)</option>
+          </select>
         </div>
-        <select
-          value={form.type}
-          onChange={e => changeType(e.target.value)}
-          disabled={typeLocked}
-          style={{
-            width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
-            fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
-            opacity: typeLocked ? 0.6 : 1,
-          }}
-        >
-          <option value="cron">Cron (recurring)</option>
-          <option value="once">Once (one-shot)</option>
-          <option value="loop">Loop (re-run until done)</option>
-          <option value="http">HTTP webhook</option>
-          <option value="github-event">GitHub event</option>
-          <option value="data-flow">Data flow (agent dependency)</option>
-        </select>
-      </div>
+      )}
 
       {form.type === 'cron' && (
         <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
@@ -1183,12 +1198,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         placeholder="What should the agent do when this trigger fires?"
       />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
-        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Enabled
-        </span>
-      </div>
+      {!lockedMode && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Enabled
+          </span>
+        </div>
+      )}
 
       {formError && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
@@ -1227,7 +1244,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-          {isEdit ? 'Save' : 'Add Trigger'}
+          {submitLabel || (isEdit ? 'Save' : 'Add Trigger')}
         </button>
         <button
           onClick={onCancel}
@@ -1336,6 +1353,12 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     onChanged?.();
   }, [fetchTriggers, agentId, onChanged]);
 
+  // The chat Triggers list holds only standing subscriptions (#1020 AC4): a
+  // loop is a launched run (chat-launched or a declarative Flows self-edge),
+  // not a subscription, so it never appears here. Existing loop entries in
+  // triggers.json keep running — they are just hidden from this list.
+  const listedTriggers = triggers.filter(isStandingSubscription);
+
   /* ── Toolbar ──────────────────────────────────────────────────────── */
   const toolbar = (
     <div style={{
@@ -1347,8 +1370,8 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       <span style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {loading
           ? 'Loading…'
-          : triggers.length > 0
-            ? `${triggers.length} trigger${triggers.length === 1 ? '' : 's'}`
+          : listedTriggers.length > 0
+            ? `${listedTriggers.length} trigger${listedTriggers.length === 1 ? '' : 's'}`
             : agentId ? 'No triggers' : ''}
       </span>
       <button
@@ -1414,13 +1437,13 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           </div>
         )}
 
-        {!loading && !error && triggers.length === 0 && (
+        {!loading && !error && listedTriggers.length === 0 && (
           <div style={{ padding: 'var(--eb-space-6)', textAlign: 'center', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
             No scheduled triggers configured for this agent.
           </div>
         )}
 
-        {triggers.map((t, i) => (
+        {listedTriggers.map((t, i) => (
           <TriggerRow
             key={t.id || i}
             trigger={t}
@@ -1438,6 +1461,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           agentId={agentId}
           ops={ops}
           saving={saving}
+          allowLoopType={false}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
         />
@@ -1450,6 +1474,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             ops={ops}
             initialValues={editTarget}
             saving={saving}
+            allowLoopType={false}
             onSave={handleEditSave}
             onCancel={() => setEditTarget(null)}
           />

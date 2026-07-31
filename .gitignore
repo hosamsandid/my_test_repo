@@ -33,3 +33,8 @@ __pycache__/
 # `make video-journeys` from the journey screen recordings, published as a CI
 # artifact and human-watched, never committed (binary; the journeys are the source).
 /artifacts/*.webm
+
+# Terraform (infra/gcp) — state stays local/GCS, never in git
+.terraform/
+*.tfstate
+*.tfstate.*

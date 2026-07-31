@@ -294,11 +294,13 @@ async function wireIssueChannel(ctx, { from, to, label, humanGate = true }) {
   const { page } = ctx;
   await connectPort(page, slugRole(from), slugRole(to));
 
-  const picker = page.getByRole('dialog', { name: 'Create connection' });
+  // The one create dialog is sentence-titled (#1005): "How does B learn about A's work?"
+  const picker = page.getByRole('dialog', { name: /How does .* learn about/ });
   await expect(picker).toBeVisible();
   await picker.getByRole('button', { name: /Issue channel/ }).click();
 
-  const channel = page.getByRole('dialog', { name: 'Wire a GitHub channel' });
+  // Sentence-titled channel dialog (#1009): "An issue from A wakes B".
+  const channel = page.getByRole('dialog', { name: /An issue from .* wakes/ });
   await expect(channel).toBeVisible();
   await channel.getByLabel(/Routing label/).fill(label);
   if (humanGate) {

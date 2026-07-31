@@ -288,6 +288,46 @@
       "example": "- action:\n    do: flows.addAgentFromScratch\n    name: Developer\n    notes: Take an issue and implement it. Create a PR at the end.\n    generate: true"
     },
     {
+      "name": "flows.addArtifactInput",
+      "module": "flows",
+      "description": "S11 — wire a file-artifact hand-off from the consumer side: Routing → Add input → File artifact → pick the producer → name the artifact.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "artifact",
+          "required": true,
+          "type": "string",
+          "description": "Logical artifact name, e.g. \"Analysis report\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.addArtifactInput\n    name: Developer\n    from: Analyst\n    artifact: Analysis report"
+    },
+    {
+      "name": "flows.addHuman",
+      "module": "flows",
+      "description": "Add a named human role via the toolbar's Human-roles registry panel (#987) and close the panel.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Display name, e.g. \"Product Owner\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.addHuman\n    name: Product Owner"
+    },
+    {
       "name": "flows.addOutcome",
       "module": "flows",
       "description": "Add one outcome on the open Routing tab (#828): title, optional `when`, and the label it sets. Does NOT save (batched into flows.saveOutcomes). Leave `label` empty for a terminal (no-signal) outcome.",
@@ -315,9 +355,56 @@
           "required": false,
           "type": "string",
           "description": "Label the outcome sets; empty = no signal."
+        },
+        {
+          "name": "action",
+          "required": false,
+          "type": "string",
+          "description": "Action type when not a label: \"openPr\", \"openIssue\" or \"none\" (#1010)."
         }
       ],
       "example": "- action:\n    do: flows.addOutcome\n    name: Dispatcher\n    title: Route to Developer\n    when: Frontend/UI task\n    label: ready"
+    },
+    {
+      "name": "flows.addRejectionPath",
+      "module": "flows",
+      "description": "S10 — add the rejection path in the OPEN Review-gate editor: on rejection, the producer is woken with this label. Closes the editor.",
+      "params": [
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Rejection label, e.g. \"rework\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.addRejectionPath\n    label: rework"
+    },
+    {
+      "name": "flows.addScheduleInput",
+      "module": "flows",
+      "description": "S8 — add a recurring schedule via Routing → Add input → Schedule (the shared trigger form; schedules have no canvas actor).",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name."
+        },
+        {
+          "name": "time",
+          "required": false,
+          "type": "string",
+          "default": "07:00",
+          "description": "Daily wake time."
+        },
+        {
+          "name": "prompt",
+          "required": true,
+          "type": "string",
+          "description": "Wake instruction text."
+        }
+      ],
+      "example": "- action:\n    do: flows.addScheduleInput\n    name: Triage\n    time: \"07:00\"\n    prompt: Daily backlog sweep."
     },
     {
       "name": "flows.addStage",
@@ -354,6 +441,34 @@
       "example": "- action:\n    do: flows.assignStage\n    name: Business Analyst\n    stage: Requirements"
     },
     {
+      "name": "flows.captureDraftWiring",
+      "module": "flows",
+      "description": "Capture the open draft's normalized wiring state under a name, for a later flows.expectDraftWiringEqual — the UI-level convergence check (concept §4.5).",
+      "params": [
+        {
+          "name": "as",
+          "required": true,
+          "type": "string",
+          "description": "Name to store the snapshot under."
+        }
+      ],
+      "example": "- action:\n    do: flows.captureDraftWiring\n    as: pathA"
+    },
+    {
+      "name": "flows.closeInspector",
+      "module": "flows",
+      "description": "Close the open node inspector panel by its agent display name.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name (the panel title)."
+        }
+      ],
+      "example": "- action:\n    do: flows.closeInspector\n    name: Builder"
+    },
+    {
       "name": "flows.closeStages",
       "module": "flows",
       "description": "Close the Stages dialog (its overlay would otherwise cover the canvas for a screenshot).",
@@ -373,6 +488,13 @@
         }
       ],
       "example": "- action:\n    do: flows.confirmAddAgent\n    name: Business Analyst"
+    },
+    {
+      "name": "flows.deleteReviewGate",
+      "module": "flows",
+      "description": "Delete the whole review gate from the open Review-gate editor (atomic, symmetric cleanup — §4.4).",
+      "params": [],
+      "example": "- action:\n    do: flows.deleteReviewGate"
     },
     {
       "name": "flows.expectAgentCount",
@@ -403,11 +525,146 @@
       "example": "- assert:\n    do: flows.expectAgentNode\n    name: Developer"
     },
     {
+      "name": "flows.expectAgentTriggerApi",
+      "module": "flows",
+      "description": "LIVE-mode wiring assertion: the member's persisted triggers.json (via the API) carries exactly one claimed single-event listener on the label — D1/D3 in live-team mode.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Full member agent id, e.g. wiring-demo-developer."
+        },
+        {
+          "name": "event",
+          "required": true,
+          "type": "string",
+          "description": "The exact single event."
+        },
+        {
+          "name": "labelFilter",
+          "required": true,
+          "type": "string",
+          "description": "The wake label."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectAgentTriggerApi\n    agentId: wiring-demo-developer\n    event: issues.labeled\n    labelFilter: ready"
+    },
+    {
+      "name": "flows.expectDraftSourceInputs",
+      "module": "flows",
+      "description": "S1/S8/S13 — assert the draft persists all three source inputs on a role: a raw github-event trigger, a cron schedule, and an http webhook.",
+      "params": [
+        {
+          "name": "role",
+          "required": true,
+          "type": "string",
+          "description": "Role display name (or id) in the draft."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectDraftSourceInputs\n    role: Triage"
+    },
+    {
+      "name": "flows.expectDraftTrigger",
+      "module": "flows",
+      "description": "Assert the open draft persists EXACTLY ONE github-event listener with the given labelFilter on a role — single-event (D1) and, when `claimed`, the derived claim convention (D3): { remove: <label>, add: \"<label>:wip\" }.",
+      "params": [
+        {
+          "name": "role",
+          "required": true,
+          "type": "string",
+          "description": "Role display name (or id) in the draft."
+        },
+        {
+          "name": "event",
+          "required": true,
+          "type": "string",
+          "description": "The exact single event, e.g. \"issues.labeled\"."
+        },
+        {
+          "name": "labelFilter",
+          "required": true,
+          "type": "string",
+          "description": "The wake label the listener waits on."
+        },
+        {
+          "name": "claimed",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "description": "Assert the derived claim is stamped."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectDraftTrigger\n    role: Developer\n    event: issues.labeled\n    labelFilter: ready\n    claimed: true"
+    },
+    {
+      "name": "flows.expectDraftWiringEqual",
+      "module": "flows",
+      "description": "Assert two captured wiring snapshots are identical — the concept's §4.5 convergence guarantee at UI level: different assembly orders must persist the same state.",
+      "params": [
+        {
+          "name": "a",
+          "required": true,
+          "type": "string",
+          "description": "First snapshot name (flows.captureDraftWiring)."
+        },
+        {
+          "name": "b",
+          "required": true,
+          "type": "string",
+          "description": "Second snapshot name."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectDraftWiringEqual\n    a: pathA\n    b: pathB"
+    },
+    {
       "name": "flows.expectEmptyDraft",
       "module": "flows",
       "description": "Assert the empty draft is on screen (capture point for the empty-draft screenshot): the from-scratch design hint + a zero-node canvas.",
       "params": [],
       "example": "- assert:\n    do: flows.expectEmptyDraft"
+    },
+    {
+      "name": "flows.expectHandsOffLine",
+      "module": "flows",
+      "description": "S9 — assert an outcome hands off to a person: the Routing row reads \"hands off to a person 👤\".",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectHandsOffLine\n    name: Reviewer"
+    },
+    {
+      "name": "flows.expectHumanNode",
+      "module": "flows",
+      "description": "Assert a named human renders as a human box on the canvas (#987).",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "The human's display name."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectHumanNode\n    name: Product Owner"
+    },
+    {
+      "name": "flows.expectInputClaim",
+      "module": "flows",
+      "description": "S2 — assert the CLAIM BADGE renders on the canvas: the hand-off's edge chip reads \"<label> · … ⇥ wip\" (#958), so a claimed listener is visibly different from an unclaimed one.",
+      "params": [
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The wake label whose claim chip must show."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectInputClaim\n    label: ready"
     },
     {
       "name": "flows.expectIssueChannel",
@@ -436,11 +693,39 @@
       "example": "- assert:\n    do: flows.expectIssueChannel\n    from: Business Analyst\n    to: Developer\n    label: ready"
     },
     {
+      "name": "flows.expectLint",
+      "module": "flows",
+      "description": "Assert a lint code's presence or absence via the canvas lint panel. With `absent: true` the whole lint button may be gone (fully clean) or the code missing from the open list.",
+      "params": [
+        {
+          "name": "code",
+          "required": true,
+          "type": "string",
+          "description": "Lint code, e.g. \"producer-unconsumed\"."
+        },
+        {
+          "name": "absent",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "description": "Assert the code does NOT fire."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectLint\n    code: producer-unconsumed"
+    },
+    {
       "name": "flows.expectMaterializeAvailable",
       "module": "flows",
       "description": "Assert the Materialize action is available on the draft (capture point for the finished-draft screenshot). The journey deliberately does not click it — a pure draft has no team side effects.",
       "params": [],
       "example": "- assert:\n    do: flows.expectMaterializeAvailable"
+    },
+    {
+      "name": "flows.expectNoLints",
+      "module": "flows",
+      "description": "Assert the canvas shows NO lint issues — a clean flow renders no lint button at all (the Flows editor has no \"clean\" banner by design).",
+      "params": [],
+      "example": "- assert:\n    do: flows.expectNoLints"
     },
     {
       "name": "flows.expectNoOutcomes",
@@ -483,6 +768,46 @@
       "example": "- assert:\n    do: flows.expectOutcome\n    name: Dispatcher\n    outcomeId: route-to-developer\n    mode: exactlyOne"
     },
     {
+      "name": "flows.expectOutcomeReviewer",
+      "module": "flows",
+      "description": "D4 — assert an outcome row of the open agent's Routing tab shows the \"reviewed by 👤 <reviewer>\" consumer line instead of a false \"no consumer\".",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "reviewer",
+          "required": true,
+          "type": "string",
+          "description": "The named human reviewer."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectOutcomeReviewer\n    name: Business Analyst\n    reviewer: Product Owner"
+    },
+    {
+      "name": "flows.expectReviewGate",
+      "module": "flows",
+      "description": "Assert the open Review-gate editor shows the full triangle with the claim (D3) and — D2 — shows NO legacy multi-event migration warning: the dialog the engine created must never warn about its own output. Closes the editor.",
+      "params": [
+        {
+          "name": "gateLabel",
+          "required": true,
+          "type": "string",
+          "description": "The gate label."
+        },
+        {
+          "name": "reviewer",
+          "required": true,
+          "type": "string",
+          "description": "The named human of the triangle."
+        }
+      ],
+      "example": "- assert:\n    do: flows.expectReviewGate\n    gateLabel: ready\n    reviewer: Product Owner"
+    },
+    {
       "name": "flows.expectSwitchNode",
       "module": "flows",
       "description": "Assert a node renders as a switch on the canvas — the ◇ switch badge (#828).",
@@ -502,6 +827,20 @@
       "description": "Press \"Generate agent prompt\" (→ POST /api/agent-prompt/generate; the mock LLM in the E2E stack answers) and wait for the generated prose to land in the editable Agent-prompt textarea (capture point for the generated-prompt panel). Requires the Add-agent panel open with a name filled.",
       "params": [],
       "example": "- action:\n    do: flows.generateAgentPrompt"
+    },
+    {
+      "name": "flows.markOutcomeTerminal",
+      "module": "flows",
+      "description": "Open-end declaration (§4.7): mark an outcome of the open Routing tab terminal (\"the end product\") and assert the endpoint readout replaces the \"no consumer yet\" call-to-action. Leaves the inspector open.",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Agent display name."
+        }
+      ],
+      "example": "- action:\n    do: flows.markOutcomeTerminal\n    name: Author"
     },
     {
       "name": "flows.newDraft",
@@ -531,6 +870,20 @@
       "example": "- action:\n    do: flows.openAddAgent\n    name: Business Analyst\n    notes: Take requirements and create a GitHub issue."
     },
     {
+      "name": "flows.openReviewGate",
+      "module": "flows",
+      "description": "Open the one Review-gate editor (§4.4) by clicking the triangle's edge chip for the gate label.",
+      "params": [
+        {
+          "name": "gateLabel",
+          "required": true,
+          "type": "string",
+          "description": "The gate label of the triangle."
+        }
+      ],
+      "example": "- action:\n    do: flows.openReviewGate\n    gateLabel: ready"
+    },
+    {
       "name": "flows.openRouting",
       "module": "flows",
       "description": "Open a node's Routing tab in the inspector (#828): click the node, then the Routing tab. Waits for the Outcomes heading.",
@@ -543,6 +896,20 @@
         }
       ],
       "example": "- action:\n    do: flows.openRouting\n    name: Dispatcher"
+    },
+    {
+      "name": "flows.openTeamFlow",
+      "module": "flows",
+      "description": "Open a LIVE team's flow graph from the Flows left list.",
+      "params": [
+        {
+          "name": "team",
+          "required": true,
+          "type": "string",
+          "description": "Team display name (list row label)."
+        }
+      ],
+      "example": "- action:\n    do: flows.openTeamFlow\n    team: Wiring Demo"
     },
     {
       "name": "flows.renameDraft",
@@ -571,6 +938,20 @@
         }
       ],
       "example": "- action:\n    do: flows.saveOutcomes\n    name: Dispatcher"
+    },
+    {
+      "name": "flows.setLabelBrake",
+      "module": "flows",
+      "description": "S9 — flag a routing label as a Brake (flow → person) in the Label registry; the outcome that sets it then reads \"hands off to a person\".",
+      "params": [
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The label to flag."
+        }
+      ],
+      "example": "- action:\n    do: flows.setLabelBrake\n    label: needs-human-decision"
     },
     {
       "name": "flows.setOutcomeMode",
@@ -607,6 +988,131 @@
       "example": "- action:\n    do: flows.suggestOutcomes\n    name: Developer"
     },
     {
+      "name": "flows.wireGithubSource",
+      "module": "flows",
+      "description": "S1 — wire a raw GitHub event source: drag @github onto an agent, pick \"GitHub trigger\", choose the event (+ optional label filter).",
+      "params": [
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "event",
+          "required": true,
+          "type": "string",
+          "description": "Event option label, e.g. \"Issue opened\"."
+        },
+        {
+          "name": "labelFilter",
+          "required": false,
+          "type": "string",
+          "description": "Label filter (label events only)."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireGithubSource\n    to: Triage\n    event: Issue opened"
+    },
+    {
+      "name": "flows.wireHumanDelivery",
+      "module": "flows",
+      "description": "S3 path B, first leg — drag a producer agent onto a human box: \"P reviews A's work\" (delivery only; the wake stays unwired for the second leg).",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "human",
+          "required": true,
+          "type": "string",
+          "description": "The human's display name."
+        },
+        {
+          "name": "artifact",
+          "required": false,
+          "type": "string",
+          "default": "Issue",
+          "description": "\"Issue\" or \"Pull request\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireHumanDelivery\n    from: Business Analyst\n    human: Product Owner"
+    },
+    {
+      "name": "flows.wireHumanDeliveryFromOutcome",
+      "module": "flows",
+      "description": "S3 path B, first leg via the OUTCOME PORT: drag the producer's outcome port (e.g. \"Opens issue\") onto a human box. Must open the person-delivery dialog (\"P reviews A's work\") — never the channel form (the #1010 regression: the pre-typed outcome drag used to mis-wire the person as a channel role).",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "outcome",
+          "required": true,
+          "type": "string",
+          "description": "The outcome port's title, e.g. \"Opens issue\"."
+        },
+        {
+          "name": "human",
+          "required": true,
+          "type": "string",
+          "description": "The human's display name."
+        },
+        {
+          "name": "artifact",
+          "required": false,
+          "type": "string",
+          "default": "Issue",
+          "description": "\"Issue\" or \"Pull request\"."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireHumanDeliveryFromOutcome\n    from: Business Analyst\n    outcome: Opens issue\n    human: Product Owner"
+    },
+    {
+      "name": "flows.wireHumanGate",
+      "module": "flows",
+      "description": "S3 path B, second leg — drag a human box onto a consumer agent: \"P approves → B wakes\". Artifact kind is inferred/selected; claim is stamped by the engine. Optionally wires the S10 rejection path back to the producer.",
+      "params": [
+        {
+          "name": "human",
+          "required": true,
+          "type": "string",
+          "description": "The human's display name."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Gate label the person applies."
+        },
+        {
+          "name": "kind",
+          "required": false,
+          "type": "string",
+          "default": "Issue label",
+          "description": "\"Issue label\" or \"Pull-request label\"."
+        },
+        {
+          "name": "rejectionLabel",
+          "required": false,
+          "type": "string",
+          "description": "When set, enable \"On rejection, wake <producer>\" with this label."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireHumanGate\n    human: Product Owner\n    to: Developer\n    label: ready"
+    },
+    {
       "name": "flows.wireIssueChannel",
       "module": "flows",
       "description": "Wire an Issue channel from one agent to another with a human-approval gate: drag the producer's port onto the consumer, choose \"Issue channel\", enter the routing label, tick the human-approval gate, and create it (→ PUT /api/process/drafts/:id). The gate requires a routing label (product rule).",
@@ -640,6 +1146,64 @@
       "example": "- action:\n    do: flows.wireIssueChannel\n    from: Business Analyst\n    to: Developer\n    label: ready\n    humanGate: true"
     },
     {
+      "name": "flows.wireIssueChannelWithApproval",
+      "module": "flows",
+      "description": "S3 path A — the ONE-dialog review gate (concept §4.3): drag producer onto consumer, pick \"Issue channel\", set the gate label, tick the human-approval gate and pick WHO approves. Wires the full triangle (delivery + gate emit + claimed single-event listener) in a single dialog.",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Gate label a person applies."
+        },
+        {
+          "name": "approver",
+          "required": true,
+          "type": "string",
+          "description": "The named human who approves."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireIssueChannelWithApproval\n    from: Business Analyst\n    to: Developer\n    label: ready\n    approver: Product Owner"
+    },
+    {
+      "name": "flows.wireLabelHandoff",
+      "module": "flows",
+      "description": "S2 — wire a plain label hand-off (A sets a label that wakes B) via the canvas drag + \"Label hand-off\" tile.",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The hand-off label."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireLabelHandoff\n    from: Author\n    to: Consumer\n    label: handoff-ready"
+    },
+    {
       "name": "flows.wireOutcome",
       "module": "flows",
       "description": "Wire an outcome to a target agent by dragging the outcome's output port onto it (#828). The drag opens the label hand-off dialog PRE-FILLED with the outcome's label; this confirms it (→ creates the listener on the target). Dismisses the node inspector first so it doesn't overlay the canvas.",
@@ -670,6 +1234,52 @@
         }
       ],
       "example": "- action:\n    do: flows.wireOutcome\n    from: Dispatcher\n    to: Developer\n    outcome: Route to Developer"
+    },
+    {
+      "name": "flows.wirePrChannel",
+      "module": "flows",
+      "description": "S5 — wire a plain (ungated) pull-request channel: A opens a PR that wakes B.",
+      "params": [
+        {
+          "name": "from",
+          "required": true,
+          "type": "string",
+          "description": "Producer agent display name."
+        },
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "label",
+          "required": false,
+          "type": "string",
+          "description": "Optional routing label."
+        }
+      ],
+      "example": "- action:\n    do: flows.wirePrChannel\n    from: Developer\n    to: Reviewer"
+    },
+    {
+      "name": "flows.wireWebhookSource",
+      "module": "flows",
+      "description": "S13 — wire a webhook source: drag @external onto an agent, pick \"Webhook\".",
+      "params": [
+        {
+          "name": "to",
+          "required": true,
+          "type": "string",
+          "description": "Consumer agent display name."
+        },
+        {
+          "name": "description",
+          "required": true,
+          "type": "string",
+          "description": "Webhook description."
+        }
+      ],
+      "example": "- action:\n    do: flows.wireWebhookSource\n    to: Triage\n    description: CI pipeline finished"
     },
     {
       "name": "gh.applyLabel",
@@ -1344,6 +1954,43 @@
         }
       ],
       "example": "fixtures:\n  - fixture: ibanStoryTeam\n    params:\n      teamId: iban-demo\n      teamName: IBAN Demo\n      envId: iban-demo-env\n      envName: IBAN Demo\n      repoUrl: \"http://git-remote/e2e/fixture.git\"\n      tokenId: iban-demo-token"
+    },
+    {
+      "name": "liveWiringTeam",
+      "description": "liveWiringTeam: the review-gate-live journey's precondition (#1010). A MINIMAL live team (Business Analyst + Developer) materialised from an inline bundle on a credential-less env pointing at the in-stack git remote — enough for the Flow editor's live scope to wire a review gate against real member configs, with no GitHub polling (token-less env) and no label chain to run. FIXED ids: setup pre-cleans a leftover team+env; teardown removes both.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to create."
+        },
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name (the Flows list row)."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to create."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment display name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "Git URL the environment points at."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: liveWiringTeam\n    params:\n      teamId: wiring-demo\n      teamName: Wiring Demo\n      envId: wiring-demo-env\n      envName: Wiring Demo\n      repoUrl: \"http://git-remote/e2e/fixture.git\""
     },
     {
       "name": "teamEnv",

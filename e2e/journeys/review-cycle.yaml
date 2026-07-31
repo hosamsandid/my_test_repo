@@ -1,0 +1,188 @@
+journeyVersion: 1
+id: review-cycle
+title: Review switch, rework cycle, merge gate, escalation
+order: 49
+# CI lane only. Draft-only, no team/Matrix side effects. Covers S5 (PR-review
+# switch with exactlyOne outcomes), S6 (the rework cycle rendered without lint
+# noise), S7 (a human merge gate) and S9 (a brake-label escalation that hands
+# off to a person).
+lanes: [ci]
+timeoutMs: 150000
+
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Review Cycle
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      A realistic build loop branches: the Reviewer either recommends the
+      merge, sends the work back, or escalates to a person. This journey
+      builds the whole loop — switch, rework cycle, human merge gate,
+      escalation — and shows the cycle renders as intent, not as warnings.
+
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Review Cycle
+  - action:
+      do: flows.addAgentFromScratch
+      name: Developer
+      notes: Implement issues and open pull requests.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Reviewer
+      notes: Review every pull request against its acceptance criteria.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Reworker
+      notes: Address review feedback and return the PR to a reviewable state.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Merger
+      notes: Merge approved pull requests.
+  - action:
+      do: flows.addHuman
+      name: Merge Approver
+
+  # ── S5: the PR channel + the review switch ─────────────────────────────────
+  - action:
+      do: flows.wirePrChannel
+      from: Developer
+      to: Reviewer
+  - action:
+      do: flows.openRouting
+      name: Reviewer
+  - action:
+      do: flows.setOutcomeMode
+      name: Reviewer
+      mode: exactlyOne
+  - action:
+      do: flows.addOutcome
+      name: Reviewer
+      title: Recommends merge
+      when: The PR satisfies its acceptance criteria
+      label: ""
+  - action:
+      do: flows.addOutcome
+      name: Reviewer
+      title: Revisions required
+      when: Blocking findings — the PR goes back
+      label: revisions-required
+  - action:
+      do: flows.addOutcome
+      name: Reviewer
+      title: Escalate
+      when: A decision above the reviewer's authority is needed
+      label: needs-human-decision
+  - id: review-switch
+    narrative: |
+      The Reviewer is a switch: exactly one of three outcomes per run —
+      recommend the merge (a signal-less verdict), send it back with
+      `revisions-required`, or escalate with `needs-human-decision`.
+    action:
+      do: flows.saveOutcomes
+      name: Reviewer
+    screenshot: review-cycle-switch
+
+  # ── S6: the rework cycle ───────────────────────────────────────────────────
+  - action:
+      do: flows.wireOutcome
+      from: Reviewer
+      to: Reworker
+      outcome: Revisions required
+  - action:
+      do: flows.openRouting
+      name: Reworker
+  - action:
+      do: flows.addOutcome
+      name: Reworker
+      title: Resolved
+      when: All review feedback is addressed and tests are green
+      label: ready-for-review
+  - action:
+      do: flows.saveOutcomes
+      name: Reworker
+  - id: rework-cycle
+    narrative: |
+      The Reworker resolves the feedback and sets `ready-for-review`, which
+      wakes the Reviewer again — a genuine cycle on the canvas, drawn as a
+      back edge, not flagged as a mistake.
+    action:
+      do: flows.wireOutcome
+      from: Reworker
+      to: Reviewer
+      outcome: Resolved
+    screenshot: review-cycle-loop
+
+
+  # Both cycle listeners are claimed, single-event (the convention holds on
+  # every hand-off, not only gates).
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Reworker
+      event: issues.labeled
+      labelFilter: revisions-required
+      claimed: true
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Reviewer
+      event: issues.labeled
+      labelFilter: ready-for-review
+      claimed: true
+
+  # ── S7: the human merge gate ───────────────────────────────────────────────
+  # The delivery half via the plain ● drag: the person reviews the Developer's
+  # pull requests before applying the merge label.
+  - action:
+      do: flows.wireHumanDelivery
+      from: Developer
+      human: Merge Approver
+      artifact: Pull request
+  - id: merge-gate
+    narrative: |
+      The final decision belongs to a person: the Merge Approver applies
+      `merge-approved` on the reviewed pull request, and only that wakes the
+      Merger.
+    action:
+      do: flows.wireHumanGate
+      human: Merge Approver
+      to: Merger
+      label: merge-approved
+      kind: Pull-request label
+    screenshot: review-cycle-merge-gate
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Merger
+      event: pull_request.labeled
+      labelFilter: merge-approved
+      claimed: true
+
+  # ── S9: escalation hands off to a person ───────────────────────────────────
+  - id: escalation
+    narrative: |
+      `needs-human-decision` is flagged as a Brake in the label registry: an
+      agent applies it to pause the flow and hand the decision to a person.
+      The Reviewer's Escalate outcome now reads "hands off to a person" —
+      a consumer by design, not a dead end.
+    action:
+      do: flows.setLabelBrake
+      label: needs-human-decision
+    screenshot: review-cycle-brake
+  - assert:
+      do: flows.expectHandsOffLine
+      name: Reviewer
+
+  # With every branch consumed or handed to a person, the full loop renders
+  # with no false wiring warnings — the cycle is intent, not noise.
+  - assert:
+      do: flows.expectLint
+      code: outcome-without-consumer
+      absent: true
+  - assert:
+      do: flows.expectLint
+      code: duplicate-listener
+      absent: true

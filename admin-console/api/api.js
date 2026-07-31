@@ -42,6 +42,7 @@ const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unified
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
+const promptHistory = require('./prompt-history');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
@@ -1659,6 +1660,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // pushed to all inheriting members in the same call (their AGENT-PROMPT.md
   // and CLAUDE.md are rewritten in place — see updateTeamPrompt).
   if (cfg.role === 'team' && typeof systemPromptTemplate === 'string') {
+    // #990: snapshot the previous template before the orchestrator overwrites it.
+    if (systemPromptTemplate !== (cfg.systemPromptTemplate || '')) {
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPromptTemplate',
+        oldContent: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '',
+        newContent: systemPromptTemplate, req, action: 'edited',
+      });
+    }
     const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
     try {
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/prompt`, {
@@ -1946,6 +1955,18 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // parent team's systemPromptTemplate), mirror it into the agent's volume, and
   // wake the agent so the next session reads it.
   if (promptOverrideChanged) {
+    // #990: version the member's authored OVERRIDE (the field the human edits).
+    // Setting an override → 'edited'; switching back to inherit (systemPrompt
+    // cleared) → 'inherited' with empty content. cfg still holds the pre-edit
+    // override here (fresh was written above; cfg was read before that).
+    const prevOverride = (typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
+    const nextOverride = (typeof fresh.systemPrompt === 'string') ? fresh.systemPrompt : '';
+    if (prevOverride !== nextOverride) {
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPrompt', oldContent: prevOverride, newContent: nextOverride, req,
+        action: typeof fresh.systemPrompt === 'string' ? 'edited' : 'inherited',
+      });
+    }
     let resolvedPrompt = '';
     if (typeof fresh.systemPrompt === 'string') {
       resolvedPrompt = fresh.systemPrompt;
@@ -2900,6 +2921,47 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
 
 /* ─── Agent Prompt ──────────────────────────────────────────────────── */
 
+// #990 (docs/prompt-version-history-concept.md): record the pre-edit authored
+// prompt as a retained version before a write overwrites it. Best-effort — a
+// stamping failure never breaks the primary prompt write. `field` is
+// 'systemPromptTemplate' for a team, else 'systemPrompt'. `by` comes from the
+// acting human (skillActor), so history is attributed to the person.
+function captureAuthoredPromptEdit(id, { field, oldContent, newContent, req, action = 'edited', note }) {
+  try {
+    const agentDir = path.join(AGENTS_DIR, id);
+    const existing = promptHistory.readPromptHistory(agentDir);
+    const next = promptHistory.stampPromptHistory(existing, {
+      field,
+      oldContent: oldContent == null ? '' : String(oldContent),
+      newContent: newContent == null ? '' : String(newContent),
+      by: skillActor(req),
+      action,
+      note,
+    });
+    promptHistory.writePromptHistory(agentDir, next);
+    return next;
+  } catch (err) {
+    console.warn(`[API] prompt-history capture failed for ${id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The authored-prompt field an agent versions, and its current authored content
+// (the string the human edits), resolved from config + AGENT-PROMPT.md. A team
+// versions its `systemPromptTemplate`; everyone else versions `systemPrompt`
+// (materialized in AGENT-PROMPT.md). Returns { field, content }.
+function resolveAuthoredPrompt(id, cfg) {
+  if (cfg && cfg.role === 'team') {
+    return { field: 'systemPromptTemplate', content: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '' };
+  }
+  // Prefer the materialized AGENT-PROMPT.md (the byte-exact authored text); fall
+  // back to config.systemPrompt when the file isn't there yet.
+  let content = '';
+  try { content = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); }
+  catch { content = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : ''; }
+  return { field: 'systemPrompt', content };
+}
+
 app.get('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -2918,6 +2980,13 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const { content } = req.body;
   if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
   const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+  // #990: snapshot the previous authored prompt before we overwrite it. (Rollback
+  // has its own route that stamps action:'reverted'; a direct edit here is 'edited'.)
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const prev = resolveAuthoredPrompt(id, cfg);
+  captureAuthoredPromptEdit(id, {
+    field: 'systemPrompt', oldContent: prev.content, newContent: content, req, action: 'edited',
+  });
   const tmp = promptPath + '.tmp';
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, promptPath);
@@ -2927,6 +2996,110 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   // never needs a rebuild for a prompt edit.
   notifyAgentReseed(id, ['AGENT-PROMPT.md']);
   res.json({ ok: true });
+});
+
+/* ─── Agent Prompt version history (#990) ────────────────────────────── */
+
+// GET the bounded version history (content-free summary + preview snippets).
+app.get('/api/agents/:id/prompt-history', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentDir = path.join(AGENTS_DIR, id);
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const existing = promptHistory.readPromptHistory(agentDir);
+  if (!existing) {
+    // No history yet — report the field the agent versions so the UI can render
+    // an empty state without a second request.
+    const { field } = resolveAuthoredPrompt(id, cfg);
+    return res.json({ v: promptHistory.HISTORY_V, field, currentVersion: 0, history: [] });
+  }
+  res.json(promptHistory.summarize(existing));
+});
+
+// GET the full stored content of one version (for diff / preview before revert).
+app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
+  const { id, version } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentDir = path.join(AGENTS_DIR, id);
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const existing = promptHistory.readPromptHistory(agentDir);
+  const entry = promptHistory.findVersion(existing, version);
+  if (!entry) return res.status(404).json({ error: `Version ${version} not retained` });
+  res.json(entry);
+});
+
+// POST rollback to an earlier version. The target content is re-applied through
+// the SAME write path a normal edit uses (so preview stays byte-identical to what
+// is seeded); capture then records a new head with action:'reverted'. Never
+// destructive — a rollback is itself a new version.
+app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (req, res) => {
+  const { id, version } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentDir = path.join(AGENTS_DIR, id);
+  const cfgPath = path.join(agentDir, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const existing = promptHistory.readPromptHistory(agentDir);
+  const target = promptHistory.findVersion(existing, version);
+  if (!target) return res.status(404).json({ error: `Version ${version} not retained` });
+  const summary = promptHistory.summarize(existing);
+  const note = `from v${summary.currentVersion} to v${target.version}`;
+  const targetContent = typeof target.content === 'string' ? target.content : '';
+
+  try {
+    if (cfg.role === 'team') {
+      // Route through the orchestrator so the reverted template is pushed to all
+      // inheriting members (same path as updateTeamPrompt).
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPromptTemplate',
+        oldContent: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '',
+        newContent: targetContent, req, action: 'reverted', note,
+      });
+      const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPromptTemplate: targetContent }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return res.status(resp.status).json(data);
+    } else if (cfg.role === 'team-member') {
+      // A member revert re-establishes an override (or switches back to inherit
+      // when the target version was an inherit-clear, i.e. empty content).
+      const fresh = readJsonFile(cfgPath, cfg);
+      const prev = resolveAuthoredPrompt(id, cfg);
+      captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
+      let resolvedPrompt = targetContent;
+      if (targetContent.length === 0) {
+        delete fresh.systemPrompt; // inherit
+        const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
+        resolvedPrompt = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
+      } else {
+        fresh.systemPrompt = targetContent;
+      }
+      writeJsonAtomic(cfgPath, fresh);
+      const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, resolvedPrompt, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+    } else {
+      // Standalone agent (or any other role) — raw AGENT-PROMPT.md rewrite.
+      const prev = resolveAuthoredPrompt(id, cfg);
+      captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
+      const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, targetContent, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+    }
+  } catch (err) {
+    return res.status(502).json({ error: `Revert failed: ${err.message}` });
+  }
+
+  const updated = promptHistory.summarize(promptHistory.readPromptHistory(agentDir));
+  res.json({ ok: true, revertedTo: target.version, currentVersion: updated.currentVersion, history: updated.history });
 });
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */

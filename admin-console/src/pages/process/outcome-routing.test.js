@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   rowLabels, rowArtifact, consumerCandidates, wireConsumerSpec, unwireConsumerSpec, currentConsumers,
-  outcomeDropDialog,
+  outcomeDropDialog, openEndMarker,
 } from './outcome-routing.js';
 
 // #1003 — pure specs for the per-row consumer picker (concept §4.2).
@@ -88,4 +88,40 @@ test('outcomeDropDialog: drops onto an agent are unchanged (channel vs hand-off)
   // No/undefined target node behaves like an agent target (no human).
   assert.equal(outcomeDropDialog(labelDrag, null), 'handoff');
   assert.equal(outcomeDropDialog(prDrag, undefined), 'channel');
+});
+
+// #1037 — open-end marker round-trips through normalize (load) + finalize (save).
+
+test('openEndMarker: terminal outcome yields {terminal:true}', () => {
+  assert.deepEqual(openEndMarker({ id: 'done', terminal: true }), { terminal: true });
+});
+
+test('openEndMarker: external with a note is preserved and trimmed', () => {
+  assert.deepEqual(openEndMarker({ external: { note: 'CI workflow' } }), { external: { note: 'CI workflow' } });
+  assert.deepEqual(openEndMarker({ external: { note: '  CI workflow  ' } }), { external: { note: 'CI workflow' } });
+});
+
+test('openEndMarker: external with an empty/blank note collapses to {external:{}}', () => {
+  assert.deepEqual(openEndMarker({ external: {} }), { external: {} });
+  assert.deepEqual(openEndMarker({ external: { note: '' } }), { external: {} });
+  assert.deepEqual(openEndMarker({ external: { note: '   ' } }), { external: {} });
+});
+
+test('openEndMarker: an unmarked outcome yields no marker fields', () => {
+  assert.deepEqual(openEndMarker({ id: 'x', actions: [{ type: 'setLabel', label: 'y' }] }), {});
+  assert.deepEqual(openEndMarker({}), {});
+  assert.deepEqual(openEndMarker(null), {});
+  assert.deepEqual(openEndMarker(undefined), {});
+});
+
+test('openEndMarker: terminal wins if both are somehow present (mirrors marker derivation)', () => {
+  assert.deepEqual(openEndMarker({ terminal: true, external: { note: 'x' } }), { terminal: true });
+});
+
+test('openEndMarker: a non-true terminal or non-object external is ignored', () => {
+  assert.deepEqual(openEndMarker({ terminal: false }), {});
+  assert.deepEqual(openEndMarker({ terminal: 'yes' }), {});
+  assert.deepEqual(openEndMarker({ external: null }), {});
+  assert.deepEqual(openEndMarker({ external: 'nope' }), {});
+  assert.deepEqual(openEndMarker({ external: ['a'] }), {});
 });

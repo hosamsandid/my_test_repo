@@ -7,6 +7,28 @@
 // Pure + framework-free (node:test-able). `peers` are flow-graph nodes
 // (`{ id, kind?, displayName?, triggers?, channels? }`).
 
+/**
+ * The open-end marker (#1004, concept §4.7) an outcome option carries, as the
+ * subset of persisted fields — `{ terminal: true }`, `{ external: {note?} }`, or
+ * `{}` (no marker). Used by both the load hydrator and the save serializer in
+ * RoutingSection so the marker round-trips (it was previously dropped on both
+ * sides — #1037).
+ *
+ * `terminal` and `external` are mutually exclusive; `terminal` wins if both are
+ * somehow present, mirroring the row's marker derivation. `external.note` is
+ * trimmed, and an empty note collapses to `{ external: {} }` (still a valid
+ * declared endpoint per the server's validateOutcomes).
+ */
+export function openEndMarker(option) {
+  if (option?.terminal === true) return { terminal: true };
+  const ext = option?.external;
+  if (ext && typeof ext === 'object' && !Array.isArray(ext)) {
+    const note = typeof ext.note === 'string' ? ext.note.trim() : '';
+    return { external: note ? { note } : {} };
+  }
+  return {};
+}
+
 // The labels an outcome sets and the first GitHub artifact it opens.
 export function rowLabels(option) {
   return (Array.isArray(option?.actions) ? option.actions : [])

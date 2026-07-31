@@ -915,6 +915,9 @@ export default function ModelRegistry() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents } | null
+  const [respawning, setRespawning]       = useState(false);
+  const [respawnError, setRespawnError]   = useState(null);
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1058,6 +1061,23 @@ export default function ModelRegistry() {
     setSaving(true); setFormError(null);
     try {
       await apiCall('PUT', `/api/llm-endpoints/${editing.id}`, payload);
+      // Detect whether a spawn-time credential changed: new/cleared token, new
+      // OAuth flow, or changed baseUrl — all are baked into the container env.
+      const credentialChanged = 'authToken' in payload
+        || 'oauthFlowId' in payload
+        || payload.baseUrl !== (editing.baseUrl ?? '');
+      if (credentialChanged) {
+        try {
+          const { agents } = await apiCall('GET', `/api/llm-endpoints/${editing.id}/bound-agents`);
+          if (agents && agents.length > 0) {
+            setRespawnPrompt({ endpointId: editing.id, agents });
+            // Don't close the panel yet — dialog handles that on confirm/cancel.
+            return;
+          }
+        } catch {
+          // bound-agents failure is non-blocking; save already succeeded.
+        }
+      }
       setEditing(null);
       refetch();
     } catch (e) {

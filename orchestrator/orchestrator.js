@@ -7136,7 +7136,16 @@ class Orchestrator {
   // is off; this guard makes that true no matter which route calls in
   // (PUT /api/agents/:id, the internal /enable|/disable routes, or any
   // future caller).
-  _assertNotLockedByTeam(cfg) {
+  //
+  // `bypass` is for disableTeam's OWN internal per-member disableAgent()
+  // calls only — never set by any external route. Without it, retrying
+  // disableTeam after a partial failure (team already flipped to disabled,
+  // one member still enabled because its disableAgent() call failed for an
+  // unrelated reason) would deadlock: this guard would now block that same
+  // member's disableAgent() forever, and it's never disabledByTeam-tagged
+  // (its disable never succeeded), so enableTeam can't reach it either.
+  _assertNotLockedByTeam(cfg, bypass = false) {
+    if (bypass) return;
     const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
     if (isMemberLockedByTeam(cfg, teamCfg)) {
       const err = new Error(`Team '${cfg.parentTeamId}' is disabled — enable the team first`);
@@ -7256,10 +7265,10 @@ class Orchestrator {
   //   executions start, but leave the process running to let the current
   //   invocation finish naturally.
   // mode === 'abort'  → write enabled=false and kill the process right away.
-  async disableAgent(id, { mode } = {}) {
+  async disableAgent(id, { mode, bypassTeamLock = false } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
-    this._assertNotLockedByTeam(cfg);
+    this._assertNotLockedByTeam(cfg, bypassTeamLock);
 
     const isRunning = agentProcesses.has(id);
 
@@ -7317,9 +7326,13 @@ class Orchestrator {
   // tagging each one disabledByTeam so enableTeam later knows to bring back
   // only these — members already enabled===false are left completely
   // untouched (see docs/superpowers/specs/2026-07-31-team-wide-disable-design.md).
-  // Members are disabled BEFORE the team's own config flips to disabled, so
-  // the per-member disableAgent() calls below don't trip their own lockout
-  // guard (which only fires once the team is actually off).
+  // Idempotent/retry-safe: the team config is flipped to disabled=false
+  // unconditionally at the end EVEN IF some members failed, so a retry after
+  // a partial failure must still be able to disable the members that are
+  // still enabled — bypassTeamLock:true on the per-member disableAgent()
+  // call below is what makes that retry actually work (see
+  // _assertNotLockedByTeam's comment for why a retry would otherwise
+  // deadlock on any member left enabled by the first attempt).
   async disableTeam(teamId, { mode } = {}) {
     if (mode !== 'drain' && mode !== 'abort') {
       throw new Error("mode must be 'drain' or 'abort'");
@@ -7335,7 +7348,7 @@ class Orchestrator {
     const failed = [];
     for (const id of toDisable) {
       try {
-        await this.disableAgent(id, { mode });
+        await this.disableAgent(id, { mode, bypassTeamLock: true });
       } catch (err) {
         // disableAgent never touched disk (it threw before/at its own save,
         // e.g. the lockout guard or "not found") — nothing to reconcile.

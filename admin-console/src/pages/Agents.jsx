@@ -2830,9 +2830,23 @@ function TeamDisableDialog({ open, team, members, error, busy, onDrain, onAbort,
           </div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
-          <button onClick={onCancel} disabled={busy}>Cancel</button>
-          <button onClick={onDrain} disabled={busy}>Let running work finish</button>
-          <button onClick={onAbort} disabled={busy}>Hard stop</button>
+          <button onClick={onCancel} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Let running work finish</button>
+          <button onClick={onAbort} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Hard stop</button>
         </div>
       </div>
     </div>

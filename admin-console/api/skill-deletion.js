@@ -49,8 +49,12 @@ function planDeletion(input, opts = {}) {
   if (!name || !skillNameRe.test(name)) return { ok: false, error: 'invalid skill name' };
 
   // `source` is the endpoint's historic query param; treat absent as global.
+  // `GET /api/skills` tags global (pool-tier) skills with `source: 'pool'`, so
+  // accept 'pool' as an alias for 'global' — otherwise every global-skill delete
+  // from the Skills Registry UI fails the TIERS check (#1044).
   const raw = typeof b.tier === 'string' ? b.tier : b.source;
-  const tier = raw == null || raw === '' ? 'global' : String(raw).trim();
+  const aliased = raw === 'pool' ? 'global' : raw;
+  const tier = aliased == null || aliased === '' ? 'global' : String(aliased).trim();
   if (!TIERS.includes(tier)) return { ok: false, error: `tier must be one of ${TIERS.join('|')}` };
 
   const out = { ok: true, tier, name, cascade: b.cascade === true || b.cascade === 'true' };

@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   computeScope, visibleTeam, visibleAgent,
-  canManageTeam, visibleUser, describeAuthz,
+  canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics,
@@ -283,6 +283,55 @@ test('provider gating: team-admin sees/manages own team provider, only uses assi
   assert.equal(canManageCredential(alice, sysProvider), false);
   // AC7: reassigning is System-Admin-only.
   assert.equal(canReassignCredential(alice), false);
+});
+
+// ── Config-write authorization for agents / environments (#989) ─────────────
+// alice = team-admin of 'payments', team-member of 'default'.
+// bob   = team-member of 'risk'. sys = System Admin. admin = env admin.
+
+test('canManageAgent: team-admin manages agents of their admin team only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(alice, { teamId: 'payments' }), true);   // team-admin
+  assert.equal(canManageAgent(alice, { teamId: 'default' }), false);   // only a member (AC1)
+  assert.equal(canManageAgent(alice, { teamId: 'risk' }), false);      // not a member
+  assert.equal(canManageAgent(alice, {}), false);                      // missing → default, not admin
+});
+
+test('canManageAgent: plain team-member manages no agent (AC1)', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(bob, { teamId: 'risk' }), false); // member, not admin
+});
+
+test('canManageAgent: env admin & System-Admin user manage any agent', () => {
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(env, { teamId: 'risk' }), true);
+  assert.equal(canManageAgent(sys, { teamId: 'anything' }), true);
+});
+
+test('canManageAgent: missing scope / unknown subject fail closed', () => {
+  const unknown = computeScope({ username: 'ghost@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(unknown, { teamId: 'default' }), false);
+  assert.equal(canManageAgent(null, { teamId: 'default' }), false);
+  assert.equal(canManageAgent(undefined, { teamId: 'payments' }), false);
+});
+
+test('canManageEnvironment: team-admin manages own team env; member/other denied', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob   = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageEnvironment(alice, { teamId: 'payments' }), true);
+  assert.equal(canManageEnvironment(alice, { teamId: 'default' }), false); // only a member
+  assert.equal(canManageEnvironment(alice, { teamId: 'risk' }), false);    // other team
+  assert.equal(canManageEnvironment(bob, { teamId: 'risk' }), false);      // member, not admin
+  assert.equal(canManageEnvironment(alice, {}), false);                    // missing → default
+});
+
+test('canManageEnvironment: env admin & System-Admin manage any env (no regression)', () => {
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageEnvironment(env, { teamId: 'risk' }), true);
+  assert.equal(canManageEnvironment(sys, { teamId: 'payments' }), true);
+  assert.equal(canManageEnvironment(null, { teamId: 'payments' }), false); // missing scope fails closed
 });
 
 // ── Token-usage statistics visibility (#801) ────────────────────────────────

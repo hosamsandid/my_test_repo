@@ -175,6 +175,38 @@ function credentialVisibleToTeam(cred, teamId) {
   return c.teamId === t;
 }
 
+// ── Config-write authorization for agents / environments (#989) ─────────────
+//
+// The #302/#584 model gives list/read endpoints a *visibility* filter
+// (visibleAgent / visibleTeam) and the Teams admin surface a *management* gate
+// (canManageTeam). The core config-write endpoints — agent config, triggers,
+// prompt/model/provider, environment CRUD — were previously either unguarded or
+// gated only on visibility, so a Team Member (or a member of an unrelated team)
+// could mutate them. These predicates apply the same management gate as
+// canManageCredential, keyed on the *resource's* owning team: write authorization
+// requires the team-admin role of the owning team (or full-visibility admin),
+// never mere visibility. All admins keep `all: true` (no single-operator
+// regression).
+
+// May the caller create / edit / delete / re-parent this agent? Team Admin of
+// the agent's owning team, or a full-visibility admin. Callers pass the resolved
+// owning team on `agent.teamId` (agentTeamId = parentTeamId||teamId, single-
+// sourced in the api layer via agentMetaForScope), mirroring canManageCredential.
+function canManageAgent(scope, agent) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return canManageTeam(scope, (agent && agent.teamId) || 'default');
+}
+
+// May the caller create / edit / delete this environment (or its MCP
+// credentials)? Team Admin of the resource's owning team, or a full-visibility
+// admin. A missing teamId collapses to the default team, mirroring visibleTeam.
+function canManageEnvironment(scope, env) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return canManageTeam(scope, (env && env.teamId) || 'default');
+}
+
 // ── Token-usage statistics visibility (#801) ────────────────────────────────
 //
 // The Token Usage statistics view (token/cost figures) is, for now, a
@@ -211,6 +243,8 @@ module.exports = {
   visibleTeam,
   visibleAgent,
   canManageTeam,
+  canManageAgent,
+  canManageEnvironment,
   visibleUser,
   describeAuthz,
   normalizeCredential,

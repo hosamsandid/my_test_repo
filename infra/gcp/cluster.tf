@@ -17,6 +17,13 @@ resource "google_container_cluster" "agent_studio" {
     channel = "REGULAR"
   }
 
+  # Agent required by Backup for GKE (see backup.tf) — in-place addon update.
+  addons_config {
+    gke_backup_agent_config {
+      enabled = true
+    }
+  }
+
   # The node pool is managed as its own resource below; these cluster-level
   # node attributes only describe the imported state and must not drive diffs.
   initial_node_count = 1

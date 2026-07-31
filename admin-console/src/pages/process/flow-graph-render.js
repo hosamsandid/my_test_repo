@@ -1850,6 +1850,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
             artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
+            // Carry the `audience` tag (#1036): a github delivery to a NAMED
+            // human role (unified-graph tags it `audience:'human'`) must reach
+            // the human-aware review-gate editor via findReviewGate — dropping
+            // it here mis-routes the click to the agent→agent EditChannelDialog,
+            // whose channel ops don't touch bundle.humans (silent no-op remove).
+            ...(e.audience ? { audience: e.audience } : {}),
             ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });

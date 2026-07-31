@@ -31,8 +31,14 @@ export function findReviewGate(edge, graph) {
 
   let humanId = null;
   let clickedLabel = null;
+  // The clicked delivery edge names its producer + artifact, so a human with
+  // two deliveries (#1036 edge case) edits/removes the one that was clicked
+  // rather than always the first.
+  let clickedFrom = null; let clickedArtifact = null;
   if (edge && edge.on === 'github' && edge.audience === 'human' && isHumanNode(byId.get(edge.to))) {
     humanId = edge.to;
+    clickedFrom = edge.from || null;
+    clickedArtifact = edge.artifact === 'issue' ? 'issue' : (edge.artifact === 'pr' ? 'pr' : null);
   } else if (edge && edge.on === 'label' && isHumanNode(byId.get(edge.from))) {
     humanId = edge.from;
     clickedLabel = edge.label || null;
@@ -42,7 +48,11 @@ export function findReviewGate(edge, graph) {
 
   const human = byId.get(humanId);
   const consumes = Array.isArray(human.consumes) ? human.consumes : [];
-  const artifactConsume = consumes.find(c => c && (c.artifact === 'pr' || c.artifact === 'issue')) || null;
+  const isArtifactConsume = (c) => c && (c.artifact === 'pr' || c.artifact === 'issue');
+  const artifactConsume =
+    (clickedFrom && consumes.find(c => isArtifactConsume(c)
+      && c.from === clickedFrom && (!clickedArtifact || c.artifact === clickedArtifact)))
+    || consumes.find(isArtifactConsume) || null;
   const producer = artifactConsume ? (byId.get(artifactConsume.from) || null) : null;
   const artifact = artifactConsume ? artifactConsume.artifact : null;
 

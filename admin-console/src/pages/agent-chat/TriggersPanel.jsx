@@ -1175,7 +1175,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       />
 
       <FormInput
-        label="Prompt"
+        label="Wake instruction — what the consumer is told"
         value={form.prompt}
         onChange={v => set('prompt', v)}
         multiline

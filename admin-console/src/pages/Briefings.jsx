@@ -81,8 +81,8 @@ function HelpPanel({ onClose }) {
             </h3>
             <p style={{ margin: '0 0 var(--eb-space-2)' }}>
               Selecting a <strong>Team</strong> shows its live orchestration graph. Agents don't call each other
-              directly — they communicate through labels: one trigger <em>emits</em> a label, another
-              <em> listens</em> on it, and that wiring is the graph.
+              directly — they communicate through labels: one agent's <em>outcome</em> sets a label, a
+              <em> consumer</em> waits on it, and that wiring is the graph.
             </p>
             <p style={{ margin: 0 }}>
               Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add agents, then

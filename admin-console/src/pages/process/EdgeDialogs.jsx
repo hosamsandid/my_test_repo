@@ -198,16 +198,16 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
           {humanLabel ? (
             <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
               <code>{label.trim()}</code> is configured as a {isGate ? 'human gate — only a human sets it' : 'brake — it pauses the loop'}.
-              This wires <strong>{toName || to}</strong> to wait on it; <strong>{fromName || from}</strong> is not recorded as emitting it.
+              This wires <strong>{toName || to}</strong> to wait on it; <strong>{fromName || from}</strong> gets no outcome that sets it.
             </div>
           ) : (
             <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)' }}>
-              <strong>{fromName || from}</strong> will be recorded as emitting <code>{label.trim() || '<label>'}</code>,
-              and <strong>{toName || to}</strong> gets a listener — no need to pre-configure a trigger on {fromName || from}.
+              <strong>{fromName || from}</strong> gets an outcome that sets <code>{label.trim() || '<label>'}</code>,
+              and <strong>{toName || to}</strong> gets the matching input — no need to pre-configure a trigger on {fromName || from}.
             </div>
           )}
 
-          <Field label="Listener prompt">
+          <Field label="Wake instruction — what the consumer is told">
             <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
               style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
           </Field>
@@ -309,7 +309,7 @@ export function CreateEdgeDialog({
     .filter(Boolean);
 
   const createTiles = [
-    { id: 'label', title: 'Label hand-off', desc: `${A} emits a label that wakes ${B}.` },
+    { id: 'label', title: 'Label hand-off', desc: `An outcome of ${A} sets a label that wakes ${B}.` },
     { id: 'github-issue', title: 'Issue channel', desc: `${A} opens an issue that wakes ${B} (optionally routed via a label / human approval).` },
     { id: 'github-pr', title: 'Pull-request channel', desc: `${A} opens a pull request that wakes ${B} (optionally routed via a label / human approval).` },
     { id: 'artifact', title: 'File artifact', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
@@ -529,7 +529,7 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
   }
 
   return (
-    <SidePanel open onClose={onClose} title="Wire a GitHub channel" width="520px">
+    <SidePanel open onClose={onClose} title={`A ${noun} from ${fromName || from} wakes ${toName || to}`} width="520px">
       <p style={hint}>
         <strong>{fromName || from}</strong> opens a {noun} that wakes <strong>{toName || to}</strong>.
       </p>
@@ -991,8 +991,8 @@ function ReviewGateEditor({ gate, ops = liveOps, humanOps, onClose, onDone }) {
           <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
             <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Remove the whole review gate?</strong>
             <small style={small}>
-              Removes the delivery to {humanName}, the gate label{gate.rejectLabel ? 's' : ''} from their
-              emits, and the listener{gate.rejectTriggerId ? 's' : ''} — all three sides, no leftovers.
+              Removes the delivery to {humanName}, the gate label{gate.rejectLabel ? 's' : ''} they apply,
+              and the consumer input{gate.rejectTriggerId ? 's' : ''} — all three sides, no leftovers.
               {gate.producer ? ' The producer’s outcome (what it opens) stays.' : ''}
             </small>
             <div style={actions}>
@@ -1049,7 +1049,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
   }
 
   return (
-    <SidePanel open onClose={onClose} title="GitHub channel" width="520px">
+    <SidePanel open onClose={onClose} title={`${toName || to} reacts to ${fromName || from}'s ${noun}`} width="520px">
       <p style={hint}>
         <strong>{fromName || from}</strong>'s {noun} → <strong>{toName || to}</strong>
       </p>
@@ -1063,12 +1063,12 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label
         </label>
-        <Field label="Wake prompt override (optional)">
+        <Field label="Wake instruction — what the consumer is told (optional)">
           <textarea value={wakePrompt} onChange={e => setWakePrompt(e.target.value)}
-            placeholder="Leave empty to use the generated prompt for this input."
+            placeholder="Leave empty to use the generated wake instruction for this input."
             style={{ ...input, minHeight: 90, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
           <span style={hint}>
-            Replaces the auto-generated prompt the derived listener wakes {toName || to} with. Empty keeps the default.
+            Replaces the auto-generated wake instruction {toName || to} is woken with. Empty keeps the default.
           </span>
         </Field>
         {error && <span style={errStyle}>{error}</span>}
@@ -1209,12 +1209,12 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
             <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
             {labelName.trim() && labelName.trim() !== label && !humanSource && (
               <small style={small}>
-                Renaming updates this listener and <strong>{fromName || from}</strong>'s emitted labels.
+                Renaming updates this input and the label <strong>{fromName || from}</strong>'s outcome sets.
               </small>
             )}
           </Field>
 
-          <Field label="Listener prompt">
+          <Field label="Wake instruction — what the consumer is told">
             <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
               style={{ ...input, minHeight: 120, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
           </Field>
@@ -1626,14 +1626,14 @@ function EditWebhookDialog({ edge, toName, ops = liveOps, onClose, onDone, onOpe
 function ReadonlyEdgeDialog({ edge, fromName, toName, onClose }) {
   const { from, to, on } = edge;
   return (
-    <SidePanel open onClose={onClose} title={on === 'review' ? 'PR review' : 'Connection'} width="520px">
+    <SidePanel open onClose={onClose} title={on === 'review' ? 'PR review' : 'Input'} width="520px">
       <p style={hint}>
         <strong>{fromName || from}</strong> → <strong>{toName || to}</strong>
       </p>
       <div style={small}>
         {on === 'review'
           ? 'This edge is derived from a PR-review step. Edit it in the reviewer’s inspector (reviews-from / on-approve / on-changes), not here.'
-          : 'This connection is derived and can’t be edited here.'}
+          : 'This input is derived and can’t be edited here.'}
       </div>
       <div style={actions}>
         <button onClick={onClose} style={ghost}>Close</button>
@@ -1722,7 +1722,7 @@ export function GithubTriggerForm({ to, toName, labels, ops = liveOps, onBack, o
             {isGate && <small style={small}><code>{trimmedLabel}</code> is configured as an approval-gate label — it renders as a gate on the edge.</small>}
           </Field>
         )}
-        <Field label="Listener prompt">
+        <Field label="Wake instruction — what the consumer is told">
           <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
             style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
         </Field>
@@ -1815,7 +1815,7 @@ export function WebhookForm({ to, toName, ops = liveOps, onBack, onClose, onDone
           <input value={description} onChange={e => setDescription(e.target.value)}
             placeholder="e.g. CI pipeline finished" style={input} />
         </Field>
-        <Field label="Prompt">
+        <Field label="Wake instruction — what the consumer is told">
           <textarea value={effectivePrompt} onChange={e => setPrompt(e.target.value)}
             style={{ ...input, minHeight: 100, fontFamily: 'var(--eb-font-mono)', resize: 'vertical' }} />
         </Field>

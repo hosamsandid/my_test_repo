@@ -16,6 +16,34 @@ import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-ro
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
 import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
 
+// Single source of truth for edge colours and legend names (#402, #1009).
+// Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
+// read from here so the graph and its keys can never drift apart. Each entry
+// maps a semantic edge type to its stroke colour; the same hue is reused for
+// the node's matching badge/port (Issue = teal, PR = purple) so a node's
+// "opens issues/PRs" chip and the resulting channel edge read as one colour.
+export const EDGE_STYLES = {
+  hierarchy:  { color: 'var(--eb-border-hover)', label: 'hierarchy' },
+  dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
+  artifact:   { color: '#22c55e', label: 'data flow' },
+  label:      { color: '#3b82f6', label: 'label hand-off' },
+  issue:      { color: '#14b8a6', label: 'issue' },
+  pr:         { color: '#8b5cf6', label: 'pull request' },
+  review:     { color: '#f59e0b', label: 'review' },
+  gate:       { color: '#dc2626', label: 'human approval' },
+  // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
+  event:      { color: '#f97316', label: 'GitHub event', dashed: true },
+  timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
+  webhook:    { color: '#eab308', label: 'webhook', dashed: true },
+  // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
+  // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
+  loop:       { color: '#d946ef', label: 'loop' },
+  // Brake hand-off to a human (#981): the flow pauses pending a human
+  // decision. Rose + dashed so "waiting on a person" never reads as a
+  // gate listener (solid red) or a plain label hand-off (blue).
+  handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
+};
+
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
   // ─── Constants ──────────────────────────────────────────────────────
@@ -38,32 +66,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
   ];
 
-  // Single source of truth for edge colours (#402). Every drawer and the legend
-  // read from here so the graph and its key can never drift apart. Each entry
-  // maps a semantic edge type to its stroke colour; the same hue is reused for
-  // the node's matching badge/port (Issue = teal, PR = purple) so a node's
-  // "opens issues/PRs" chip and the resulting channel edge read as one colour.
-  const EDGE_STYLES = {
-    hierarchy:  { color: 'var(--eb-border-hover)', label: 'hierarchy' },
-    dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
-    artifact:   { color: '#22c55e', label: 'data flow' },
-    label:      { color: '#3b82f6', label: 'label hand-off' },
-    issue:      { color: '#14b8a6', label: 'issue' },
-    pr:         { color: '#8b5cf6', label: 'pull request' },
-    review:     { color: '#f59e0b', label: 'review' },
-    gate:       { color: '#dc2626', label: 'human approval' },
-    // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
-    event:      { color: '#f97316', label: 'GitHub event', dashed: true },
-    timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
-    webhook:    { color: '#eab308', label: 'webhook', dashed: true },
-    // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
-    // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
-    loop:       { color: '#d946ef', label: 'loop' },
-    // Brake hand-off to the @human actor (#981): the flow pauses pending a
-    // human decision. Rose + dashed so "waiting on a person" never reads as a
-    // gate listener (solid red) or a plain label hand-off (blue).
-    handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
-  };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
   // ─── DOM structure ──────────────────────────────────────────────────

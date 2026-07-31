@@ -1,7 +1,7 @@
 # Team-wide enable/disable
 
 **Date:** 2026-07-31
-**Status:** Approved for implementation
+**Status:** Implemented
 
 ## Problem
 

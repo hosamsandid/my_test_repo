@@ -13,7 +13,7 @@ import {
   moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
 } from './wiring-engine.js';
 import {
-  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates,
+  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker,
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
 
@@ -893,6 +893,9 @@ function normalize(oc) {
       id: o.id, title: o.title || '', when: o.when || '',
       actions: Array.isArray(o.actions) && o.actions.length ? o.actions.map(a => ({ ...a })) : [{ type: 'none' }],
       ...(o.notify ? { notify: o.notify } : {}),
+      // #1037: hydrate the open-end marker so a persisted terminal/external
+      // outcome re-displays (previously dropped here, so it never re-showed).
+      ...openEndMarker(o),
     })),
   };
 }
@@ -922,6 +925,9 @@ function finalize(oc) {
       ...(o.when && o.when.trim() ? { when: o.when.trim() } : {}),
       actions: actions.length ? actions : [{ type: 'none' }],
       ...(o.notify ? { notify: o.notify } : {}),
+      // #1037: carry the open-end marker into the persisted port so the
+      // declared endpoint survives Save (previously dropped before the payload).
+      ...openEndMarker(o),
     };
   });
   return { mode: oc.mode === 'exactlyOne' ? 'exactlyOne' : 'anyOf', options };

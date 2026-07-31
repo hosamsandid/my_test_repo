@@ -49,6 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { isTeamDisabled, planTeamDisable, planTeamEnable } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
@@ -2078,6 +2079,31 @@ function listAgentIds() {
   return fs.readdirSync(AGENTS_DIR).filter((f) =>
     fs.existsSync(path.join(AGENTS_DIR, f, "config.json"))
   );
+}
+
+// Busy/active-trigger snapshot for an agent — shared by disableAgent's own
+// busy-warning path and the team-members preview listing, so both report
+// identical state for the same agent.
+function agentBusyState(id) {
+  let busy = false;
+  try {
+    const status = JSON.parse(
+      fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
+    );
+    busy = status?.state === 'busy';
+  } catch { /* no status file = idle */ }
+
+  let activeTriggers = [];
+  try {
+    const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
+    if (Array.isArray(triggers)) {
+      activeTriggers = triggers
+        .filter(t => t.enabled !== false && t.id)
+        .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
+    }
+  } catch { /* no triggers file */ }
+
+  return { busy, activeTriggers };
 }
 
 // ============================================================
@@ -7093,12 +7119,31 @@ class Orchestrator {
     return { source, suggested, siblings };
   }
 
+  // Throws a team-disabled error if cfg is a team-member whose parent team
+  // is currently disabled — the lockout for the team-wide disable feature
+  // (docs/superpowers/specs/2026-07-31-team-wide-disable-design.md). A
+  // member's own enable/disable toggle must not do anything while its team
+  // is off; this guard makes that true no matter which route calls in
+  // (PUT /api/agents/:id, the internal /enable|/disable routes, or any
+  // future caller).
+  _assertNotLockedByTeam(cfg) {
+    if (cfg.role !== "team-member" || !cfg.parentTeamId) return;
+    const teamCfg = loadAgentConfig(cfg.parentTeamId);
+    if (isTeamDisabled(teamCfg)) {
+      const err = new Error(`Team '${cfg.parentTeamId}' is disabled — enable the team first`);
+      err.code = 'team-disabled';
+      err.teamId = cfg.parentTeamId;
+      throw err;
+    }
+  }
+
   // Materialize a stub bp-instance agent (or re-enable a previously-active
   // one). Idempotent: a stub gets full provisioning on the first call;
   // subsequent calls just (re)spawn the agent-runner process.
   async enableAgent(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg);
 
     // Already-materialized agents: just flip enabled and respawn.
     if (cfg.token) {
@@ -7205,29 +7250,12 @@ class Orchestrator {
   async disableAgent(id, { mode } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg);
 
     const isRunning = agentProcesses.has(id);
 
     if (!mode && isRunning) {
-      // Check for active state before disabling without an explicit mode.
-      let isBusy = false;
-      try {
-        const status = JSON.parse(
-          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
-        );
-        isBusy = status?.state === 'busy';
-      } catch { /* no status file = idle */ }
-
-      let activeTriggers = [];
-      try {
-        const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
-        if (Array.isArray(triggers)) {
-          activeTriggers = triggers
-            .filter(t => t.enabled !== false && t.id)
-            .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
-        }
-      } catch { /* no triggers file */ }
-
+      const { busy: isBusy, activeTriggers } = agentBusyState(id);
       if (isBusy || activeTriggers.length > 0) {
         return {
           id,
@@ -7251,6 +7279,112 @@ class Orchestrator {
     }
 
     return { id, enabled: false };
+  }
+
+  // Members + running/busy/trigger state for the team-wide disable/enable
+  // preview dialog. Read-only — makes no config changes.
+  listTeamMembersWithState(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+
+    const members = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId)
+      .map((c) => {
+        const { busy, activeTriggers } = agentBusyState(c.id);
+        return {
+          id: c.id,
+          displayName: c.displayName || c.id,
+          enabled: c.enabled !== false,
+          disabledByTeam: c.disabledByTeam === true,
+          running: agentProcesses.has(c.id),
+          busy,
+          activeTriggers,
+        };
+      });
+
+    return { teamId, teamEnabled: !isTeamDisabled(teamCfg), members };
+  }
+
+  // Disable every currently-enabled member of teamId in one bulk action,
+  // tagging each one disabledByTeam so enableTeam later knows to bring back
+  // only these — members already enabled===false are left completely
+  // untouched (see docs/superpowers/specs/2026-07-31-team-wide-disable-design.md).
+  // Members are disabled BEFORE the team's own config flips to disabled, so
+  // the per-member disableAgent() calls below don't trip their own lockout
+  // guard (which only fires once the team is actually off).
+  async disableTeam(teamId, { mode } = {}) {
+    if (mode !== 'drain' && mode !== 'abort') {
+      throw new Error("mode must be 'drain' or 'abort'");
+    }
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const memberConfigs = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const { toDisable, skip } = planTeamDisable(memberConfigs);
+
+    const disabled = [];
+    const failed = [];
+    for (const id of toDisable) {
+      try {
+        await this.disableAgent(id, { mode });
+        const cfg = loadAgentConfig(id);
+        const updated = { ...cfg, disabledByTeam: true };
+        saveAgentConfig(id, updated);
+        this.agentConfigs.set(id, { config: updated });
+        disabled.push(id);
+      } catch (err) {
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    const teamUpdated = { ...teamCfg, enabled: false };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    console.log(`[Orchestrator] team ${teamId} disabled → ${disabled.length} member(s) disabled, ${skip.length} already off, ${failed.length} failed`);
+    return { teamId, disabled, skipped: skip, failed };
+  }
+
+  // Re-enable every member disableTeam previously tagged disabledByTeam.
+  // Members disabled independently before the team went down, or never
+  // activated, are left exactly as they are (see the design spec). The
+  // team's own config flips to enabled FIRST, so the per-member
+  // enableAgent() calls below don't trip their own lockout guard.
+  async enableTeam(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const teamUpdated = { ...teamCfg, enabled: true };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    const memberConfigs = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const { toEnable, skip } = planTeamEnable(memberConfigs);
+
+    const enabled = [];
+    const failed = [];
+    for (const id of toEnable) {
+      try {
+        await this.enableAgent(id);
+        const cfg = loadAgentConfig(id);
+        const { disabledByTeam, ...rest } = cfg;
+        saveAgentConfig(id, rest);
+        this.agentConfigs.set(id, { config: rest });
+        enabled.push(id);
+      } catch (err) {
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    console.log(`[Orchestrator] team ${teamId} enabled → ${enabled.length} member(s) re-enabled, ${skip.length} left as-is, ${failed.length} failed`);
+    return { teamId, enabled, skipped: skip, failed };
   }
 
   // Re-inject an environment's credentials into every running agent bound to it.

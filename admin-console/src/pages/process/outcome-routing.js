@@ -47,6 +47,24 @@ export function wireConsumerSpec(option) {
 }
 
 /**
+ * Which dialog does a pre-typed outcome-port drag (#1005/#828) onto `toNode`
+ * open? (#1035) The `outcome` here is the resolved drag payload the renderer
+ * emits — `{ artifact: 'pr'|'issue'|null, label }` — not a raw option.
+ *   • human target      → 'person': the agent-to-person delivery dialog, the
+ *                         same branch the generic ● port takes. The channel /
+ *                         hand-off forms below resolve consumers via
+ *                         `bundle.roles` only, so a human (living in
+ *                         `bundle.humans`) throws `role <id> not found`.
+ *   • openPr/openIssue  → 'channel' (CreateChannelDialog, artifact-locked).
+ *   • otherwise         → 'handoff' (setLabel → CreateHandoffDialog).
+ */
+export function outcomeDropDialog(outcome, toNode) {
+  if (toNode && toNode.kind === 'human') return 'person';
+  if (outcome && outcome.artifact) return 'channel';
+  return 'handoff';
+}
+
+/**
  * How is `targetNode` currently consuming this row's signal? Returns the
  * unwire spec — `{kind: 'label', triggerId, label}` for a matching label
  * listener, `{kind: 'channel', artifact, label?}` for a channel from this

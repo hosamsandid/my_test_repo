@@ -583,7 +583,7 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
  * outcomes; an optional inline "on approval, wake…" section completes the
  * full S3 triangle (consumer + gate label → engine wireReviewGate) in this
  * one dialog — the two-drag path stays available and converges (§4.5). */
-export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, peers = [], onBack, onClose, onDone }) {
+export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, peers = [], initialArtifact = null, onBack, onClose, onDone }) {
   const outputs = (fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [])
     .map(a => ((a && (a.name || a.path)) ? { key: a.name || a.path } : null)).filter(Boolean);
   const options = [
@@ -591,7 +591,11 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
     { id: 'issue', title: 'Issue', desc: `${fromName || from} opens an issue that ${toName || to} reviews.` },
     ...outputs.map(o => ({ id: `file:${o.key}`, title: `Output · ${o.key}`, desc: `${toName || to} reads the ${o.key} artifact.` })),
   ];
-  const [choice, setChoice] = useState(options[0].id);
+  // Dragging an agent's typed openPr/openIssue outcome onto a person preselects
+  // the matching review target (#1035); the generic ● port passes none.
+  const [choice, setChoice] = useState(
+    (initialArtifact === 'pr' || initialArtifact === 'issue') ? initialArtifact : options[0].id,
+  );
   // Optional S3 completion (§4.3): on approval, wake a consumer via a gate label.
   const [wakeTo, setWakeTo] = useState('');
   const [gateLabel, setGateLabel] = useState('ready');

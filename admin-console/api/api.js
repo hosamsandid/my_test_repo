@@ -29,7 +29,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -1448,14 +1448,28 @@ async function reconcileTeamOutcomes(teamId) {
   const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
   const teamTemplate = teamCfg && typeof teamCfg.systemPromptTemplate === 'string'
     ? teamCfg.systemPromptTemplate : '';
+  // Wiring context (#1007): the block now names consumers/reviewers/gates, so
+  // collect the whole team (configs + triggers) once before rendering members.
+  const members = [];
   for (const id of listAgentDirs()) {
-    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
-    const cfg = readJsonFile(cfgPath, null);
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({ id, cfg, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  for (const { id, cfg } of members) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
 
     const hasOwnPrompt = typeof cfg.systemPrompt === 'string';
     const base = hasOwnPrompt ? cfg.systemPrompt : teamTemplate;
-    const nextPrompt = applyDerivedPromptBlocks(base, { github: cfg.github, outcomes: cfg.outcomes });
+    const wiring = outcomesWiringContext(id, {
+      roles: members,
+      humans: (teamCfg && Array.isArray(teamCfg.humans)) ? teamCfg.humans : [],
+      labels: (teamCfg && Array.isArray(teamCfg.labels)) ? teamCfg.labels : [],
+    });
+    const nextPrompt = applyDerivedPromptBlocks(base, {
+      github: cfg.github, outcomes: cfg.outcomes, ...(wiring ? { wiring } : {}),
+    });
 
     // Persist the re-rendered block onto an override member's stored prompt so
     // export (buildProcessTemplate strips it back out) and a later prompt-toggle
@@ -1801,11 +1815,15 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
 
   // Named human roles, team-agent only (#987) — validated into normHumans above.
   // Mirrors the bundle's `humans[]`; `teamHumansRegistry` reads it so the live
-  // graph binds the #981 touchpoints to the named nodes. Declarative only — no
-  // trigger/reconcile side-effect (AC9). `null`/[] clears the registry.
+  // graph binds the #981 touchpoints to the named nodes. No trigger side-effect
+  // (AC9), but a reviewer/gate binding feeds the generated Outcomes prompt
+  // block (#1007) — reconciled below.
+  let humansChanged = false;
   if (humans !== undefined && fresh.role === 'team') {
+    const before = JSON.stringify(fresh.humans || []);
     if (normHumans && normHumans.length) fresh.humans = normHumans;
     else delete fresh.humans;
+    humansChanged = JSON.stringify(fresh.humans || []) !== before;
   }
 
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────
@@ -1969,6 +1987,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // github-flag-only change keeps the produce block's established lazy refresh.
   if (outcomesChanged && fresh.parentTeamId) {
     await reconcileTeamOutcomes(fresh.parentTeamId);
+  }
+  // A humans-registry change on the TEAM agent (reviewer/gate bindings) feeds
+  // the members' generated Outcomes blocks (#1007) — re-render them.
+  if (humansChanged && fresh.role === 'team') {
+    await reconcileTeamOutcomes(id);
   }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
@@ -3194,6 +3217,9 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
+  // A new listener is a CONSUMER write (#1007): sibling producers' generated
+  // Outcomes blocks name their consumers, so re-render the team. Best-effort.
+  await reconcileTeamOutcomesForAgent(id);
   res.status(201).json(newTrigger);
 });
 
@@ -3235,6 +3261,8 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
+  // Consumer write (#1007) — see the POST handler.
+  await reconcileTeamOutcomesForAgent(id);
   res.json(triggers[idx]);
 });
 
@@ -3251,8 +3279,22 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
+  // Consumer write (#1007) — see the POST handler.
+  await reconcileTeamOutcomesForAgent(id);
   res.status(204).end();
 });
+
+// A trigger write on a team member changes WHO CONSUMES its siblings' labels —
+// re-render the team's generated Outcomes blocks (#1007). Best-effort: a
+// reconcile failure never breaks the originating trigger request.
+async function reconcileTeamOutcomesForAgent(agentId) {
+  try {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+    if (cfg && cfg.parentTeamId) await reconcileTeamOutcomes(cfg.parentTeamId);
+  } catch (err) {
+    console.error(`[API] outcomes reconcile after trigger write on ${agentId} failed: ${err.message}`);
+  }
+}
 
 function readAgentSystemPrompt(id) {
   try {

@@ -1325,3 +1325,78 @@ test('#1006: the bundle validator deliberately TOLERATES multi-event triggers un
   };
   assert.equal(validateProcessTemplate(bundle).ok, true);
 });
+
+// ─── #1007: wiring-aware Outcomes prompt projection ──────────────────────────
+
+test('#1007: outcomesWiringContext derives consumers, reviewers (with gates) and gate labels', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  const ctx = outcomesWiringContext('ba', {
+    roles: [
+      { id: 'ba', name: 'BA' },
+      { id: 'dev', displayName: 'Developer', triggers: [
+        { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+      ] },
+      { id: 'qa', displayName: 'QA', triggers: [
+        { id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+        { id: 't3', type: 'cron', cron: '* * * * *' },
+      ] },
+    ],
+    humans: [{ id: 'p', name: 'BA Human', emits: ['approve-it'], consumes: [{ artifact: 'issue', from: 'ba' }] }],
+    labels: [{ name: 'dispatch', humanGate: true }, { name: 'hold', brake: true }],
+  });
+  assert.deepEqual(ctx.consumersByLabel, { ready: ['Developer', 'QA'] });
+  assert.deepEqual(ctx.reviewers, { issue: { name: 'BA Human', gates: ['approve-it'] } });
+  assert.deepEqual(ctx.gateLabels, ['approve-it', 'dispatch']); // brake labels are NOT gates
+  // No context at all → null, so the block renders exactly as before #1007.
+  assert.equal(outcomesWiringContext('solo', { roles: [{ id: 'solo' }] }), null);
+});
+
+test('#1007: the generated block carries consumer, reviewer+prohibition and marker context', () => {
+  const wiring = {
+    consumersByLabel: { ready: ['Developer'] },
+    reviewers: { issue: { name: 'BA Human', gates: ['approve-it'] } },
+    gateLabels: ['approve-it'],
+  };
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'route', title: 'Route', actions: [{ type: 'setLabel', label: 'ready' }] },
+      { id: 'ticket', title: 'Files ticket', actions: [{ type: 'openIssue' }] },
+      { id: 'done', title: 'Done', actions: [{ type: 'none' }], terminal: true },
+      { id: 'report', title: 'Report', actions: [{ type: 'openPr' }], external: { note: 'platform team' } },
+    ],
+  }, wiring);
+  assert.match(block, /apply label `ready` — this wakes \*\*Developer\*\*/);
+  assert.match(block, /\*\*BA Human\*\* reviews it\./);
+  assert.match(block, /Do \*\*not\*\* apply the gate label `approve-it` yourself — a person applies it\./);
+  assert.match(block, /This is the final deliverable — set no further signal\./);
+  assert.match(block, /Consumed outside this flow \(platform team\) — no further signal expected\./);
+  assert.match(block, /The label `approve-it` is a human approval gate — a person applies it; never set it yourself\./);
+  // Without wiring the same port renders the pre-#1007 text (no drift for
+  // context-less agents) — locked by the earlier outcomesBlock tests too.
+  const plain = outcomesBlock({ mode: 'anyOf', options: [{ id: 'route', title: 'Route', actions: [{ type: 'setLabel', label: 'ready' }] }] });
+  assert.ok(!plain.includes('this wakes'));
+});
+
+test('#1007: materialise second pass — a producer EARLIER in the list sees later-derived consumers', () => {
+  const bundle = {
+    processTemplateVersion: 1,
+    name: 'x',
+    roles: [
+      { id: 'ba', name: 'BA', systemPrompt: 'You write tickets.',
+        outcomes: { mode: 'anyOf', options: [{ id: 'ticket', title: 'Opens issue', actions: [{ type: 'openIssue' }] }] } },
+      // The consumer comes AFTER the producer; its listener is derived from
+      // this channel during expansion — the producer's prompt must still see it.
+      { id: 'dev', name: 'Developer', systemPrompt: 'You build.',
+        channels: [{ artifact: 'issue', from: 'ba', label: 'go' }] },
+    ],
+    humans: [{ id: 'p', name: 'BA Human', emits: ['go'], consumes: [{ artifact: 'issue', from: 'ba' }] }],
+  };
+  const out = expandGithubChannels(bundle, { repoFullName: 'o/r' });
+  const ba = out.roles.find(r => r.id === 'ba');
+  assert.match(ba.systemPrompt, /\*\*BA Human\*\* reviews it\./);
+  assert.match(ba.systemPrompt, /Do \*\*not\*\* apply the gate label `go` yourself/);
+  // Idempotent under re-expansion (strip-then-reappend).
+  const again = expandGithubChannels(out, { repoFullName: 'o/r' });
+  assert.equal(again.roles.find(r => r.id === 'ba').systemPrompt, ba.systemPrompt);
+});

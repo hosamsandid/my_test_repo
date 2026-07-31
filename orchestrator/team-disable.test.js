@@ -9,6 +9,8 @@ const {
   planTeamEnable,
   isMemberLockedByTeam,
   deriveBusyState,
+  httpStatusForAgentActionError,
+  httpStatusForTeamActionError,
 } = require('./team-disable');
 
 test('isTeamDisabled: false/undefined enabled or missing config means enabled', () => {
@@ -118,4 +120,42 @@ test('deriveBusyState: triggers are filtered and mapped to id/type/description',
 
 test('deriveBusyState: null status and null triggers (missing files) yield idle/no-triggers, no throw', () => {
   assert.deepEqual(deriveBusyState(null, null), { busy: false, activeTriggers: [] });
+});
+
+test('httpStatusForAgentActionError: team-disabled code maps to 409', () => {
+  const err = new Error("Team 'x' is disabled — enable the team first");
+  err.code = 'team-disabled';
+  assert.equal(httpStatusForAgentActionError(err), 409);
+});
+
+test('httpStatusForAgentActionError: "not found" message maps to 404', () => {
+  assert.equal(httpStatusForAgentActionError(new Error('Agent not found')), 404);
+});
+
+test('httpStatusForAgentActionError: any other error maps to 500', () => {
+  assert.equal(httpStatusForAgentActionError(new Error('boom')), 500);
+});
+
+test('httpStatusForTeamActionError: "not found" message maps to 404', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('Team not found')), 404);
+});
+
+test('httpStatusForTeamActionError: "not a team" message maps to 400', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('agent x is not a team')), 400);
+});
+
+test('httpStatusForTeamActionError: "mode must be" message maps to 400 only when hasMode is true', () => {
+  const err = new Error('mode must be "drain" or "abort"');
+  assert.equal(httpStatusForTeamActionError(err, { hasMode: true }), 400);
+  assert.equal(httpStatusForTeamActionError(err), 500);
+  assert.equal(httpStatusForTeamActionError(err, { hasMode: false }), 500);
+});
+
+test('httpStatusForTeamActionError: any other message maps to 500', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('boom'), { hasMode: true }), 500);
+});
+
+test('httpStatusForTeamActionError: falsy/undefined err maps to 500 without throwing', () => {
+  assert.equal(httpStatusForTeamActionError(undefined), 500);
+  assert.equal(httpStatusForTeamActionError(null, { hasMode: true }), 500);
 });

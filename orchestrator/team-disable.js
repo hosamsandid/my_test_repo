@@ -64,10 +64,31 @@ function deriveBusyState(statusJson, triggers) {
   return { busy, activeTriggers };
 }
 
+// HTTP status for an error thrown by enableAgent/disableAgent, surfaced on
+// the single-agent enable/disable routes.
+function httpStatusForAgentActionError(err) {
+  if (err && err.code === 'team-disabled') return 409;
+  if (err && /not found/i.test(err.message)) return 404;
+  return 500;
+}
+
+// HTTP status for an error thrown by disableTeam/enableTeam, surfaced on
+// the team-wide disable/enable routes. `hasMode` is true only for the
+// disable route, which additionally validates the mode argument.
+function httpStatusForTeamActionError(err, { hasMode = false } = {}) {
+  if (!err) return 500;
+  if (/not found/i.test(err.message)) return 404;
+  if (/not a team/i.test(err.message)) return 400;
+  if (hasMode && /mode must be/i.test(err.message)) return 400;
+  return 500;
+}
+
 module.exports = {
   isTeamDisabled,
   planTeamDisable,
   planTeamEnable,
   isMemberLockedByTeam,
   deriveBusyState,
+  httpStatusForAgentActionError,
+  httpStatusForTeamActionError,
 };

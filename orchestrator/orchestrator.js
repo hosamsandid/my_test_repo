@@ -49,7 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
-const { isTeamDisabled, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState } = require('./team-disable');
+const { isTeamDisabled, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
@@ -9631,9 +9631,9 @@ async function main() {
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] enableAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
+          const status = httpStatusForAgentActionError(err);
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
         }
       })();
       return;
@@ -9711,9 +9711,9 @@ async function main() {
             res.end(JSON.stringify(result));
           } catch (err) {
             console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
-            const status = /not found/i.test(err.message) ? 404 : 500;
+            const status = httpStatusForAgentActionError(err);
             res.writeHead(status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
+            res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
           }
         })();
       });
@@ -10664,6 +10664,70 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, results }));
+      return;
+    }
+
+    // ── List a team's members with running/busy/trigger state ────────────
+    // Feeds the team-wide disable/enable preview dialog in the admin console.
+    const teamMembersMatch = req.method === 'GET' && req.url.match(/^\/internal\/teams\/([^/]+)\/members$/);
+    if (teamMembersMatch) {
+      const teamId = decodeURIComponent(teamMembersMatch[1]);
+      try {
+        const result = orchestrator.listTeamMembersWithState(teamId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        const status = httpStatusForTeamActionError(err);
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // ── Disable an entire team's members in one bulk action ───────────────
+    // Body: { mode: 'drain' | 'abort' } — required, applied uniformly to
+    // every currently-enabled member (the preview dialog already showed the
+    // operator which members are busy before they picked one mode).
+    const teamDisableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/disable$/);
+    if (teamDisableMatch) {
+      const teamId = decodeURIComponent(teamDisableMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.disableTeam(teamId, { mode: parsed.mode });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] disableTeam error for ${teamId}: ${err.message}`);
+            const status = httpStatusForTeamActionError(err, { hasMode: true });
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
+      return;
+    }
+
+    // ── Re-enable an entire team's cascade-disabled members ───────────────
+    const teamEnableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/enable$/);
+    if (teamEnableMatch) {
+      const teamId = decodeURIComponent(teamEnableMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.enableTeam(teamId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] enableTeam error for ${teamId}: ${err.message}`);
+          const status = httpStatusForTeamActionError(err);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
       return;
     }
 

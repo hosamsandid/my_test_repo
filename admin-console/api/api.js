@@ -29,7 +29,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -3379,6 +3379,13 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // direct API) can persist a non-conformant listener unchallenged again.
   const te = rawTriggerError(newTrigger);
   if (te) return res.status(400).json({ error: te });
+  // At most one active chat-launched loop per agent (#1020 AC8). A launched
+  // loop is a one-off run; a second launch while one runs would race two
+  // runners, so reject it — the composer reflects the running state and
+  // offers Stop instead of Start.
+  if (launchedLoopConflict(triggers, newTrigger)) {
+    return res.status(409).json({ error: 'A loop is already running for this agent. Stop it before starting another.' });
+  }
   if (newTrigger.type === 'github-event') {
     const now = new Date().toISOString();
     if (!newTrigger.createdAt) newTrigger.createdAt = now;

@@ -918,6 +918,11 @@ export default function ModelRegistry() {
   const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents } | null
   const [respawning, setRespawning]       = useState(false);
   const [respawnError, setRespawnError]   = useState(null);
+  // Set when respawn-agents reports agents it failed to restart (still on the
+  // old credentials) — surfaced as a follow-up alert so the operator can't
+  // mistake "dialog closed" for "rotation fully applied" (only console.info'd
+  // previously, which nobody watching the UI would ever see).
+  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedNames: string[] } | null
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1074,8 +1079,10 @@ export default function ModelRegistry() {
             // Don't close the panel yet — dialog handles that on confirm/cancel.
             return;
           }
-        } catch {
-          // bound-agents failure is non-blocking; save already succeeded.
+        } catch (e) {
+          // bound-agents failure is non-blocking toward the user; the PUT
+          // already succeeded — but leave a breadcrumb for developers.
+          console.warn('[ModelRegistry] failed to fetch bound-agents for', editing.id, e);
         }
       }
       setEditing(null);
@@ -1103,13 +1110,24 @@ export default function ModelRegistry() {
     setRespawning(true); setRespawnError(null);
     try {
       const { respawned, skipped } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
+      const agents = respawnPrompt.agents;
       setRespawnPrompt(null);
-      setEditing(null);
       refetch();
       if (skipped && skipped.length > 0) {
-        // Surface skipped count as a non-blocking informational note.
-        // A toast would be ideal but is out of scope for this feature.
-        console.info(`[ModelRegistry] respawn: ${respawned.length} restarted, ${skipped.length} skipped (already stopped)`);
+        // `skipped` means respawnAgentBestEffort returned false for that agent
+        // id — the discovery filter already excludes disabled/unmaterialized
+        // agents, so a skip here means the respawn attempt itself FAILED
+        // against the orchestrator, not "agent was already stopped". Those
+        // agents are still running on stale credentials — the exact problem
+        // this feature exists to prevent — so don't close the panel silently;
+        // surface it as a follow-up alert the operator must see and dismiss.
+        const failedNames = skipped.map(id => {
+          const a = agents.find(a => a.id === id);
+          return a ? a.displayName : id;
+        });
+        setRespawnFailureNotice({ failedNames });
+      } else {
+        setEditing(null);
       }
     } catch (e) {
       setRespawnError(e.message);
@@ -1120,6 +1138,12 @@ export default function ModelRegistry() {
 
   function handleRespawnCancel() {
     setRespawnPrompt(null);
+    setEditing(null);
+    refetch();
+  }
+
+  function handleRespawnFailureAck() {
+    setRespawnFailureNotice(null);
     setEditing(null);
     refetch();
   }
@@ -1268,6 +1292,9 @@ export default function ModelRegistry() {
             <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
               If you skip this, agents will keep using the old credentials until you manually disable and re-enable them.
             </p>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Restarting will interrupt any agent currently mid-task — you may need to manually restart or re-trigger interrupted work afterward.
+            </p>
           </div>
         )}
         confirmLabel="Restart agents"
@@ -1275,6 +1302,20 @@ export default function ModelRegistry() {
         busy={respawning}
         onConfirm={handleRespawnConfirm}
         onCancel={handleRespawnCancel}
+      />
+
+      <ConfirmDialog
+        open={!!respawnFailureNotice}
+        variant="danger"
+        alertOnly
+        title="Some agents failed to restart"
+        message={respawnFailureNotice && (
+          <p style={{ margin: 0 }}>
+            {respawnFailureNotice.failedNames.length} agent(s) failed to restart and are still running with the old credentials: <strong>{respawnFailureNotice.failedNames.join(', ')}</strong>. Reopen this provider and confirm the restart prompt again to retry.
+          </p>
+        )}
+        onConfirm={handleRespawnFailureAck}
+        onCancel={handleRespawnFailureAck}
       />
     </div>
   );

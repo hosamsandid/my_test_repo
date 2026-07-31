@@ -21,7 +21,8 @@ const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
 const { githubApiBase } = require('./github-api-base');
-const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz,
+const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
+        canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -1597,6 +1598,19 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     normHumans = normalizeHumans(humans || []);
   }
 
+  // Config-write authorization (#989): editing an agent requires management
+  // rights over its owning team — not mere visibility. Re-parenting to another
+  // team additionally requires management rights over the destination team, so a
+  // Team Admin can't move an agent into a team they don't administer.
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (teamId !== undefined && teamId !== (cfg.teamId || 'default')
+      && !canManageAgent(scope, { teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
   // Validate the structured OUTCOMES port (#827) up front so a bad shape can't
   // half-apply. `null`/[]/{} clears it (handled at persist below); a non-empty
   // port must pass validateOutcomes (rejects flagged human-gate labels, duplicate
@@ -2516,6 +2530,12 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   if (!fs.existsSync(teamDir)) {
     return res.status(404).json({ error: 'Team not found' });
   }
+  // Config-write authorization (#989): adding a member requires management
+  // rights over the parent team agent's owning team.
+  const teamCfg = readJsonFile(path.join(teamDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(teamCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   // Body is optional. When present it carries the override / config fields
   // the orchestrator's addTeamMember now accepts: { id, displayName,
   // systemPromptOverride, skillsOverride, sessionPolicy, triggers }.
@@ -2565,6 +2585,11 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
+  // Config-write authorization (#989): creating an agent requires management
+  // rights over the destination team (default when unspecified).
+  if (!canManageAgent(getScope(req), { teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   // Teams may be created without a default prompt — members can carry their
   // own per-role prompts, and the orchestrator stores an empty template.
   if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
@@ -2596,6 +2621,12 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): deleting an agent requires management
+  // rights over its owning team.
+  const delCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(delCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, {
@@ -2650,6 +2681,20 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
       code: 'id-conflict',
       agentId: newId,
     });
+  }
+  // Config-write authorization (#989): cloning creates an agent — require
+  // management rights over the source agent's owning team, and (when grafting
+  // the clone into a team) over the destination team too.
+  const cloneScope = getScope(req);
+  const srcCfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!canManageAgent(cloneScope, agentMetaForScope(srcCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (parentTeamId != null) {
+    const destCfg = readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null);
+    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { teamId: parentTeamId }))) {
+      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    }
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -2855,6 +2900,20 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const parentTeamId = typeof req.body.parentTeamId === 'string' && req.body.parentTeamId.trim()
       ? req.body.parentTeamId.trim() : null;
 
+    // Config-write authorization (#989): importing creates an agent. When
+    // grafting into a team, require management rights over that team; a
+    // standalone import (arbitrary bundle, untrusted teamId) requires management
+    // of the default team — non-default Team Admins should graft via parentTeamId.
+    {
+      const importScope = getScope(req);
+      const destMeta = parentTeamId != null
+        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { teamId: parentTeamId })
+        : { teamId: 'default' };
+      if (!canManageAgent(importScope, destMeta)) {
+        return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+      }
+    }
+
     // Containment check — path.resolve + path.relative is the in-flow
     // sanitiser pattern CodeQL recognises for js/path-injection.
     const agentsBaseDir = path.resolve(AGENTS_DIR);
@@ -2977,6 +3036,12 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): a prompt edit is a management action, not
+  // a visibility one — require team-admin rights over the agent's owning team.
+  const promptCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(promptCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const { content } = req.body;
   if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
   const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
@@ -3115,6 +3180,22 @@ function agentMetaForScope(cfg) {
   return { teamId: agentTeamId(cfg), visibility: cfg && cfg.visibility, ownerId: cfg && cfg.ownerId };
 }
 
+// Config-write authorization guard (#989). Derives the agent's owning team from
+// its on-disk config and 403s the response when the caller lacks team-admin
+// management rights over it. Returns true when it has already sent a denial (the
+// route should `return` immediately), false when the caller may proceed. Accepts
+// either the agent directory or an already-loaded config object.
+function denyUnlessCanManageAgent(req, res, agentDirOrCfg) {
+  const cfg = typeof agentDirOrCfg === 'string'
+    ? readJsonFile(path.join(agentDirOrCfg, 'config.json'), null)
+    : agentDirOrCfg;
+  if (!canManageAgent(getScope(req), agentMetaForScope(cfg || {}))) {
+    res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    return true;
+  }
+  return false;
+}
+
 // The Model Providers a given team is entitled to use — team-owned endpoints
 // plus system-scoped endpoints assigned to that team. This is the ONLY set an
 // agent may be switched to (no cross-team leakage), and — unlike
@@ -3181,7 +3262,9 @@ app.get('/api/agents/:id/model-options', (req, res) => {
     models:         endpoint?.models || [],
     // Curated set of providers this agent's team may switch to (never tokens).
     endpoints:      usableEndpointsForTeam(teamId).map(publicEndpointView),
-    canSwitch:      visibleAgent(scope, agentMetaForScope(cfg)),
+    // Whether THIS caller may actually change the model/provider — a management
+    // action (#989), so the picker is read-only for a plain Team Member.
+    canSwitch:      canManageAgent(scope, agentMetaForScope(cfg)),
     teamId,
   });
 });
@@ -3192,10 +3275,11 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  // Same team gate as the provider switch — only someone who can see the agent
-  // (in-team member/admin) may change its model.
+  // Config-write authorization (#989): changing the model is a management
+  // action — require team-admin rights over the agent's owning team, not mere
+  // visibility (a plain Team Member may see the agent but not reconfigure it).
   const scope = getScope(req);
-  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
   const { modelId } = req.body || {};
@@ -3238,7 +3322,8 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
 // override (read live by the runtime), the provider is injected at container
 // spawn time, so a change requires a one-agent respawn — done best-effort after
 // the config write. Permission model (see docs/multi-user-concept.md):
-//   • the caller must be able to see the agent (in-team member/admin) — 403 else
+//   • the caller must have team-admin management rights over the agent's owning
+//     team (#989) — not mere visibility — 403 else
 //   • the target endpoint must be in the agent team's curated, usable set
 //     (credentialVisibleToTeam) — never a provider the team isn't entitled to,
 //     not even for a System Admin — 403 else
@@ -3249,7 +3334,7 @@ app.patch('/api/agents/:id/provider', apiLimiter, async (req, res) => {
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const scope = getScope(req);
-  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
 
@@ -3371,6 +3456,9 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
@@ -3408,6 +3496,9 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const idx = triggers.findIndex(t => t.id === triggerId);
@@ -3451,6 +3542,9 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const agentDir = path.join(AGENTS_DIR, id);
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const filtered = triggers.filter(t => t.id !== triggerId);
@@ -8505,6 +8599,11 @@ app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
   let ownerTeamId;
   try { ownerTeamId = resolveOwnerTeamId(teamId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  // Config-write authorization (#989): creating an MCP credential requires
+  // team-admin management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   if (serverId !== undefined && serverId !== null && !MCP_SERVER_ID_RE.test(serverId)) {
     return res.status(400).json({ error: 'Invalid serverId' });
   }
@@ -8551,7 +8650,13 @@ app.delete('/api/mcp-credentials/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
   const creds = listMcpCredentials();
-  if (!creds.some(c => c.id === id)) return res.status(404).json({ error: 'MCP credential not found' });
+  const cred = creds.find(c => c.id === id);
+  if (!cred) return res.status(404).json({ error: 'MCP credential not found' });
+  // Config-write authorization (#989): deleting an MCP credential requires
+  // team-admin management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: cred.teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = mcpCredentialInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP credential is used by environment '${usedBy}'. Detach it first.` });
   try { fs.unlinkSync(path.join(MCP_CREDENTIALS_KEYS_DIR, id)); } catch { /* ignore */ }
@@ -8897,6 +9002,12 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   try { ownerTeamId = resolveOwnerTeamId(teamId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
+  // Config-write authorization (#989): creating an environment requires team-admin
+  // management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
   let normalizedRepos;
   try {
     normalizedRepos = normalizeRepositoriesInput(repositories, repository);
@@ -8942,6 +9053,12 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  // Config-write authorization (#989): editing an environment requires team-admin
+  // management rights over its owning team; re-parenting also over the target.
+  const envScope = getScope(req);
+  if (!canManageEnvironment(envScope, env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const prevGithubTokenId = env.githubTokenId || null;
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
@@ -8958,8 +9075,15 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   }
 
   if (teamId !== undefined) {
-    try { env.teamId = resolveOwnerTeamId(teamId); }
+    let nextTeamId;
+    try { nextTeamId = resolveOwnerTeamId(teamId); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    // Re-parenting to another team requires management rights over the target.
+    if (nextTeamId !== (env.teamId || 'default')
+        && !canManageEnvironment(envScope, { teamId: nextTeamId })) {
+      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    }
+    env.teamId = nextTeamId;
   }
 
   // Only re-validate the LLM binding if either field was explicitly sent.
@@ -9010,6 +9134,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  // Config-write authorization (#989): deleting an environment requires team-admin
+  // management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = environmentInUse(env.id);
   if (usedBy) {
     return res.status(409).json({ error: `Environment is used by agent '${usedBy}'. Delete the agent first.` });

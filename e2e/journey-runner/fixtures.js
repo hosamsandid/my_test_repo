@@ -117,6 +117,73 @@ const ibanStoryTeam = {
   },
 };
 
+
+/**
+ * liveWiringTeam: the review-gate-live journey's precondition (#1010). A
+ * MINIMAL live team (Business Analyst + Developer) materialised from an inline
+ * bundle on a credential-less env pointing at the in-stack git remote — enough
+ * for the Flow editor's live scope to wire a review gate against real member
+ * configs, with no GitHub polling (token-less env) and no label chain to run.
+ * FIXED ids: setup pre-cleans a leftover team+env; teardown removes both.
+ *
+ * @param {string} params.teamId - Team slug id to create.
+ * @param {string} params.teamName - Team display name (the Flows list row).
+ * @param {string} params.envId - Fixture environment id to create.
+ * @param {string} params.envName - Fixture environment display name.
+ * @param {string} params.repoUrl - Git URL the environment points at.
+ * @example
+ * fixtures:
+ *   - fixture: liveWiringTeam
+ *     params:
+ *       teamId: wiring-demo
+ *       teamName: Wiring Demo
+ *       envId: wiring-demo-env
+ *       envName: Wiring Demo
+ *       repoUrl: "http://git-remote/e2e/fixture.git"
+ */
+const liveWiringTeam = {
+  async setup(ctx, params = {}) {
+    const { teamId, teamName, envId, envName, repoUrl, branch = 'main' } = params;
+    if (!teamId || !envId || !envName || !repoUrl) {
+      throw new Error('liveWiringTeam fixture requires { teamId, envId, envName, repoUrl }');
+    }
+    await teardown.teardownTeam(ctx, { teamId, envId });
+    await env.createFixtureEnv(ctx, { id: envId, name: envName, repoUrl, branch });
+    await team.materializeBundleTeam(ctx, {
+      teamId, teamName: teamName || teamId, envId,
+      bundle: {
+        processTemplateVersion: 1,
+        name: teamName || teamId,
+        level: 'template',
+        roles: [
+          {
+            id: 'business-analyst', displayName: 'Business Analyst', role: 'team-member',
+            sessionPolicy: 'persistent',
+            systemPrompt: 'You are the Business Analyst. You refine requirements into GitHub issues with acceptance criteria.',
+            triggers: [],
+            outcomes: { mode: 'anyOf', options: [
+              { id: 'opens-issue', title: 'Opens issue', when: 'The issue is authored and ready for review', actions: [{ type: 'openIssue' }] },
+            ] },
+          },
+          {
+            id: 'developer', displayName: 'Developer', role: 'team-member',
+            sessionPolicy: 'per-invocation',
+            systemPrompt: 'You are the Developer. You implement a ready issue and open a pull request.',
+            triggers: [],
+          },
+        ],
+        gates: [],
+        labels: [],
+      },
+    });
+    return { teamId, envId };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId, envId } = params;
+    if (teamId && envId) await teardown.teardownTeam(ctx, { teamId, envId });
+  },
+};
+
 /**
  * triggerAgent: the `triggers` journey's precondition (#733). Stands up ONE
  * Business-Analyst agent to hang triggers on, as cheaply as possible: a
@@ -204,7 +271,7 @@ const flowsDraft = {
   },
 };
 
-const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft };
+const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam };
 
 function resolveFixture(name) {
   const fx = FIXTURES[name];

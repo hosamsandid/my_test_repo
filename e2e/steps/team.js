@@ -46,6 +46,27 @@ async function materializeTeam(ctx, { teamId, teamName, envId, roles }) {
 // chain (BA→issue, Developer reacts to `ready`, Reviewer reacts to
 // `ready-for-review`). That wiring is what the IBAN-story journey exercises —
 // bare roles would materialise the same agents WITHOUT the channels.
+
+// Materialise a team from an INLINE process-template bundle (#1010) — for
+// journeys that need a minimal live team (e.g. two roles) without shipping a
+// registry template. Same POST /api/teams seam as materializeCoreSdlcTeam.
+async function materializeBundleTeam(ctx, { teamId, teamName, envId, bundle }) {
+  const res = await ctx.request.post('/api/teams', {
+    timeout: 180_000,
+    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle },
+  });
+  expect(
+    res.ok(),
+    `materializeBundleTeam(${teamId}) expected 2xx, got HTTP ${res.status()}: ${await res.text()}`,
+  ).toBeTruthy();
+  const body = await res.json();
+  return {
+    teamId: body.teamId,
+    memberIds: Array.isArray(body.created) ? body.created : [],
+    dms: Array.isArray(body.dms) ? body.dms : [],
+  };
+}
+
 async function materializeCoreSdlcTeam(ctx, { teamId, teamName, envId, templateId = 'core-sdlc' }) {
   const tmpl = await ctx.request.get(`/api/process-templates/${encodeURIComponent(templateId)}`);
   expect(
@@ -69,4 +90,5 @@ async function materializeCoreSdlcTeam(ctx, { teamId, teamName, envId, templateI
   };
 }
 
-module.exports = { materializeTeam, materializeCoreSdlcTeam };
+module.exports = {
+  materializeBundleTeam, materializeTeam, materializeCoreSdlcTeam };

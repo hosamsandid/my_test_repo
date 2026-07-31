@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, AlertCircle, Copy, Check } from 'lucide-react';
+import PromptHistory from './PromptHistory';
 
 /**
  * Read-only preview of the fully-composed system prompt an agent actually
@@ -16,6 +17,8 @@ export default function PromptPreviewPanel({ agentId, embedded = false }) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState(null);
+  // Bumped after a rollback so the composed preview re-fetches the reverted prompt.
+  const [reload, setReload]   = useState(0);
 
   // Bump generation counter on agent change so a slow response from the
   // previous agent can't clobber the current state.
@@ -46,7 +49,7 @@ export default function PromptPreviewPanel({ agentId, embedded = false }) {
       .finally(() => {
         if (reqId === reqIdRef.current) setLoading(false);
       });
-  }, [agentId]);
+  }, [agentId, reload]);
 
   const meta = data?.meta || {};
   const badges = data ? buildBadges(data.role, meta) : [];
@@ -138,6 +141,8 @@ export default function PromptPreviewPanel({ agentId, embedded = false }) {
             title="Runtime append (--append-system-prompt)"
             text={data.appendSystemPrompt}
           />
+
+          <PromptHistory agentId={agentId} onReverted={() => setReload(n => n + 1)} />
         </div>
       )}
 

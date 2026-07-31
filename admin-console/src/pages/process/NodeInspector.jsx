@@ -6,6 +6,7 @@ import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
+import PromptHistory from '../agent-chat/PromptHistory';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
 // modes so the first-page layout, tab set, and routing wiring live in a single
@@ -265,6 +266,8 @@ function LivePromptEditor({ agentId, onChanged }) {
   const [text, setText] = useState('');
   const [inherit, setInherit] = useState(false);
   const [inheritedPreview, setInheritedPreview] = useState('');
+  // Bumped on save / revert so the editor text + history list re-fetch.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -295,7 +298,7 @@ function LivePromptEditor({ agentId, onChanged }) {
       }
     })();
     return () => { alive = false; };
-  }, [agentId]);
+  }, [agentId, reloadKey]);
 
   async function save() {
     setSaving(true); setError(null); setSaved(false);
@@ -306,6 +309,7 @@ function LivePromptEditor({ agentId, onChanged }) {
         await apiCall('PUT', `/api/agents/${agentId}/prompt`, { content: text });
       }
       setSaved(true);
+      setReloadKey(k => k + 1);   // refresh the history list with the new version
       onChanged?.();
     } catch (e) {
       setError(e.message);
@@ -355,6 +359,14 @@ function LivePromptEditor({ agentId, onChanged }) {
           Save prompt
         </button>
         {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PromptHistory
+          agentId={agentId}
+          reloadKey={reloadKey}
+          onReverted={() => { setReloadKey(k => k + 1); onChanged?.(); }}
+        />
       </div>
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>

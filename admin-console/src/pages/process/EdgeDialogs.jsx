@@ -529,9 +529,9 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
   }
 
   return (
-    <SidePanel open onClose={onClose} title={`A ${noun} from ${fromName || from} wakes ${toName || to}`} width="520px">
+    <SidePanel open onClose={onClose} title={`${artifact === 'pr' ? 'A pull request' : 'An issue'} from ${fromName || from} wakes ${toName || to}`} width="520px">
       <p style={hint}>
-        <strong>{fromName || from}</strong> opens a {noun} that wakes <strong>{toName || to}</strong>.
+        <strong>{fromName || from}</strong> opens {artifact === 'pr' ? 'a pull request' : 'an issue'} that wakes <strong>{toName || to}</strong>.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         {!lockArtifact && (

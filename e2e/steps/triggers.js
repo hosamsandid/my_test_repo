@@ -117,7 +117,7 @@ async function configureCron(ctx, { time = '07:00', prompt }) {
   // Cadence select — the one carrying the "Custom expression" option.
   await d.locator('select').filter({ hasText: 'Custom expression' }).selectOption('daily');
   await d.locator('input[type="time"]').fill(time);
-  await d.getByLabel('Prompt').fill(prompt);
+  await d.getByLabel(/Wake instruction/).fill(prompt);
 }
 
 /**
@@ -154,7 +154,7 @@ async function expectCronForm(ctx, { summary, cron }) {
 async function configureOnce(ctx, { at, prompt }) {
   const d = await openAddForm(ctx.page, 'once');
   await d.locator('input[type="datetime-local"]').fill(at);
-  await d.getByLabel('Prompt').fill(prompt);
+  await d.getByLabel(/Wake instruction/).fill(prompt);
 }
 
 /**
@@ -183,7 +183,7 @@ async function expectOnceForm(ctx) {
  */
 async function configureHttp(ctx, { prompt }) {
   const d = await openAddForm(ctx.page, 'http');
-  await d.getByLabel('Prompt').fill(prompt);
+  await d.getByLabel(/Wake instruction/).fill(prompt);
 }
 
 /**
@@ -231,7 +231,7 @@ async function configureGithubEvent(ctx, { repo, event, labelFilter, prompt }) {
   if (labelFilter) {
     await d.locator('input[placeholder*="leave empty to fire"]').fill(labelFilter);
   }
-  await d.getByLabel('Prompt').fill(prompt);
+  await d.getByLabel(/Wake instruction/).fill(prompt);
 }
 
 /**
@@ -264,7 +264,7 @@ async function expectGithubEventForm(ctx) {
 async function configureDataFlow(ctx, { repo, prompt }) {
   const d = await openAddForm(ctx.page, 'data-flow');
   if (repo) await selectRepo(d, repo);
-  await d.getByLabel('Prompt').fill(prompt);
+  await d.getByLabel(/Wake instruction/).fill(prompt);
 }
 
 /**

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   rowLabels, rowArtifact, consumerCandidates, wireConsumerSpec, unwireConsumerSpec, currentConsumers,
+  outcomeDropDialog,
 } from './outcome-routing.js';
 
 // #1003 — pure specs for the per-row consumer picker (concept §4.2).
@@ -61,4 +62,30 @@ test('currentConsumers lists wired peers with their unwire specs', () => {
   assert.deepEqual(viaChannel.map(w => w.id), ['qa']);
   // Humans never appear as signal consumers.
   assert.ok(!currentConsumers(mixedOpt, node, peers).some(w => w.id === 'p'));
+});
+
+// #1035 — an outcome-port drag onto a human routes to the person delivery
+// dialog, not the agent channel/hand-off forms (which throw `role … not found`
+// on a human target). The `outcome` here is the resolved drag payload.
+const humanNode = { id: 'ba-human', kind: 'human', displayName: 'BA Human' };
+const agentNode = { id: 'dev', displayName: 'Developer' };
+const issueDrag = { id: 'ticket', artifact: 'issue', label: '' };
+const prDrag = { id: 'pr', artifact: 'pr', label: '' };
+const labelDrag = { id: 'ready', artifact: null, label: 'ready' };
+
+test('outcomeDropDialog: any outcome onto a human routes to the person delivery dialog', () => {
+  assert.equal(outcomeDropDialog(issueDrag, humanNode), 'person');
+  assert.equal(outcomeDropDialog(prDrag, humanNode), 'person');
+  // setLabel onto a human also routes to the person dialog (not the agent
+  // hand-off form) — a person does not emit an agent's label.
+  assert.equal(outcomeDropDialog(labelDrag, humanNode), 'person');
+});
+
+test('outcomeDropDialog: drops onto an agent are unchanged (channel vs hand-off)', () => {
+  assert.equal(outcomeDropDialog(issueDrag, agentNode), 'channel');
+  assert.equal(outcomeDropDialog(prDrag, agentNode), 'channel');
+  assert.equal(outcomeDropDialog(labelDrag, agentNode), 'handoff');
+  // No/undefined target node behaves like an agent target (no human).
+  assert.equal(outcomeDropDialog(labelDrag, null), 'handoff');
+  assert.equal(outcomeDropDialog(prDrag, undefined), 'channel');
 });

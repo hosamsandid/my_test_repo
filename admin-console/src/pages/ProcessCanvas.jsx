@@ -9,7 +9,8 @@ import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
-import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog } from './process/EdgeDialogs';
+import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
+import { outcomeDropDialog } from './process/outcome-routing';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -348,6 +349,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   const nodeName = (id) =>
     (displayGraph?.nodes || []).find(n => n.id === id)?.displayName || ACTOR_NAMES[id] || id;
+  // Which dialog an outcome-port drag opens (#1035): a human drop target routes
+  // to the agent-to-person delivery form (like the generic ● port), never the
+  // channel/hand-off forms which resolve agent consumers only and would throw
+  // `role … not found` on a human.
+  const outcomeToNode = outcomeConnect
+    ? (displayGraph?.nodes || []).find(n => n.id === outcomeConnect.to) || null
+    : null;
+  const outcomeDialog = outcomeConnect
+    ? outcomeDropDialog(outcomeConnect.outcome, outcomeToNode)
+    : null;
   const selectedNode = useMemo(
     () => (displayGraph?.nodes || []).find(n => n.id === selectedId) || null,
     [displayGraph, selectedId],
@@ -642,8 +653,25 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
       {/* Pre-typed outcome/badge drag (#1005, §4.3): the outcome's action picks
           the form — a channel dialog for openPr/openIssue (and the produce
-          badges), the label hand-off for setLabel. Never the generic picker. */}
-      {outcomeConnect && (outcomeConnect.outcome?.artifact ? (
+          badges), the label hand-off for setLabel. Never the generic picker.
+          A HUMAN drop target routes to the agent-to-person delivery dialog
+          instead (#1035) — the same branch CreateEdgeDialog takes for the ●
+          port; the channel/hand-off forms resolve agent consumers only. */}
+      {outcomeConnect && (outcomeDialog === 'person' ? (
+        <AgentToPersonDialog
+          from={outcomeConnect.from}
+          to={outcomeConnect.to}
+          fromName={nodeName(outcomeConnect.from)}
+          toName={nodeName(outcomeConnect.to)}
+          ops={ops}
+          humanOps={isDraft ? draftOps : liveHumanOps}
+          fromNode={(displayGraph?.nodes || []).find(n => n.id === outcomeConnect.from) || null}
+          peers={displayGraph?.nodes || []}
+          initialArtifact={outcomeConnect.outcome?.artifact || null}
+          onClose={() => setOutcomeConnect(null)}
+          onDone={() => { setOutcomeConnect(null); afterEdit(); }}
+        />
+      ) : outcomeDialog === 'channel' ? (
         <CreateChannelDialog
           from={outcomeConnect.from}
           to={outcomeConnect.to}

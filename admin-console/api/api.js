@@ -8119,7 +8119,17 @@ app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
       const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
       return effectiveEndpointId(cfg, env) === ep.id;
     })
-    .map(cfg => ({ id: cfg.id, displayName: cfg.displayName || cfg.id, role: cfg.role || 'agent' }));
+    .map(cfg => {
+      const teamId = typeof cfg.parentTeamId === 'string' ? cfg.parentTeamId : null;
+      const teamCfg = teamId ? readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null) : null;
+      return {
+        id: cfg.id,
+        displayName: cfg.displayName || cfg.id,
+        role: cfg.role || 'agent',
+        teamId,
+        teamName: teamCfg ? (teamCfg.displayName || teamId) : null,
+      };
+    });
   res.json({ agents });
 });
 
@@ -8138,7 +8148,22 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
       return effectiveEndpointId(cfg, env) === ep.id;
     })
     .map(cfg => cfg.id);
-  const results = await Promise.all(agentIds.map(id => respawnAgentBestEffort(id, 'llm-credential-rotated')));
+  // Bounded concurrency: an unbounded Promise.all here would fan out one
+  // stop+recreate container-lifecycle call per agent simultaneously, which
+  // can overwhelm the orchestrator's libpod socket and the host's container
+  // runtime on a large squad (observed directly while load-testing this
+  // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
+  // for their hardware; the default is conservative for a local Podman host.
+  const concurrency = Math.max(1, Number(process.env.RESPAWN_CONCURRENCY) || 5);
+  const results = new Array(agentIds.length);
+  let next = 0;
+  async function worker() {
+    while (next < agentIds.length) {
+      const i = next++;
+      results[i] = await respawnAgentBestEffort(agentIds[i], 'llm-credential-rotated');
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, agentIds.length) }, worker));
   const respawned = agentIds.filter((_, i) => results[i]);
   const skipped   = agentIds.filter((_, i) => !results[i]);
   res.json({ respawned, skipped });

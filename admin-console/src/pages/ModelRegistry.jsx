@@ -24,6 +24,29 @@ import {
   probeRequest,
 } from './llm-probe-state';
 
+// Groups bound-agents for the respawn dialog: one group per parent team
+// (sorted by name), standalone agents (no parentTeamId) last under one
+// synthetic group so a large squad-heavy list stays scannable.
+function groupAgentsByTeam(agents) {
+  const byTeam = new Map();
+  const standalone = [];
+  for (const a of agents) {
+    if (!a.teamId) {
+      standalone.push(a);
+      continue;
+    }
+    if (!byTeam.has(a.teamId)) {
+      byTeam.set(a.teamId, { key: a.teamId, name: a.teamName || a.teamId, agents: [] });
+    }
+    byTeam.get(a.teamId).agents.push(a);
+  }
+  const groups = [...byTeam.values()].sort((x, y) => x.name.localeCompare(y.name));
+  if (standalone.length > 0) {
+    groups.push({ key: '__standalone__', name: 'Standalone agents', agents: standalone });
+  }
+  return groups;
+}
+
 /* ───────────────────────── shared styles ───────────────────────── */
 
 const buttonPrimary = {
@@ -922,7 +945,7 @@ export default function ModelRegistry() {
   // old credentials) — surfaced as a follow-up alert so the operator can't
   // mistake "dialog closed" for "rotation fully applied" (only console.info'd
   // previously, which nobody watching the UI would ever see).
-  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedNames: string[] } | null
+  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedAgents: Array<{id, displayName, role, teamId, teamName}> } | null
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1114,18 +1137,17 @@ export default function ModelRegistry() {
       setRespawnPrompt(null);
       refetch();
       if (skipped && skipped.length > 0) {
-        // `skipped` means respawnAgentBestEffort returned false for that agent
-        // id — the discovery filter already excludes disabled/unmaterialized
-        // agents, so a skip here means the respawn attempt itself FAILED
-        // against the orchestrator, not "agent was already stopped". Those
-        // agents are still running on stale credentials — the exact problem
-        // this feature exists to prevent — so don't close the panel silently;
-        // surface it as a follow-up alert the operator must see and dismiss.
-        const failedNames = skipped.map(id => {
-          const a = agents.find(a => a.id === id);
-          return a ? a.displayName : id;
-        });
-        setRespawnFailureNotice({ failedNames });
+        // `skipped` means the orchestrator's respawn call returned
+        // respawned:false for that agent id. That covers two different cases
+        // it can't distinguish from here: the agent wasn't actually running
+        // at the moment of the call (nothing to fix — it'll get the new
+        // credential on its next start), or it WAS running and the restart
+        // attempt itself failed (still on stale credentials — the exact
+        // problem this feature exists to prevent). Since we can't tell which
+        // occurred, don't close the panel silently; surface it as a
+        // follow-up alert the operator must see and dismiss.
+        const failedAgents = skipped.map(id => agents.find(a => a.id === id) || { id, displayName: id, role: 'agent', teamId: null, teamName: null });
+        setRespawnFailureNotice({ failedAgents });
       } else {
         setEditing(null);
       }
@@ -1138,6 +1160,7 @@ export default function ModelRegistry() {
 
   function handleRespawnCancel() {
     setRespawnPrompt(null);
+    setRespawnError(null);
     setEditing(null);
     refetch();
   }
@@ -1266,24 +1289,39 @@ export default function ModelRegistry() {
         message={respawnPrompt && (
           <div>
             <p style={{ marginTop: 0 }}>
-              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} currently running with this provider and will be restarted:
+              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} enabled and bound to this provider, and will be restarted:
             </p>
-            <ul style={{
+            <div style={{
               margin: '0 0 var(--eb-space-3)',
-              padding: '0 0 0 var(--eb-space-4)',
-              maxHeight: 200,
+              maxHeight: 240,
               overflowY: 'auto',
               fontSize: 'var(--eb-text-sm)',
             }}>
-              {respawnPrompt.agents.map(a => (
-                <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
-                  <strong>{a.displayName}</strong>
-                  <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
-                    {a.role}
-                  </span>
-                </li>
+              {groupAgentsByTeam(respawnPrompt.agents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
-            </ul>
+            </div>
             {respawnError && (
               <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>
                 {respawnError} — you can retry or skip.
@@ -1310,9 +1348,40 @@ export default function ModelRegistry() {
         alertOnly
         title="Some agents failed to restart"
         message={respawnFailureNotice && (
-          <p style={{ margin: 0 }}>
-            {respawnFailureNotice.failedNames.length} agent(s) failed to restart and are still running with the old credentials: <strong>{respawnFailureNotice.failedNames.join(', ')}</strong>. Reopen this provider and confirm the restart prompt again to retry.
-          </p>
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {respawnFailureNotice.failedAgents.length} agent(s) could not be restarted — if currently running, they may still be using the old credentials:
+            </p>
+            <div style={{ maxHeight: 240, overflowY: 'auto', fontSize: 'var(--eb-text-sm)' }}>
+              {groupAgentsByTeam(respawnFailureNotice.failedAgents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)' }}>
+              Reopen this provider and confirm the restart prompt again to retry.
+            </p>
+          </div>
         )}
         onConfirm={handleRespawnFailureAck}
         onCancel={handleRespawnFailureAck}

@@ -23,29 +23,7 @@ import {
   probeTitle,
   probeRequest,
 } from './llm-probe-state';
-
-// Groups bound-agents for the respawn dialog: one group per parent team
-// (sorted by name), standalone agents (no parentTeamId) last under one
-// synthetic group so a large squad-heavy list stays scannable.
-function groupAgentsByTeam(agents) {
-  const byTeam = new Map();
-  const standalone = [];
-  for (const a of agents) {
-    if (!a.teamId) {
-      standalone.push(a);
-      continue;
-    }
-    if (!byTeam.has(a.teamId)) {
-      byTeam.set(a.teamId, { key: a.teamId, name: a.teamName || a.teamId, agents: [] });
-    }
-    byTeam.get(a.teamId).agents.push(a);
-  }
-  const groups = [...byTeam.values()].sort((x, y) => x.name.localeCompare(y.name));
-  if (standalone.length > 0) {
-    groups.push({ key: '__standalone__', name: 'Standalone agents', agents: standalone });
-  }
-  return groups;
-}
+import { groupAgentsByTeam } from './group-agents-by-team.js';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 

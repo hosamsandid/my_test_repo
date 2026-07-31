@@ -18,10 +18,20 @@ cp .env.example .env          # once; add your LLM endpoint + token
 ./deploy/k8s/kind-up.sh       # creates cluster, builds+loads images, deploys, seeds
 ```
 
-The script is idempotent — re-run it after any failure or code change. On first
-run it asks for a password for the Matrix admin user and writes the stack's own
-env file `.env.k8s` (the kind stack has its own homeserver DB; it never shares
-tokens with compose).
+The script is idempotent — re-run it after any failure or code change.
+
+**Env files:** `.env` is only the **seed** (LLM endpoint/token, console login).
+The kind stack keeps its own `.env.k8s` — created from `.env` on first run —
+and every stack-specific value, including the Matrix token the bootstrap
+obtains, is written **there**, never back to `.env` (each stack has its own
+homeserver DB, so tokens are never shared with compose).
+
+**Two different credentials, easy to confuse:**
+
+| Credential | Asked/used where | What it is |
+|---|---|---|
+| Password prompted by the script (first run) | terminal | the **Matrix homeserver admin** user — token lands in `.env.k8s`, you rarely need it again |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env` (default `admin`/`admin`) | console login at `:4100` | the **Admin Console** web login |
 
 Open the console:
 

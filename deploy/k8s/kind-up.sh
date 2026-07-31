@@ -17,9 +17,9 @@ set -euo pipefail
 #   6. renders .env into the agent-studio-env Secret
 #   7. applies orchestrator / admin-console / bp-explorer and waits for rollout
 #
-# Afterwards:
-#   kubectl -n agent-studio port-forward svc/admin-console 4000:4000
-#   open http://localhost:4000
+# Afterwards (4100, NOT 4000 — the compose stack owns :4000 locally):
+#   kubectl -n agent-studio port-forward svc/admin-console 4100:4000
+#   open http://localhost:4100
 #
 # Compatible with bash 3.2 (macOS default).
 
@@ -123,7 +123,13 @@ start_port_forward() {
   done
   fail "cannot reach conduwuit through port-forward on :${BOOTSTRAP_PORT}"
 }
-stop_port_forward() { [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null || true; PF_PID=""; }
+# kill + wait reaps the background port-forward silently — without the wait,
+# bash prints an async "Terminated: 15" job notice that reads like an error.
+stop_port_forward() {
+  [ -n "$PF_PID" ] || return 0
+  { kill "$PF_PID" && wait "$PF_PID"; } 2>/dev/null || true
+  PF_PID=""
+}
 trap stop_port_forward EXIT
 
 start_port_forward
@@ -139,7 +145,7 @@ if token_valid "${MATRIX_ACCESS_TOKEN:-}"; then
 else
   log "bootstrapping Matrix admin user @${ADMIN_USER}:local ..."
   if [ -z "${ADMIN_PASS:-}" ]; then
-    echo -n "Password for admin user @${ADMIN_USER}:local: "
+    echo -n "Password for MATRIX admin user @${ADMIN_USER}:local (homeserver admin — NOT the console login): "
     read -rs ADMIN_PASS; echo
     [ -n "$ADMIN_PASS" ] || fail "empty password"
   fi
@@ -240,8 +246,9 @@ echo
 log "done. Agent Studio is running on kind cluster '${CLUSTER_NAME}'."
 echo
 echo "  Open the console:"
-echo "    kubectl -n ${NAMESPACE} port-forward svc/admin-console 4000:4000"
-echo "    open http://localhost:4000"
+echo "    kubectl -n ${NAMESPACE} port-forward svc/admin-console 4100:4000"
+echo "    open http://localhost:4100"
+echo "    (4100 on purpose — the compose stack owns :4000; console login = ADMIN_USERNAME/ADMIN_PASSWORD from .env)"
 echo
 echo "  Watch agent pods appear as you enable agents:"
 echo "    kubectl -n ${NAMESPACE} get pods -l app.kubernetes.io/component=as-agent -w"

@@ -1,8 +1,10 @@
 # Agent Studio — GCP infrastructure (Terraform)
 
 Codifies the stage-1 GKE hosting in `acn-projectroots`: the `agent-studio`
-cluster (zonal, 1 node, RWO storage), the Artifact Registry repo, and the
-keyless GitHub-Actions deploy identity (Workload Identity Federation).
+cluster (zonal, 1 node, RWO storage), the Artifact Registry repo, the keyless
+GitHub-Actions deploy identity (Workload Identity Federation), and a daily
+Backup-for-GKE plan for the `agent-studio` namespace (volumes + secrets,
+14-day retention — see `backup.tf` for the restore procedure).
 
 Cluster, node pool, registry and deployer SA **already exist** (created
 imperatively while standing up the pilot) — `imports.tf` adopts them into

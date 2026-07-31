@@ -2081,6 +2081,15 @@ function listAgentIds() {
   );
 }
 
+// All team-member configs belonging to teamId — shared by
+// listTeamMembersWithState/disableTeam/enableTeam so the membership
+// filter (role + parentTeamId) lives in exactly one place.
+function teamMemberConfigs(teamId) {
+  return listAgentIds()
+    .map((id) => loadAgentConfig(id))
+    .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+}
+
 // Busy/active-trigger snapshot for an agent — shared by disableAgent's own
 // busy-warning path and the team-members preview listing, so both report
 // identical state for the same agent.
@@ -7287,9 +7296,7 @@ class Orchestrator {
     const teamCfg = loadAgentConfig(teamId);
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
 
-    const members = listAgentIds()
-      .map((id) => loadAgentConfig(id))
-      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId)
+    const members = teamMemberConfigs(teamId)
       .map((c) => {
         const { busy, activeTriggers } = agentBusyState(c.id);
         return {
@@ -7321,9 +7328,7 @@ class Orchestrator {
     if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
     if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
 
-    const memberConfigs = listAgentIds()
-      .map((id) => loadAgentConfig(id))
-      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const memberConfigs = teamMemberConfigs(teamId);
     const { toDisable, skip } = planTeamDisable(memberConfigs);
 
     const disabled = [];
@@ -7331,12 +7336,34 @@ class Orchestrator {
     for (const id of toDisable) {
       try {
         await this.disableAgent(id, { mode });
+      } catch (err) {
+        // disableAgent never touched disk (it threw before/at its own save,
+        // e.g. the lockout guard or "not found") — nothing to reconcile.
+        failed.push({ id, error: err.message });
+        continue;
+      }
+      // disableAgent's own work (warning-check/mode/stop-process) is now
+      // confirmed done: enabled=false is already on disk. Tag
+      // disabledByTeam in one more save so enableTeam later knows to bring
+      // this member back. If that save throws, the member is left
+      // disabled-but-untagged and enableTeam would never find it again — so
+      // best-effort roll it back to enabled here, keeping the on-disk state
+      // consistent with reporting it under `failed` (never disabled).
+      try {
         const cfg = loadAgentConfig(id);
         const updated = { ...cfg, disabledByTeam: true };
         saveAgentConfig(id, updated);
         this.agentConfigs.set(id, { config: updated });
         disabled.push(id);
       } catch (err) {
+        try {
+          const cfg = loadAgentConfig(id);
+          const reverted = { ...cfg, enabled: true };
+          saveAgentConfig(id, reverted);
+          this.agentConfigs.set(id, { config: reverted });
+        } catch (rollbackErr) {
+          console.error(`[Orchestrator] team ${teamId}: member ${id} was disabled but could not be tagged disabledByTeam, AND the rollback to enabled also failed — it is now disabled without disabledByTeam tracking and needs manual re-enable: ${rollbackErr.message}`);
+        }
         failed.push({ id, error: err.message });
       }
     }
@@ -7363,9 +7390,7 @@ class Orchestrator {
     saveAgentConfig(teamId, teamUpdated);
     this.agentConfigs.set(teamId, { config: teamUpdated });
 
-    const memberConfigs = listAgentIds()
-      .map((id) => loadAgentConfig(id))
-      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const memberConfigs = teamMemberConfigs(teamId);
     const { toEnable, skip } = planTeamEnable(memberConfigs);
 
     const enabled = [];

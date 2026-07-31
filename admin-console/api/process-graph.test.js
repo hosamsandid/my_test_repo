@@ -1263,3 +1263,24 @@ test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only
   assert.ok(raws.every(l => l.severity === 'info'), 'advisory, never blocking');
   assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
 });
+
+test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger lint', () => {
+  // A derived listener is ENGINE-written and regenerated on every port
+  // reconcile — the operator cannot "edit it to conform". The unlabelled
+  // PR-open channel derivation carries the two-event open pair; that must not
+  // flag every team that uses a plain PR channel.
+  const g = buildProcessGraph([
+    { id: 'consumer', channels: [{ artifact: 'pr', from: 'producer' }], triggers: [
+      { id: 'consumer-on-pr', type: 'github-event', channel: true,
+        events: ['pull_request.opened', 'pull_request.reopened'], prompt: 'p' },
+      { id: 'push-from-up', type: 'github-event', dataFlow: true,
+        events: ['push', 'push'], prompt: 'p' },
+      { id: 'hand-authored-two', type: 'github-event',
+        events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
+    ] },
+    { id: 'producer', github: { producesPr: true }, triggers: [] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]), ['hand-authored-two'],
+    'only the hand-authored deviation is flagged');
+});

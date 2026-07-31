@@ -18,6 +18,10 @@
                 "issues.labeled"
             ],
             "labelFilter": "ready-for-implementation",
+            "claim": {
+                "remove": "ready-for-implementation",
+                "add": "ready-for-implementation:wip"
+            },
             "enabled": true,
             "intrinsic": true,
             "description": "Re-run the dispatch decision when an issue becomes ready for implementation",
@@ -44,6 +48,16 @@
                     {
                         "type": "setLabel",
                         "label": "dispatched-for-implementation"
+                    }
+                ]
+            },
+            {
+                "id": "keeps-queued",
+                "title": "Keeps queued",
+                "when": "No Developer slot is free or dependencies are unresolved — the issue stays queued",
+                "actions": [
+                    {
+                        "type": "none"
                     }
                 ]
             }

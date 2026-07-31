@@ -18,6 +18,10 @@
                 "pull_request.labeled"
             ],
             "labelFilter": "revisions-required",
+            "claim": {
+                "remove": "revisions-required",
+                "add": "revisions-required:wip"
+            },
             "enabled": true,
             "intrinsic": true,
             "description": "Rework a PR the reviewer sent back",

@@ -15,12 +15,21 @@
       "id": "compliance-submission-opened",
       "type": "github-event",
       "events": [
-        "pull_request.opened",
-        "pull_request.reopened"
+        "pull_request.opened"
       ],
       "enabled": true,
       "description": "Review every opened policy submission",
       "promptTemplate": "A policy submission was opened in the repository (payload above). Read the submission diff and the originating change request (look for `Closes #N` in the submission body to find the change request number). Review the draft policy for regulatory accuracy and coverage. Post your findings: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. If clean: 'Compliance review: approved'."
+    },
+    {
+      "id": "compliance-submission-reopened",
+      "type": "github-event",
+      "events": [
+        "pull_request.reopened"
+      ],
+      "enabled": true,
+      "description": "Review every reopened policy submission",
+      "promptTemplate": "A policy submission was reopened in the repository (payload above). Read the submission diff and the originating change request (look for `Closes #N` in the submission body to find the change request number). Review the draft policy for regulatory accuracy and coverage. Post your findings: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. If clean: 'Compliance review: approved'."
     },
     {
       "id": "self-curation",
@@ -31,5 +40,30 @@
       "description": "Daily memory housekeeping",
       "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
-  ]
+  ],
+  "outcomes": {
+    "mode": "exactlyOne",
+    "options": [
+      {
+        "id": "compliance-ack",
+        "title": "Compliance ack",
+        "when": "The submission covers its change request accurately — the review closes clean",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      },
+      {
+        "id": "compliance-findings",
+        "title": "Reports compliance findings",
+        "when": "Gaps, over-interpretations or inconsistencies found — findings are posted, each citing the regulation clause",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

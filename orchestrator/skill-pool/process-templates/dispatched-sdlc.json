@@ -71,6 +71,10 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "approved-for-dispatch",
+                    "claim": {
+                        "remove": "approved-for-dispatch",
+                        "add": "approved-for-dispatch:wip"
+                    },
                     "from": "humans",
                     "enabled": true,
                     "description": "A human queued an issue by adding the approved-for-dispatch label.",
@@ -276,6 +280,10 @@
                         "pull_request.labeled"
                     ],
                     "labelFilter": "revisions-required",
+                    "claim": {
+                        "remove": "revisions-required",
+                        "add": "revisions-required:wip"
+                    },
                     "from": "team",
                     "enabled": true,
                     "description": "Woken when the Code Reviewer requests revisions.",
@@ -322,6 +330,10 @@
                         "pull_request.labeled"
                     ],
                     "labelFilter": "ready-to-merge",
+                    "claim": {
+                        "remove": "ready-to-merge",
+                        "add": "ready-to-merge:wip"
+                    },
                     "from": "team",
                     "enabled": true,
                     "description": "Woken when the Code Reviewer approves a PR for merge.",
@@ -335,7 +347,22 @@
                     "description": "Weekly memory housekeeping.",
                     "prompt": "Weekly memory curation of memory/log.md: consolidate durable repo merge conventions, prune stale entries. If nothing to do: [PASS]."
                 }
-            ]
+            ],
+            "outcomes": {
+                "mode": "anyOf",
+                "options": [
+                    {
+                        "id": "merges-pr",
+                        "title": "Merges the PR",
+                        "when": "The approved PR is merged and its branch deleted — the flow ends here",
+                        "actions": [
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                ]
+            }
         },
         {
             "id": "documentation-sync",
@@ -372,6 +399,7 @@
                         "id": "opens-pr",
                         "title": "Opens PR",
                         "when": "Documentation updates are ready",
+                        "terminal": true,
                         "actions": [
                             {
                                 "type": "openPr"

@@ -1310,20 +1310,27 @@ test('#1006: rawTriggerError — one event per github-event trigger, legacy pass
   );
 });
 
-test('#1006: the bundle validator deliberately TOLERATES multi-event triggers until #1008', () => {
-  // The weaver's companion listener and curated templates still ship
-  // multi-event triggers; hard-rejecting at the bundle validator would brick
-  // materialise for every not-yet-migrated bundle. The deviation stays
-  // VISIBLE via the `raw-trigger-nonconformant` graph lint, and the live
-  // trigger endpoints hard-reject via `rawTriggerError`. #1008 flips the
-  // validator to `rawTriggerError` when it migrates the generators.
+test('#1008: the strict bundle validator rejects multi-event triggers; drafts stay saveable', () => {
+  // The #1006 tolerance existed only until the generators were migrated; #1008
+  // flipped strict validation (materialise, registry, weaver self-check) to the
+  // full `rawTriggerError` contract. DRAFT mode (`allowEmptyRoles`) still
+  // tolerates a pre-flip multi-event trigger — the editor's migration flow
+  // (shrink the events, then save) must not deadlock on an unsaveable draft.
   const bundle = {
     processTemplateVersion: 1,
     roles: [{ id: 'r', name: 'R', prompt: 'x', triggers: [
       { id: 't', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
     ] }],
   };
-  assert.equal(validateProcessTemplate(bundle).ok, true);
+  const strict = validateProcessTemplate(bundle);
+  assert.equal(strict.ok, false);
+  assert.match(strict.error, /exactly ONE event/);
+  assert.equal(validateProcessTemplate(bundle, { allowEmptyRoles: true }).ok, true);
+  // A malformed claim is rejected in BOTH modes.
+  bundle.roles[0].triggers[0].events = ['issues.labeled'];
+  bundle.roles[0].triggers[0].claim = { remove: 'go', add: 'wrong' };
+  assert.equal(validateProcessTemplate(bundle).ok, false);
+  assert.equal(validateProcessTemplate(bundle, { allowEmptyRoles: true }).ok, false);
 });
 
 // ─── #1007: wiring-aware Outcomes prompt projection ──────────────────────────

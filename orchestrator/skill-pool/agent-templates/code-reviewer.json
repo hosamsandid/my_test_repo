@@ -15,12 +15,21 @@
       "id": "reviewer-pr-opened",
       "type": "github-event",
       "events": [
-        "pull_request.opened",
-        "pull_request.reopened"
+        "pull_request.opened"
       ],
       "enabled": true,
       "description": "Review every opened pull request",
       "promptTemplate": "A pull request was opened in the repository (payload above). `git pull`, read the linked issue and the PR diff in context, then post a structured review: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. List each acceptance criterion with ✅/❌ and close with a clear recommendation. If the diff is trivial and clean: a short 'LGTM' comment. Reply `[PASS]` if there is nothing to do."
+    },
+    {
+      "id": "reviewer-pr-reopened",
+      "type": "github-event",
+      "events": [
+        "pull_request.reopened"
+      ],
+      "enabled": true,
+      "description": "Review every reopened pull request",
+      "promptTemplate": "A pull request was reopened in the repository (payload above). `git pull`, read the linked issue and the PR diff in context, then post a structured review: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. List each acceptance criterion with ✅/❌ and close with a clear recommendation. If the diff is trivial and clean: a short 'LGTM' comment. Reply `[PASS]` if there is nothing to do."
     },
     {
       "id": "self-curation",
@@ -41,6 +50,31 @@
       {
         "artifact": "pr",
         "fromSlot": "stage-author"
+      }
+    ]
+  },
+  "outcomes": {
+    "mode": "exactlyOne",
+    "options": [
+      {
+        "id": "recommends-merge",
+        "title": "Recommends merge",
+        "when": "The PR satisfies its acceptance criteria — the review closes with a merge recommendation for the human",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      },
+      {
+        "id": "requests-changes",
+        "title": "Requests changes",
+        "when": "The review found blocking findings — a structured change request is posted on the PR",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
       }
     ]
   }

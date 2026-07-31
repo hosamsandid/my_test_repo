@@ -6,21 +6,37 @@ const fs = require('fs');
 const path = require('path');
 
 const { weaveProcess, stripWeaverBlock } = require('./flow-weaver');
-const { validateProcessTemplate } = require('./process-template');
+const { validateProcessTemplate, rawTriggerError } = require('./process-template');
 const { processTemplateToUnified, buildUnifiedGraph } = require('./unified-graph');
 
 const CATALOG = path.join(__dirname, '..', '..', 'orchestrator', 'skill-pool', 'agent-templates');
 const tpl = (id) => JSON.parse(fs.readFileSync(path.join(CATALOG, id + '.json'), 'utf8'));
 
+function graphOf(bundle) {
+  const flow = processTemplateToUnified(bundle);
+  // The woven bundle's own `labels[]` registry is the authoritative gate/brake
+  // source (#928) and `humans[]` the named-role bindings (#987) — thread both
+  // in exactly as POST /api/flows/graph does, or the weaver's human-gated
+  // stage boundaries look like orphan listeners.
+  const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
+  return buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans });
+}
+
 // The weaver's contract: the woven bundle renders with zero error and zero
 // warning lints (info allowed). Mirrors the canvas' unified-graph path.
 function nonInfoLints(bundle) {
-  const flow = processTemplateToUnified(bundle);
-  // The woven bundle's own `labels[]` registry is the authoritative gate/brake
-  // source (#928) — thread it in exactly as POST /api/flows/graph does, or the
-  // weaver's human-gated stage boundaries look like orphan listeners.
-  const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
-  return g.lints.filter(l => l.severity === 'error' || l.severity === 'warning');
+  return graphOf(bundle).lints.filter(l => l.severity === 'error' || l.severity === 'warning');
+}
+
+// The #1008 lint set the shipped-preset CI guard also enforces: on top of
+// error/warning cleanliness, a woven bundle may not deviate from the wiring
+// rules (multi-event / malformed claim), leave a label listener unclaimed, or
+// leave a produced artifact as an UNDECLARED open end. Advisory unbound-* infos
+// (a declared touchpoint merely lacking a named human) stay allowed.
+const BANNED_INFO_CODES = ['raw-trigger-nonconformant', 'unclaimed-listener', 'producer-unconsumed'];
+function wiringLints(bundle) {
+  return graphOf(bundle).lints.filter(l =>
+    l.severity === 'error' || l.severity === 'warning' || BANNED_INFO_CODES.includes(l.code));
 }
 
 const inlineAuthor = (id) => ({
@@ -74,7 +90,14 @@ test('extended-SDLC-like composition is valid, complete and lint-clean', () => {
   assert.ok(byId.get('design-author').triggers.some(t => t.id === 'rework-on-review'));
   assert.deepEqual(byId.get('design-companion').channels, [{ artifact: 'pr', from: 'design-author' }]);
   assert.equal(byId.get('design-companion').triggers.find(t => t.id === 'escalate-wake').labelFilter, 'design:escalate');
-  assert.ok(byId.get('design-companion').triggers.some(t => t.id === 'human-feedback'));
+  // Human-feedback routing is one listener PER EVENT (#1008) — never one
+  // multi-event trigger.
+  const feedback = byId.get('design-companion').triggers.filter(t => t.id.startsWith('human-feedback-'));
+  assert.deepEqual(feedback.map(t => t.events).flat().sort(), [
+    'issue_comment.created', 'issues.edited',
+    'pull_request_review.submitted', 'pull_request_review_comment.created',
+  ]);
+  assert.ok(feedback.every(t => t.events.length === 1));
 
   // Stage tokens resolved in prompts; wiring notes appended.
   assert.ok(byId.get('design-author').systemPrompt.includes('Design Author'));
@@ -289,6 +312,99 @@ test('#958: every weaver-GENERATED label listener carries its derived claim, sti
     assert.deepEqual(t.claim, { remove: t.labelFilter, add: `${t.labelFilter}:wip` },
       `${t.role}/${t.id} must claim \`${t.labelFilter}\``);
   }
+});
+
+// ─── #1008: single-event conformance, named humans, open-end deliveries ──────
+
+test('#1008: every woven github-event trigger is single-event and rule-conformant', () => {
+  const { bundle } = weaveProcess({
+    name: 'Conformant (woven)',
+    stages: [
+      { name: 'Requirements', roles: [tpl('issue-triage'), tpl('business-analyst')] },
+      { name: 'Design', roles: [tpl('scout'), tpl('stage-author'), tpl('stage-companion')] },
+      { name: 'Build', roles: [tpl('developer'), tpl('code-reviewer')] },
+      { name: 'Release', roles: [tpl('documentation-sync'), tpl('release-notes-writer')] },
+    ],
+  });
+  for (const r of bundle.roles) {
+    for (const t of (r.triggers || [])) {
+      assert.equal(rawTriggerError(t), null, `${r.id}/${t.id} must satisfy the raw wiring rules`);
+      if (t.type === 'github-event') {
+        assert.equal(t.events.length, 1, `${r.id}/${t.id} must carry exactly one event`);
+      }
+    }
+  }
+});
+
+test('#1008: woven output is lint-clean under the new lint set, per stage pattern', () => {
+  const patterns = {
+    'full-triad': [{ name: 'Design', roles: [tpl('scout'), tpl('stage-author'), tpl('stage-companion')] },
+      { name: 'Build', roles: [tpl('developer'), tpl('code-reviewer')] }],
+    'author-only': [{ name: 'Build', roles: [tpl('developer')] }],
+    'intake-chain': [{ name: 'Requirements', roles: [tpl('issue-triage'), tpl('business-analyst')] },
+      { name: 'Build', roles: [inlineAuthor('builder')] }],
+    'passive-tail': [{ name: 'Build', roles: [tpl('stage-author'), tpl('stage-companion')] },
+      { name: 'Release', roles: [tpl('documentation-sync')] }],
+  };
+  for (const [name, stages] of Object.entries(patterns)) {
+    const { bundle } = weaveProcess({ name, stages });
+    assert.deepEqual(wiringLints(bundle), [], `${name} must be clean under the new lint set`);
+  }
+});
+
+test('#1008: a named human binds the stage gate (emits) and reviews the hand-over (consumes)', () => {
+  const { bundle } = weaveProcess({
+    name: 'Gated (woven)',
+    stages: [
+      { name: 'Design', roles: [tpl('stage-author'), tpl('stage-companion')] },
+      { name: 'Build', roles: [inlineAuthor('builder')] },
+    ],
+    options: { humans: [{ id: 'po', name: 'Product Owner', stage: 'Design' }] },
+  });
+  assert.ok(validateProcessTemplate(bundle).ok);
+  const [po] = bundle.humans;
+  assert.equal(po.id, 'po');
+  assert.deepEqual(po.emits, ['design:approved']);
+  // Reviewer binding: the person reviews the hand-over issue they approve —
+  // and the open-end pass binds the flow's remaining deliveries to them too.
+  assert.ok(po.consumes.some(c => c.artifact === 'issue' && c.from === 'design-companion'));
+  const g = graphOf(bundle);
+  assert.ok(!g.lints.some(l => l.code === 'unbound-gate'), 'a bound gate is not unbound');
+  assert.deepEqual(wiringLints(bundle), []);
+});
+
+test('#1008: compensated author PRs become declared human deliveries (open-end markers)', () => {
+  // No companion → nobody in the flow consumes the author's PR; a human
+  // reviews/merges it. Without a named human that is a DECLARED but unbound
+  // delivery (advisory); with one it binds and the advisory disappears.
+  const solo = weaveProcess({ name: 'Solo', stages: [{ name: 'Build', roles: [tpl('developer')] }] });
+  const dev = solo.bundle.roles[0];
+  assert.equal(dev.github.prAudience, 'human');
+  assert.ok(solo.notes.some(n => n.rule === 'open-end-delivery' && n.stage === 'Build'));
+  assert.deepEqual(wiringLints(solo.bundle), []);
+  assert.ok(graphOf(solo.bundle).lints.some(l => l.code === 'unbound-delivery'));
+
+  const bound = weaveProcess({
+    name: 'Solo bound', stages: [{ name: 'Build', roles: [tpl('developer')] }],
+    options: { humans: [{ id: 'lead', name: 'Tech Lead' }] }, // stage-less fallback
+  });
+  const [lead] = bound.bundle.humans;
+  assert.ok(lead.consumes.some(c => c.artifact === 'pr' && c.from === 'developer'));
+  assert.ok(!graphOf(bound.bundle).lints.some(l => l.code === 'unbound-delivery'));
+  assert.deepEqual(wiringLints(bound.bundle), []);
+});
+
+test('#1008: invalid humans input throws instead of weaving a broken bundle', () => {
+  const stages = [{ name: 'Build', roles: [tpl('developer')] }];
+  assert.throws(() => weaveProcess({ name: 'X', stages, options: { humans: [{ id: 'a' }] } }), /name required/);
+  assert.throws(() => weaveProcess({
+    name: 'X', stages,
+    options: { humans: [{ id: 'a', name: 'A' }, { id: 'a', name: 'B' }] },
+  }), /duplicate human id/);
+  assert.throws(() => weaveProcess({
+    name: 'X', stages,
+    options: { humans: [{ id: 'a', name: 'A', stage: 'Nope' }] },
+  }), /unknown stage/);
 });
 
 test('#958: a woven derived channel listener claims its label too', () => {

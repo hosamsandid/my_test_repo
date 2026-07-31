@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
-const { validateProcessTemplate } = require('./process-template');
+const { validateProcessTemplate, rawTriggerError } = require('./process-template');
 const { buildProcessGraph } = require('./process-graph');
 const {
   bundleRoutingLabels, extractProseLabelTokens, proseSources,
@@ -91,28 +91,112 @@ test('curated repo templates are valid bundles', () => {
   }
 });
 
+// The #1008 lint set: on top of error/warning cleanliness a shipped bundle may
+// not deviate from the wiring rules (multi-event trigger / malformed claim),
+// leave a label listener unclaimed, or leave a produced artifact as an
+// UNDECLARED open end (`terminal`/`external` markers and human deliveries are
+// the declared forms). Advisory unbound-* infos (a declared human touchpoint
+// merely lacking a named role) stay allowed.
+const BANNED_INFO_CODES = ['raw-trigger-nonconformant', 'unclaimed-listener', 'producer-unconsumed'];
+
+function curatedBundleLints(b) {
+  // Mirror the POST /api/process/graph preview path: roles become nodes with
+  // their declarative ports; effective emits = persisted emits. The structured
+  // `outcomes` port (#827/#830) is threaded so the outcome lints are exercised
+  // against the shipped templates too, and the bundle's `labels[]` registry is
+  // the authoritative gate/brake source (#928) — without it a gate listener
+  // (e.g. dispatched-sdlc's dispatcher) looks like an orphan.
+  const agents = b.roles.map(r => ({
+    id: r.id, role: r.role || 'team-member', displayName: r.displayName,
+    sessionPolicy: r.sessionPolicy, emits: r.emits, github: r.github,
+    outcomes: r.outcomes,
+    channels: r.channels, triggers: r.triggers || [],
+  }));
+  return buildProcessGraph(agents, { labels: b.labels, humans: b.humans }).lints;
+}
+
 test('curated repo templates render with no error/warning lints', () => {
   for (const t of listProcessTemplates(CURATED_DIR)) {
-    const b = loadProcessTemplate(CURATED_DIR, t.id);
-    // Mirror the POST /api/process/graph preview path: roles become nodes with
-    // their declarative ports; effective emits = persisted emits.
-    const agents = b.roles.map(r => ({
-      id: r.id, role: r.role || 'team-member', displayName: r.displayName,
-      sessionPolicy: r.sessionPolicy, emits: r.emits, github: r.github,
-      // Thread the structured `outcomes` port (#827/#830) so the outcome lints
-      // (outcome-without-consumer / same-label-multiple-outcomes /
-      // human-label-as-outcome / switch-with-one-option) are exercised against
-      // the shipped templates too — they must stay clean under the new rules.
-      outcomes: r.outcomes,
-      channels: r.channels, triggers: r.triggers || [],
-    }));
-    // The bundle's `labels[]` registry is the authoritative gate/brake source
-    // (#928) — the endpoint threads it in, so the guard must too. Without it a
-    // gate listener (e.g. dispatched-sdlc's dispatcher) looks like an orphan.
-    const graph = buildProcessGraph(agents, { labels: b.labels });
-    const bad = graph.lints.filter(l => l.severity === 'error' || l.severity === 'warning');
+    const lints = curatedBundleLints(loadProcessTemplate(CURATED_DIR, t.id));
+    const bad = lints.filter(l => l.severity === 'error' || l.severity === 'warning');
     assert.deepEqual(bad, [], `${t.id} must be lint-clean, got: ${JSON.stringify(bad)}`);
   }
+});
+
+// ── #1008 preset conventions — the extended CI guard ─────────────────────────
+// Presets are the third authoring channel besides canvas and Routing tab; a
+// template that ships a convention violation seeds every team it instantiates
+// with wiring the Flow Editor cannot explain. The guard therefore fails on the
+// #1008 lint set, not only on error/warning.
+
+test('#1008: curated bundles are clean under the extended lint set (no undeclared open ends)', () => {
+  for (const t of listProcessTemplates(CURATED_DIR)) {
+    const lints = curatedBundleLints(loadProcessTemplate(CURATED_DIR, t.id));
+    const banned = lints.filter(l => BANNED_INFO_CODES.includes(l.code));
+    assert.deepEqual(banned, [], `${t.id} violates the preset conventions: ${JSON.stringify(banned)}`);
+  }
+});
+
+test('#1008: catalog role templates carry single-event triggers and claimed label listeners', () => {
+  const files = fs.readdirSync(CATALOG_DIR).filter(n => n.endsWith('.json'));
+  assert.ok(files.length >= 24, `expected the full catalog (got ${files.length})`);
+  for (const f of files) {
+    const r = JSON.parse(fs.readFileSync(path.join(CATALOG_DIR, f), 'utf8'));
+    for (const tr of r.triggers || []) {
+      // Full raw wiring contract (#1006): one event per github-event trigger,
+      // claim well-formed against its labelFilter.
+      assert.equal(rawTriggerError(tr), null,
+        `${f}/${tr.id}: ${rawTriggerError(tr)}`);
+      if (tr.type !== 'github-event') continue;
+      assert.equal((tr.events || []).length, 1, `${f}/${tr.id} must carry exactly one event`);
+      // A label listener must CLAIM its wake label (#958) — templates seed
+      // fresh teams, and an unclaimed preset makes a stalled run
+      // indistinguishable from a wake that never arrived.
+      const lf = typeof tr.labelFilter === 'string' ? tr.labelFilter.trim() : '';
+      if (lf && !lf.endsWith(':wip')) {
+        assert.deepEqual(tr.claim, { remove: lf, add: `${lf}:wip` },
+          `${f}/${tr.id} must claim its wake label \`${lf}\``);
+      }
+    }
+  }
+});
+
+test('#1008: audited terminal/external markers are present on the flow-ending presets', () => {
+  // The audited open ends of the shipped presets (issue #1008 scope 1/2): the
+  // docs follow-up PR is the end product; the reporters' output leaves the flow.
+  const marker = (r, oid) => (r.outcomes.options.find(o => o.id === oid)) || {};
+  const docSync = JSON.parse(fs.readFileSync(path.join(CATALOG_DIR, 'documentation-sync.json'), 'utf8'));
+  assert.equal(marker(docSync, 'opens-pr').terminal, true);
+  for (const id of ['release-notes-writer', 'roadmap-reporter']) {
+    const r = JSON.parse(fs.readFileSync(path.join(CATALOG_DIR, `${id}.json`), 'utf8'));
+    assert.ok(r.outcomes.options.some(o => o.external && typeof o.external.note === 'string'),
+      `${id} must declare its external audience`);
+  }
+  const dispatched = loadProcessTemplate(CURATED_DIR, 'dispatched-sdlc');
+  assert.equal(marker(dispatched.roles.find(r => r.id === 'documentation-sync'), 'opens-pr').terminal, true);
+  const extended = loadProcessTemplate(CURATED_DIR, 'extended-sdlc');
+  assert.equal(marker(extended.roles.find(r => r.id === 'doc-sync'), 'opens-pr').terminal, true);
+});
+
+test('#1008: the extended guard goes red on a drifted preset (mutation checks)', () => {
+  // Multi-event trigger → strict validation AND the lint set reject it.
+  const b = loadProcessTemplate(CURATED_DIR, 'core-sdlc');
+  const reworker = b.roles.find(r => r.id === 'reworker');
+  const listener = reworker.triggers.find(t => t.id === 'rework-on-revisions-required');
+  listener.events = ['pull_request.labeled', 'issues.labeled'];
+  assert.match(validateProcessTemplate(b).error, /exactly ONE event/);
+
+  // Missing claim on a label listener → unclaimed-listener joins the banned set.
+  const b2 = loadProcessTemplate(CURATED_DIR, 'core-sdlc');
+  delete b2.roles.find(r => r.id === 'reworker')
+    .triggers.find(t => t.id === 'rework-on-revisions-required').claim;
+  assert.ok(curatedBundleLints(b2).some(l => l.code === 'unclaimed-listener'));
+
+  // Undeclared open end → producer-unconsumed joins the banned set.
+  const b3 = loadProcessTemplate(CURATED_DIR, 'extended-sdlc');
+  const doc = b3.roles.find(r => r.id === 'doc-sync');
+  delete doc.outcomes.options.find(o => o.id === 'opens-pr').terminal;
+  assert.ok(curatedBundleLints(b3).some(l => l.code === 'producer-unconsumed'));
 });
 
 // #928 AC7, now realised by #927: the `human:` prefix is gone from the shipped

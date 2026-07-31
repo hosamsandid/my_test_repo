@@ -43,6 +43,7 @@
                 "id": "opens-pr",
                 "title": "Opens PR",
                 "when": "Documentation updates are ready",
+                "terminal": true,
                 "actions": [
                     {
                         "type": "openPr"

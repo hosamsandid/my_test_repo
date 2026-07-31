@@ -906,6 +906,13 @@ function computeLints(nodes, edges, classifier) {
   for (const n of nodes) {
     if (n.synthetic) continue;
     for (const t of (n.triggers || [])) {
+      // Derived channel/data-flow listeners are ENGINE-written (stripped and
+      // regenerated on every port reconcile) — not a raw layer. Flagging them
+      // would tell the operator to "edit it to conform" on a trigger the next
+      // reconcile rewrites; if the derivation deviates (e.g. the unlabelled
+      // PR-open event pair), the fix belongs in the expander, not per team
+      // (#1008).
+      if (t.channel || t.dataFlow) continue;
       const te = rawTriggerError(t);
       if (!te) continue;
       lints.push({

@@ -238,6 +238,25 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   as an unassigned touchpoint. Persisted on the team agent like `stages`/`labels`;
   round-trips through export → materialise and Edit-as-draft. Threaded into the
   graph builders as `buildProcessGraph(agents, { labels, humans })`.
+- **Preset conventions are enforced (#1008).** Shipped presets (the registry
+  bundles here and the agent-template catalog) carry the same wiring conventions
+  the engine writes: every `github-event` trigger has exactly **one** event
+  (`rawTriggerError` — the strict bundle validator now rejects multi-event
+  triggers at materialise; drafts stay saveable for the migration flow), every
+  label listener **claims** its wake label (`{ remove: <label>, add:
+  "<label>:wip" }`), and every produced artifact either has an in-flow consumer
+  or is a **declared** open end (`terminal: true` / `external: {note}` on the
+  outcome, or a human delivery via `prAudience`/`issueAudience: 'human'` +
+  `humans[].consumes`). The registry CI guard
+  (`process-template-registry.test.js`) fails on violations: error/warning
+  lints plus `raw-trigger-nonconformant`, `unclaimed-listener` and
+  `producer-unconsumed`. Derived `channel:true`/`dataFlow:true` triggers are
+  engine-owned and exempt from the raw-trigger lint — if a derivation deviates,
+  the fix belongs in the expander, not per team. The Flow-Weaver emits
+  conformant bundles by construction (single-event feedback listeners, claims
+  at its choke point, open-end deliveries on compensated terminal roles, and —
+  when the weave is given `options.humans` — reviewer bindings on its
+  human-gated stage boundaries).
 - **No team-specifics in the bundle.** `repo`, credentials and Matrix tokens are
   intentionally excluded; they are bound at materialise time.
 - **Stability.** The format is versioned. Bumping shape ⇒ bump

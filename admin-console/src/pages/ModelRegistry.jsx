@@ -1098,6 +1098,32 @@ export default function ModelRegistry() {
     }
   }
 
+  async function handleRespawnConfirm() {
+    if (!respawnPrompt) return;
+    setRespawning(true); setRespawnError(null);
+    try {
+      const { respawned, skipped } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
+      setRespawnPrompt(null);
+      setEditing(null);
+      refetch();
+      if (skipped && skipped.length > 0) {
+        // Surface skipped count as a non-blocking informational note.
+        // A toast would be ideal but is out of scope for this feature.
+        console.info(`[ModelRegistry] respawn: ${respawned.length} restarted, ${skipped.length} skipped (already stopped)`);
+      }
+    } catch (e) {
+      setRespawnError(e.message);
+    } finally {
+      setRespawning(false);
+    }
+  }
+
+  function handleRespawnCancel() {
+    setRespawnPrompt(null);
+    setEditing(null);
+    refetch();
+  }
+
   if (loading) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
@@ -1207,6 +1233,48 @@ export default function ModelRegistry() {
         confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={!!respawnPrompt}
+        variant="info"
+        title="Restart agents to apply new credentials?"
+        message={respawnPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} currently running with this provider and will be restarted:
+            </p>
+            <ul style={{
+              margin: '0 0 var(--eb-space-3)',
+              padding: '0 0 0 var(--eb-space-4)',
+              maxHeight: 200,
+              overflowY: 'auto',
+              fontSize: 'var(--eb-text-sm)',
+            }}>
+              {respawnPrompt.agents.map(a => (
+                <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                  <strong>{a.displayName}</strong>
+                  <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                    {a.role}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {respawnError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>
+                {respawnError} — you can retry or skip.
+              </p>
+            )}
+            <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              If you skip this, agents will keep using the old credentials until you manually disable and re-enable them.
+            </p>
+          </div>
+        )}
+        confirmLabel="Restart agents"
+        cancelLabel="Skip for now"
+        busy={respawning}
+        onConfirm={handleRespawnConfirm}
+        onCancel={handleRespawnCancel}
       />
     </div>
   );

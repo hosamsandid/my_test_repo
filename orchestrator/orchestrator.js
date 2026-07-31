@@ -374,7 +374,15 @@ function startAgentProcess(config) {
   );
   child.on('exit', (code) => {
     console.log(`[Orchestrator] Agent ${id} exited (code ${code})`);
-    agentProcesses.delete(id);
+    // Only clear the map entry if it still points at THIS child. A respawn
+    // calls stopAgentProcess() (kill + delete) then immediately sets a new
+    // child for the same id; the OLD child's exit event can fire after that
+    // point (container teardown is async), and would otherwise delete the
+    // NEW child's entry — making a genuinely running agent look stopped to
+    // every subsequent respawn call (agentProcesses.has(id) → false).
+    if (agentProcesses.get(id) === child) {
+      agentProcesses.delete(id);
+    }
   });
 
   agentProcesses.set(id, child);

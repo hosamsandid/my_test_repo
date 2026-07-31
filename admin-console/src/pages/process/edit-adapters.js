@@ -782,10 +782,13 @@ export function makeDraftOps(getBundle, persist) {
     removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
-      if (r) {
-        r.channels = removeChannelFrom(r.channels, { artifact, from, label });
-        if (!r.channels.length) delete r.channels;
-      }
+      // Symmetric with addChannel (#1036): a channel lives on a role. If the
+      // target isn't a role (e.g. a human delivery mis-routed here), surface a
+      // clear error instead of persisting unchanged — a removal must never be a
+      // silent no-op that reports success while the edge stays on the canvas.
+      if (!r) throw new Error(`role ${roleId} not found`);
+      r.channels = removeChannelFrom(r.channels, { artifact, from, label });
+      if (!r.channels.length) delete r.channels;
       await persist(b);
     },
   };

@@ -72,6 +72,63 @@ test('non-gate edges are not review-gate shaped', () => {
   assert.equal(isReviewGateEdge({ on: 'dependency', from: 'ba', to: 'dev' }, graph), false);
 });
 
+// ── #1036: a PLAIN agent→human delivery (no gate) also reaches the editor ────
+
+test('a plain agent→human delivery (no gate label / consumer) is review-gate shaped', async () => {
+  // Just the delivery leg — the person reviews the PR, nothing wired downstream.
+  const bundle = freshBundle();
+  const ctx = makeDraftLike(bundle);
+  await submitAgentToPerson(ctx, { from: 'ba', human: 'p', entry: { artifact: 'pr', from: 'ba' } });
+
+  const g = findReviewGate({ on: 'github', audience: 'human', from: 'ba', to: 'p', artifact: 'pr' }, graphOf(bundle));
+  assert.ok(g, 'a plain delivery must open the human-aware editor, not the channel dialog');
+  assert.equal(g.human.id, 'p');
+  assert.equal(g.producer.id, 'ba');
+  assert.equal(g.artifact, 'pr');
+  assert.equal(g.gateLabel, null, 'no gate label on a plain delivery');
+  assert.equal(g.consumer, null, 'no downstream consumer on a plain delivery');
+});
+
+test('the delivery edge must carry `audience` to reach the editor (the #1036 hit-payload contract)', () => {
+  // The canvas hit payload (flow-graph-render.js) MUST copy `audience` from the
+  // source-of-truth edge; without it the click falls through to the agent→agent
+  // EditChannelDialog and Remove is a silent no-op.
+  const bundle = freshBundle();
+  const ctx = makeDraftLike(bundle);
+  // wire a delivery so the human actually consumes ba's PR
+  return submitAgentToPerson(ctx, { from: 'ba', human: 'p', entry: { artifact: 'pr', from: 'ba' } }).then(() => {
+    const graph = graphOf(bundle);
+    assert.equal(
+      isReviewGateEdge({ on: 'github', from: 'ba', to: 'p', artifact: 'pr' }, graph), false,
+      'without `audience` the delivery is indistinguishable from an agent→agent channel',
+    );
+    assert.equal(
+      isReviewGateEdge({ on: 'github', audience: 'human', from: 'ba', to: 'p', artifact: 'pr' }, graph), true,
+      'with `audience:human` the delivery routes to the human-aware editor',
+    );
+  });
+});
+
+test('deleteReviewGate on a plain delivery removes only that delivery — a second one survives', async () => {
+  // Human with two deliveries (pr·ba and pr·dev); removing one leaves the other.
+  const bundle = freshBundle();
+  const ctx = makeDraftLike(bundle);
+  await submitAgentToPerson(ctx, { from: 'ba', human: 'p', entry: { artifact: 'pr', from: 'ba' } });
+  await submitAgentToPerson(ctx, { from: 'dev', human: 'p', entry: { artifact: 'pr', from: 'dev' } });
+
+  // Each edge resolves ITS OWN producer, not just the first consume.
+  const gBa = findReviewGate({ on: 'github', audience: 'human', from: 'ba', to: 'p', artifact: 'pr' }, graphOf(bundle));
+  const gDev = findReviewGate({ on: 'github', audience: 'human', from: 'dev', to: 'p', artifact: 'pr' }, graphOf(bundle));
+  assert.equal(gBa.producer.id, 'ba');
+  assert.equal(gDev.producer.id, 'dev', 'the clicked delivery disambiguates the producer');
+
+  await deleteReviewGate(ctx, gDev);
+
+  const p = bundle.humans.find(h => h.id === 'p');
+  assert.deepEqual(p.consumes, [{ artifact: 'pr', from: 'ba' }], 'only the clicked delivery is gone');
+  assert.equal(p.emits, undefined, 'no gate emits touched');
+});
+
 // ── UI-level convergence (§4.5 / §5) ────────────────────────────────────────
 
 test('S3 convergence: one-dialog (channel+approver) ≡ one-dialog (delivery+wake) ≡ two drags', async () => {

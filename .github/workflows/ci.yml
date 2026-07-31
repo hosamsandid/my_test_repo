@@ -3,9 +3,16 @@
 # Covered suites (one job each):
 #   orchestrator          — orchestrator/*.test.js            (node --test)
 #   admin-api             — admin-console/api/*.test.js       (node --test)
-#   admin-console-build   — admin-console Vite production build (no frontend test runner yet, see #651)
+#   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
+#   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
 #   agent-image           — agent-image/scripts/test_*.py     (pytest, python 3.12)
 #   e2e-journeys          — journey unit tests + lint + dry-run + catalog freshness (#706, podman-free)
+#
+# admin-console-src covers pure, non-JSX helper modules colocated under src/
+# (e.g. credential-scope-view.js, group-agents-by-team.js) that have zero React
+# dependency and are already written to node:test conventions. Full component/
+# JSX rendering and interaction tests remain uncovered — that's issue #651, a
+# separate and larger effort (a real test renderer + DOM environment).
 #
 # Deliberately minimal (issue #665 / e2e-testing-concept §1): no lint, no coverage —
 # just make the suites that already exist run automatically. Recommend promoting these
@@ -58,6 +65,22 @@ jobs:
       - name: Run unit tests
         working-directory: admin-console/api
         run: node --test
+
+  admin-console-src:
+    name: admin-console/src (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: admin-console
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests
+        working-directory: admin-console
+        run: node --test "src/**/*.test.js"
 
   admin-console-build:
     name: admin-console (vite build)

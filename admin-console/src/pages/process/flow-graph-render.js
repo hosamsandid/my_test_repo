@@ -14,6 +14,7 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
+import { previewStrokeColor, portRectAnchor, screenPointToCanvas } from './drag-preview-anchor';
 import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
 
 // Single source of truth for edge colours and legend names (#402, #1009).
@@ -1202,7 +1203,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
             el.addEventListener('mousedown', (ev) => {
               ev.stopPropagation();
               ev.preventDefault();
-              startConnect(n.id, { artifact: b.artifact });
+              startConnect(n.id, { artifact: b.artifact }, { el, kind: 'artifact' });
             });
           }
           badges.appendChild(el);
@@ -1311,7 +1312,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         port.addEventListener('mousedown', (ev) => {
           ev.stopPropagation();
           ev.preventDefault();
-          startConnect(n.id);
+          startConnect(n.id, null, { el: port, kind: 'handoff' });
         });
         node.appendChild(port);
       }
@@ -1361,7 +1362,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
               id: o.id, title,
               label: setLabelAction ? setLabelAction.label : '',
               artifact: setLabelAction ? null : (opensPr ? 'pr' : (opensIssue ? 'issue' : null)),
-            });
+            }, { el: dot, kind: 'outcome' });
           });
           row.appendChild(tag);
           row.appendChild(dot);
@@ -1548,7 +1549,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         port.addEventListener('mousedown', (ev) => {
           ev.stopPropagation();
           ev.preventDefault();
-          startConnect(a.id);
+          startConnect(a.id, null, { el: port, kind: 'handoff' });
         });
         el.appendChild(port);
       }
@@ -2445,17 +2446,24 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ── Connect-to-wire (#362 UI rework Phase C2) ──────────────────────────────
   let tempEdge = null;
   function toCanvas(clientX, clientY) {
-    const r = viewport.getBoundingClientRect();
-    return {
-      x: (clientX - r.left - state.pan.x) / state.zoom,
-      y: (clientY - r.top - state.pan.y) / state.zoom,
-    };
+    return screenPointToCanvas(clientX, clientY, viewport.getBoundingClientRect(), state.pan, state.zoom);
   }
-  function startConnect(fromId, outcome) {
+  // source (#1029): { el, kind } — the exact port element the drag started on and
+  // its type ('handoff' ● / 'outcome' yellow / 'artifact' GitHub badge). We capture
+  // the port's canvas-space anchor + colour so the preview line starts at, and
+  // visually matches, the grabbed port instead of the hard-coded ● centre. Absent
+  // (or without an element) → fall back to the source node/actor's ● anchor.
+  function startConnect(fromId, outcome, source) {
     state.connecting = { fromId, outcome: outcome || null };
+    const color = previewStrokeColor(source && source.kind);
+    state.connecting.color = color;
+    if (source && source.el) {
+      const r = source.el.getBoundingClientRect();
+      state.connecting.anchor = portRectAnchor(r, viewport.getBoundingClientRect(), state.pan, state.zoom);
+    }
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
+    tempEdge.setAttribute('stroke', color);
     tempEdge.setAttribute('stroke-width', '2');
     tempEdge.setAttribute('stroke-dasharray', '5 4');
     tempEdge.setAttribute('fill', 'none');
@@ -2464,18 +2472,27 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   function updateTempEdge(clientX, clientY) {
     if (!tempEdge) return;
     const fromId = state.connecting.fromId;
-    // The drag source is an agent card or an actor node (#411).
+    // Start the preview at the exact port the drag began on when we captured it
+    // (#1029), stored in canvas coords so it stays glued to the port under
+    // pan/zoom. Fall back to the source node/actor's right-edge vertical centre
+    // (the ● port) — the drag source is an agent card or an actor node (#411).
     let x1, y1;
-    const actorPos = state.actorPositions[fromId];
-    if (actorPos) {
-      x1 = actorPos.x + ACTOR_W;
-      y1 = actorPos.y + ACTOR_H / 2;
+    const anchor = state.connecting.anchor;
+    if (anchor) {
+      x1 = anchor.x;
+      y1 = anchor.y;
     } else {
-      const pos = state.positions[fromId];
-      const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
-      if (!pos || !el) return;
-      x1 = pos.x + NODE_W;
-      y1 = pos.y + el.offsetHeight / 2;
+      const actorPos = state.actorPositions[fromId];
+      if (actorPos) {
+        x1 = actorPos.x + ACTOR_W;
+        y1 = actorPos.y + ACTOR_H / 2;
+      } else {
+        const pos = state.positions[fromId];
+        const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
+        if (!pos || !el) return;
+        x1 = pos.x + NODE_W;
+        y1 = pos.y + el.offsetHeight / 2;
+      }
     }
     const p = toCanvas(clientX, clientY);
     const cx = x1 + (p.x - x1) * 0.4;

@@ -581,20 +581,77 @@ function stripOutcomesBlock(text) {
   ).trimEnd();
 }
 
+/**
+ * The wiring context an outcomes block projects (#1007, concept V4): who
+ * consumes each label this role sets, which person reviews its PR/issue
+ * artifacts (and via which gate labels), and every gate label a human in the
+ * flow applies. Pure derivation from the same ports the graph reads:
+ *
+ *   consumersByLabel — label -> [displayName…] of OTHER roles listening on it
+ *                      (github-event `labelFilter` triggers);
+ *   reviewers        — { pr?: {name, gates: []}, issue?: {…} } from the humans
+ *                      registry (`consumes: {artifact, from: thisRole}`; the
+ *                      reviewer's `emits` are its gate labels);
+ *   gateLabels       — every human-applied gate label in the flow (registry
+ *                      `humanGate` flags + all human `emits`), sorted.
+ *
+ * `roles` accepts bundle roles and live member shapes ({id, displayName?/name?,
+ * triggers?}). Returns null when no context at all exists — the block then
+ * renders exactly as before #1007 (byte-identical legacy output).
+ */
+function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } = {}) {
+  const nameOf = (r) => r.displayName || r.name || r.id;
+  const consumersByLabel = {};
+  for (const r of roles) {
+    if (!r || r.id === roleId) continue;
+    for (const t of (Array.isArray(r.triggers) ? r.triggers : [])) {
+      if (!t || t.type !== 'github-event') continue;
+      const lf = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+      if (!lf) continue;
+      (consumersByLabel[lf] = consumersByLabel[lf] || []).push(nameOf(r));
+    }
+  }
+  const reviewers = {};
+  const gateSet = new Set();
+  for (const h of (Array.isArray(humans) ? humans : [])) {
+    if (!h || !h.id) continue;
+    const emits = (Array.isArray(h.emits) ? h.emits : []).filter(e => typeof e === 'string' && e.trim());
+    for (const e of emits) gateSet.add(e.trim());
+    for (const c of (Array.isArray(h.consumes) ? h.consumes : [])) {
+      if (c && (c.artifact === 'pr' || c.artifact === 'issue') && c.from === roleId && !reviewers[c.artifact]) {
+        reviewers[c.artifact] = { name: h.name || h.id, gates: emits };
+      }
+    }
+  }
+  for (const l of (Array.isArray(labels) ? labels : [])) {
+    if (l && l.humanGate && typeof l.name === 'string' && l.name.trim()) gateSet.add(l.name.trim());
+  }
+  const gateLabels = [...gateSet].sort();
+  if (!Object.keys(consumersByLabel).length && !Object.keys(reviewers).length && !gateLabels.length) {
+    return null;
+  }
+  return { consumersByLabel, reviewers, gateLabels };
+}
+
 // The "Then: …" action clause for one option — a human-readable summary of its
 // actions joined with " and ". `setLabel` names the label; `openPr`/`openIssue`
 // use the produce verbs (the full how-to is appended once below, reusing
 // producePrText/produceIssueText); a `none`-only / empty action set is
 // "set no label". A `notify: "dm"` option appends the DM-reporting instruction.
-// Returns the clause plus whether this option opens a PR/issue.
-function outcomeActionClause(option) {
+// With a wiring context (#1007) a setLabel clause names its consumer ("— this
+// wakes **Developer**"). Returns the clause plus whether it opens a PR/issue.
+function outcomeActionClause(option, wiring) {
   const parts = [];
   let opensPr = false;
   let opensIssue = false;
   for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
     if (!a || typeof a !== 'object') continue;
     if (a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) {
-      parts.push(`apply label \`${a.label.trim()}\``);
+      const label = a.label.trim();
+      const consumers = wiring && wiring.consumersByLabel && wiring.consumersByLabel[label];
+      parts.push(consumers && consumers.length
+        ? `apply label \`${label}\` — this wakes **${[...new Set(consumers)].join('**, **')}**`
+        : `apply label \`${label}\``);
     } else if (a.type === 'openPr') {
       parts.push('open a pull request'); opensPr = true;
     } else if (a.type === 'openIssue') {
@@ -611,7 +668,7 @@ function outcomeActionClause(option) {
 // port (concept §6). Empty string for a non-authored port (nothing to project).
 // Pure; the caller (expandGithubChannels / reconcileTeamOutcomes) does the
 // strip-then-reappend into the systemPrompt.
-function outcomesBlock(outcomes) {
+function outcomesBlock(outcomes, wiring) {
   if (!isAuthoredOutcomes(outcomes)) return '';
   const exactlyOne = outcomes.mode === 'exactlyOne';
   const lead = exactlyOne
@@ -622,15 +679,46 @@ function outcomesBlock(outcomes) {
   let anyIssue = false;
   outcomes.options.forEach((o, i) => {
     const title = (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : o.id;
-    const { clause, opensPr, opensIssue } = outcomeActionClause(o);
+    const { clause, opensPr, opensIssue } = outcomeActionClause(o, wiring);
     anyPr = anyPr || opensPr;
     anyIssue = anyIssue || opensIssue;
     const when = (typeof o.when === 'string' && o.when.trim()) ? ` when: ${o.when.trim()}.` : '';
-    items.push(`${i + 1}. **${title}** —${when} Then: ${clause}.`);
+    let line = `${i + 1}. **${title}** —${when} Then: ${clause}.`;
+    // Reviewer context (#1007): the person reviewing this option's artifact,
+    // and the explicit prohibition on its gate label(s) — declaration and
+    // agent behaviour must not drift (a gate set by an agent is a hard error).
+    const reviewer = wiring && wiring.reviewers
+      && ((opensPr && wiring.reviewers.pr) || (opensIssue && wiring.reviewers.issue));
+    if (reviewer) {
+      line += ` **${reviewer.name}** reviews it.`;
+      if (reviewer.gates && reviewer.gates.length) {
+        const gates = reviewer.gates.map(g => `\`${g}\``).join(', ');
+        line += ` Do **not** apply the gate label${reviewer.gates.length > 1 ? 's' : ''} ${gates} yourself — a person applies ${reviewer.gates.length > 1 ? 'them' : 'it'}.`;
+      }
+    }
+    // Open-end markers (#1004/#1007): a declared endpoint tells the agent to
+    // stop signalling, instead of leaving the run feeling unfinished.
+    if (o.terminal === true) {
+      line += ' This is the final deliverable — set no further signal.';
+    } else if (o.external && typeof o.external === 'object') {
+      const note = typeof o.external.note === 'string' && o.external.note.trim()
+        ? ` (${o.external.note.trim()})` : '';
+      line += ` Consumed outside this flow${note} — no further signal expected.`;
+    }
+    items.push(line);
   });
   const body = [lead, '', ...items];
   if (exactlyOne) {
     body.push('', 'Never apply more than one of these labels in a single run.');
+  }
+  // Flow-wide gate prohibition (#1007, §4.8 known gap): whenever the flow
+  // contains human gates this agent could plausibly touch, the prohibition is
+  // in the generated prose — not left to the author to remember.
+  if (wiring && wiring.gateLabels && wiring.gateLabels.length) {
+    const gates = wiring.gateLabels.map(g => `\`${g}\``).join(', ');
+    body.push('', wiring.gateLabels.length > 1
+      ? `The labels ${gates} are human approval gates — a person applies them; never set them yourself.`
+      : `The label ${gates} is a human approval gate — a person applies it; never set it yourself.`);
   }
   // Absorb the produce how-to once for any option that opens a PR/issue —
   // reusing the exact producePrText/produceIssueText wording. The github-io
@@ -657,7 +745,7 @@ function stripDerivedPromptBlocks(text) {
 // from the github-io block — the instruction never appears twice. Order is
 // produce-then-outcomes so a github-only agent's prompt stays byte-identical to
 // before #829 (the outcomes block is empty and appends nothing). Pure.
-function applyDerivedPromptBlocks(systemPrompt, { github, outcomes } = {}) {
+function applyDerivedPromptBlocks(systemPrompt, { github, outcomes, wiring } = {}) {
   const base = stripDerivedPromptBlocks(systemPrompt || '');
   const covered = isAuthoredOutcomes(outcomes) ? outcomesToGithub(outcomes) : {};
   const effGithub = github && typeof github === 'object'
@@ -666,7 +754,7 @@ function applyDerivedPromptBlocks(systemPrompt, { github, outcomes } = {}) {
       producesIssue: !!(github.producesIssue && !covered.producesIssue),
     }
     : github;
-  const appended = [produceBlock(effGithub), outcomesBlock(outcomes)]
+  const appended = [produceBlock(effGithub), outcomesBlock(outcomes, wiring)]
     .filter(Boolean).join('\n\n');
   return appended ? `${base ? `${base}\n\n` : ''}${appended}` : base;
 }
@@ -873,10 +961,19 @@ function expandGithubChannels(bundle, _opts = {}) {
             : consumeIssuePrompt(producerLabel, { label: g.label, human: g.human })),
       });
     }
-    // Derived prompt blocks — idempotent (strip any prior blocks, re-append):
-    // the github-io producer instruction (#380) and the outcomes projection
-    // (#829). Coexistence is handled inside applyDerivedPromptBlocks.
-    b.systemPrompt = applyDerivedPromptBlocks(b.systemPrompt, { github: b.github, outcomes: b.outcomes });
+  }
+  // Derived prompt blocks — idempotent (strip any prior blocks, re-append):
+  // the github-io producer instruction (#380) and the outcomes projection
+  // (#829, wiring-aware since #1007). A SECOND pass, after every role's
+  // listeners were derived above — a producer earlier in the list must see
+  // consumers whose derived triggers only appear later in the loop.
+  for (const b of roles) {
+    const wiring = outcomesWiringContext(b.id, {
+      roles, humans: bundle.humans, labels: bundle.labels,
+    });
+    b.systemPrompt = applyDerivedPromptBlocks(b.systemPrompt, {
+      github: b.github, outcomes: b.outcomes, ...(wiring ? { wiring } : {}),
+    });
   }
   return { ...bundle, roles };
 }
@@ -1219,6 +1316,7 @@ module.exports = {
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
+  outcomesWiringContext,
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,

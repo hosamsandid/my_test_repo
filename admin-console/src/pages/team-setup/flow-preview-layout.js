@@ -46,6 +46,49 @@ export function roundedPath(pts, r = 6) {
   return d;
 }
 
+// Map the SERVER-computed unified graph (POST /api/flows/graph) onto the
+// preview's edge model (#1009, concept §8.2 V6): the wizard preview draws the
+// same edge set the Flows canvas renders — never a client-side approximation.
+// Only role-to-role edges are kept (the mini preview draws no actor/human/
+// artifact boxes; a gate still shows as the ⛔ flag on its channel edge).
+// Each edge carries the canvas' semantic style key so colours and legend names
+// come from flow-graph-render's shared EDGE_STYLES.
+export function previewEdgesFromGraph(graph) {
+  const out = [];
+  for (const e of (graph && Array.isArray(graph.edges) ? graph.edges : [])) {
+    if (!e || !e.from || !e.to || e.from === e.to) continue;
+    const gate = e.gate === 'human' || e.kind === 'gate';
+    let styleKey;
+    let label;
+    switch (e.on) {
+      case 'github':
+        styleKey = e.artifact === 'issue' ? 'issue' : 'pr';
+        label = e.label || (e.artifact === 'issue' ? 'issue' : 'PR');
+        break;
+      case 'label':
+        styleKey = 'label';
+        label = e.label;
+        break;
+      case 'review':
+        styleKey = 'review';
+        label = e.label || 'review';
+        break;
+      case 'dependency':
+        styleKey = 'dependency';
+        label = 'depends-on';
+        break;
+      case 'artifact':
+        styleKey = 'artifact';
+        label = e.label || 'data flow';
+        break;
+      default:
+        continue; // actor/self edges (event, timer, webhook, loop) have no second role box
+    }
+    out.push({ from: e.from, to: e.to, label, gate, styleKey: gate ? 'gate' : styleKey });
+  }
+  return out;
+}
+
 export function bundleEdges(bundle) {
   const roles = bundle.roles || [];
   const edges = [];
@@ -79,7 +122,10 @@ export function bundleEdges(bundle) {
   return edges;
 }
 
-export function computePreviewLayout(bundle) {
+// `edgesOverride` is the server-derived edge set (`previewEdgesFromGraph`);
+// while the graph fetch is still in flight the local `bundleEdges` derivation
+// keeps the preview responsive, then the server truth replaces it.
+export function computePreviewLayout(bundle, edgesOverride) {
   if (!bundle || !Array.isArray(bundle.roles) || bundle.roles.length === 0) return null;
   const { NODE_W, NODE_H, COL_W, ROW_H, PAD, HEADER, LANE_START, LANE_STEP, LABEL_GAP, BUS_INSET, BUS_STEP } = PREVIEW;
   const GAP = COL_W - NODE_W;
@@ -109,7 +155,7 @@ export function computePreviewLayout(bundle) {
   const fw = [];
   const intra = [];
   const cross = [];
-  for (const e of bundleEdges(bundle)) {
+  for (const e of (edgesOverride || bundleEdges(bundle))) {
     if (!pos.has(e.from) || !pos.has(e.to)) continue;
     const cf = pos.get(e.from).col;
     const ct = pos.get(e.to).col;

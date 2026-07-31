@@ -5,7 +5,8 @@ import {
   CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow, Sparkles,
 } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
-import { computePreviewLayout, ellipsize, PREVIEW } from './flow-preview-layout';
+import { computePreviewLayout, previewEdgesFromGraph, ellipsize, PREVIEW } from './flow-preview-layout';
+import { EDGE_STYLES } from '../process/flow-graph-render';
 
 // ─── Wizard "Process" step (#422) ────────────────────────────────────────────
 // Replaces the flat role-checkbox Members step in create mode. Three entries:
@@ -108,13 +109,22 @@ const labelHaloStyle = {
   strokeLinejoin: 'round',
 };
 
+// Edge colours/dash come from the canvas' shared EDGE_STYLES (#1009) so the
+// preview and the Flows view can never diverge in edge naming or styling; a
+// server edge without a style key falls back to the old gate/muted pair.
+function edgeStyleOf(edge) {
+  const st = edge.styleKey ? EDGE_STYLES[edge.styleKey] : null;
+  if (st) return { color: st.color, dashed: !!st.dashed };
+  return { color: edge.gate ? 'var(--eb-status-error)' : 'var(--eb-text-muted)', dashed: !!edge.gate };
+}
+
 function PreviewEdge({ edge }) {
-  const color = edge.gate ? 'var(--eb-status-error)' : 'var(--eb-text-muted)';
+  const { color, dashed } = edgeStyleOf(edge);
   return (
     <g>
       <path d={edge.d} fill="none" stroke={color} strokeWidth={1.2}
-        strokeDasharray={edge.gate ? '4 3' : undefined}
-        markerEnd={`url(#${edge.gate ? 'proc-arrow-gate' : 'proc-arrow'})`} opacity={0.85} />
+        strokeDasharray={dashed ? '4 3' : undefined}
+        markerEnd={`url(#proc-arrow-${(edge.styleKey || (edge.gate ? 'gate' : 'default'))})`} opacity={0.85} />
       <text x={edge.labelX} y={edge.labelY} textAnchor="middle"
         style={{ fontSize: 9.5, fill: color, ...labelHaloStyle }}>
         {edge.labelText}
@@ -123,23 +133,37 @@ function PreviewEdge({ edge }) {
   );
 }
 
-export function BundleFlowPreview({ bundle }) {
-  const layout = useMemo(() => computePreviewLayout(bundle), [bundle]);
+export function BundleFlowPreview({ bundle, graph }) {
+  // Server truth first (#1009): once /api/flows/graph answered, the preview
+  // draws exactly the edge set the Flows canvas would; the client derivation
+  // only bridges the fetch latency.
+  const serverEdges = useMemo(() => (graph ? previewEdgesFromGraph(graph) : null), [graph]);
+  const layout = useMemo(() => computePreviewLayout(bundle, serverEdges || undefined), [bundle, serverEdges]);
 
   if (!layout) return null;
   const { NODE_W, COL_W, NODE_H, PAD } = PREVIEW;
   const { stages, nodes, forward, back, width, height } = layout;
 
+  // One arrow marker per semantic style in use, matching its stroke; the
+  // legend mirrors the canvas legend — same keys, same names, same colours.
+  const usedKeys = [...new Set([...forward, ...back].map(e => e.styleKey).filter(k => k && EDGE_STYLES[k]))];
+
   return (
-    <div style={{ overflowX: 'auto', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)' }}>
+    <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-elevated)' }}>
+      <div style={{ overflowX: 'auto' }}>
       <svg width={width} height={height} style={{ display: 'block', minWidth: '100%' }}>
         <defs>
-          <marker id="proc-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+          <marker id="proc-arrow-default" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
             <path d="M0,0 L10,5 L0,10 z" fill="var(--eb-text-muted)" />
           </marker>
           <marker id="proc-arrow-gate" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--eb-status-error)" />
+            <path d="M0,0 L10,5 L0,10 z" fill={EDGE_STYLES.gate.color} />
           </marker>
+          {usedKeys.filter(k => k !== 'gate').map(k => (
+            <marker key={k} id={`proc-arrow-${k}`} markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill={EDGE_STYLES[k].color} />
+            </marker>
+          ))}
         </defs>
         {stages.map((s, i) => (
           <text key={`st-${i}`} x={PAD + i * COL_W + NODE_W / 2} y={PAD + 12} textAnchor="middle"
@@ -165,6 +189,18 @@ export function BundleFlowPreview({ bundle }) {
           </g>
         ))}
       </svg>
+      </div>
+      {usedKeys.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)', fontSize: 10, color: 'var(--eb-text-muted)' }}>
+          {usedKeys.map(k => (
+            <span key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <svg width="18" height="6"><line x1="0" y1="3" x2="18" y2="3" stroke={EDGE_STYLES[k].color}
+                strokeWidth="2" strokeDasharray={EDGE_STYLES[k].dashed ? '4 3' : undefined} /></svg>
+              {EDGE_STYLES[k].label}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -475,6 +511,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
   const [weaving, setWeaving] = useState(false);
   const [weaveError, setWeaveError] = useState(null);
   const [lints, setLints] = useState(null);
+  const [previewGraph, setPreviewGraph] = useState(null); // full /api/flows/graph response (#1009 — the preview renders SERVER edges)
   const [lintLoading, setLintLoading] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [customRoleStage, setCustomRoleStage] = useState(null); // stage index with an open dialog
@@ -499,16 +536,17 @@ export default function StepProcess({ form, setForm, templates, error }) {
   // Authoritative lint check for whatever bundle is currently selected/woven.
   useEffect(() => {
     const bundle = form.processBundle;
-    if (!bundle) { setLints(null); return; }
+    if (!bundle) { setLints(null); setPreviewGraph(null); return; }
     const seq = ++lintSeq.current;
     setLintLoading(true);
     apiCall('POST', '/api/flows/graph', { processTemplate: bundle })
       .then(g => {
         if (seq !== lintSeq.current) return;
         setLints(g.lints || []);
+        setPreviewGraph(g);
         setForm(f => ({ ...f, processLints: g.lints || [] }));
       })
-      .catch(() => { if (seq === lintSeq.current) setLints([]); })
+      .catch(() => { if (seq === lintSeq.current) { setLints([]); setPreviewGraph(null); } })
       .finally(() => { if (seq === lintSeq.current) setLintLoading(false); });
   }, [form.processBundle]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -651,7 +689,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
           {gallery.length === 0 && <div style={hintStyle}>No process templates found — is the pool seeded (`make seed-process-templates`)?</div>}
         </div>
         {form.processBundle && (
-          <PreviewBlock form={form} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
+          <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
         )}
         {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
         {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
@@ -777,7 +815,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
       {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
 
       {form.processBundle && !weaving && (
-        <PreviewBlock form={form} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
+        <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
       )}
       {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
 
@@ -797,7 +835,7 @@ export default function StepProcess({ form, setForm, templates, error }) {
   );
 }
 
-function PreviewBlock({ form, lints, lintLoading, onSaveDraft, savingDraft }) {
+function PreviewBlock({ form, graph, lints, lintLoading, onSaveDraft, savingDraft }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -809,7 +847,7 @@ function PreviewBlock({ form, lints, lintLoading, onSaveDraft, savingDraft }) {
           Save as draft &amp; open in canvas
         </button>
       </div>
-      <BundleFlowPreview bundle={form.processBundle} />
+      <BundleFlowPreview bundle={form.processBundle} graph={graph} />
       <LintBadges lints={lints} loading={lintLoading} />
       <WeaverNotes notes={form.weaveNotes} />
     </div>

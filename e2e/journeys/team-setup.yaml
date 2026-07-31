@@ -54,6 +54,8 @@ steps:
       templateName: Core SDLC
     assert:
       do: wizard.expectFlowPreview
+      edgeLabel: ready-for-implementation
+      legendEntry: human approval
     screenshot: process-step-core-sdlc
 
   - action:

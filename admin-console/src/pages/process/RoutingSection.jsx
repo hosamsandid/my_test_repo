@@ -238,7 +238,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       </div>
       {!hasAny && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Nothing wakes this agent yet — add an input below, or drag a connection onto it on the canvas.
+          Nothing wakes this agent yet — add an input below, or drag a hand-off onto it on the canvas.
         </div>
       )}
 
@@ -355,7 +355,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
           <div key={i} style={warn}>
             <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
             <div style={{ flex: 1 }}>
-              <div>{l.message || `Duplicate listener${l.label ? ` on "${l.label}"` : ''}.`}</div>
+              <div>{l.message || `Duplicate input${l.label ? ` on "${l.label}"` : ''}.`}</div>
               {target && ops.deleteTrigger && (
                 <button onClick={() => removeTrigger(target)} disabled={busy === `t:${target}`} style={{ ...ghost, marginTop: 4, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
                   <Trash2 size={12} /> Delete duplicate trigger

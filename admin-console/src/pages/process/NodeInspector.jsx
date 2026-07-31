@@ -160,7 +160,7 @@ export default function NodeInspector({
                     <input value={id}
                       onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
                       style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all connections to this agent.</span>
+                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all of this agent's inputs and hand-offs.</span>
                   </>
                 )}
               </Field>

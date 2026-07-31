@@ -474,7 +474,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               ? caps.readOnlyHint
               : isDraft
                 ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port (agents and sources) to wire a connection · click an edge to edit it.'}
+                : 'Click a node to edit · drag the ● port (agents and sources) to wire a hand-off · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (

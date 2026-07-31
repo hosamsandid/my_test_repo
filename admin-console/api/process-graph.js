@@ -746,7 +746,7 @@ function computeLints(nodes, edges, classifier) {
   for (const e of edges) {
     if (e.orphan) {
       lints.push({ code: 'orphan-listener', severity: 'warning', label: e.label, nodeId: e.to,
-        message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
+        message: `\`${e.to}\` waits for \`${e.label}\` but no outcome sets it.` });
     }
     if (e.deadEnd) {
       // outcome-without-consumer (#830) is the successor of dead-end-emitter for
@@ -756,10 +756,10 @@ function computeLints(nodes, edges, classifier) {
       // actions set no label → no edge → naturally exempt.
       if (e.outcome) {
         lints.push({ code: 'outcome-without-consumer', severity: 'warning', label: e.label, nodeId: e.from, outcome: e.outcome,
-          message: `\`${e.from}\` outcome \`${e.outcome}\` sets \`${e.label}\` but nothing listens on it.` });
+          message: `\`${e.from}\` outcome \`${e.outcome}\` sets \`${e.label}\` but no consumer reacts to it.` });
       } else {
         lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
-          message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
+          message: `\`${e.from}\` sets \`${e.label}\` but no consumer reacts to it.` });
       }
     }
   }
@@ -853,13 +853,13 @@ function computeLints(nodes, edges, classifier) {
       // NOT for a `brake` label — a brake is agent-appliable by design.
       if (isHumanGate(lbl)) {
         lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl,
-          message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
+          message: `\`${n.id}\` declares it sets gate label \`${lbl}\` — only a person may apply it.` });
       }
       if (lbl.startsWith('stage:')) stageEmits.add(lbl);
     }
     if (stageEmits.size > 1) {
       lints.push({ code: 'competing-stage', severity: 'warning', nodeId: n.id,
-        message: `\`${n.id}\` emits multiple stage labels: ${[...stageEmits].join(', ')}.` });
+        message: `\`${n.id}\` sets multiple stage labels: ${[...stageEmits].join(', ')}.` });
     }
   }
 
@@ -891,7 +891,7 @@ function computeLints(nodes, edges, classifier) {
         code: 'duplicate-listener', severity: 'warning', nodeId: n.id,
         ...(label ? { label } : {}),
         triggerIds: ids,
-        message: `\`${n.id}\` has ${group.length} triggers listening on the same event`
+        message: `\`${n.id}\` has ${group.length} inputs waiting on the same event`
           + `${label ? ` + label \`${label}\`` : 's'}${ids.length ? ` (${ids.map(i => `\`${i}\``).join(', ')})` : ''}`
           + ` — they fire redundantly.`,
       });
@@ -943,7 +943,7 @@ function computeLints(nodes, edges, classifier) {
       lints.push({
         code: 'unclaimed-listener', severity: 'info', nodeId: n.id, label,
         ...(t.id ? { triggerIds: [t.id] } : {}),
-        message: `\`${n.id}\` listens on \`${label}\` without a claim — a stalled run`
+        message: `\`${n.id}\` waits on \`${label}\` without a claim — a stalled run`
           + ` cannot be told apart from a wake that never arrived.`,
       });
     }

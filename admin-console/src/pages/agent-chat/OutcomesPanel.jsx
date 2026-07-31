@@ -149,7 +149,7 @@ export default function OutcomesPanel({ agentId, active }) {
             {/* AC3 — a legacy flat `emits[]` agent has labels but no structure. */}
             {view.kind === 'legacy' && (
               <div style={hintBox}>
-                This agent still declares plain emitted labels. Structured outcomes —
+                This agent still declares plain flat labels. Structured outcomes —
                 with a condition and a title per outcome — can be authored in the
                 Flow Editor.
               </div>
@@ -258,7 +258,7 @@ function OutcomeCard({ index, row, showConsumers }) {
                 : row.consumers.length
                   ? <><span style={fieldLabel}>wakes</span> {row.consumers.join(', ')}</>
                   : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>
-                      no consumer — nothing listens for this outcome&apos;s signal
+                      no consumer — nothing reacts to this outcome&apos;s signal
                     </span>}
         </div>
       )}

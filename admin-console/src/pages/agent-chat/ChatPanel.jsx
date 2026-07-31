@@ -4,9 +4,12 @@ import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import { TriggerForm } from './TriggersPanel';
+import { isLaunchedLoop } from './trigger-summary.js';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
@@ -111,6 +114,15 @@ export default function ChatPanel({
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
+
+  // Chat-launched loops (#1020): a loop is started from the composer, runs as
+  // a launched run visible here, and can be stopped. `activeLoop` is the
+  // running launched-loop trigger (or null); we poll the agent's triggers to
+  // reflect its lifecycle (it self-removes on any terminal outcome).
+  const [loopDialogOpen, setLoopDialogOpen] = useState(false);
+  const [activeLoop, setActiveLoop] = useState(null);
+  const [loopBusy, setLoopBusy] = useState(false);
+  const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -631,6 +643,81 @@ export default function ChatPanel({
   }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
+  /* ─── Loop launch (#1020) ────────────────────────────────────────────
+   * A loop is launched from the composer, runs as a launched run visible
+   * here, and self-removes on any terminal outcome. Poll the agent's triggers
+   * so the composer reflects whether a launched loop is currently running —
+   * at most one per agent (the control then offers Stop instead of Start).
+   */
+  const refreshActiveLoop = useCallback(async () => {
+    if (!agent?.id) { setActiveLoop(null); return; }
+    try {
+      const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
+      const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
+      setActiveLoop(running || null);
+    } catch {
+      /* best-effort — a transient error just keeps the last known state */
+    }
+  }, [agent?.id]);
+
+  useEffect(() => {
+    if (!agent?.id) return undefined;
+    refreshActiveLoop();
+    const timer = setInterval(refreshActiveLoop, 15000);
+    return () => clearInterval(timer);
+  }, [agent?.id, refreshActiveLoop]);
+
+  function handleLoopClick() {
+    if (activeLoop) setShowStopLoopConfirm(true);
+    else setLoopDialogOpen(true);
+  }
+
+  async function handleLaunchLoop(body) {
+    if (!agent?.id) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // A chat-launched loop is a loop trigger tagged `launched: true`; the
+      // runtime runs it once and removes it on completion. Post the room id so
+      // the terminal outcome DM lands in this chat.
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/triggers`, {
+        ...body,
+        launched: true,
+        enabled: true,
+        ...(roomId ? { roomId } : {}),
+      });
+      setLoopDialogOpen(false);
+      await refreshActiveLoop();
+    } catch (err) {
+      setError(`Could not start loop: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+    }
+  }
+
+  async function handleStopLoop() {
+    setShowStopLoopConfirm(false);
+    if (!agent?.id || !activeLoop) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // Deleting the trigger cancels the loop's re-arm cycle (the runtime
+      // cancels the runner on the next sync); stopping the session kills the
+      // in-flight iteration immediately. Both best-effort.
+      await apiCall('DELETE', `/api/agents/${encodeURIComponent(agent.id)}/triggers/${encodeURIComponent(activeLoop.id)}`);
+      if (roomId) {
+        try {
+          await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
+        } catch { /* the loop is already stopping — ignore */ }
+      }
+    } catch (err) {
+      setError(`Stop loop failed: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+      await refreshActiveLoop();
+    }
+  }
+
   async function handleSend(text) {
     if (!roomId) return;
     const body = text.trim();
@@ -1183,6 +1270,9 @@ export default function ChatPanel({
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}
+        onLoopClick={handleLoopClick}
+        loopRunning={!!activeLoop}
+        loopBusy={loopBusy}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}
@@ -1205,6 +1295,30 @@ export default function ChatPanel({
         open={showHandoff}
         agent={agent}
         onClose={() => setShowHandoff(false)}
+      />
+
+      {/* Loop launcher (#1020): reuse the shared loop configuration form,
+          pinned to a loop and started in one step ("Start loop"). */}
+      <SidePanel open={loopDialogOpen} onClose={() => setLoopDialogOpen(false)} title="Start a loop">
+        <TriggerForm
+          agentId={agent.id}
+          saving={loopBusy}
+          lockType="loop"
+          allowLoopType
+          submitLabel="Start loop"
+          onSave={handleLaunchLoop}
+          onCancel={() => setLoopDialogOpen(false)}
+        />
+      </SidePanel>
+
+      <ConfirmDialog
+        open={showStopLoopConfirm}
+        title="Stop loop"
+        message="Stop the running loop for this agent? The current iteration is interrupted and no further iterations run."
+        variant="danger"
+        confirmLabel="Stop loop"
+        onConfirm={handleStopLoop}
+        onCancel={() => setShowStopLoopConfirm(false)}
       />
     </div>
   );

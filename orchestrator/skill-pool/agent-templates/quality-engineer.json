@@ -18,6 +18,10 @@
         "issues.labeled"
       ],
       "labelFilter": "ready-for-implementation",
+      "claim": {
+        "remove": "ready-for-implementation",
+        "add": "ready-for-implementation:wip"
+      },
       "enabled": true,
       "description": "Draft a test plan when an issue is released for implementation",
       "promptTemplate": "An issue in the repository was labeled `ready-for-implementation` (payload above). Draft an independent test plan from the acceptance criteria and post it as a comment on the issue: write the comment body to a file, run `gh-as-agent stamp <file>`, then `gh issue comment <number> --body-file <file>`. Title the comment **Test plan**. Do NOT implement — the Developer is working on this in parallel."
@@ -31,5 +35,20 @@
       "description": "Daily memory housekeeping",
       "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
-  ]
+  ],
+  "outcomes": {
+    "mode": "anyOf",
+    "options": [
+      {
+        "id": "test-plan-posted",
+        "title": "Posts test plan",
+        "when": "The independent test-plan checklist is posted as a comment on the issue",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

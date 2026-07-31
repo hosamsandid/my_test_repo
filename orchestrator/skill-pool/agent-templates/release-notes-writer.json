@@ -35,5 +35,23 @@
   "patternRole": "standalone",
   "stageAffinity": [
     "Release"
-  ]
+  ],
+  "outcomes": {
+    "mode": "anyOf",
+    "options": [
+      {
+        "id": "notes-published",
+        "title": "Publishes release notes",
+        "when": "The release body is updated with user-facing notes",
+        "external": {
+          "note": "published on the GitHub release — read outside this flow"
+        },
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

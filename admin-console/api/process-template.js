@@ -315,19 +315,18 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   for (const r of b.roles) {
     if (!r || typeof r.id !== 'string' || !r.id) return { ok: false, error: 'each role needs a string id' };
     if (r.triggers && !Array.isArray(r.triggers)) return { ok: false, error: `role ${r.id}: triggers must be an array` };
-    // Claim shape + `claim.remove === labelFilter` + `<wakeLabel>:wip` (#958).
+    // Wiring rules on bundle triggers (#1006 §4.8, flipped by #1008 now that
+    // the generators — weaver, curated templates — are migrated:
+    //  - STRICT mode (materialise, registry, weaver self-check) enforces the
+    //    full `rawTriggerError` contract: exactly ONE event per github-event
+    //    trigger + a well-formed claim.
+    //  - DRAFT mode (`allowEmptyRoles`) keeps claim validation only: a draft
+    //    holding a pre-flip multi-event trigger must stay SAVEABLE, or the
+    //    editor's own migration flow (shrink the events, then save) deadlocks.
     for (const t of (r.triggers || [])) {
       if (!t || typeof t !== 'object') continue;
-      const ce = claimError(t.claim, t.labelFilter, t.type);
-      if (ce) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${ce}` };
-      // One-event enforcement (#1006, §4.8) deliberately stays OUT of the
-      // bundle validator for now: the weaver's companion listener and the
-      // curated templates still ship multi-event triggers until the #1008
-      // migration lands — hard-rejecting here would brick materialise for
-      // every not-yet-migrated bundle. Until then the deviation is VISIBLE
-      // (the `raw-trigger-nonconformant` graph lint); the live trigger
-      // endpoints already hard-reject new multi-event triggers. #1008 flips
-      // this to `rawTriggerError(t)` when it migrates the generators.
+      const te = allowEmptyRoles ? claimError(t.claim, t.labelFilter, t.type) : rawTriggerError(t);
+      if (te) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${te}` };
     }
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome

@@ -140,6 +140,10 @@
                         "pull_request.labeled"
                     ],
                     "labelFilter": "revisions-required",
+                    "claim": {
+                        "remove": "revisions-required",
+                        "add": "revisions-required:wip"
+                    },
                     "description": "Rework a PR the Code Reviewer sent back",
                     "prompt": "A pull request in `{{repoFullName}}` was labelled `revisions-required` by the Code Reviewer (payload above).\n\n1. Remove the `revisions-required` label, `git pull`, check out the PR branch, and read the linked issue, the diff and every review comment.\n2. Resolve every review point completely; keep the diff scoped to what was requested.\n3. Run the tests green, commit via `gh-as-agent commit`, push to the same branch, and summarise the changes in a PR comment.\n4. Add the `ready-for-review` label to hand the PR back to the Code Reviewer.\n\nIf a comment is contradictory, impossible, or needs a product decision, post a blocking PR comment, apply the `human-decision-required` label (creating it if it does not exist), and escalate to a human instead of re-applying `ready-for-review`; remove the label once resolved. Reply `[PASS]` if there is nothing to do."
                 },

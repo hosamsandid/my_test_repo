@@ -70,6 +70,10 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "needs-refinement",
+                    "claim": {
+                        "remove": "needs-refinement",
+                        "add": "needs-refinement:wip"
+                    },
                     "description": "Refine a triaged work request into acceptance criteria",
                     "prompt": "The label `needs-refinement` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. `git pull`, read the issue and any linked context.\n2. Rewrite the issue body into: problem statement, scope (in/out), numbered acceptance criteria (edit via `gh-as-agent` + `gh issue edit`).\n3. If information is missing, ask the requester concrete questions in a comment and stop.\n4. When the requirement is complete, comment that it is ready and ask a human to apply the `requirements-approved` label to release it into Design.\n\nReply `[PASS]` if there is nothing to do."
                 }
@@ -148,6 +152,10 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "design-author-go",
+                    "claim": {
+                        "remove": "design-author-go",
+                        "add": "design-author-go:wip"
+                    },
                     "description": "Author the design for a prepared requirement",
                     "prompt": "The label `design-author-go` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. `git pull`, read the issue, its acceptance criteria and the Scout's Evidence comment.\n2. Write the design doc under `docs/design/` on a feature branch.\n3. Commit via `gh-as-agent commit`, push, open a PR referencing the issue (`gh-as-agent stamp` + `gh pr create`).\n4. If blocked: add `design-escalation` to the issue, describe the blocker in a comment, stop.\n\nReply `[PASS]` if there is nothing to do."
                 },
@@ -219,20 +227,51 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "design-escalation",
+                    "claim": {
+                        "remove": "design-escalation",
+                        "add": "design-escalation:wip"
+                    },
                     "description": "Broker a design escalation",
                     "prompt": "The label `design-escalation` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. Read the blocker description on the issue.\n2. Gather what is needed: ask the humans concrete questions in the issue, propose options with a recommendation.\n3. Once the decision is clear, summarise it in a comment, remove `design-escalation`, and re-add `design-author-go` so the Design Author continues.\n\nUse `gh-as-agent` for all GitHub actions. Reply `[PASS]` if there is nothing to do."
                 },
                 {
-                    "id": "design-human-feedback",
+                    "id": "design-human-feedback-comment",
                     "type": "github-event",
                     "enabled": true,
                     "events": [
-                        "issue_comment.created",
-                        "pull_request_review.submitted",
-                        "pull_request_review_comment.created",
+                        "issue_comment.created"
+                    ],
+                    "description": "Route human feedback in the Design stage (comment)",
+                    "prompt": "A human commented / reviewed / edited something in `{{repoFullName}}` (payload above). Only act if it concerns a design issue or design PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the design must change: distil the feedback into concrete work items in a comment and add `design-author-go` to the requirement issue.\n3. If it is a question: answer it in a comment.\n4. If it is merely informational: acknowledge briefly or `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
+                },
+                {
+                    "id": "design-human-feedback-review",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
+                        "pull_request_review.submitted"
+                    ],
+                    "description": "Route human feedback in the Design stage (review)",
+                    "prompt": "A human commented / reviewed / edited something in `{{repoFullName}}` (payload above). Only act if it concerns a design issue or design PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the design must change: distil the feedback into concrete work items in a comment and add `design-author-go` to the requirement issue.\n3. If it is a question: answer it in a comment.\n4. If it is merely informational: acknowledge briefly or `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
+                },
+                {
+                    "id": "design-human-feedback-review-comment",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
+                        "pull_request_review_comment.created"
+                    ],
+                    "description": "Route human feedback in the Design stage (review comment)",
+                    "prompt": "A human commented / reviewed / edited something in `{{repoFullName}}` (payload above). Only act if it concerns a design issue or design PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the design must change: distil the feedback into concrete work items in a comment and add `design-author-go` to the requirement issue.\n3. If it is a question: answer it in a comment.\n4. If it is merely informational: acknowledge briefly or `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
+                },
+                {
+                    "id": "design-human-feedback-issue-edit",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
                         "issues.edited"
                     ],
-                    "description": "Route human feedback in the Design stage",
+                    "description": "Route human feedback in the Design stage (issue edit)",
                     "prompt": "A human commented / reviewed / edited something in `{{repoFullName}}` (payload above). Only act if it concerns a design issue or design PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the design must change: distil the feedback into concrete work items in a comment and add `design-author-go` to the requirement issue.\n3. If it is a question: answer it in a comment.\n4. If it is merely informational: acknowledge briefly or `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
                 }
             ],
@@ -287,6 +326,10 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "build-author-go",
+                    "claim": {
+                        "remove": "build-author-go",
+                        "add": "build-author-go:wip"
+                    },
                     "description": "Continue implementation after escalation/feedback resolution",
                     "prompt": "The label `build-author-go` was added to an issue in `{{repoFullName}}` (payload above) — an escalation or feedback round was resolved.\n\n1. `git pull`, read the issue and the latest decision comments.\n2. Continue or adjust the implementation accordingly on your feature branch.\n3. Commit via `gh-as-agent commit`, push, update or open the PR.\n\nReply `[PASS]` if there is nothing to do."
                 },
@@ -358,7 +401,32 @@
                     "description": "Weekly memory housekeeping",
                     "prompt": "Weekly memory curation of memory/log.md: consolidate, generalise, merge duplicates, prune stale entries. If nothing to do: [PASS]."
                 }
-            ]
+            ],
+            "outcomes": {
+                "mode": "exactlyOne",
+                "options": [
+                    {
+                        "id": "recommends-merge",
+                        "title": "Recommends merge",
+                        "when": "The PR satisfies its acceptance criteria — the review closes with a merge recommendation for the human",
+                        "actions": [
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "requests-changes",
+                        "title": "Requests changes",
+                        "when": "The review found blocking findings — a structured change request is posted on the PR",
+                        "actions": [
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                ]
+            }
         },
         {
             "id": "build-companion",
@@ -376,19 +444,41 @@
                         "issues.labeled"
                     ],
                     "labelFilter": "build-escalation",
+                    "claim": {
+                        "remove": "build-escalation",
+                        "add": "build-escalation:wip"
+                    },
                     "description": "Broker a build escalation",
                     "prompt": "The label `build-escalation` was added to an issue in `{{repoFullName}}` (payload above).\n\n1. Read the blocker description.\n2. Gather what is needed: ask humans concrete questions in the issue, propose options with a recommendation. If the design itself has a gap, say so explicitly and reference the design doc.\n3. Once resolved, summarise the decision in a comment, remove `build-escalation`, add `build-author-go`.\n\nUse `gh-as-agent` for all GitHub actions. Reply `[PASS]` if there is nothing to do."
                 },
                 {
-                    "id": "build-human-feedback",
+                    "id": "build-human-feedback-comment",
                     "type": "github-event",
                     "enabled": true,
                     "events": [
-                        "issue_comment.created",
-                        "pull_request_review_comment.created",
+                        "issue_comment.created"
+                    ],
+                    "description": "Route human feedback in the Build stage (comment)",
+                    "prompt": "A human commented / edited something in `{{repoFullName}}` (payload above). Only act if it concerns an implementation issue or implementation PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the implementation must change: distil it into concrete work items in a comment and add `build-author-go` to the issue.\n3. If it is a question: answer it.\n4. Otherwise `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
+                },
+                {
+                    "id": "build-human-feedback-review-comment",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
+                        "pull_request_review_comment.created"
+                    ],
+                    "description": "Route human feedback in the Build stage (review comment)",
+                    "prompt": "A human commented / edited something in `{{repoFullName}}` (payload above). Only act if it concerns an implementation issue or implementation PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the implementation must change: distil it into concrete work items in a comment and add `build-author-go` to the issue.\n3. If it is a question: answer it.\n4. Otherwise `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
+                },
+                {
+                    "id": "build-human-feedback-issue-edit",
+                    "type": "github-event",
+                    "enabled": true,
+                    "events": [
                         "issues.edited"
                     ],
-                    "description": "Route human feedback in the Build stage",
+                    "description": "Route human feedback in the Build stage (issue edit)",
                     "prompt": "A human commented / edited something in `{{repoFullName}}` (payload above). Only act if it concerns an implementation issue or implementation PR of this team — otherwise reply `[PASS]`.\n\n1. Read the feedback in context.\n2. If the implementation must change: distil it into concrete work items in a comment and add `build-author-go` to the issue.\n3. If it is a question: answer it.\n4. Otherwise `[PASS]`.\n\nUse `gh-as-agent` for all GitHub actions."
                 }
             ],
@@ -443,6 +533,7 @@
                         "id": "opens-pr",
                         "title": "Opens PR",
                         "when": "Documentation updates are ready",
+                        "terminal": true,
                         "actions": [
                             {
                                 "type": "openPr"
@@ -478,7 +569,25 @@
                     "description": "Weekly memory housekeeping",
                     "prompt": "Weekly memory curation of memory/log.md: consolidate, generalise, merge duplicates, prune stale entries. If nothing to do: [PASS]."
                 }
-            ]
+            ],
+            "outcomes": {
+                "mode": "anyOf",
+                "options": [
+                    {
+                        "id": "notes-published",
+                        "title": "Publishes release notes",
+                        "when": "The release body is updated with user-facing notes",
+                        "external": {
+                            "note": "published on the GitHub release — read outside this flow"
+                        },
+                        "actions": [
+                            {
+                                "type": "none"
+                            }
+                        ]
+                    }
+                ]
+            }
         }
     ],
     "gates": [],

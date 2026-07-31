@@ -30,5 +30,20 @@
       "description": "Daily memory housekeeping",
       "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
-  ]
+  ],
+  "outcomes": {
+    "mode": "anyOf",
+    "options": [
+      {
+        "id": "replied",
+        "title": "Replies",
+        "when": "The human's comment is answered, or acknowledged and routed to the right teammate",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

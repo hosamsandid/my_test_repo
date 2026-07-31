@@ -18,6 +18,10 @@
                 "issues.labeled"
             ],
             "labelFilter": "needs-refinement",
+            "claim": {
+                "remove": "needs-refinement",
+                "add": "needs-refinement:wip"
+            },
             "enabled": true,
             "intrinsic": true,
             "description": "Refine a triaged work request into acceptance criteria",

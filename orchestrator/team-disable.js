@@ -44,6 +44,16 @@ function planTeamEnable(memberConfigs) {
   return { toEnable, skip };
 }
 
+// Fields to spread onto a new team-member config at creation time. A
+// member created while its parent team is disabled comes up disabled
+// too, tagged so enableTeam brings it back automatically later (see
+// docs/superpowers/specs/2026-07-31-team-wide-disable-design.md).
+function newMemberFieldsForTeam(teamCfg) {
+  return isTeamDisabled(teamCfg)
+    ? { enabled: false, disabledByTeam: true }
+    : { enabled: true };
+}
+
 // True when a team-member's own enable/disable toggle must be locked
 // because its parent team is currently disabled.
 function isMemberLockedByTeam(memberCfg, teamCfg) {
@@ -85,6 +95,7 @@ function httpStatusForTeamActionError(err, { hasMode = false } = {}) {
 
 module.exports = {
   isTeamDisabled,
+  newMemberFieldsForTeam,
   planTeamDisable,
   planTeamEnable,
   isMemberLockedByTeam,

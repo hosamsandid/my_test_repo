@@ -49,7 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
-const { isTeamDisabled, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
+const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
@@ -6033,6 +6033,10 @@ class Orchestrator {
         // stage layout after materialisation.
         ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
+        // A member created while its team is disabled is tagged so
+        // enableTeam brings it back automatically later — see
+        // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+        ...(isTeamDisabled(teamCfg) ? { disabledByTeam: true } : {}),
       };
       saveAgentConfig(memberId, stubConfig);
       // Pre-write triggers so the materialized agent has them immediately;
@@ -6111,7 +6115,10 @@ class Orchestrator {
       // Process stage band (#362 E) — recorded so the live graph reproduces the
       // draft's stage layout after materialisation.
       ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
-      enabled: true,
+      // A member created while its team is disabled comes up disabled too,
+      // tagged so enableTeam brings it back automatically — see
+      // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+      ...newMemberFieldsForTeam(teamCfg),
     };
     saveAgentConfig(memberId, memberConfig);
     saveAgentPrompt(memberId, effectivePrompt, "team-member", env);
@@ -6121,7 +6128,7 @@ class Orchestrator {
     }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
-    startAgentProcess(memberConfig);
+    if (memberConfig.enabled !== false) startAgentProcess(memberConfig);
 
     console.log(
       `[Orchestrator] Created team-member ${memberId} (team=${teamId}` +

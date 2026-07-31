@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   isTeamDisabled,
+  newMemberFieldsForTeam,
   planTeamDisable,
   planTeamEnable,
   isMemberLockedByTeam,
@@ -22,6 +23,16 @@ test('isTeamDisabled: false/undefined enabled or missing config means enabled', 
 
 test('isTeamDisabled: enabled === false means disabled', () => {
   assert.equal(isTeamDisabled({ enabled: false }), true);
+});
+
+test('newMemberFieldsForTeam: enabled (or missing/empty) team → member comes up enabled, untagged', () => {
+  assert.deepEqual(newMemberFieldsForTeam({ enabled: true }), { enabled: true });
+  assert.deepEqual(newMemberFieldsForTeam({}), { enabled: true });
+  assert.deepEqual(newMemberFieldsForTeam(null), { enabled: true });
+});
+
+test('newMemberFieldsForTeam: disabled team → member comes up disabled and tagged disabledByTeam', () => {
+  assert.deepEqual(newMemberFieldsForTeam({ enabled: false }), { enabled: false, disabledByTeam: true });
 });
 
 test('planTeamDisable: enabled members go to toDisable, already-off members are skipped untouched', () => {

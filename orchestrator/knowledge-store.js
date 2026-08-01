@@ -199,6 +199,19 @@ function validateKnowledgeEntry(entry) {
   if (entry.summary !== undefined && typeof entry.summary !== 'string') {
     errors.push('summary must be a string when present');
   }
+  // Bitemporal validity (#916). All three are optional — an entry without them
+  // behaves exactly as before (validFrom semantically defaults to createdAt;
+  // never backfilled onto materialized lines). Expiry is a FIELD, not a status:
+  // readers derive "expired" from validTo, so STATUSES stays untouched.
+  if (entry.validFrom !== undefined && (typeof entry.validFrom !== 'string' || entry.validFrom.trim() === '')) {
+    errors.push('validFrom must be a non-empty string when present');
+  }
+  if (entry.validTo !== undefined && (typeof entry.validTo !== 'string' || entry.validTo.trim() === '')) {
+    errors.push('validTo must be a non-empty string when present');
+  }
+  if (entry.supersededBy !== undefined && (typeof entry.supersededBy !== 'string' || !/^[0-9a-f]{12}$/.test(entry.supersededBy))) {
+    errors.push('supersededBy must be a 12-char hex entry id when present');
+  }
   return { ok: errors.length === 0, errors };
 }
 
@@ -256,6 +269,17 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
   if (typeof input.summary === 'string' && input.summary.trim() !== '') {
     entry.summary = input.summary.trim();
   }
+  // Bitemporal validity (#916) — optional; absent ⇒ semantics identical to today
+  // (validFrom defaults to createdAt at READ time; nothing is backfilled).
+  if (typeof input.validFrom === 'string' && input.validFrom.trim() !== '') {
+    entry.validFrom = input.validFrom.trim();
+  }
+  if (typeof input.validTo === 'string' && input.validTo.trim() !== '') {
+    entry.validTo = input.validTo.trim();
+  }
+  if (typeof input.supersededBy === 'string' && /^[0-9a-f]{12}$/.test(input.supersededBy)) {
+    entry.supersededBy = input.supersededBy;
+  }
 
   const { ok, errors } = validateKnowledgeEntry(entry);
   if (!ok) {
@@ -272,7 +296,7 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
 const KEY_ORDER = [
   'v', 'id', 'kind', 'text', 'originAgent', 'teamId', 'createdAt',
   'correlationId', 'sessionId', 'sourceRefs', 'convergence', 'tags',
-  'status', 'updatedAt', 'summary',
+  'status', 'updatedAt', 'summary', 'validFrom', 'validTo', 'supersededBy',
 ];
 
 function serializeEntry(entry) {

@@ -10,6 +10,7 @@ manually per repo convention. Run with:
     python3 -m unittest agent-image/scripts/test_knowledge.py
 """
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -333,6 +334,47 @@ class TestVisibleEntries(unittest.TestCase):
     def test_no_id_skipped_and_output_stable(self):
         entries = [self._e("a" * 12), {"text": "no id"}, self._e("a" * 12)]
         self.assertEqual([e["id"] for e in kn.visible_entries(entries)], ["a" * 12])
+
+    def test_expired_folds_out_with_injected_now_only(self):
+        # #916: validTo before `now` hides the entry exactly like archived; a
+        # future validTo — or no injected clock at all — keeps it visible.
+        entries = [
+            self._e("a" * 12, validTo="2026-07-01T00:00:00Z"),
+            self._e("b" * 12, validTo="2026-12-31T23:59:59Z"),
+            self._e("c" * 12),
+        ]
+        now = "2026-08-01T12:00:00Z"
+        self.assertEqual([e["id"] for e in kn.visible_entries(entries, now=now)],
+                         ["b" * 12, "c" * 12])
+        # no clock (pure core has none) => nothing expires
+        self.assertEqual(len(kn.visible_entries(entries)), 3)
+
+    def test_validity_fields_round_trip_and_key_order(self):
+        # #916 AC1: build_entry accepts the three fields; serialized key order is
+        # stable (validity keys after summary); pre-existing entries still validate.
+        e = kn.build_entry(
+            "fact", "expires", origin_agent="dev-1", team_id="acme",
+            correlation_id="$evt", valid_from="2026-07-01T00:00:00Z",
+            valid_to="2026-09-01T00:00:00Z", superseded_by="d" * 12,
+            entry_id="a" * 12, created_at="2026-07-01T00:00:00Z",
+        )
+        ok, errors = kn.validate_entry(e)
+        self.assertTrue(ok, errors)
+        line = kn.serialize_entry(e)
+        keys = list(json.loads(line).keys())
+        self.assertEqual(keys.index("validFrom"), len(keys) - 3)
+        self.assertEqual(kn.parse_entry(line), e)
+        # legacy entry without the fields is untouched and valid
+        legacy = kn.build_entry("fact", "old", origin_agent="dev-1",
+                                team_id="acme", correlation_id="$evt")
+        self.assertNotIn("validTo", legacy)
+        ok2, _ = kn.validate_entry(legacy)
+        self.assertTrue(ok2)
+        # invalid shapes are rejected
+        bad = dict(e, supersededBy="not-hex")
+        ok3, errs3 = kn.validate_entry(bad)
+        self.assertFalse(ok3)
+        self.assertTrue(any("supersededBy" in x for x in errs3))
 
 
 class ResolveTeamId(unittest.TestCase):

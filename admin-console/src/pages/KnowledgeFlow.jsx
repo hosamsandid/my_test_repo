@@ -354,6 +354,22 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
+  // #916: set/clear an entry's validity window ("this stops being true on X" —
+  // distinct from Retire). Reload posture mirrors archiveItem.
+  const setItemValidity = useCallback((id, teamId, validTo) => {
+    return fetch(`/api/knowledge/item/${encodeURIComponent(id)}/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, validTo }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => {
+        setSelected(null); setDetail(null);
+        const t = (teams || []).find(x => x.id === teamId);
+        return loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+      })
+      .catch(() => {});
+  }, [teams, loadTeamData]);
+
   // Bulk retire / un-retire for the overview table. Each id is flipped
   // independently (already-in-target-state ids are filtered out by the caller,
   // so this never errors on a no-op), then the team slice is reloaded once.
@@ -523,7 +539,7 @@ export default function KnowledgeFlow() {
         <Chip
           active={filters.showArchived}
           title="Also show retired knowledge — it’s hidden by default but kept for audit"
-          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
+          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show retired &amp; expired</Chip>
       </div>
       )}
 
@@ -582,6 +598,8 @@ export default function KnowledgeFlow() {
               onClose={() => { setSelected(null); setDetail(null); }}
               onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)}
               onArchive={(id, teamId, archived) => archiveItem(id, teamId ?? selected.teamId, archived)}
+              onValidity={(id, teamId, validTo) => setItemValidity(id, teamId ?? selected.teamId, validTo)}
+              onOpenItem={(id, teamId) => openItem(id, teamId ?? selected.teamId)}
             />
           </div>
         )}
@@ -2564,6 +2582,9 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
         {item.archived && (
           <span title="Retired from the active knowledge base — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
         )}
+        {item.expired && !item.archived && (
+          <span title={`No longer valid since ${(item.validTo || '').slice(0, 10)} — dropped from the digest, search and active graph; kept in git`} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>expired</span>
+        )}
         {item.converged && (
           <span
             title={`${item.convergenceCount} agents learned this independently of each other — a strong signal it’s true and important. Converged knowledge is what gets suggested as a skill.`}
@@ -3921,10 +3942,14 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
 
 /* ── Provenance drill-down (right rail) ─────────────────────────────────────── */
 
-function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
+function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onOpenItem }) {
   const { entry, links } = detail;
   const archived = entry.status === 'archived';
   const promoted = entry.status === 'promoted';
+  // #916 bitemporal validity: expiry is derived from validTo (field, not status).
+  const expired = typeof entry.validTo === 'string' && entry.validTo !== '' && entry.validTo < new Date().toISOString();
+  const [validDate, setValidDate] = useState((entry.validTo || '').slice(0, 10));
+  useEffect(() => { setValidDate((entry.validTo || '').slice(0, 10)); }, [entry.id, entry.validTo]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
@@ -3965,6 +3990,52 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
             title="Agents that learned this on their own, without seeing each other’s notes — the more, the stronger the signal">
             {entry.convergence?.length || 1}× — {(entry.convergence || []).join(', ') || entry.originAgent}
           </div>
+        </Lineage>
+        <Lineage label="Validity">
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: expired ? 'var(--eb-status-warning)' : 'var(--eb-text-primary)' }}
+            title="When this fact was (or is) true. Expired entries drop out of the digest, search and the active graph automatically — nothing is deleted.">
+            From {(entry.validFrom || entry.createdAt || '?').slice(0, 10)} · {entry.validTo
+              ? <>until {entry.validTo.slice(0, 10)}{expired ? ' — expired' : ''}</>
+              : 'open-ended'}
+          </div>
+          {entry.supersededBy && (
+            <button
+              onClick={() => onOpenItem && onOpenItem(entry.supersededBy, entry.teamId)}
+              title="This fact was replaced by a newer entry — open it"
+              style={{
+                marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
+                background: 'var(--eb-accent-muted)', border: 'none', padding: '1px 8px',
+                borderRadius: 'var(--eb-radius-full)', cursor: onOpenItem ? 'pointer' : 'default',
+              }}>
+              superseded by {entry.supersededBy}
+            </button>
+          )}
+          {onValidity && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+              <input
+                type="date"
+                value={validDate}
+                onChange={e => setValidDate(e.target.value)}
+                title="Valid until — the date this stops being true (inclusive)"
+                style={{ ...inp, padding: '2px 6px', fontSize: 'var(--eb-text-xs)', width: 'auto', flex: 1 }}
+              />
+              <button
+                onClick={() => onValidity(entry.id, entry.teamId, validDate)}
+                disabled={!validDate || validDate === (entry.validTo || '').slice(0, 10)}
+                title="Set the valid-until date — the entry expires everywhere active on that date"
+                style={{ ...miniBtn }}>
+                Set
+              </button>
+              {entry.validTo && (
+                <button
+                  onClick={() => onValidity(entry.id, entry.teamId, null)}
+                  title="Clear the valid-until date — the entry is current again everywhere"
+                  style={{ ...miniBtn }}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
         </Lineage>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           {entry.teamId} · {entry.createdAt}{entry.status && entry.status !== 'active' ? ` · ${entry.status}` : ''}

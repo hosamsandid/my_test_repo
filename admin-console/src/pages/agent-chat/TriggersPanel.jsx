@@ -15,6 +15,16 @@ import {
   isStandingSubscription,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import {
+  STOP_CONDITIONS,
+  TOKEN_BUDGET_PRESETS,
+  GAP_PRESETS,
+  deriveStopCondition,
+  deriveTokenBudget,
+  deriveGap,
+  resolveTokenBudget,
+  resolveGapSeconds,
+} from './loop-form-options.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
 // container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
@@ -572,9 +582,22 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // ── loop fields (type: 'loop') ───────────────────────────────────────
     // Kept as strings in the form (number inputs emit strings); parsed on save.
     maxIterations: initialValues?.maxIterations != null ? String(initialValues.maxIterations) : '',
-    maxTokens:     initialValues?.maxTokens     != null ? String(initialValues.maxTokens)     : '',
-    minGapSeconds: initialValues?.minGapSeconds != null ? String(initialValues.minGapSeconds) : '',
+    // #1083: the raw `until` / `maxTokens` / `minGapSeconds` inputs are replaced
+    // by plain-language selectors that derive from and resolve back to the same
+    // wire schema (loop-form-options.js). The raw untilCommand string is still
+    // held for the "Custom command" escape hatch.
+    stopCondition: deriveStopCondition(initialValues?.until, deriveVerifyMode(initialValues?.verify) !== 'none'),
     untilCommand:  (initialValues?.until && typeof initialValues.until === 'object' && initialValues.until.command) || '',
+    tokenPreset:   deriveTokenBudget(initialValues?.maxTokens).preset,
+    tokenRaw:      deriveTokenBudget(initialValues?.maxTokens).raw,
+    gapPreset:     deriveGap(initialValues?.minGapSeconds).preset,
+    gapRaw:        deriveGap(initialValues?.minGapSeconds).raw,
+    // Advanced settings collapse (#1083 AC7): expanded automatically when the
+    // stored trigger already uses a technical option, so an edit never hides
+    // configuration the author set.
+    showAdvanced:  deriveStopCondition(initialValues?.until, deriveVerifyMode(initialValues?.verify) !== 'none') === 'custom'
+                     || initialValues?.maxTokens != null
+                     || initialValues?.minGapSeconds != null,
     // verify: { command } | { agentId } | absent. Derive the editor mode.
     verifyMode:    deriveVerifyMode(initialValues?.verify),
     verifyCommand: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.command) || '',
@@ -738,8 +761,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     else if (form.type === 'once')         body.at   = form.at.trim();
     else if (form.type === 'loop') {
       body.maxIterations = Number(form.maxIterations);
-      const untilCmd = form.untilCommand.trim();
-      if (untilCmd) body.until = { command: untilCmd };
+      // Stop condition (#1083): only the "Custom command" option emits `until`;
+      // the predefined options run to the iteration cap (with the verifier, if
+      // any, gating each pass).
+      if (form.stopCondition === 'custom') {
+        const untilCmd = form.untilCommand.trim();
+        if (untilCmd) body.until = { command: untilCmd };
+      }
       // verify: command form / agent form / omitted. A team agent's blank
       // verifier is (re-)enforced to a sibling server-side (concept §4.6).
       if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
@@ -747,10 +775,12 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
         body.verify = { agentId: form.verifyAgentId.trim() };
       }
-      const mt = Number(form.maxTokens);
-      if (form.maxTokens.trim() && Number.isFinite(mt) && mt > 0) body.maxTokens = mt;
-      const mg = Number(form.minGapSeconds);
-      if (form.minGapSeconds.trim() && Number.isFinite(mg) && mg >= 0) body.minGapSeconds = mg;
+      // Token budget + min-gap resolve from their presets (or the advanced raw
+      // fields) back to the exact wire numbers; `undefined` omits the field.
+      const mt = resolveTokenBudget(form.tokenPreset, form.tokenRaw);
+      if (mt != null) body.maxTokens = mt;
+      const mg = resolveGapSeconds(form.gapPreset, form.gapRaw);
+      if (mg != null) body.minGapSeconds = mg;
     }
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
@@ -826,20 +856,23 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'loop' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {/* Plain-language banner — no CLI terms (#1083 AC5). */}
           <div style={{
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
-            A <strong>loop</strong> re-runs this agent with the prompt below, chaining
-            each iteration into the next until a stop condition is met. It stops when
-            <code> until</code> exits <code>0</code> (done), the iteration cap or token
-            budget is reached (exhausted), or the safety backstop trips (paused).
+            A <strong>loop</strong> runs this agent again and again, feeding each run's
+            result into the next, and stops once the work is done or it reaches the
+            maximum number of tries you set. Use it for tasks that take several passes
+            to finish — like working through a checklist or refining a result.
           </div>
 
+          {/* ── Core fields (#1083 AC1): iterations + verifier. Everything else
+              lives in Advanced settings below. ─────────────────────────────── */}
           <FormInput
-            label="Max iterations (required)"
+            label="Maximum number of tries (required)"
             type="number"
             value={form.maxIterations}
             onChange={v => set('maxIterations', v)}
@@ -847,37 +880,22 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             error={formError && !isValidMaxIterations(form.maxIterations) ? 'Required — a positive whole number.' : undefined}
           />
 
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Stop condition — <code>until</code> command (optional)
-            </div>
-            <input
-              type="text"
-              value={form.untilCommand}
-              onChange={e => set('untilCommand', e.target.value)}
-              placeholder="e.g. npm test && test ! -s fix_plan.md"
-              style={{ ...FIELD_STYLE, width: '100%', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
-            />
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-              Runs after each iteration; exit code <code>0</code> means the goal is met and the loop is done.
-            </div>
-          </div>
-
           {/* Verifier — command form, agent form, or none. For a team agent the
               separation is enforced (concept §4.6): the picker is pre-filled and
-              cannot be silently emptied. */}
+              cannot be silently emptied. Kept in the core set (out of scope for
+              #1083) as it is already relatively accessible. */}
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Verifier (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+              Who checks the work? (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
             </div>
             <select
               value={form.verifyMode}
               onChange={e => set('verifyMode', e.target.value)}
               style={{ ...FIELD_STYLE, width: '100%' }}
             >
-              <option value="none">No verifier{isTeamLoopAgent ? ' (a sibling is enforced server-side)' : ' (self-graded)'}</option>
-              <option value="command">Command — must exit 0 for the iteration to count</option>
-              <option value="agent">Agent — a separate role grades the work</option>
+              <option value="none">No one{isTeamLoopAgent ? ' (a teammate is assigned automatically)' : ' (the agent judges itself)'}</option>
+              <option value="command">A command must pass each try</option>
+              <option value="agent">Another agent reviews each try</option>
             </select>
 
             {form.verifyMode === 'command' && (
@@ -915,31 +933,116 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
             {isTeamLoopAgent && (
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                Team agents must not grade their own work — a separate sibling verifier
-                is assigned automatically and re-enforced on save even if left blank.
+                Team agents must not grade their own work — a separate teammate is
+                assigned automatically and re-applied on save even if left blank.
               </div>
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
-            <div style={{ flex: 1 }}>
-              <FormInput
-                label="Token budget (optional)"
-                type="number"
-                value={form.maxTokens}
-                onChange={v => set('maxTokens', v)}
-                placeholder="e.g. 2000000"
-              />
-            </div>
-            <div style={{ flex: 1 }}>
-              <FormInput
-                label="Min gap seconds (optional)"
-                type="number"
-                value={form.minGapSeconds}
-                onChange={v => set('minGapSeconds', v)}
-                placeholder="0 = chain immediately"
-              />
-            </div>
+          {/* ── Advanced settings (#1083 AC7): collapsed by default. Holds the
+              stop condition, token budget and gap — including every raw/custom
+              escape hatch so power users lose no capability (#1083 AC6). ────── */}
+          <div>
+            <button
+              type="button"
+              onClick={() => set('showAdvanced', !form.showAdvanced)}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+                color: 'var(--eb-text-secondary)', fontFamily: 'inherit',
+              }}
+              aria-expanded={form.showAdvanced}
+            >
+              <span style={{ display: 'inline-block', transform: form.showAdvanced ? 'rotate(90deg)' : 'none', transition: 'transform var(--eb-transition-fast)' }}>▸</span>
+              Advanced settings
+            </button>
+
+            {form.showAdvanced && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
+
+                {/* Stop condition — plain "Done when…" with a custom escape hatch. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    Done when…
+                  </div>
+                  <select
+                    value={form.stopCondition}
+                    onChange={e => set('stopCondition', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {STOP_CONDITIONS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+
+                  {form.stopCondition === 'custom' && (
+                    <>
+                      <input
+                        type="text"
+                        value={form.untilCommand}
+                        onChange={e => set('untilCommand', e.target.value)}
+                        placeholder="e.g. npm test && test ! -s fix_plan.md"
+                        style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+                      />
+                      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                        A shell command run after each try; the loop finishes as soon as it succeeds.
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Token budget — labelled presets, raw number only under Custom. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    How much work can it do? (budget)
+                  </div>
+                  <select
+                    value={form.tokenPreset}
+                    onChange={e => set('tokenPreset', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {TOKEN_BUDGET_PRESETS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  {form.tokenPreset === 'custom' && (
+                    <input
+                      type="number"
+                      value={form.tokenRaw}
+                      onChange={e => set('tokenRaw', e.target.value)}
+                      placeholder="exact token budget, e.g. 2000000"
+                      style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                    />
+                  )}
+                </div>
+
+                {/* Min gap — human-readable dropdown, raw seconds only under Custom. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    Wait between tries
+                  </div>
+                  <select
+                    value={form.gapPreset}
+                    onChange={e => set('gapPreset', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {GAP_PRESETS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  {form.gapPreset === 'custom' && (
+                    <input
+                      type="number"
+                      value={form.gapRaw}
+                      onChange={e => set('gapRaw', e.target.value)}
+                      placeholder="exact seconds, e.g. 120"
+                      style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -5,7 +5,6 @@
   "description": "Reviews PRs for hot-path concerns — algorithmic complexity, N+1 queries, blocking I/O, allocations.",
   "icon": "gauge",
   "category": "reactive",
-  "envSuffix": "perf",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Performance reviews need to be specific: name the function, the input size, the cost. Vague \"this might be slow\" comments are worse than no review.",

@@ -5,7 +5,6 @@
     "description": "Talk to me. I refine your requirements and turn them into GitHub issues with acceptance criteria.",
     "icon": "compass",
     "category": "chat",
-    "envSuffix": "ba",
     "sessionPolicy": "persistent",
     "skills": [],
     "additionalContextSnippet": "You are the stakeholder's voice toward the team. When the user talks to you, they're talking to the product — present options, surface assumptions, translate domain language.",

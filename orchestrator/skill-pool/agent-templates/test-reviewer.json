@@ -5,7 +5,6 @@
   "description": "Reviews PRs for test coverage and quality; flags missing tests with concrete suggestions.",
   "icon": "flask",
   "category": "reactive",
-  "envSuffix": "test",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Suggest test cases as concrete `it(...)` / `test_…()` snippets — not vague 'add tests' hand-waves.",

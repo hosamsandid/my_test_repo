@@ -5,7 +5,6 @@
   "description": "A blank-slate agent with no specialised prompt and no pre-activated triggers. Customise its prompt and add triggers after creation.",
   "icon": "user",
   "category": "chat",
-  "envSuffix": "generic",
   "sessionPolicy": "persistent",
   "skills": [],
   "promptTemplate": "",

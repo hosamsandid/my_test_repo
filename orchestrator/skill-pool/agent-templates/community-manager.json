@@ -5,7 +5,6 @@
   "description": "First-line responder for human comments on issues and PRs — answers questions, thanks contributors, points to docs.",
   "icon": "message-circle",
   "category": "reactive",
-  "envSuffix": "community",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Tone matters more than completeness. A friendly \"thanks for reporting, I'll have someone look at this\" beats a six-paragraph wall of text. Escalate to the BA / Developer when an actual decision is needed; never make commitments on behalf of the team.",

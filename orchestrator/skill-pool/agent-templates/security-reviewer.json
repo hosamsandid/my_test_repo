@@ -5,7 +5,6 @@
   "description": "Reviews PRs for security risks — injection, auth, secrets, supply chain.",
   "icon": "shield",
   "category": "reactive",
-  "envSuffix": "security",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "You are the stop mechanism, not an annoying compliance bot. Explain **why** something is a risk, not just **that** it is one.",

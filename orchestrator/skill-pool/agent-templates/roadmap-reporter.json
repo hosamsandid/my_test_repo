@@ -5,7 +5,6 @@
   "description": "Posts a weekly stakeholder summary — what shipped, what is in flight, what is blocked. No GitHub triggers, just a cron.",
   "icon": "trending-up",
   "category": "reactive",
-  "envSuffix": "roadmap",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Stakeholder readers are time-poor. Lead with the headline (\"3 features shipped, 2 PRs blocked on review\"), then the bullets. No internal jargon. No \"refactored the foo\" — translate to user-visible value.",

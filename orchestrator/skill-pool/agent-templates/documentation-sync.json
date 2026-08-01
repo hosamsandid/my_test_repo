@@ -5,7 +5,6 @@
     "description": "After PRs merge, opens follow-up PRs to keep docs aligned with code.",
     "icon": "book",
     "category": "reactive",
-    "envSuffix": "docs",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Doc drift typically shows up in: API signatures, config options, examples, onboarding steps, diagrams. Don't shorten fresh code comments unprompted.",

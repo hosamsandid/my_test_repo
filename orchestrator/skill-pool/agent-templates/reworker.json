@@ -5,7 +5,6 @@
     "description": "Addresses code-review feedback on a pull request and returns it to a reviewable state.",
     "icon": "wrench",
     "category": "reactive",
-    "envSuffix": "rework",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Keep the diff tightly scoped to what the reviewer requested. Commit messages reference the specific feedback being resolved.",

@@ -5,7 +5,6 @@
     "description": "Implements issues on a feature branch, gets the tests green, and opens a pull request.",
     "icon": "code",
     "category": "reactive",
-    "envSuffix": "dev",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Branch naming: `feature/<issue-number>-<short-slug>`. Commit messages: present tense, terse. PR body links the issue with `Closes #N`.",

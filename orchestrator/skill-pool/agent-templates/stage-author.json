@@ -5,7 +5,6 @@
     "description": "Generic per-stage producer: turns prepared, approved input into the stage's work product on a feature branch and opens a PR. Composable into any stage via the Flow-Weaver.",
     "icon": "pencil",
     "category": "pattern",
-    "envSuffix": "author",
     "defaultEnabled": false,
     "patternRole": "author",
     "stageAffinity": [],

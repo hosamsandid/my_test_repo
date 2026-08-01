@@ -9857,7 +9857,6 @@ app.get('/api/agent-templates', (_req, res) => {
       icon: t.icon,
       category: t.category,
       sessionPolicy: t.sessionPolicy,
-      envSuffix: t.envSuffix,
       // Which tier this effective template comes from (#587): 'default'
       // (seeded, read-only), 'user' (UI-created) or 'override' (UI edit of a
       // seeded default — can be reset to default).

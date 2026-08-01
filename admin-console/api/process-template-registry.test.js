@@ -268,8 +268,7 @@ test('#927 AC2: no retired label token survives in the shipped process templates
 test('#927 AC2: no retired label token survives in the catalog role templates', () => {
   for (const f of fs.readdirSync(CATALOG_DIR).filter(n => n.endsWith('.json'))) {
     const r = JSON.parse(fs.readFileSync(path.join(CATALOG_DIR, f), 'utf8'));
-    // `envSuffix` is an environment-name segment, not a label — deliberately not
-    // part of this sweep (dispatcher.json still ships envSuffix "dispatch").
+    // `envSuffix` was a dead field removed in #1065 — no longer present in templates.
     const labels = routingLabels({ roles: [r] });
     for (const label of labels) {
       assert.ok(!RETIRED_TOKENS.includes(label), `${f}: retired token "${label}" is still routed`);

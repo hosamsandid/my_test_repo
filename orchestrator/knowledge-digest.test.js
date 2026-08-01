@@ -86,6 +86,23 @@ test('includedIds lists the selected entries in render order', () => {
   ]);
 });
 
+test('conventions are ordered by confirmation count desc, then newest first (not oldest-first)', () => {
+  // Four conventions, ids chosen so alphabetical order (a,b,c,d) is NOT the
+  // expected result — proving the sort is count/date driven. Expected render
+  // order: count 3 newest→oldest (c, b), then count 1 newest→oldest (d, a).
+  const entries = [
+    { id: 'c0nv00000a01', kind: 'convention', text: 'A', createdAt: '2026-01-01T00:00:00Z', convergence: ['x'], status: 'active' },
+    { id: 'c0nv00000b01', kind: 'convention', text: 'B', createdAt: '2026-02-01T00:00:00Z', convergence: ['x', 'y', 'z'], status: 'active' },
+    { id: 'c0nv00000c01', kind: 'convention', text: 'C', createdAt: '2026-03-01T00:00:00Z', convergence: ['x', 'y', 'z'], status: 'active' },
+    { id: 'c0nv00000d01', kind: 'convention', text: 'D', createdAt: '2026-04-01T00:00:00Z', convergence: ['x'], status: 'active' },
+  ];
+  const res = buildKnowledgeDigest({ teamId: 't', generatedAt: '2026-07-13T09:00:00Z', entries });
+  assert.deepEqual(res.includedIds, ['c0nv00000c01', 'c0nv00000b01', 'c0nv00000d01', 'c0nv00000a01']);
+  // Under a tight budget the most-confirmed + freshest convention survives, not the oldest.
+  const tight = buildKnowledgeDigest({ teamId: 't', generatedAt: '2026-07-13T09:00:00Z', entries, budgetTokens: 8 });
+  assert.deepEqual(tight.includedIds, ['c0nv00000c01']);
+});
+
 test('budget: conventions fill first, cutoff is deterministic and reported', () => {
   const small = FIXTURE.cases.find((c) => c.name === 'small-budget');
   assert.ok(small.expectedIncluded < small.expectedTotal);

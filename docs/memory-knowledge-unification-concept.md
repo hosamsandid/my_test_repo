@@ -45,7 +45,7 @@ than anything the memory files ever provided.
 Digest content (deterministic, no LLM required), under a hard token budget (~2–4k),
 prioritized:
 
-1. **All `conventions`** — few, highest value ("this is how we do things here")
+1. **All `conventions`** — few, highest value ("this is how we do things here"); when the budget truncates, ordered by confirmation count desc then newest first (so the most-confirmed and freshest survive, not simply the oldest)
 2. **Converged entries** (independently learned ≥2× = validated), by convergence count
 3. **Recent entries** (last N days)
 4. Whatever exceeds the budget stays reachable via Level 2.

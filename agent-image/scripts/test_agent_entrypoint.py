@@ -1986,6 +1986,28 @@ class BuildKnowledgeDigest(unittest.TestCase):
         )
         self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
 
+    def test_conventions_ordered_by_count_then_newest(self):
+        # Mirrors the JS test of the same name: conventions are NOT oldest-first;
+        # they order count desc, then newest first, then id — so budget
+        # truncation keeps the most-confirmed + freshest, not the oldest.
+        entries = [
+            {"id": "c0nv00000a01", "kind": "convention", "text": "A",
+             "createdAt": "2026-01-01T00:00:00Z", "convergence": ["x"], "status": "active"},
+            {"id": "c0nv00000b01", "kind": "convention", "text": "B",
+             "createdAt": "2026-02-01T00:00:00Z", "convergence": ["x", "y", "z"], "status": "active"},
+            {"id": "c0nv00000c01", "kind": "convention", "text": "C",
+             "createdAt": "2026-03-01T00:00:00Z", "convergence": ["x", "y", "z"], "status": "active"},
+            {"id": "c0nv00000d01", "kind": "convention", "text": "D",
+             "createdAt": "2026-04-01T00:00:00Z", "convergence": ["x"], "status": "active"},
+        ]
+        res = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z", entries=entries)
+        self.assertEqual(res["includedIds"],
+                         ["c0nv00000c01", "c0nv00000b01", "c0nv00000d01", "c0nv00000a01"])
+        tight = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z", entries=entries, budget_tokens=8)
+        self.assertEqual(tight["includedIds"], ["c0nv00000c01"])
+
 
 class HarvestBlock(unittest.TestCase):
     """Two-sided contract with orchestrator/harvest-block.js: both test suites

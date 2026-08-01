@@ -1983,8 +1983,14 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
               and budget_tokens > 0 else DEFAULT_DIGEST_TOKEN_BUDGET)
     visible = fold_visible_entries(entries if entries is not None else [], now=generated_at)
 
-    # Tier 1: all conventions, chronological (fold order is (createdAt, id)).
+    # Tier 1: all conventions (few, highest value). Ordered like Tier 2 so the
+    # budget truncation keeps the most-confirmed and freshest conventions, not
+    # simply the oldest. Stable multi-pass sorts == the JS comparator
+    # (count desc, then createdAt desc, then id asc).
     conventions = [e for e in visible if e.get("kind") == "convention"]
+    conventions.sort(key=lambda e: e.get("id") or "")
+    conventions.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+    conventions.sort(key=lambda e: -_digest_convergence_count(e))
     # Tier 2: converged non-conventions, strongest first. Stable multi-pass
     # sorts == the JS comparator (count desc, then createdAt desc, then id asc).
     converged = [e for e in visible

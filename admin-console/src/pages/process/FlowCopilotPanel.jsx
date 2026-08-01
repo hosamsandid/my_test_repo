@@ -11,6 +11,8 @@ import {
   copilotErrorInfo,
   supersedePending,
   latestProposal,
+  phaseLabel,
+  consumeCopilotStream,
 } from './flow-copilot-view';
 
 // FlowCopilotPanel (#1069, spec #1047) — the docked chat rail of the Flow
@@ -42,6 +44,8 @@ export default function FlowCopilotPanel({
   const [messages, setMessages] = useState([]);
   const [composer, setComposer] = useState('');
   const [busy, setBusy] = useState(false);
+  // Live phase of the running generation (#1070) — fed by the NDJSON stream.
+  const [phase, setPhase] = useState(null);
   const [applying, setApplying] = useState(false);
   const [model, setModel] = useState(null);
   const messagesRef = useRef(messages);
@@ -73,7 +77,11 @@ export default function FlowCopilotPanel({
     setMessages(history);
     setComposer('');
     setBusy(true);
+    setPhase(null);
     try {
+      // The endpoint streams NDJSON progress (#1070): request-shape/provider
+      // errors come back as plain non-ok JSON before any streaming starts; an
+      // OK response is a phase stream terminated by a result or error event.
       let res, body;
       try {
         res = await fetch('/api/process/copilot', {
@@ -81,20 +89,22 @@ export default function FlowCopilotPanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: toApiMessages(history), bundle }),
         });
-        body = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+          const errBody = await res.json().catch(() => null);
+          setMessages(ms => [...ms, {
+            id: nextId(), role: 'error', retryText: trimmed,
+            ...copilotErrorInfo(res.status, errBody && errBody.error),
+          }]);
+          return;
+        }
+        body = await consumeCopilotStream(res, setPhase);
       } catch (e) {
-        // Network failure — retryable error row, composer re-enabled.
+        // Network failure, a terminal error event, or a dropped connection
+        // mid-stream — retryable error row, composer re-enabled.
         setMessages(ms => [...ms, {
           id: nextId(), role: 'error', retryText: trimmed,
-          ...copilotErrorInfo(undefined, e.message),
-        }]);
-        return;
-      }
-      if (!res.ok) {
-        if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-        setMessages(ms => [...ms, {
-          id: nextId(), role: 'error', retryText: trimmed,
-          ...copilotErrorInfo(res.status, body && body.error),
+          ...copilotErrorInfo(e.status, e.message),
         }]);
         return;
       }
@@ -118,6 +128,7 @@ export default function FlowCopilotPanel({
       if (onPreview) onPreview(graph ? { bundle: body.bundle, graph, ok: !!body.ok } : null);
     } finally {
       setBusy(false);
+      setPhase(null);
     }
   }, [busy, mode, bundle, onPreview]);
 
@@ -235,7 +246,8 @@ export default function FlowCopilotPanel({
             {busy && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
                 <Loader2 size={14} style={{ animation: 'eb-copilot-spin 1s linear infinite' }} />
-                Generating proposal… (validates and repairs before you see it)
+                {/* Live phase from the NDJSON stream (#1070). */}
+                {phaseLabel(phase)}
               </div>
             )}
           </div>

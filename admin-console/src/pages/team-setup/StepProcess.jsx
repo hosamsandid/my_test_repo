@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import {
   LayoutTemplate, Blocks, PencilRuler, AlertCircle, AlertTriangle, Info,
   CheckCircle, Loader2, ArrowUp, ArrowDown, X, Plus, Save, Workflow, Sparkles,
@@ -7,10 +7,14 @@ import {
 import { useApi, apiCall } from '../../hooks/useApi';
 import { computePreviewLayout, previewEdgesFromGraph, ellipsize, PREVIEW } from './flow-preview-layout';
 import { EDGE_STYLES } from '../process/flow-graph-render';
+import { copilotErrorInfo, consumeCopilotStream, phaseLabel } from '../process/flow-copilot-view';
 
 // ─── Wizard "Process" step (#422) ────────────────────────────────────────────
-// Replaces the flat role-checkbox Members step in create mode. Three entries:
+// Replaces the flat role-checkbox Members step in create mode. Four entries:
 //   • Use a template  — gallery of curated process templates (#419) + drafts
+//   • Describe        — plain-language description → the Flow Copilot endpoint
+//                       (#1070; same POST /api/process/copilot as the editor
+//                       panel — no second LLM/grounding path)
 //   • Compose         — stage columns with pattern slots, wired live by the
 //                       Flow-Weaver (#421); gap rules are explained inline
 //   • Blank canvas    — creates an empty draft and jumps to the Flows editor
@@ -626,6 +630,9 @@ export default function StepProcess({ form, setForm, templates, error }) {
           <EntryCard icon={LayoutTemplate} title="Use a template"
             copy="Start from a curated process (Core SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
             onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
+          <EntryCard icon={Sparkles} title="Describe the flow"
+            copy="Write the process in plain language — roles, hand-offs, human gates. The Flow Copilot generates a validated flow you review here."
+            onClick={() => setForm(f => ({ ...f, processMode: 'describe' }))} />
           <EntryCard icon={Blocks} title="Compose a process" disabled badge="Coming soon"
             copy="Define stages and pick 1–3 agents per stage from the catalog. The Flow-Weaver wires hand-offs, human gates and escalation loops for you." />
           <EntryCard icon={PencilRuler} title="Start blank in the canvas"
@@ -694,6 +701,18 @@ export default function StepProcess({ form, setForm, templates, error }) {
         {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
         {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
       </div>
+    );
+  }
+
+  // ── describe (#1070) ──
+  if (form.processMode === 'describe') {
+    return (
+      <DescribeSection
+        form={form} setForm={setForm} setBundle={setBundle}
+        previewGraph={previewGraph} lints={lints} lintLoading={lintLoading}
+        onSaveDraft={saveAsDraft} savingDraft={savingDraft}
+        backToEntry={backToEntry} error={error}
+      />
     );
   }
 
@@ -831,6 +850,134 @@ export default function StepProcess({ form, setForm, templates, error }) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// ─── "Describe" entry (#1070) ────────────────────────────────────────────────
+// A minimal inline variant of the Flow-Copilot exchange: one description field,
+// regenerate on edit — no chat history (the full panel lives in the Flows
+// editor; "Save as draft & open in canvas" hands over to it). Calls the SAME
+// POST /api/process/copilot NDJSON endpoint as the panel; an ok:true bundle
+// lands in form.processBundle where the existing authoritative lint pass
+// (POST /api/flows/graph) gates submission exactly like every other entry.
+
+function DescribeSection({ form, setForm, setBundle, previewGraph, lints, lintLoading, onSaveDraft, savingDraft, backToEntry, error }) {
+  const [running, setRunning] = useState(false);
+  const [phase, setPhase] = useState(null);
+  const [genError, setGenError] = useState(null);   // copilotErrorInfo shape
+  const [summary, setSummary] = useState(null);
+  const [findings, setFindings] = useState(null);   // error lints of an ok:false result
+  const text = form.describeText || '';
+
+  async function generate() {
+    const trimmed = text.trim();
+    if (!trimmed || running) return;
+    setRunning(true); setPhase(null); setGenError(null); setSummary(null); setFindings(null);
+    try {
+      // Always a fresh whole-flow generation from the description (no bundle,
+      // no history) — editing the text and regenerating replaces the result.
+      const res = await fetch('/api/process/copilot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: trimmed }] }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => null);
+        setGenError(copilotErrorInfo(res.status, b && b.error));
+        return;
+      }
+      const out = await consumeCopilotStream(res, setPhase);
+      setSummary(out.summary || '');
+      if (out.ok && out.bundle) {
+        // Lands on the form like the weaver/template paths; the lint effect
+        // in StepProcess re-checks it authoritatively.
+        setBundle(out.bundle, [], 'describe');
+      } else {
+        // Error-level findings survived the repair loop — keep the form
+        // untouched (an unappliable bundle must not reach submission) and let
+        // the user refine the description.
+        setFindings((out.lints || []).filter(l => l.severity === 'error'));
+      }
+    } catch (e) {
+      setGenError(copilotErrorInfo(e.status, e.message));
+    } finally {
+      setRunning(false);
+      setPhase(null);
+    }
+  }
+
+  return (
+    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {SPIN_KEYFRAMES}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={labelStyle}>Describe the flow</div>
+        {backToEntry}
+      </div>
+      <div style={hintStyle}>
+        Roles, hand-offs, human approval gates — in your own words. Example: <em>"an issue-triage agent
+        labels new issues, a Business Analyst refines them, a human approves with `ready`, a Developer
+        implements and opens a PR, a Code Reviewer routes to a Reworker or approves, a Merger merges."</em>
+      </div>
+      <textarea
+        value={text}
+        onChange={e => { const v = e.target.value; setForm(f => ({ ...f, describeText: v })); }}
+        rows={5}
+        autoFocus
+        disabled={running}
+        placeholder="Describe the process…"
+        style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5, opacity: running ? 0.6 : 1 }}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+        <button type="button" onClick={generate} disabled={running || !text.trim()} style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+          borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2) var(--eb-space-4)',
+          fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 600,
+          cursor: (running || !text.trim()) ? 'not-allowed' : 'pointer', opacity: (running || !text.trim()) ? 0.6 : 1,
+        }}>
+          {running
+            ? <Loader2 size={13} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />
+            : <Sparkles size={13} />}
+          {form.processBundle && form.processMode === 'describe' ? 'Regenerate' : 'Generate flow'}
+        </button>
+        {running && <span style={hintStyle}>{phaseLabel(phase)}</span>}
+      </div>
+
+      {genError && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{genError.message}</div>
+          {genError.kind === 'provider' && (
+            <div style={hintStyle}>
+              The Copilot needs a configured LLM —{' '}
+              <Link to="/models" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>add a Model Provider</Link>{' '}
+              and try again.
+            </div>
+          )}
+        </div>
+      )}
+
+      {findings && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+            <AlertCircle size={13} /> The generated flow still has validation errors — refine the description and regenerate.
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {findings.map((l, i) => (
+              <li key={i} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{l.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {summary && form.processBundle && !findings && (
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>{summary}</div>
+      )}
+
+      {form.processBundle && (
+        <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={onSaveDraft} savingDraft={savingDraft} />
+      )}
+      {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
     </div>
   );
 }

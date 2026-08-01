@@ -280,6 +280,12 @@ function buildRepairMessage(findings) {
  * when no iteration produced a parseable bundle at all — the route maps that
  * to a 502.
  *
+ * `onProgress(ev)` (#1070, optional) is called with `{type:'phase', phase}`
+ * events as the loop advances — `generating` before the first LLM call,
+ * `repairing` (+ `iteration`, 1-based) before each repair call, `validating`
+ * after each reply lands. The NDJSON route forwards them to the client;
+ * omitting the hook keeps the loop's behaviour byte-identical.
+ *
  * @returns {{ ok, bundle, summary, changes, lints, repairIterations }}
  */
 async function runCopilot({
@@ -289,7 +295,9 @@ async function runCopilot({
   formatDoc = readFormatDoc(),
   addendum = readPromptAddendum(),
   maxRepairIterations = MAX_REPAIR_ITERATIONS,
+  onProgress,
 }) {
+  const progress = typeof onProgress === 'function' ? onProgress : () => {};
   const baseBundle = isPlainObject(bundle) ? bundle : emptyDraftBundle();
   let request = buildCopilotRequest({ bundle: baseBundle, messages, formatDoc, addendum });
 
@@ -297,6 +305,9 @@ async function runCopilot({
   let repairIterations = 0;
 
   for (let attempt = 0; attempt <= maxRepairIterations; attempt++) {
+    progress(attempt === 0
+      ? { type: 'phase', phase: 'generating' }
+      : { type: 'phase', phase: 'repairing', iteration: attempt });
     let text;
     try {
       text = await callLlm(request);
@@ -304,6 +315,7 @@ async function runCopilot({
       if (!best) throw err; // nothing to fall back to — surface the transport error
       break;                // best-effort with the previous iteration's bundle
     }
+    progress({ type: 'phase', phase: 'validating' });
 
     const parsed = parseCopilotResponse(text);
     let findings;

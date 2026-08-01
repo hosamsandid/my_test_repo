@@ -7,8 +7,11 @@ const path = require('path');
 
 const {
   MAX_REPAIR_ITERATIONS,
+  COPILOT_HISTORY_CAP,
   sanitizeBundle,
   parseCopilotResponse,
+  applyCopilotOps,
+  sanitizeCopilotHistory,
   evaluateBundle,
   computeChanges,
   readFormatDoc,
@@ -414,4 +417,134 @@ test('omitting onProgress keeps the loop working (no hook required)', async () =
     formatDoc: 'doc', addendum: 'add',
   });
   assert.equal(out.ok, true);
+});
+
+// ── patch-based incremental edits (#1071 item 3) ─────────────────────────────
+
+test('parseCopilotResponse: ops envelope; a bundle wins when both appear', () => {
+  const ops = parseCopilotResponse(JSON.stringify({ summary: 's', ops: [{ op: 'removeRole', id: 'x' }] }));
+  assert.equal(ops.summary, 's');
+  assert.equal(ops.ops.length, 1);
+  assert.equal(ops.bundle, undefined);
+  const both = parseCopilotResponse(JSON.stringify({ summary: 's', ops: [], bundle: fixture() }));
+  assert.ok(both.bundle);
+  assert.equal(both.ops, undefined);
+});
+
+test('applyCopilotOps: add / patch / remove role', () => {
+  const b = applyCopilotOps(fixture(), [
+    { op: 'addRole', role: { id: 'security-reviewer', displayName: 'Security Reviewer', systemPrompt: 'You review.', evil: 'stripped' } },
+    { op: 'patchRole', id: 'code-reviewer', patch: { systemPrompt: 'Updated prompt.', stage: null } },
+    { op: 'removeRole', id: 'merger' },
+  ]);
+  const added = b.roles.find(r => r.id === 'security-reviewer');
+  assert.ok(added);
+  assert.equal(added.evil, undefined); // role keys are whitelisted like sanitizeBundle
+  assert.equal(b.roles.find(r => r.id === 'code-reviewer').systemPrompt, 'Updated prompt.');
+  assert.ok(!('stage' in b.roles.find(r => r.id === 'code-reviewer'))); // null deletes the key
+  assert.equal(b.roles.find(r => r.id === 'merger'), undefined);
+});
+
+test('applyCopilotOps: labels / humans / name / stages', () => {
+  const b = applyCopilotOps(fixture(), [
+    { op: 'upsertLabel', label: { name: 'sec:approved', humanGate: true } },
+    { op: 'upsertHuman', human: { id: 'sec-lead', name: 'Security Lead', emits: ['sec:approved'] } },
+    { op: 'setName', name: 'Hardened SDLC' },
+    { op: 'setStages', stages: ['Build', 'Harden'] },
+  ]);
+  assert.ok(b.labels.some(l => l.name === 'sec:approved' && l.humanGate));
+  assert.ok(b.humans.some(h => h.id === 'sec-lead'));
+  assert.equal(b.name, 'Hardened SDLC');
+  assert.deepEqual(b.stages, ['Build', 'Harden']);
+  // upsert replaces in place, no duplicates
+  const again = applyCopilotOps(b, [{ op: 'upsertLabel', label: { name: 'sec:approved' } }]);
+  assert.equal(again.labels.filter(l => l.name === 'sec:approved').length, 1);
+});
+
+test('applyCopilotOps fails fast with a positioned message', () => {
+  assert.throws(() => applyCopilotOps(fixture(), [{ op: 'removeRole', id: 'nope' }]), /op 1 \(removeRole\): role 'nope' not found/);
+  assert.throws(() => applyCopilotOps(fixture(), [{ op: 'patchRole', id: 'merger', patch: { id: 'renamed' } }]), /cannot be changed/);
+  assert.throws(() => applyCopilotOps(fixture(), [{ op: 'addRole', role: { id: 'merger' } }]), /already exists/);
+  assert.throws(() => applyCopilotOps(fixture(), [{ op: 'explode' }]), /unknown operation/);
+  assert.throws(() => applyCopilotOps(fixture(), []), /non-empty/);
+});
+
+test('revision turn: ops reply is applied and gated like a whole bundle', async () => {
+  const requests = [];
+  const out = await runCopilot({
+    bundle: fixture(),
+    messages: [{ role: 'user', content: 'make the reviewer security-aware' }],
+    callLlm: async (req) => {
+      requests.push(req);
+      return JSON.stringify({
+        summary: 'reviewer updated',
+        ops: [{ op: 'patchRole', id: 'code-reviewer', patch: { systemPrompt: 'You also check security.' } }],
+      });
+    },
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.changes, [{ kind: 'role-modified', id: 'code-reviewer' }]);
+  assert.deepEqual(out.bundle.roles.map(r => r.id), FIXTURE.roles.map(r => r.id)); // untouched parts survive structurally
+  assert.match(requests[0].system, /"ops": \[/);          // patch contract offered
+  assert.match(requests[0].system, /reproduce every part/); // whole-bundle fallback documented
+});
+
+test('generation turn keeps the whole-bundle contract (no ops vocabulary)', () => {
+  const request = buildCopilotRequest({
+    bundle: { processTemplateVersion: 1, name: 'Untitled flow', roles: [] },
+    messages: [{ role: 'user', content: 'build it' }],
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.ok(!request.system.includes('"op":"addRole"'));
+  assert.match(request.system, /the COMPLETE bundle, never a fragment/);
+});
+
+test('failed ops application becomes a repairable finding; bundle fallback accepted', async () => {
+  let calls = 0;
+  const out = await runCopilot({
+    bundle: fixture(),
+    messages: [{ role: 'user', content: 'remove the ghost role' }],
+    callLlm: async (req) => {
+      if (++calls === 1) return JSON.stringify({ summary: 'x', ops: [{ op: 'removeRole', id: 'ghost' }] });
+      assert.match(req.messages[req.messages.length - 1].content, /\[invalid-ops\].*ghost.*not found/);
+      return reply(fixture(), 'fell back to the whole bundle');
+    },
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.equal(calls, 2);
+  assert.equal(out.ok, true);
+  assert.equal(out.repairIterations, 1);
+  assert.equal(out.summary, 'fell back to the whole bundle');
+});
+
+// ── chat-history persistence (#1071 item 1) ──────────────────────────────────
+
+test('sanitizeCopilotHistory whitelists fields, demotes proposed, drops junk rows', () => {
+  const out = sanitizeCopilotHistory({
+    messages: [
+      { role: 'user', content: 'build it', retryText: 'secret-ish' },
+      { role: 'assistant', summary: 's', changes: [{ kind: 'role-added', id: 'x' }], lints: [], ok: true, status: 'proposed', bundle: { huge: true }, id: 7 },
+      { role: 'error', message: 'HTTP 502' },
+      'not-an-object',
+    ],
+  });
+  assert.deepEqual(out.messages, [
+    { role: 'user', content: 'build it' },
+    { role: 'assistant', summary: 's', changes: [{ kind: 'role-added', id: 'x' }], lints: [], ok: true, status: 'superseded' },
+  ]);
+});
+
+test('sanitizeCopilotHistory caps at the last N turns and rejects malformed input', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ role: 'user', content: `m${i}` }));
+  const out = sanitizeCopilotHistory({ messages: many });
+  assert.equal(out.messages.length, COPILOT_HISTORY_CAP);
+  assert.equal(out.messages[0].content, `m${30 - COPILOT_HISTORY_CAP}`);
+  assert.equal(sanitizeCopilotHistory(null), undefined);
+  assert.equal(sanitizeCopilotHistory({ messages: 'nope' }), undefined);
+});
+
+test('sanitizeBundle strips the copilot storage key from the portable bundle', () => {
+  const b = sanitizeBundle({ ...fixture(), copilot: { messages: [{ role: 'user', content: 'x' }] } });
+  assert.equal(b.copilot, undefined);
 });

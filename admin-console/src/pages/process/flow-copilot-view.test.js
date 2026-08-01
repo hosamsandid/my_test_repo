@@ -11,6 +11,10 @@ import {
   latestProposal,
   phaseLabel,
   consumeCopilotStream,
+  PERSISTED_HISTORY_CAP,
+  toPersistedMessages,
+  hydrateMessages,
+  proposalNodeDiff,
 } from './flow-copilot-view.js';
 
 test('starter prompts: three chips, whole-flow example first', () => {
@@ -171,4 +175,71 @@ test('consumeCopilotStream survives corrupt lines and a missing trailing newline
     '{"type":"result","ok":false,"summary":"tail"}',
   ]), null);
   assert.equal(result.summary, 'tail');
+});
+
+// ── chat-history persistence (#1071 item 1) ──────────────────────────────────
+
+test('toPersistedMessages projects to durable fields, drops errors and bundles', () => {
+  const out = toPersistedMessages([
+    { id: 1, role: 'user', content: 'build it' },
+    { id: 2, role: 'error', message: 'HTTP 502', retryText: 'build it' },
+    { id: 3, role: 'assistant', summary: 's', changes: [{ kind: 'role-added', id: 'x' }], lints: [], ok: true, status: 'proposed', bundle: { big: 1 }, hasPreview: true },
+  ]);
+  assert.deepEqual(out, [
+    { role: 'user', content: 'build it' },
+    { role: 'assistant', summary: 's', changes: [{ kind: 'role-added', id: 'x' }], ok: true, status: 'superseded' },
+  ]);
+});
+
+test('toPersistedMessages caps to the last N turns', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ role: 'user', content: `m${i}` }));
+  const out = toPersistedMessages(many);
+  assert.equal(out.length, PERSISTED_HISTORY_CAP);
+  assert.equal(out[0].content, `m${30 - PERSISTED_HISTORY_CAP}`);
+});
+
+test('hydrateMessages rebuilds entries with fresh ids; proposals can never revive', () => {
+  let n = 0;
+  const out = hydrateMessages({ messages: [
+    { role: 'user', content: 'build it' },
+    { role: 'assistant', summary: 's', ok: true, status: 'proposed' },
+    { role: 'assistant', summary: 'a', ok: true, status: 'applied' },
+    { role: 'weird' },
+  ] }, () => ++n);
+  assert.equal(out.length, 3);
+  assert.deepEqual(out.map(e => e.id), [1, 2, 3]);
+  assert.equal(out[1].status, 'superseded'); // no bundle survives persistence
+  assert.equal(out[1].bundle, null);
+  assert.equal(out[2].status, 'applied');
+  assert.deepEqual(hydrateMessages(undefined, () => 1), []);
+});
+
+// ── canvas diff-highlighting (#1071 item 2) ──────────────────────────────────
+
+test('proposalNodeDiff classifies added / modified / removed roles and humans', () => {
+  const current = {
+    roles: [
+      { id: 'dev', displayName: 'Developer', systemPrompt: 'a' },
+      { id: 'rev', displayName: 'Reviewer', systemPrompt: 'b' },
+    ],
+    humans: [{ id: 'po', name: 'Product Owner' }],
+  };
+  const proposed = {
+    roles: [
+      { id: 'dev', systemPrompt: 'a', displayName: 'Developer' }, // key order only → unchanged
+      { id: 'sec', displayName: 'Security Reviewer' },
+    ],
+    humans: [{ id: 'po', name: 'Product Owner', emits: ['ready'] }],
+  };
+  const d = proposalNodeDiff(current, proposed);
+  assert.deepEqual(d.added, ['sec']);
+  assert.deepEqual(d.modified, ['po']);
+  assert.deepEqual(d.removed, [{ id: 'rev', name: 'Reviewer' }]);
+});
+
+test('proposalNodeDiff tolerates empty/missing bundles', () => {
+  const d = proposalNodeDiff(null, { roles: [{ id: 'a' }] });
+  assert.deepEqual(d.added, ['a']);
+  assert.deepEqual(d.removed, []);
+  assert.deepEqual(proposalNodeDiff({ roles: [{ id: 'a' }] }, null).removed, [{ id: 'a', name: 'a' }]);
 });

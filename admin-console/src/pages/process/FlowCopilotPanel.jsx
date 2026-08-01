@@ -13,6 +13,8 @@ import {
   latestProposal,
   phaseLabel,
   consumeCopilotStream,
+  toPersistedMessages,
+  hydrateMessages,
 } from './flow-copilot-view';
 
 // FlowCopilotPanel (#1069, spec #1047) — the docked chat rail of the Flow
@@ -26,20 +28,25 @@ import {
 // canvas is the live preview of what the chat produces, so it must stay
 // visible and interactive while chatting (no modal backdrop).
 //
-// Chat history is session-local component state (lost on reload/scope change —
-// acceptable; applied results are durable in the draft; persistence is Phase 4).
+// Chat history persists in the draft file (#1071): hydrated once from the
+// draft's `copilot.messages` and written back as a compact projection after
+// every turn / decision. Proposal bundles are NOT persisted — a reloaded
+// proposal card shows as superseded and the user regenerates.
 //
 // Props:
-//   mode          — 'draft' (chat) | 'team' (notice + Edit-as-draft bridge only)
-//   bundle        — the current draft bundle (draft mode; resent every turn — stateless server)
-//   autoFocus     — focus the composer on mount (the "Describe flow…" entry)
-//   onPreview(p)  — show { bundle, graph, ok } as the canvas proposal preview (null clears)
-//   onApplyBundle — async (bundle) => void; the normal draft write (PUT …/drafts/:id)
-//   onEditAsDraft — team mode: run the existing editAsDraft() bridge
-//   onClose       — close the panel (parent also clears the preview)
-//   actionsRef    — ref the parent's proposal banner uses: { apply, discard, ok } | null
+//   mode            — 'draft' (chat) | 'team' (notice + Edit-as-draft bridge only)
+//   bundle          — the current draft (draft mode; resent every turn — stateless
+//                     server; also carries `copilot.messages` for hydration)
+//   autoFocus       — focus the composer on mount (the "Describe flow…" entry)
+//   onPreview(p)    — show { bundle, graph, ok } as the canvas proposal preview (null clears)
+//   onApplyBundle   — async (bundle, persistedMessages) => void; the normal draft
+//                     write (PUT …/drafts/:id) carrying the history along
+//   onPersistHistory— (persistedMessages) => void; best-effort history-only write
+//   onEditAsDraft   — team mode: run the existing editAsDraft() bridge
+//   onClose         — close the panel (parent also clears the preview)
+//   actionsRef      — ref the parent's proposal banner uses: { apply, discard, ok } | null
 export default function FlowCopilotPanel({
-  mode, bundle, autoFocus, onPreview, onApplyBundle, onEditAsDraft, onClose, actionsRef,
+  mode, bundle, autoFocus, onPreview, onApplyBundle, onPersistHistory, onEditAsDraft, onClose, actionsRef,
 }) {
   const [messages, setMessages] = useState([]);
   const [composer, setComposer] = useState('');
@@ -64,6 +71,20 @@ export default function FlowCopilotPanel({
   useEffect(() => {
     if (autoFocus && textareaRef.current) textareaRef.current.focus();
   }, [autoFocus]);
+
+  // Hydrate the chat once from the draft's persisted history (#1071). Guarded
+  // by a ref: the bundle prop updates on every draft write (including our own
+  // history persists) and must never re-hydrate over live state.
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (mode !== 'draft' || hydratedRef.current || !bundle) return;
+    hydratedRef.current = true;
+    const initial = hydrateMessages(bundle.copilot, nextId);
+    if (initial.length) {
+      messagesRef.current = initial;
+      setMessages(initial);
+    }
+  }, [mode, bundle]);
 
   const setEntry = useCallback((id, patch) => {
     setMessages(ms => ms.map(m => (m.id === id ? { ...m, ...patch } : m)));
@@ -123,21 +144,30 @@ export default function FlowCopilotPanel({
         bundle: body.bundle, hasPreview: !!graph,
       };
       if (body.model) setModel(body.model);
-      // A new proposal retires every older still-actionable card.
-      setMessages(ms => [...supersedePending(ms), entry]);
+      // A new proposal retires every older still-actionable card. Computed
+      // synchronously off the send-time history (the composer is disabled
+      // while busy, so nothing interleaves) and persisted to the draft (#1071).
+      const next = [...supersedePending(history), entry];
+      messagesRef.current = next;
+      setMessages(next);
+      if (onPersistHistory) onPersistHistory(toPersistedMessages(next));
       if (onPreview) onPreview(graph ? { bundle: body.bundle, graph, ok: !!body.ok } : null);
     } finally {
       setBusy(false);
       setPhase(null);
     }
-  }, [busy, mode, bundle, onPreview]);
+  }, [busy, mode, bundle, onPreview, onPersistHistory]);
 
   const apply = useCallback(async (entry) => {
     if (!entry || !entry.ok || applying) return;
     setApplying(true);
     try {
-      await onApplyBundle(entry.bundle);
-      setEntry(entry.id, { status: 'applied', applyError: null });
+      // The applied status rides along in the same draft write (#1071) — one
+      // PUT persists bundle + history atomically.
+      const next = messagesRef.current.map(m => (m.id === entry.id ? { ...m, status: 'applied', applyError: null } : m));
+      await onApplyBundle(entry.bundle, toPersistedMessages(next));
+      messagesRef.current = next;
+      setMessages(next);
       if (onPreview) onPreview(null);
     } catch (e) {
       setEntry(entry.id, { applyError: e.message || 'Apply failed' });
@@ -148,10 +178,13 @@ export default function FlowCopilotPanel({
 
   const discard = useCallback((entry) => {
     if (!entry) return;
-    setEntry(entry.id, { status: 'discarded' });
+    const next = messagesRef.current.map(m => (m.id === entry.id ? { ...m, status: 'discarded' } : m));
+    messagesRef.current = next;
+    setMessages(next);
+    if (onPersistHistory) onPersistHistory(toPersistedMessages(next));
     if (onPreview) onPreview(null);
     if (textareaRef.current) textareaRef.current.focus();
-  }, [onPreview, setEntry]);
+  }, [onPreview, onPersistHistory]);
 
   const retry = useCallback((entry) => {
     // Strip the error row AND the user turn that failed (send() re-appends it —

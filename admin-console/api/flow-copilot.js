@@ -91,19 +91,141 @@ function extractJsonObject(text) {
 }
 
 /**
- * Parse the model's `{ "summary", "bundle" }` reply. Tolerates a bare bundle
- * with no envelope (recognised by its `processTemplateVersion`). Returns
- * { summary, bundle } or null when no JSON object can be recovered.
+ * Parse the model's reply: `{ "summary", "bundle" }` (whole-bundle contract),
+ * `{ "summary", "ops" }` (patch contract on revision turns, #1071), or a bare
+ * bundle with no envelope (recognised by its `processTemplateVersion`). A
+ * bundle wins over ops when both appear — it is the complete state. Returns
+ * { summary, bundle } | { summary, ops } or null when nothing usable exists.
  */
 function parseCopilotResponse(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const obj = extractJsonObject(text);
   if (!obj) return null;
-  const bundle = isPlainObject(obj.bundle)
-    ? obj.bundle
-    : (obj.processTemplateVersion !== undefined ? obj : null);
-  if (!bundle) return null;
-  return { summary: typeof obj.summary === 'string' ? obj.summary.trim() : '', bundle };
+  const summary = typeof obj.summary === 'string' ? obj.summary.trim() : '';
+  if (isPlainObject(obj.bundle)) return { summary, bundle: obj.bundle };
+  if (Array.isArray(obj.ops)) return { summary, ops: obj.ops };
+  if (obj.processTemplateVersion !== undefined) return { summary, bundle: obj };
+  return null;
+}
+
+// ── patch-based incremental edits (#1071 item 3) ─────────────────────────────
+// On revision turns the model answers with a constrained operation list instead
+// of regenerating the whole bundle — smaller outputs, structural preservation
+// of untouched parts. The vocabulary mirrors the editing surface makeDraftOps
+// exposes (roles / labels / stages / gates / humans / name). Application is
+// pure and fail-fast; the result runs through the SAME sanitize → STRICT
+// validate → lint gate as a whole-bundle reply, and a whole-bundle reply stays
+// accepted at any point as the fallback path.
+
+function applyCopilotOps(base, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) throw new Error('ops must be a non-empty array');
+  const b = JSON.parse(JSON.stringify(sanitizeBundle(base) || {}));
+  if (b.processTemplateVersion === undefined) b.processTemplateVersion = 1;
+  b.roles = Array.isArray(b.roles) ? b.roles : [];
+  ops.forEach((op, i) => {
+    const fail = (msg) => {
+      throw new Error(`op ${i + 1} (${isPlainObject(op) && typeof op.op === 'string' ? op.op : '?'}): ${msg}`);
+    };
+    if (!isPlainObject(op) || typeof op.op !== 'string') fail('not an operation object with a string `op`');
+    switch (op.op) {
+      case 'addRole': {
+        const role = isPlainObject(op.role) ? pick(op.role, ROLE_KEYS) : null;
+        if (!role || typeof role.id !== 'string' || !role.id) fail('needs `role` with a string id');
+        if (b.roles.some(r => r && r.id === role.id)) fail(`role '${role.id}' already exists`);
+        b.roles.push(role);
+        break;
+      }
+      case 'patchRole': {
+        const r = b.roles.find(x => x && x.id === op.id);
+        if (!r) fail(`role '${op.id}' not found`);
+        const patch = isPlainObject(op.patch) ? pick(op.patch, ROLE_KEYS) : {};
+        if (!Object.keys(patch).length) fail('needs `patch` with at least one known role key');
+        if ('id' in patch) fail('a role id cannot be changed by patch (remove and re-add instead)');
+        for (const [k, v] of Object.entries(patch)) {
+          if (v === null) delete r[k];
+          else r[k] = v;
+        }
+        break;
+      }
+      case 'removeRole': {
+        const before = b.roles.length;
+        b.roles = b.roles.filter(x => !(x && x.id === op.id));
+        if (b.roles.length === before) fail(`role '${op.id}' not found`);
+        break;
+      }
+      case 'setName':
+        if (typeof op.name !== 'string' || !op.name.trim()) fail('needs a non-empty string `name`');
+        b.name = op.name.trim();
+        break;
+      case 'setDescription':
+        if (typeof op.description !== 'string') fail('needs a string `description`');
+        b.description = op.description;
+        break;
+      case 'setStages':
+        if (!Array.isArray(op.stages) || op.stages.some(s => typeof s !== 'string')) fail('needs `stages` as an array of strings');
+        b.stages = op.stages;
+        break;
+      case 'setGates':
+        if (!Array.isArray(op.gates)) fail('needs `gates` as an array');
+        b.gates = op.gates;
+        break;
+      case 'upsertLabel': {
+        const label = isPlainObject(op.label) && typeof op.label.name === 'string' && op.label.name ? op.label : null;
+        if (!label) fail('needs `label` with a string name');
+        b.labels = Array.isArray(b.labels) ? b.labels : [];
+        const at = b.labels.findIndex(x => x && x.name === label.name);
+        if (at >= 0) b.labels[at] = label; else b.labels.push(label);
+        break;
+      }
+      case 'removeLabel': {
+        const list = Array.isArray(b.labels) ? b.labels : [];
+        b.labels = list.filter(x => !(x && x.name === op.name));
+        if (b.labels.length === list.length) fail(`label '${op.name}' not found`);
+        break;
+      }
+      case 'upsertHuman': {
+        const human = isPlainObject(op.human) && typeof op.human.id === 'string' && op.human.id ? op.human : null;
+        if (!human) fail('needs `human` with a string id');
+        b.humans = Array.isArray(b.humans) ? b.humans : [];
+        const at = b.humans.findIndex(x => x && x.id === human.id);
+        if (at >= 0) b.humans[at] = human; else b.humans.push(human);
+        break;
+      }
+      case 'removeHuman': {
+        const list = Array.isArray(b.humans) ? b.humans : [];
+        b.humans = list.filter(x => !(x && x.id === op.id));
+        if (b.humans.length === list.length) fail(`human '${op.id}' not found`);
+        break;
+      }
+      default:
+        fail('unknown operation');
+    }
+  });
+  return b;
+}
+
+// ── chat-history persistence (#1071 item 1) ──────────────────────────────────
+// The draft file may carry `copilot: { messages: [] }` — pure storage metadata
+// like `id`/`createdAt`, never part of the portable bundle (sanitizeBundle and
+// the export/materialise paths strip it). The draft PUT normalizes it through
+// this helper: whitelisted fields only, capped length, and any still-'proposed'
+// entry demoted to 'superseded' — the proposal's bundle is deliberately not
+// persisted (it would bloat the file; the user regenerates after a reload).
+
+const COPILOT_HISTORY_CAP = 20;
+const HISTORY_ENTRY_KEYS = ['role', 'content', 'summary', 'changes', 'lints', 'ok', 'status'];
+
+function sanitizeCopilotHistory(raw) {
+  if (!isPlainObject(raw) || !Array.isArray(raw.messages)) return undefined;
+  const messages = raw.messages
+    .filter(m => isPlainObject(m) && (m.role === 'user' || m.role === 'assistant'))
+    .map(m => {
+      const entry = pick(m, HISTORY_ENTRY_KEYS);
+      if (entry.status === 'proposed') entry.status = 'superseded';
+      return entry;
+    })
+    .slice(-COPILOT_HISTORY_CAP);
+  return { messages };
 }
 
 // ── evaluate: sanitize → STRICT validate → lint ──────────────────────────────
@@ -212,13 +334,36 @@ function readPromptAddendum() {
 // ── prompt composition ───────────────────────────────────────────────────────
 
 function buildCopilotSystem({ formatDoc, addendum, bundle }) {
-  return [
-    [
-      'You are the Flow Copilot of the Agent Studio Flow Editor. You turn natural-language',
-      'descriptions into a `processTemplateVersion: 1` process-template bundle — a team of AI',
-      'agent roles wired together by labels, GitHub channels, data-flow ports and human gates —',
-      'and you revise an existing bundle on follow-up instructions.',
-      '',
+  // Revision turns (the current bundle already has roles) use the patch
+  // contract (#1071): a minimal op list instead of whole-bundle regeneration —
+  // smaller outputs and structural preservation of untouched parts. The
+  // whole-bundle reply stays the documented fallback.
+  const revision = isPlainObject(bundle) && Array.isArray(bundle.roles) && bundle.roles.length > 0;
+  const contract = revision
+    ? [
+      'Output contract (revision — the current bundle is below):',
+      '- Respond with ONLY one JSON object: {"summary": "…", "ops": [ … ]}. No prose outside it.',
+      '- `summary`: 1–3 sentences describing what you changed, in the language the user wrote in.',
+      '- `ops`: the MINIMAL list of operations that applies the requested change to the current',
+      '  bundle. Untouched parts are preserved structurally — never restate them. Vocabulary',
+      '  (no other `op` values exist):',
+      '  {"op":"addRole","role":{…}} — a full role object (same schema as bundle roles[]).',
+      '  {"op":"patchRole","id":"<roleId>","patch":{…}} — shallow-merges the given role keys; a',
+      '    null value deletes that key; the id itself cannot be changed.',
+      '  {"op":"removeRole","id":"<roleId>"}',
+      '  {"op":"setName","name":"…"} · {"op":"setDescription","description":"…"}',
+      '  {"op":"setStages","stages":[…]} · {"op":"setGates","gates":[…]}',
+      '  {"op":"upsertLabel","label":{"name":"…", …}} · {"op":"removeLabel","name":"…"}',
+      '  {"op":"upsertHuman","human":{"id":"…", …}} · {"op":"removeHuman","id":"…"}',
+      '- Only when the change cannot be expressed as ops (a full restructure), fall back to',
+      '  {"summary": "…", "bundle": { … }} with the COMPLETE bundle — then',
+      '  reproduce every part you were not asked to change verbatim.',
+      '- Write a real `systemPrompt` for every role you add (second person, identity +',
+      '  responsibilities + hand-offs + quality bar) — never leave prompts blank.',
+      '- Never include repository URLs, branch names, tokens, credentials, environment ids or',
+      '  Matrix identities: infrastructure is bound later by a human, outside this bundle.',
+    ]
+    : [
       'Output contract:',
       '- Respond with ONLY one JSON object: {"summary": "…", "bundle": { … }}. No prose outside it.',
       '- `summary`: 1–3 sentences describing what you created or changed, in the language the user wrote in.',
@@ -229,6 +374,15 @@ function buildCopilotSystem({ formatDoc, addendum, bundle }) {
       '  hand-offs + quality bar) — never leave prompts blank.',
       '- Never include repository URLs, branch names, tokens, credentials, environment ids or',
       '  Matrix identities: infrastructure is bound later by a human, outside this bundle.',
+    ];
+  return [
+    [
+      'You are the Flow Copilot of the Agent Studio Flow Editor. You turn natural-language',
+      'descriptions into a `processTemplateVersion: 1` process-template bundle — a team of AI',
+      'agent roles wired together by labels, GitHub channels, data-flow ports and human gates —',
+      'and you revise an existing bundle on follow-up instructions.',
+      '',
+      ...contract,
     ].join('\n'),
     `## Bundle format reference\n\n${formatDoc || '(format reference unavailable)'}`,
     `## Studio wiring conventions\n\n${addendum || '(conventions addendum unavailable)'}`,
@@ -258,11 +412,12 @@ function buildCopilotRequest({ bundle, messages, formatDoc, addendum }) {
 function buildRepairMessage(findings) {
   const lines = findings.map(l => `- [${l.code}] ${l.message}`).join('\n');
   return [
-    'The proposed bundle was rejected by the Studio\'s validator. Fix these errors:',
+    'The proposed change was rejected by the Studio\'s validator. Fix these errors:',
     '',
     lines,
     '',
-    'Return the corrected COMPLETE bundle as {"summary": "…", "bundle": { … }} — JSON only,',
+    'Return the corrected reply — a corrected {"summary": "…", "ops": [ … ]} list when revising,',
+    'or the corrected COMPLETE bundle as {"summary": "…", "bundle": { … }} — JSON only,',
     'changing nothing beyond what the errors require.',
   ].join('\n');
 }
@@ -320,11 +475,25 @@ async function runCopilot({
     const parsed = parseCopilotResponse(text);
     let findings;
     if (!parsed) {
-      findings = [{ code: 'unparseable-output', severity: 'error', message: 'the reply was not a parseable {"summary", "bundle"} JSON object' }];
+      findings = [{ code: 'unparseable-output', severity: 'error', message: 'the reply was not a parseable {"summary", "bundle"} or {"summary", "ops"} JSON object' }];
     } else {
-      const ev = evaluateBundle(parsed.bundle);
-      best = { bundle: ev.bundle, summary: parsed.summary, lints: ev.lints };
-      findings = errorLints(ev.lints);
+      // Patch contract (#1071): apply the op list to the CURRENT bundle; the
+      // result runs through the same gate as a whole-bundle reply. A failed
+      // application becomes a repairable finding, and the model may always
+      // fall back to a whole bundle.
+      let candidate = parsed.bundle || null;
+      let opsError = null;
+      if (!candidate && parsed.ops) {
+        try { candidate = applyCopilotOps(baseBundle, parsed.ops); }
+        catch (err) { opsError = err.message; }
+      }
+      if (!candidate) {
+        findings = [{ code: 'invalid-ops', severity: 'error', message: opsError || 'the ops list could not be applied' }];
+      } else {
+        const ev = evaluateBundle(candidate);
+        best = { bundle: ev.bundle, summary: parsed.summary, lints: ev.lints };
+        findings = errorLints(ev.lints);
+      }
     }
 
     if (!findings.length || attempt === maxRepairIterations) break;
@@ -356,8 +525,11 @@ async function runCopilot({
 
 module.exports = {
   MAX_REPAIR_ITERATIONS,
+  COPILOT_HISTORY_CAP,
   sanitizeBundle,
   parseCopilotResponse,
+  applyCopilotOps,
+  sanitizeCopilotHistory,
   evaluateBundle,
   computeChanges,
   readFormatDoc,

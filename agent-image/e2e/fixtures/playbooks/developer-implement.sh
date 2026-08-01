@@ -1,5 +1,5 @@
 #!/bin/bash
-# Developer playbook (issue #711, §6.2): woken by `issues.labeled` = `ready`, it
+# Developer playbook (issue #711, §6.2): woken by `issues.labeled` = `ready-for-implementation`, it
 # does the Developer's part of the loop — a REAL branch + commit in the workspace
 # clone, then opens a PR on fake-github and labels it `ready-for-review` (the hop
 # that wakes the Code Reviewer). The scripted diff is arbitrary (§6.2): it just

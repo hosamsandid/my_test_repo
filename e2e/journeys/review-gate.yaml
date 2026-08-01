@@ -89,24 +89,28 @@ steps:
       do: flows.expectOutcomeReviewer
       name: Business Analyst
       reviewer: Product Owner
-    screenshot: review-gate-reviewed-by
+    # No screenshot: this assert opens and closes the BA inspector, leaving the
+    # bare canvas — identical to review-gate-path-a. The "reviewed by Product
+    # Owner" detail is carried in the gate-editor slide's notes below.
 
   # D2: editing the triangle opens the ONE review-gate editor with no legacy
   # multi-event migration warning about wiring the engine itself just created.
-  - action:
-      do: flows.openReviewGate
-      gateLabel: ready
   - id: gate-editor
     narrative: |
-      Clicking any edge of the triangle opens the same "Review gate" editor:
-      producer, reviewer, gate label, consumer and the claim — one object, not
-      three disconnected dialogs. And no migration warning: the engine never
-      creates the multi-event listeners it used to warn about.
-    assert:
+      The Business Analyst's "Opens issue" outcome now reads "reviewed by 👤 Product Owner" — a bound human reviewer counts as the consumer, so the false "no consumer" warning that motivated this epic is gone.
+
+      Clicking any edge of the triangle opens the same "Review gate" editor: producer, reviewer, gate label, consumer and the claim — one object, not three disconnected dialogs. And no migration warning: the engine never creates the multi-event listeners it used to warn about.
+    # Capture the editor WHILE it is open: openReviewGate leaves it visible, and
+    # the expectReviewGate assertion (which closes it) runs in the next step —
+    # so the screenshot shows the editor dialog, not the canvas behind it.
+    action:
+      do: flows.openReviewGate
+      gateLabel: ready
+    screenshot: review-gate-editor
+  - assert:
       do: flows.expectReviewGate
       gateLabel: ready
       reviewer: Product Owner
-    screenshot: review-gate-editor
 
   - assert:
       do: flows.expectNoLints
@@ -145,7 +149,9 @@ steps:
       to: Developer
       label: ready
       kind: Issue label
-    screenshot: review-gate-path-b
+    # No screenshot: path B rebuilds the SAME triangle as path A — the canvas is
+    # a near-duplicate of review-gate-path-a. The convergence proof is the
+    # assertion below; this path's story is carried in the notes.
 
   - action:
       do: flows.captureDraftWiring
@@ -172,7 +178,9 @@ steps:
     action:
       do: flows.addRejectionPath
       label: rework
-    screenshot: review-gate-rejection
+    # No screenshot: addRejectionPath closes the editor on a successful add, so a
+    # capture here would show the bare canvas. The rejection-path story is kept
+    # in the notes; the wiring is proven by the assertion below.
   - assert:
       do: flows.expectDraftTrigger
       role: Business Analyst

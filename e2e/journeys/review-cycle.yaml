@@ -171,7 +171,10 @@ steps:
     action:
       do: flows.setLabelBrake
       label: needs-human-decision
-    screenshot: review-cycle-brake
+    # No screenshot: setLabelBrake closes the Label-registry dialog, leaving the
+    # bare canvas — pixel-identical to review-cycle-merge-gate. The escalation /
+    # brake story rides in the merge-gate slide's notes; the "hands off to a
+    # person" readout is proven by the assertion below.
   - assert:
       do: flows.expectHandsOffLine
       name: Reviewer

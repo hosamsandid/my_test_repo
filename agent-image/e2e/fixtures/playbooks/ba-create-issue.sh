@@ -1,7 +1,7 @@
 #!/bin/bash
 # BA playbook (issue #711, §6.2): the Business Analyst's "thinking" for the IBAN
 # story. Woken by a human DM, it creates the GitHub issue the human will then
-# approve with the `ready` label. Content is deliberately minimal — the CI
+# approve with the `ready-for-implementation` label. Content is deliberately minimal — the CI
 # journey proves the wiring, not the prose (the IBAN narrative is for the
 # docs/live lane). Talks to fake-github directly with curl (see _lib.sh).
 set -uo pipefail

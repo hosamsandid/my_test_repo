@@ -218,7 +218,44 @@ function validateKnowledgeEntry(entry) {
   if (entry.supersededBy !== undefined && (typeof entry.supersededBy !== 'string' || !/^[0-9a-f]{12}$/.test(entry.supersededBy))) {
     errors.push('supersededBy must be a 12-char hex entry id when present');
   }
+  // Scoped auto-load triggers (#917). Optional — an entry without them behaves
+  // exactly as today; when present, each trigger is { type: keyword|path,
+  // pattern }. Operator-authored (sidecar-overlaid, like validity), matched at
+  // invocation time by the Python-side scoped-knowledge resolver.
+  if (entry.loadTriggers !== undefined) {
+    if (!Array.isArray(entry.loadTriggers)) {
+      errors.push('loadTriggers must be an array when present');
+    } else {
+      for (const t of entry.loadTriggers) {
+        if (!t || typeof t !== 'object' || !LOAD_TRIGGER_TYPES.includes(t.type)
+          || typeof t.pattern !== 'string' || t.pattern.trim() === '') {
+          errors.push(`loadTriggers entries must be { type: ${LOAD_TRIGGER_TYPES.join('|')}, pattern: <non-empty> }`);
+          break;
+        }
+      }
+    }
+  }
   return { ok: errors.length === 0, errors };
+}
+
+// #917: the closed trigger-type set + a normalizer shared by the sidecar writer.
+// Returns a clean array (deduped, trimmed) or null when nothing valid remains.
+const LOAD_TRIGGER_TYPES = ['keyword', 'path'];
+function normalizeLoadTriggers(input) {
+  if (!Array.isArray(input)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const t of input) {
+    if (!t || typeof t !== 'object') continue;
+    const type = LOAD_TRIGGER_TYPES.includes(t.type) ? t.type : null;
+    const pattern = typeof t.pattern === 'string' ? t.pattern.trim() : '';
+    if (!type || !pattern) continue;
+    const key = `${type}:${pattern.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ type, pattern });
+  }
+  return out.length > 0 ? out : null;
 }
 
 // Build a validated KB entry with defaults filled in. Throws on invalid input
@@ -286,6 +323,9 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
   if (typeof input.supersededBy === 'string' && /^[0-9a-f]{12}$/.test(input.supersededBy)) {
     entry.supersededBy = input.supersededBy;
   }
+  // Scoped auto-load triggers (#917) — normalized, emitted only when non-empty.
+  const triggers = normalizeLoadTriggers(input.loadTriggers);
+  if (triggers) entry.loadTriggers = triggers;
 
   const { ok, errors } = validateKnowledgeEntry(entry);
   if (!ok) {
@@ -303,6 +343,7 @@ const KEY_ORDER = [
   'v', 'id', 'kind', 'text', 'originAgent', 'teamId', 'createdAt',
   'correlationId', 'sessionId', 'sourceRefs', 'convergence', 'tags',
   'status', 'updatedAt', 'summary', 'validFrom', 'validTo', 'supersededBy',
+  'loadTriggers',
 ];
 
 function serializeEntry(entry) {
@@ -694,6 +735,8 @@ module.exports = {
   resolveSkillResyncMode,
   resolveDecayHorizonDays,
   DEFAULT_DECAY_HORIZON_DAYS,
+  LOAD_TRIGGER_TYPES,
+  normalizeLoadTriggers,
   knowledgeCurationConfig,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,

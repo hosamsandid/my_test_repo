@@ -28,7 +28,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity } = require('./knowledge-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
@@ -3881,6 +3881,14 @@ function readValidityFor(teamId) {
   return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
 }
 
+// #917: per-team auto-load trigger sidecar { <id>: loadTriggers[] } — same
+// orchestrator-writes/console-reads posture.
+const KNOWLEDGE_TRIGGERS_DIR = path.join(WORKSPACE, 'knowledge-triggers');
+function readTriggersFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_TRIGGERS_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
 // Gather a team's KB entries from the canonical clone (preferred, fresh) or,
 // when it doesn't exist yet, union the shards from every team agent's checkout.
 // dedupById in the builder converges regardless of how many stale copies we see.
@@ -3938,6 +3946,14 @@ function gatherTeamEntries(teamId) {
     }
   }
   entries = overlayValidity(entries, validity);
+  // #917: auto-load triggers — same authoritative field overlay + legacy merge.
+  const triggers = { ...readTriggersFor(teamId) };
+  if (teamId !== 'default') {
+    for (const [k, v] of Object.entries(readTriggersFor('default'))) {
+      if (!(k in triggers)) triggers[k] = v;
+    }
+  }
+  entries = overlayLoadTriggers(entries, triggers);
   return { entries, warnings };
 }
 
@@ -4128,12 +4144,15 @@ async function augmentRetrievalStats(graph, teamIds) {
     if (node.kind !== 'item') continue;
     const row = byId.get(String(node.id).slice(5));
     if (!row) continue;
-    const a = typeof row.lastSearchAt === 'string' ? row.lastSearchAt : '';
-    const b = typeof row.lastDigestAt === 'string' ? row.lastDigestAt : '';
-    const last = a > b ? a : b;
+    let last = '';
+    for (const k of ['lastSearchAt', 'lastDigestAt', 'lastScopedAt']) {
+      const v = typeof row[k] === 'string' ? row[k] : '';
+      if (v > last) last = v;
+    }
     if (last) node.lastUsedAt = last;
     const hits = (Number.isInteger(row.searchHits) ? row.searchHits : 0)
-      + (Number.isInteger(row.digestCount) ? row.digestCount : 0);
+      + (Number.isInteger(row.digestCount) ? row.digestCount : 0)
+      + (Number.isInteger(row.scopedCount) ? row.scopedCount : 0);
     if (hits > 0) node.usageCount = hits;
     if (Number.isInteger(row.searchHits) && row.searchHits > 0) node.searchHits = row.searchHits;
   }
@@ -4424,6 +4443,29 @@ app.post('/api/knowledge/item/:id/validity', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'validity update failed' });
     res.json({ ok: true, id, validTo: out.validTo ?? null, supersededBy: out.supersededBy ?? null });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set / clear a KB entry's auto-load triggers (#917 scoped knowledge). Proxies
+// to the orchestrator (sidecar writer + canonical re-projection). An empty
+// list clears. Operator-only in v1 — agents don't author triggers.
+app.post('/api/knowledge/item/:id/triggers', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/triggers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, id, loadTriggers: Array.isArray(req.body?.loadTriggers) ? req.body.loadTriggers : [] }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'triggers update failed' });
+    res.json({ ok: true, id, loadTriggers: out.loadTriggers || [] });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

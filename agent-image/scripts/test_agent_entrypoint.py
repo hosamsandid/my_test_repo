@@ -2982,3 +2982,72 @@ class NonconformantTriggerReasonTest(unittest.TestCase):
         self.assertIsNone(entrypoint._nonconformant_trigger_reason(
             {"type": "cron", "events": ["a", "b"]}))
         self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))
+
+
+class BuildScopedKnowledge(unittest.TestCase):
+    """#917 task-scoped knowledge resolver — the single-writer middle layer
+    between the digest and manual search. No JS mirror by design (only the
+    Python runtime knows the prompt); the digest fixture stays untouched."""
+
+    def _e(self, eid, text="use JCL restart logic", triggers=None, **over):
+        d = {"v": 1, "id": eid, "kind": "fact", "text": text,
+             "originAgent": "dev-1", "teamId": "acme",
+             "createdAt": "2026-07-01T10:00:00Z", "convergence": ["dev-1"],
+             "status": "active"}
+        if triggers is not None:
+            d["loadTriggers"] = triggers
+        d.update(over)
+        return d
+
+    def test_keyword_whole_word_match_and_no_match(self):
+        e = self._e("a" * 12, triggers=[{"type": "keyword", "pattern": "jcl"}])
+        hit = entrypoint.build_scoped_knowledge(
+            prompt="Please fix the JCL job for billing", entries=[e])
+        self.assertEqual(hit["includedIds"], ["a" * 12])
+        self.assertIn("matched keyword:`jcl`", hit["markdown"])
+        # whole-word: 'jclx' must not match; nor an unrelated prompt
+        miss = entrypoint.build_scoped_knowledge(prompt="the jclx tool", entries=[e])
+        self.assertEqual(miss["includedIds"], [])
+        self.assertIn("No task-scoped knowledge for this session.", miss["markdown"])
+
+    def test_path_glob_matches_prompt_path_tokens(self):
+        e = self._e("b" * 12, triggers=[{"type": "path", "pattern": "src/jobs/*.jcl"}])
+        prompt = 'GitHub event: {"files": ["src/jobs/billing.jcl", "README.md"]}'
+        hit = entrypoint.build_scoped_knowledge(prompt=prompt, entries=[e])
+        self.assertEqual(hit["includedIds"], ["b" * 12])
+        miss = entrypoint.build_scoped_knowledge(
+            prompt='{"files": ["docs/notes.md"]}', entries=[e])
+        self.assertEqual(miss["includedIds"], [])
+
+    def test_fold_composition_hidden_and_expired_never_load(self):
+        trig = [{"type": "keyword", "pattern": "jcl"}]
+        archived = self._e("c" * 12, triggers=trig, status="archived")
+        expired = self._e("d" * 12, triggers=trig, validTo="2026-07-10T00:00:00Z")
+        active = self._e("e" * 12, triggers=trig)
+        res = entrypoint.build_scoped_knowledge(
+            prompt="jcl work", entries=[archived, expired, active],
+            now="2026-08-01T12:00:00Z")
+        self.assertEqual(res["includedIds"], ["e" * 12])
+
+    def test_budget_converged_first_with_omitted_footer(self):
+        trig = [{"type": "keyword", "pattern": "jcl"}]
+        entries = []
+        for i in range(30):
+            eid = f"{i:012x}"
+            conv = ["a", "b", "c"] if i == 29 else ["a"]
+            entries.append(self._e(eid, text=f"lesson {i} about jcl " + "x" * 200,
+                                   triggers=trig, convergence=conv))
+        res = entrypoint.build_scoped_knowledge(
+            prompt="jcl", entries=entries, budget_tokens=200)
+        self.assertGreater(len(res["omittedIds"]), 0)
+        self.assertEqual(res["matchedCount"], 30)
+        # the converged entry wins the budget race
+        self.assertIn(f"{29:012x}", res["includedIds"])
+        self.assertIn("more matched beyond the scoped budget", res["markdown"])
+        for oid in res["omittedIds"]:
+            self.assertIn(oid, res["markdown"])  # footer names them
+
+    def test_entries_without_triggers_never_load(self):
+        e = self._e("f" * 12)  # no loadTriggers
+        res = entrypoint.build_scoped_knowledge(prompt="anything jcl", entries=[e])
+        self.assertEqual(res["includedIds"], [])

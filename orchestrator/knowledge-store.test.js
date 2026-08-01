@@ -489,3 +489,29 @@ test('#916: validation rejects malformed validity fields, tolerates absent ones'
   const dropped = makeKnowledgeEntry({ ...baseInput, supersededBy: 'nope' }, inject);
   assert.ok(!('supersededBy' in dropped));
 });
+
+// ── #917 auto-load triggers ─────────────────────────────────────────────────
+
+test('#917: loadTriggers round-trip, validation, normalization', () => {
+  const { normalizeLoadTriggers } = require('./knowledge-store');
+  const withTriggers = makeKnowledgeEntry({
+    ...baseInput,
+    loadTriggers: [{ type: 'keyword', pattern: ' jcl ' }, { type: 'path', pattern: 'src/*.jcl' }, { type: 'keyword', pattern: 'JCL' }],
+  }, inject);
+  // normalized: trimmed + case-insensitively deduped
+  assert.deepEqual(withTriggers.loadTriggers, [{ type: 'keyword', pattern: 'jcl' }, { type: 'path', pattern: 'src/*.jcl' }]);
+  const line = serializeEntry(withTriggers);
+  assert.deepEqual(parseEntry(line), withTriggers);
+  assert.equal(Object.keys(JSON.parse(line)).at(-1), 'loadTriggers'); // KEY_ORDER tail
+  // absent input ⇒ no field; invalid shapes rejected by the validator
+  assert.ok(!('loadTriggers' in makeKnowledgeEntry(baseInput, inject)));
+  const good = makeKnowledgeEntry(baseInput, inject);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: 'nope' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'regex', pattern: 'x' }] }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'keyword', pattern: '' }] }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'path', pattern: '*.jcl' }] }).ok, true);
+  // normalizeLoadTriggers: nothing valid ⇒ null (the sidecar clears)
+  assert.equal(normalizeLoadTriggers([]), null);
+  assert.equal(normalizeLoadTriggers([{ type: 'bad', pattern: 'x' }]), null);
+  assert.equal(normalizeLoadTriggers('junk'), null);
+});

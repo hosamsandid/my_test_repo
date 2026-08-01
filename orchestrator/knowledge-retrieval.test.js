@@ -18,12 +18,19 @@ test('validateRetrieval: accepts search/digest with hex ids, stamps server clock
 });
 
 test('validateRetrieval: rejects unknown source, empty/malformed ids, missing clock', () => {
-  assert.equal(validateRetrieval({ source: 'scoped', entryIds: ['a'.repeat(12)] }, { now: NOW }).ok, false); // #917 adds it later
+  assert.equal(validateRetrieval({ source: 'scoped', entryIds: ['a'.repeat(12)] }, { now: NOW }).ok, true); // #917
+  assert.equal(validateRetrieval({ source: 'nope', entryIds: ['a'.repeat(12)] }, { now: NOW }).ok, false);
   assert.equal(validateRetrieval({ source: 'search', entryIds: [] }, { now: NOW }).ok, false);
   assert.equal(validateRetrieval({ source: 'search', entryIds: ['not-hex'] }, { now: NOW }).ok, false);
   assert.equal(validateRetrieval({ source: 'search', entryIds: ['a'.repeat(12)] }, {}).ok, false);
   assert.equal(validateRetrieval(null, { now: NOW }).ok, false);
-  assert.deepEqual(RETRIEVAL_SOURCES, ['search', 'digest']);
+  assert.deepEqual(RETRIEVAL_SOURCES, ['search', 'digest', 'scoped']);
+});
+
+test('applyRetrieval + lastUsedAt: scoped (#917) tracks its own fields and counts as use', () => {
+  const s = applyRetrieval({}, { source: 'scoped', entryIds: ['a'.repeat(12)], ts: NOW });
+  assert.deepEqual(s.entries['a'.repeat(12)], { lastScopedAt: NOW, scopedCount: 1 });
+  assert.equal(lastUsedAt(s.entries['a'.repeat(12)]), NOW);
 });
 
 test('applyRetrieval: search and digest update their own fields; since is first-write-stable', () => {

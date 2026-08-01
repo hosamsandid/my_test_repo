@@ -72,6 +72,21 @@ source (team id), generation timestamp, entry counts per kind, budget usage, and
 the Workspace Browser understands exactly what they are looking at and where it came
 from.
 
+**Level 1.5 — task-scoped auto-load (#917).** The middle layer between the
+evergreen digest and the model's own judgement to search: entries carrying
+operator-set `loadTriggers` (`keyword` = whole-word match on the invocation
+prompt; `path` = glob against the prompt's path-shaped tokens) are injected
+per invocation into a **separate** file, `knowledge-scoped.md`, `@`-imported by
+CLAUDE.md next to the digest. Deliberately **single-writer** (the Python
+runtime — the only place the prompt and the KB meet; the orchestrator seeds an
+empty-state stub so the import never dangles) and therefore **no byte-identity
+mirror**: the digest's promptless pure cores and golden fixture stay untouched.
+Own 1k-token budget, converged-first, with an omitted-footer naming what didn't
+fit; entries fold through `visible_entries` first, so hidden/expired knowledge
+never trigger-loads. Each build reports its injected ids as the `scoped`
+retrieval signal (#915). Transparency: the file is browsable in the Workspace
+Browser and each block names which trigger matched.
+
 **Level 2 — `knowledge search` for the long tail.** Everything beyond the digest
 budget. The memory hint instructs topic-driven search; the CLI already exists.
 

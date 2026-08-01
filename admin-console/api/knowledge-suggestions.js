@@ -977,6 +977,9 @@ function promotionSuggestionView(candidate, draft) {
     note: c.note || null,
     status: c.status || 'open',
     raisedAt: c.raisedAt || null,
+    // #918: at least one member of this cluster was linked by embedding cosine
+    // alone (not word overlap) — the card shows a sanity-check hint.
+    ...(c.semanticMatch ? { semanticMatch: true } : {}),
     draft: {
       name: d.name,
       skillMd: d.skillMd,

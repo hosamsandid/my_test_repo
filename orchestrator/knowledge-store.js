@@ -49,6 +49,9 @@ const DEFAULT_CONVERGENCE_THRESHOLD = 2;
 // same-lesson convergence: distinct lessons about one topic share some
 // vocabulary but are not near-duplicates.
 const DEFAULT_RELATED_THRESHOLD = 0.3;
+// #918: embedding-cosine threshold for the semantic convergence layer —
+// mirrors knowledge-embeddings.DEFAULT_COSINE_THRESHOLD.
+const DEFAULT_COSINE_THRESHOLD = 0.8;
 
 // Curation / full-autonomy defaults (Phase 4). The promotion transitions the
 // gate policy covers, the two gate modes, and their conservative defaults:
@@ -536,7 +539,13 @@ function knowledgeConvergenceConfig(env) {
   if (!Number.isFinite(rel)) rel = DEFAULT_RELATED_THRESHOLD;
   if (rel < 0) rel = 0;
   if (rel > 1) rel = 1;
-  return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel };
+  // #918: embedding-cosine link threshold (same clamp posture). Only consulted
+  // when the semantic layer has vectors — irrelevant (but stable) otherwise.
+  let cos = Number(raw.cosineThreshold);
+  if (!Number.isFinite(cos)) cos = DEFAULT_COSINE_THRESHOLD;
+  if (cos < 0) cos = 0;
+  if (cos > 1) cos = 1;
+  return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel, cosineThreshold: cos };
 }
 
 // Resolve the per-team decay horizon (#919), read off the (override-merged)

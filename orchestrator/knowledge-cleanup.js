@@ -32,7 +32,7 @@ function planTeamKnowledgePurge(teamId, roots = {}) {
   const seg = safeTeamSegment(teamId);
   if (!seg) return null;
 
-  const { cloneRoot, teamsDir, suggestionsDir, archivedDir, reviewDir, retrievalDir, eventsFile } = roots;
+  const { cloneRoot, teamsDir, suggestionsDir, archivedDir, reviewDir, retrievalDir, vectorsDir, eventsFile } = roots;
 
   const dirs = [];
   // Canonical KB clone: <cloneRoot>/<teamId>/ (mirrors canonicalClonePath).
@@ -51,6 +51,8 @@ function planTeamKnowledgePurge(teamId, roots = {}) {
   if (reviewDir) files.push(path.join(reviewDir, `${seg}.json`));
   // Read-side retrieval aggregate (#915) — per-team telemetry dies with the team.
   if (retrievalDir) files.push(path.join(retrievalDir, `${seg}.json`));
+  // Embedding-vector cache (#918) — derived artifacts, recomputable; purged too.
+  if (vectorsDir) files.push(path.join(vectorsDir, `${seg}.jsonl`));
 
   return { teamId: seg, dirs, files, eventsFile: eventsFile || null };
 }

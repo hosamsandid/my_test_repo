@@ -99,6 +99,12 @@ const DEFAULT_EXTEND_CONFIDENCE_FLOOR = 100;
 // above which a new-domain proposal is pushed into the merge/override flow (§3.5).
 const DEFAULT_SKILL_BUDGET = 12;
 
+// #919 automated forgetting. `decayHorizonDays` is the per-team window after
+// which an entry with zero retrievals (#915 aggregate, all sources) gets a
+// RETIRE-SUGGESTION card — proposals only, the human confirms via the same
+// archive path as the manual Retire button (even at autonomy 3). 0 = off.
+const DEFAULT_DECAY_HORIZON_DAYS = 60;
+
 // #781 skill-aggregation Phase 3. `distillAfterAmendments` is X: how many amendments
 // a skill may accrue before the curator proposes (or, at autonomy 3 + auto gate,
 // applies) a distillation pass that re-synthesises the whole document (§3.4). Clamped
@@ -492,6 +498,17 @@ function knowledgeConvergenceConfig(env) {
   return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel };
 }
 
+// Resolve the per-team decay horizon (#919), read off the (override-merged)
+// environment. 0 disables the sweep; a missing/invalid value falls back to the
+// default 60 so existing teams get forgetting-proposals without any config
+// change (AC5). Clamped to a non-negative integer.
+function resolveDecayHorizonDays(env) {
+  const raw = env && env.decayHorizonDays;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return DEFAULT_DECAY_HORIZON_DAYS;
+  return n;
+}
+
 // Resolve the per-team, per-transition promotion gate policy (Phase 4), read off
 // the environment the team shares. Absent transition ⇒ its conservative default;
 // a present-but-invalid mode ⇒ "review" (fail-safe: an unrecognised policy never
@@ -630,7 +647,7 @@ function buildHarvestHint(autonomyLevel) {
 // onto one set of values. They now live in a per-team overrides document; this
 // list is the single authority for which keys are team-owned (used by both the
 // orchestrator writers and the admin-console read path).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
 
 // Overlay a team's knowledge-config overrides onto its environment, producing an
 // env-shaped object the existing pure readers (knowledgeAutonomyLevel,
@@ -675,6 +692,8 @@ module.exports = {
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   resolveSkillResyncMode,
+  resolveDecayHorizonDays,
+  DEFAULT_DECAY_HORIZON_DAYS,
   knowledgeCurationConfig,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,

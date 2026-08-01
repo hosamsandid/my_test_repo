@@ -393,7 +393,7 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
 test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
+    ['decayHorizonDays', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 

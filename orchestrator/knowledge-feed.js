@@ -102,7 +102,9 @@ function buildPromotionCleanupEvent({ teamId, skill, entryIds, auto, ts } = {}) 
 
 // Optional structured reason an operator gives when dismissing a suggestion
 // (#775 §4). Free text is rejected — only this closed set is stored/echoed.
-const DISMISS_REASONS = ['not-relevant', 'already-covered', 'too-specific'];
+// 'retired' is stamped by the #919 decay-card confirm flow (the entry was
+// archived, so the card is resolved), never offered in the manual dialog.
+const DISMISS_REASONS = ['not-relevant', 'already-covered', 'too-specific', 'retired'];
 
 function normalizeDismissReason(reason) {
   return DISMISS_REASONS.includes(reason) ? reason : null;

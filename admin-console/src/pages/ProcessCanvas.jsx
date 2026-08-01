@@ -7,6 +7,7 @@ import StageManager from './process/StageManager';
 import LabelRegistryPanel from './process/LabelRegistryPanel';
 import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
+import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
@@ -107,8 +108,14 @@ function EditableDraftTitle({ name, onRename }) {
 //                        rail's read-only Outcomes tab can hand editing over.
 //   onFocusConsumed   — tell the parent the pendingFocus was applied, so it can
 //                        strip the params and not re-apply a stale selection
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed }) {
-  const navigate = useCallback((s) => { if (onNavigate) onNavigate(s); }, [onNavigate]);
+//   autoOpenCopilot   — open the Flow Copilot panel on mount (#1069) — fed by
+//                        the `?copilot=1` query param ("Describe flow…" entry,
+//                        Edit-as-draft bridge). onNavigate accepts an optional
+//                        second arg `{ copilot: true }` so scope changes that
+//                        should keep the panel open (draft re-key on rename,
+//                        team → draft bridge) can carry the flag.
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false }) {
+  const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
   const teams = useMemo(
@@ -151,6 +158,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // Per-node anomaly counts (#959) — overlaid as a badge on the canvas cards.
   const [anomalyCounts, setAnomalyCounts] = useState({});
 
+  // Flow Copilot (#1069): a docked chat rail; each turn yields a PROPOSAL
+  // { bundle, graph, ok } rendered exactly like the import preview — read-only
+  // graph + banner — until the user applies (normal draft PUT) or discards it.
+  const [copilotOpen, setCopilotOpen] = useState(!!autoOpenCopilot);
+  const [proposal, setProposal] = useState(null); // { bundle, graph, ok }
+  const copilotOpenRef = useRef(copilotOpen);
+  copilotOpenRef.current = copilotOpen;
+  // The panel registers { apply, discard, ok, busy } here so the canvas banner
+  // and the chat card share the same handlers.
+  const copilotActionsRef = useRef(null);
+
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
   const [draftBundle, setDraftBundle] = useState(null);
@@ -183,7 +201,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     if (onDraftsChanged) onDraftsChanged();
     // A rename re-keys the draft (#581): follow the new id so the open selection,
     // the URL scope param and every subsequent save target the live id (AC6).
-    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`);
+    // Carry the copilot flag so an apply that renames the draft (the first
+    // Copilot generation proposes a name) reopens the panel after the remount.
+    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`, { copilot: copilotOpenRef.current });
   }, [draftId, onDraftsChanged, navigate]);
 
   const draftOps = useMemo(
@@ -220,7 +240,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     removeHumanEmit: (id, label) => liveOps.removeHumanEmit(scope, id, label),
   }), [scope]);
 
-  const displayGraph = imported ? imported.graph : isDraft ? draftGraph : graph;
+  // A Copilot proposal wins the display like an imported bundle does — the
+  // canvas is the read-only preview of what the chat produced (#1069).
+  const displayGraph = proposal ? proposal.graph : imported ? imported.graph : isDraft ? draftGraph : graph;
 
   const [selectedId, setSelectedId] = useState(null);
   const [connectPair, setConnectPair] = useState(null); // { from, to } — from may be an actor id (#411)
@@ -264,10 +286,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
   // What this view may do with connections — resolved once per scope from the
   // capability matrix (#409). A draft's derived graph reports level 'template',
-  // so the mode is driven off the scope, not the level.
+  // so the mode is driven off the scope, not the level. A pending Copilot
+  // proposal turns the view read-only exactly like an imported blueprint.
   const caps = useMemo(
-    () => capabilitiesFor(processMode({ isDraft, imported, level: displayGraph?.level })),
-    [isDraft, imported, displayGraph],
+    () => capabilitiesFor(processMode({ isDraft: isDraft && !proposal, imported: imported || proposal, level: displayGraph?.level })),
+    [isDraft, imported, proposal, displayGraph],
   );
 
   useEffect(() => {
@@ -309,10 +332,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }, [anomalyCounts, displayGraph]);
 
   // Clear selection/dialogs when the scope (and thus the graph) changes. A
-  // scope change from the parent also drops any imported blueprint preview.
-  useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported]);
+  // scope change from the parent also drops any imported blueprint preview or
+  // Copilot proposal preview.
+  useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported, proposal]);
   useEffect(() => { setAnomaliesOpen(false); setAnomalyCounts({}); }, [scope]);
-  useEffect(() => { setImported(null); setImportError(null); }, [scope]);
+  useEffect(() => { setImported(null); setImportError(null); setProposal(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the
   // parent-supplied bundle instead of the (now-removed) in-editor file picker.
@@ -371,14 +395,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // to the { id, name, description, stage, emits, consumes } editor shape.
   const selectedHuman = useMemo(() => {
     if (!selectedId) return null;
-    if (isDraft) return (draftBundle?.humans || []).find(h => h.id === selectedId) || null;
+    if (isDraft && !proposal) return (draftBundle?.humans || []).find(h => h.id === selectedId) || null;
     const n = (displayGraph?.nodes || []).find(x => x.id === selectedId && x.kind === 'human');
     if (!n) return null;
     return {
       id: n.id, name: n.displayName || n.id, description: n.description || '',
       stage: n.stage || '', emits: n.emits || [], consumes: n.consumes || [],
     };
-  }, [selectedId, isDraft, draftBundle, displayGraph]);
+  }, [selectedId, isDraft, proposal, draftBundle, displayGraph]);
 
   function afterEdit() { if (!isDraft) refetch(); /* draft re-derives via persist */ }
 
@@ -394,8 +418,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     setRoutingFocus({ tab: section === 'structure' ? 'details' : 'routing', section });
   }
 
-  // Round-trip (#348): open a live team as an editable draft copy.
-  async function editAsDraft() {
+  // Round-trip (#348): open a live team as an editable draft copy. The Copilot
+  // panel's team-scope bridge (#1069) passes `openCopilot: true` so the chat
+  // continues in the new draft (a bare `true` check — the toolbar's onClick
+  // hands the click event in).
+  async function editAsDraft(openCopilot) {
     try {
       const res = await fetch(`/api/process/template?team=${encodeURIComponent(scope)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -405,9 +432,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         processTemplate: { ...tpl, sourceTeamId: scope },
       });
       if (onDraftsChanged) onDraftsChanged();
-      navigate(`draft:${d.id}`);
+      navigate(`draft:${d.id}`, { copilot: openCopilot === true });
     } catch (e) { setImportError(e.message); }
   }
+
+  // Apply a Copilot proposal: the normal draft write — from then on it IS the
+  // draft, editable with every existing dialog. Clearing the preview drops the
+  // canvas back to the (now updated) draft graph.
+  const applyCopilotBundle = useCallback(async (b) => {
+    await persistDraft(b);
+    setProposal(null);
+  }, [persistDraft]);
 
   // Live team: materialize a new role as a team-member immediately (#585) via the
   // existing member-create path — no draft round-trip. The member id mirrors the
@@ -473,7 +508,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    // Outer row: the canvas column + the docked Copilot rail (#1069). The rail
+    // is a flex CHILD, not an overlay — the canvas stays visible and
+    // interactive while chatting (it is the live preview of the chat's output).
+    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -481,21 +520,26 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
           )}
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {caps.readOnlyHint
-              ? caps.readOnlyHint
-              : isDraft
-                ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                : 'Click a node to edit · drag the ● port (agents and sources) to wire a hand-off · click an edge to edit it.'}
+            {proposal
+              ? 'Copilot proposal — read-only preview. Apply it to the draft or discard it, then keep editing.'
+              : caps.readOnlyHint
+                ? caps.readOnlyHint
+                : isDraft
+                  ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+                  : 'Click a node to edit · drag the ● port (agents and sources) to wire a hand-off · click an edge to edit it.'}
           </div>
         </div>
         {isDraft && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
-            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}>Add human</ToolbarButton>
-            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
-            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
+            {/* Structural editing pauses while a Copilot proposal is on screen —
+                the draft underneath is not what the canvas shows. */}
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus} disabled={!!proposal}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User} disabled={!!proposal}>Add human</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers} disabled={!!proposal}>Stages</ToolbarButton>
+            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag} disabled={!!proposal}>Labels</ToolbarButton>
+            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
-              disabled={!draftBundle?.roles?.length}>Materialize…</ToolbarButton>
+              disabled={!!proposal || !draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
         )}
         {isTeamScope && !imported && (
@@ -508,10 +552,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               badge={Object.keys(anomalyCounts).length ? Object.values(anomalyCounts).reduce((a, b) => a + b, 0) : null}>
               Anomalies
             </ToolbarButton>
+            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
           </>
         )}
-        <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported}>Export</ToolbarButton>
+        <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}>Export</ToolbarButton>
       </div>
 
       {/* Imported-bundle banner */}
@@ -549,6 +594,39 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         <div style={{ marginBottom: 'var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{importError}</div>
       )}
 
+      {/* Copilot-proposal banner (#1069) — the pendingImport-style preview
+          contract: read-only graph + an explicit Apply/Discard. The buttons
+          share the panel's handlers (via copilotActionsRef) so card and banner
+          can never disagree; Apply stays disabled on error-level findings. */}
+      {proposal && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <Sparkles size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Proposal from Copilot ({proposal.graph?.nodes?.length || 0} nodes) — review it, then Apply or Discard.
+          </span>
+          <button
+            onClick={() => copilotActionsRef.current?.apply()}
+            disabled={!proposal.ok}
+            title={!proposal.ok ? 'Cannot apply — the proposal still has error-level findings.' : undefined}
+            style={{
+              background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+              borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+              fontWeight: 'var(--eb-font-medium)', cursor: proposal.ok ? 'pointer' : 'not-allowed', opacity: proposal.ok ? 1 : 0.5,
+            }}>Apply</button>
+          <button
+            onClick={() => copilotActionsRef.current?.discard()}
+            style={{
+              background: 'none', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)',
+              borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+              fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+            }}>Discard</button>
+        </div>
+      )}
+
       {/* Graph viewport */}
       <div style={{ position: 'relative', flex: 1, border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)', background: 'var(--eb-bg-app)', overflow: 'hidden' }}>
         <div ref={viewportRef} style={{ width: '100%', height: '100%' }} />
@@ -579,8 +657,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         <HumanNodeInspector
           key={`human:${selectedHuman.id}`}
           human={selectedHuman}
-          stages={isDraft ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
-          ops={isDraft ? draftOps : liveHumanOps}
+          stages={isDraft && !proposal ? (draftBundle?.stages || []) : (displayGraph?.stages || [])}
+          ops={isDraft && !proposal ? draftOps : liveHumanOps}
           triggerOps={ops}
           peers={displayGraph?.nodes || []}
           onClose={() => { setSelectedId(null); graphRef.current?.setSelected(null); }}
@@ -589,8 +667,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
-      {/* Inspector — ONE shared component drives both draft and live modes (#692). */}
-      {isDraft && !selectedHuman && selectedRole && (
+      {/* Inspector — ONE shared component drives both draft and live modes (#692).
+          While a Copilot proposal is previewed, the draft inspector is suppressed
+          (the draft underneath is not what the canvas shows) and nodes open in
+          the read-only template view instead — import-preview parity. */}
+      {isDraft && !proposal && !selectedHuman && selectedRole && (
         <NodeInspector
           key={`${selectedRole.id}:${routingFocus?.outcome || ''}`}
           mode="draft"
@@ -609,7 +690,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           onChanged={() => {}}
         />
       )}
-      {!isDraft && !selectedHuman && selectedNode && (
+      {(!isDraft || proposal) && !selectedHuman && selectedNode && (
         <NodeInspector
           key={`${selectedNode.id}:${routingFocus?.outcome || ''}`}
           mode="live"
@@ -623,7 +704,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           focus={routingFocus}
           ops={liveOps}
           teamId={isTeamScope && !imported ? scope : undefined}
-          level={imported ? 'template' : displayGraph?.level}
+          level={imported || proposal ? 'template' : displayGraph?.level}
           onClose={() => { setSelectedId(null); setRoutingFocus(null); graphRef.current?.setSelected(null); }}
           onChanged={() => refetch()}
         />
@@ -786,6 +867,23 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           onDone={() => { setMaterializeOpen(false); if (imported) setImported(null); }}
         />
       )}
+    </div>
+
+    {/* Flow Copilot rail (#1069). Draft scope chats against the open draft;
+        team scope only offers the Edit-as-draft bridge (no direct live-team
+        mutation, by design). Closing also drops any pending proposal preview. */}
+    {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
+      <FlowCopilotPanel
+        mode={isDraft ? 'draft' : 'team'}
+        bundle={draftBundle}
+        autoFocus={autoOpenCopilot}
+        onPreview={setProposal}
+        onApplyBundle={applyCopilotBundle}
+        onEditAsDraft={() => editAsDraft(true)}
+        onClose={() => { setCopilotOpen(false); setProposal(null); }}
+        actionsRef={copilotActionsRef}
+      />
+    )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload, Sparkles } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
@@ -489,14 +489,18 @@ export default function Briefings() {
   // re-apply a stale selection.
   const focusNode = searchParams.get('node');
   const focusTab = searchParams.get('tab');
+  // Flow Copilot (#1069): `?copilot=1` opens the docked chat panel on mount —
+  // set by the "Describe flow…" entry below and by scope changes that should
+  // keep the panel open (draft re-key on rename, team → draft bridge).
+  const copilotParam = searchParams.get('copilot') === '1';
   const pendingFocus = useMemo(
     () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
     [proc, focusNode, focusTab],
   );
   const clearPendingFocus = useCallback(() => {
     if (!focusNode && !focusTab) return;
-    setSearchParams({ proc }, { replace: true });
-  }, [proc, focusNode, focusTab, setSearchParams]);
+    setSearchParams(copilotParam ? { proc, copilot: '1' } : { proc }, { replace: true });
+  }, [proc, focusNode, focusTab, copilotParam, setSearchParams]);
 
   // The former read-only "Role templates" blueprint scope was removed; an old
   // bookmark on ?proc=templates would otherwise render a broken graph, so drop
@@ -523,10 +527,13 @@ export default function Briefings() {
     persistLastSelected('flow', id);
     setSearchParams({ flow: id });
   }
-  function selectProc(scope) {
+  function selectProc(scope, opts) {
     // 'import' is a transient state (reading a file); don't persist it.
     if (scope !== 'import') persistLastSelected('proc', scope);
-    setSearchParams({ proc: scope });
+    // `opts.copilot` (#1069) keeps the Copilot panel open across a scope change
+    // (draft rename re-key, team → draft bridge) — the panel is component state
+    // inside the (scope-keyed) graph panel, so it only survives via the param.
+    setSearchParams(opts && opts.copilot ? { proc: scope, copilot: '1' } : { proc: scope });
   }
 
   // Restore the last-viewed flow on mount when the URL carries no selection.
@@ -560,6 +567,18 @@ export default function Briefings() {
       const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
+    } catch { /* surfaced elsewhere; keep the list usable */ }
+  }
+
+  // "Describe flow…" (#1069): same empty draft as New flow, but lands with the
+  // Flow Copilot panel open and its composer focused — the natural-language
+  // path to a first flow. The first generation also proposes the draft's name.
+  async function describeFlow() {
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
+      refetchDrafts();
+      persistLastSelected('proc', `draft:${d.id}`);
+      setSearchParams({ proc: `draft:${d.id}`, copilot: '1' });
     } catch { /* surfaced elsewhere; keep the list usable */ }
   }
 
@@ -783,6 +802,22 @@ export default function Briefings() {
                   <Upload size={15} /> {importBusy ? 'Importing…' : 'Import'}
                 </button>
               </div>
+              {/* Third creation entry (#1069): describe the flow in plain
+                  language — opens a fresh draft with the Copilot panel focused. */}
+              <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-1)' }}>
+                <button
+                  onClick={describeFlow}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
+                    border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <Sparkles size={15} /> Describe flow…
+                </button>
+              </div>
               {importError && (
                 <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
                   {importError}
@@ -879,6 +914,7 @@ export default function Briefings() {
                 onImportClosed={closeImportPreview}
                 pendingFocus={pendingFocus}
                 onFocusConsumed={clearPendingFocus}
+                autoOpenCopilot={copilotParam}
               />
             </Suspense>
           ) : !selectedAgent ? (

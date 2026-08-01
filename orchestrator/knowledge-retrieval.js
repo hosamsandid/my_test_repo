@@ -18,9 +18,10 @@
 // lives in orchestrator.js.
 
 // `search` = the agent explicitly looked (also emitted by `knowledge list`);
-// `digest` = inlined into knowledge-digest.md at rebuild. #917 will add
-// `scoped` here when the trigger-based loading layer lands.
-const RETRIEVAL_SOURCES = ['search', 'digest'];
+// `digest` = inlined into knowledge-digest.md at rebuild; `scoped` (#917) =
+// injected into knowledge-scoped.md because an auto-load trigger matched the
+// invocation's task.
+const RETRIEVAL_SOURCES = ['search', 'digest', 'scoped'];
 
 const ID_RE = /^[0-9a-f]{12}$/;
 
@@ -60,6 +61,9 @@ function applyRetrieval(stats, { source, entryIds, ts }) {
     if (source === 'search') {
       row.lastSearchAt = ts;
       row.searchHits = (Number.isInteger(row.searchHits) && row.searchHits >= 0 ? row.searchHits : 0) + 1;
+    } else if (source === 'scoped') {
+      row.lastScopedAt = ts;
+      row.scopedCount = (Number.isInteger(row.scopedCount) && row.scopedCount >= 0 ? row.scopedCount : 0) + 1;
     } else {
       row.lastDigestAt = ts;
       row.digestCount = (Number.isInteger(row.digestCount) && row.digestCount >= 0 ? row.digestCount : 0) + 1;
@@ -72,14 +76,16 @@ function applyRetrieval(stats, { source, entryIds, ts }) {
   };
 }
 
-// The freshest use of one aggregate row, across both signals — what "Last used"
+// The freshest use of one aggregate row, across every signal — what "Last used"
 // renders and what the decay sweep compares against its horizon. Null when the
 // entry has never been retrieved.
 function lastUsedAt(row) {
   const r = row && typeof row === 'object' ? row : {};
-  const a = typeof r.lastSearchAt === 'string' ? r.lastSearchAt : '';
-  const b = typeof r.lastDigestAt === 'string' ? r.lastDigestAt : '';
-  const max = a > b ? a : b;
+  let max = '';
+  for (const k of ['lastSearchAt', 'lastDigestAt', 'lastScopedAt']) {
+    const v = typeof r[k] === 'string' ? r[k] : '';
+    if (v > max) max = v;
+  }
   return max || null;
 }
 

@@ -2075,6 +2075,132 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
     }
 
 
+# ---- Task-scoped knowledge (#917, KM Gap 2) ----
+#
+# The middle layer between the evergreen digest (bulk-injected) and the manual
+# `knowledge search` (agent judgement): entries whose operator-set
+# `loadTriggers` match the CURRENT task load automatically into a separate
+# file, knowledge-scoped.md, `@`-imported by CLAUDE.md next to the digest.
+#
+# SINGLE-WRITER, NO JS MIRROR — deliberately unlike the digest: only the
+# Python runtime ever knows the invocation prompt (the orchestrator's fan-out
+# and seed paths are promptless and only ever write the empty-state stub), so
+# there is exactly one writer and NO byte-identity contract. The digest's
+# mirror doctrine stays clean: its pure cores remain promptless and its golden
+# fixture is untouched.
+
+SCOPED_KNOWLEDGE_FILENAME = "knowledge-scoped.md"  # kept in sync with prompt-assembly.js
+DEFAULT_SCOPED_TOKEN_BUDGET = 1000
+
+_SCOPED_TRIGGER_TYPES = ("keyword", "path")
+
+
+def _prompt_path_tokens(prompt) -> list:
+    """Path-shaped tokens in the task text (trigger prompts embed the GitHub
+    event payload as fenced JSON, so file paths / branch names / repo names all
+    appear as plain tokens containing a slash)."""
+    toks = re.split(r"[\s,;:'\"`()\[\]{}<>|]+", prompt if isinstance(prompt, str) else "")
+    return [t.strip(".") for t in toks if "/" in t.strip(".")]
+
+
+def _scoped_trigger_matches(trigger, prompt, path_tokens) -> bool:
+    """One trigger against one task. `keyword` = case-insensitive whole-word
+    match on the prompt text; `path` = case-insensitive glob against the
+    prompt's path-shaped tokens."""
+    if not isinstance(trigger, dict):
+        return False
+    ttype = trigger.get("type")
+    pattern = trigger.get("pattern")
+    if ttype not in _SCOPED_TRIGGER_TYPES or not isinstance(pattern, str) or not pattern.strip():
+        return False
+    pattern = pattern.strip()
+    if ttype == "keyword":
+        return re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(pattern) + r"(?![A-Za-z0-9_])",
+            prompt if isinstance(prompt, str) else "", re.IGNORECASE,
+        ) is not None
+    import fnmatch
+    low = pattern.lower()
+    return any(fnmatch.fnmatchcase(tok.lower(), low) for tok in path_tokens)
+
+
+def build_scoped_knowledge(*, prompt="", entries=None, now="",
+                           budget_tokens=DEFAULT_SCOPED_TOKEN_BUDGET) -> dict:
+    """Compose knowledge-scoped.md for one invocation. Pure (injected clock).
+
+    Entries fold through fold_visible_entries first (hidden/expired never load —
+    composes with #916); only entries with a matching trigger are injected.
+    Budget priority: converged (count desc) first, then newest; omitted matches
+    are named in a footer so the agent can `knowledge search` them.
+    Returns { markdown, includedIds, matchedCount, omittedIds }.
+    """
+    budget = (budget_tokens
+              if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
+              and budget_tokens > 0 else DEFAULT_SCOPED_TOKEN_BUDGET)
+    visible = fold_visible_entries(entries if entries is not None else [], now=now)
+    path_tokens = _prompt_path_tokens(prompt)
+
+    matched = []  # (entry, trigger)
+    for e in visible:
+        triggers = e.get("loadTriggers")
+        if not isinstance(triggers, list):
+            continue
+        hit = next((t for t in triggers
+                    if _scoped_trigger_matches(t, prompt, path_tokens)), None)
+        if hit is not None:
+            matched.append((e, hit))
+
+    # Converged first (count desc), then newest first — the digest's priority
+    # logic, applied to the matched slice. Stable multi-pass sorts.
+    matched.sort(key=lambda p: p[0].get("id") or "")
+    matched.sort(key=lambda p: p[0].get("createdAt") or "", reverse=True)
+    matched.sort(key=lambda p: -_digest_convergence_count(p[0]))
+
+    header = (
+        "# Task-Scoped Knowledge\n\n"
+        "> GENERATED — do not edit. Auto-built before every run from team knowledge\n"
+        "> whose auto-load triggers match the current task.\n"
+    )
+
+    if not matched:
+        markdown = header + "\nNo task-scoped knowledge for this session.\n"
+        return {"markdown": markdown, "includedIds": [], "matchedCount": 0, "omittedIds": []}
+
+    budget_chars = budget * 4
+    used = 0
+    included = []
+    omitted = []
+    for e, trig in matched:
+        line = (f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} "
+                f"(matched {trig.get('type')}:`{trig.get('pattern')}`, "
+                f"{_digest_convergence_count(e)}×, {_digest_entry_date(e)})")
+        if included and used + _utf16_len(line) + 1 > budget_chars:
+            omitted.append(e)
+            continue
+        if not included and used + _utf16_len(line) + 1 > budget_chars:
+            # Never emit an empty section when something matched: the first
+            # match always fits (a single line can't reasonably bust 4k chars).
+            pass
+        used += _utf16_len(line) + 1
+        included.append((e, line))
+
+    blocks = [header.rstrip("\n")]
+    blocks.append(
+        f"Matched for this task ({len(included)} of {len(matched)}):\n\n"
+        + "\n".join(line for _, line in included)
+    )
+    if omitted:
+        ids = ", ".join(str(e.get("id")) for e in omitted)
+        blocks.append(f"_…{len(omitted)} more matched beyond the scoped budget "
+                      f"— `knowledge search` them by id: {ids}_")
+    return {
+        "markdown": "\n\n".join(blocks) + "\n",
+        "includedIds": [e.get("id") for e, _ in included],
+        "matchedCount": len(matched),
+        "omittedIds": [e.get("id") for e in omitted],
+    }
+
+
 # ---- Knowledge digest IO (pre-invocation rebuild) ----
 
 def _knowledge_checkout_root() -> Path:
@@ -2179,14 +2305,40 @@ def _rebuild_knowledge_digest() -> None:
         # agent's context this invocation — report them as the weak `digest`
         # retrieval signal (once per rebuild, after the atomic write). Strictly
         # best-effort: a telemetry outage must never break the invocation.
-        _report_digest_retrieval(res.get("includedIds") or [])
+        _report_retrieval("digest", res.get("includedIds") or [])
     except Exception as exc:  # noqa: BLE001 — never break an invocation
         print(f"[Runner] knowledge digest rebuild failed: {exc}", file=sys.stderr)
 
 
-def _report_digest_retrieval(included_ids) -> None:
-    """POST {source:"digest", entryIds} to the orchestrator's retrieval endpoint
-    (#915). Fire-and-forget: short timeout, every failure silent."""
+def _rebuild_scoped_knowledge(prompt: str) -> None:
+    """Regenerate knowledge-scoped.md (#917) for THIS invocation — the single
+    writer of the file (only the runtime knows the prompt; the orchestrator
+    seeds a stub). Same gating as the digest rebuild; atomic write; best-effort:
+    any failure leaves the previous file in place and never blocks the run."""
+    try:
+        if _knowledge_autonomy_level() < 1:
+            return
+        root = _knowledge_checkout_root()
+        if not (root / ".git").is_dir():
+            return
+        res = build_scoped_knowledge(
+            prompt=prompt,
+            entries=_read_kb_entries(),
+            now=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+        target = _agent_workdir() / SCOPED_KNOWLEDGE_FILENAME
+        tmp = target.with_suffix(".md.tmp")
+        tmp.write_text(res["markdown"], encoding="utf-8")
+        tmp.replace(target)
+        # #915/#917: report the injected slice as the `scoped` retrieval signal.
+        _report_retrieval("scoped", res.get("includedIds") or [])
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] scoped knowledge rebuild failed: {exc}", file=sys.stderr)
+
+
+def _report_retrieval(source: str, included_ids) -> None:
+    """POST {source, entryIds} to the orchestrator's retrieval endpoint (#915).
+    Fire-and-forget: short timeout, every failure silent."""
     try:
         ids = [i for i in included_ids
                if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)]
@@ -2197,7 +2349,7 @@ def _report_digest_retrieval(included_ids) -> None:
                 or "http://orchestrator:4002").rstrip("/")
         url = f"{base}/internal/agents/{agent_id}/knowledge/retrieval"
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        payload = json.dumps({"source": "digest", "entryIds": ids,
+        payload = json.dumps({"source": source, "entryIds": ids,
                               "hitCount": len(ids), "ts": ts}).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, method="POST",
@@ -2830,6 +2982,9 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
+    # Level 1.5 (#917): task-scoped knowledge for THIS prompt — the one place
+    # in the whole system where the task text and the KB meet.
+    _rebuild_scoped_knowledge(prompt)
     resume_id, resume_requested = _read_session_pointer_full(room_id)
     if resume_id:
         try:

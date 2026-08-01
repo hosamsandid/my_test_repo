@@ -620,3 +620,22 @@ test('#916: overlayValidity is authoritative both ways and identity when empty',
   const bad = overlayValidity([plain], { val1val1val1: { supersededBy: 'nope' } })[0];
   assert.ok(!('supersededBy' in bad));
 });
+
+// ── #917 auto-load trigger overlay ───────────────────────────────────────────
+
+const { overlayLoadTriggers } = require('./knowledge-graph');
+
+test('#917: overlayLoadTriggers is authoritative both ways and identity when empty', () => {
+  const plain = entry({ id: 'trg1trg1trg1' });
+  const carrying = entry({ id: 'trg2trg2trg2', loadTriggers: [{ type: 'keyword', pattern: 'old' }] });
+  assert.equal(overlayLoadTriggers([plain], {})[0], plain); // identity
+  const applied = overlayLoadTriggers([plain], { trg1trg1trg1: [{ type: 'keyword', pattern: 'jcl' }] })[0];
+  assert.deepEqual(applied.loadTriggers, [{ type: 'keyword', pattern: 'jcl' }]);
+  // id absent from the sidecar ⇒ stale field stripped
+  const stripped = overlayLoadTriggers([carrying], {})[0];
+  assert.ok(!('loadTriggers' in stripped));
+  // item view surfaces the field ([] default)
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries: [applied], agents: [], now: NOW });
+  const node = g.nodes.find((n) => n.kind === 'item' && n.id.includes('trg1trg1trg1'));
+  assert.deepEqual(node.loadTriggers, [{ type: 'keyword', pattern: 'jcl' }]);
+});

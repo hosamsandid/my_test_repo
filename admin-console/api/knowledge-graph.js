@@ -237,6 +237,29 @@ function overlayValidity(entries, validity = {}) {
   });
 }
 
+// Apply the operator-set auto-load triggers at READ time (#917) — the exact
+// posture of overlayValidity: the sidecar is the only writer, so it is
+// authoritative both ways (id in map → field set; id absent → field stripped).
+// Identity when the map is empty and no entry carries the field.
+function overlayLoadTriggers(entries, triggers = {}) {
+  const map = triggers && typeof triggers === 'object' ? triggers : {};
+  const list = Array.isArray(entries) ? entries : [];
+  return list.map((e) => {
+    if (!e || typeof e !== 'object' || typeof e.id !== 'string') return e;
+    const t = map[e.id];
+    if (Array.isArray(t) && t.length > 0) {
+      if (e.loadTriggers === t) return e;
+      return { ...e, loadTriggers: t };
+    }
+    if (e.loadTriggers !== undefined) {
+      const next = { ...e };
+      delete next.loadTriggers;
+      return next;
+    }
+    return e;
+  });
+}
+
 // The inverse of foldReview for the review-queue endpoint: the deduped set of
 // entries whose latest copy is pending/rejected, newest first, as item views.
 // `only` optionally narrows to one status ("pending" | "rejected").
@@ -311,6 +334,8 @@ function toItem(e, now = '') {
     validTo: typeof e.validTo === 'string' ? e.validTo : null,
     supersededBy: typeof e.supersededBy === 'string' ? e.supersededBy : null,
     expired: entryExpired(e, now),
+    // #917: operator-set auto-load triggers ([] when none).
+    loadTriggers: Array.isArray(e.loadTriggers) ? e.loadTriggers : [],
     convergence,
     convergenceCount: convergence.length,
     converged: convergence.length >= 2,
@@ -477,6 +502,13 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
       convergenceCount: it.convergenceCount,
       converged: it.converged,
       archived: it.archived,
+      // #916 bitemporal validity + #917 auto-load triggers — the item card's
+      // expired/auto-load chips and the reveal view read these off the node.
+      validFrom: it.validFrom,
+      validTo: it.validTo,
+      supersededBy: it.supersededBy,
+      expired: it.expired,
+      loadTriggers: it.loadTriggers,
       provenance: it.provenance,
     });
     // T0→T1: one harvested edge per convergence contributor → the fan-in that
@@ -625,6 +657,7 @@ module.exports = {
   entryExpired,
   overlayStatuses,
   overlayValidity,
+  overlayLoadTriggers,
   selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,

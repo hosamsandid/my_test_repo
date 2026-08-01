@@ -371,6 +371,22 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
+  // #917: persist an entry's auto-load triggers; reload posture mirrors
+  // setItemValidity, but keeps the detail rail open (re-fetches the item).
+  const setItemTriggers = useCallback((id, teamId, loadTriggers) => {
+    return fetch(`/api/knowledge/item/${encodeURIComponent(id)}/triggers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, loadTriggers }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => {
+        const t = (teams || []).find(x => x.id === teamId);
+        loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+        return openItem(id, teamId);
+      })
+      .catch(() => {});
+  }, [teams, loadTeamData, openItem]);
+
   // Bulk retire / un-retire for the overview table. Each id is flipped
   // independently (already-in-target-state ids are filtered out by the caller,
   // so this never errors on a no-op), then the team slice is reloaded once.
@@ -600,6 +616,7 @@ export default function KnowledgeFlow() {
               onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)}
               onArchive={(id, teamId, archived) => archiveItem(id, teamId ?? selected.teamId, archived)}
               onValidity={(id, teamId, validTo) => setItemValidity(id, teamId ?? selected.teamId, validTo)}
+              onTriggers={(id, teamId, loadTriggers) => setItemTriggers(id, teamId ?? selected.teamId, loadTriggers)}
               onOpenItem={(id, teamId) => openItem(id, teamId ?? selected.teamId)}
             />
           </div>
@@ -2623,6 +2640,13 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
         {item.expired && !item.archived && (
           <span title={`No longer valid since ${(item.validTo || '').slice(0, 10)} — dropped from the digest, search and active graph; kept in git`} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>expired</span>
         )}
+        {(item.loadTriggers || []).length > 0 && (
+          <span
+            title={`Auto-loads into the agent's context when a task matches: ${item.loadTriggers.map(t => `${t.type}:${t.pattern}`).join(', ')}`}
+            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)', cursor: 'help' }}>
+            auto-load
+          </span>
+        )}
         {item.converged && (
           <span
             title={`${item.convergenceCount} agents learned this independently of each other — a strong signal it’s true and important. Converged knowledge is what gets suggested as a skill.`}
@@ -4072,7 +4096,7 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
 
 /* ── Provenance drill-down (right rail) ─────────────────────────────────────── */
 
-function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onOpenItem }) {
+function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onTriggers, onOpenItem }) {
   const { entry, links } = detail;
   const archived = entry.status === 'archived';
   const promoted = entry.status === 'promoted';
@@ -4080,6 +4104,24 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onOpe
   const expired = typeof entry.validTo === 'string' && entry.validTo !== '' && entry.validTo < new Date().toISOString();
   const [validDate, setValidDate] = useState((entry.validTo || '').slice(0, 10));
   useEffect(() => { setValidDate((entry.validTo || '').slice(0, 10)); }, [entry.id, entry.validTo]);
+  // #917: local editing state for the auto-load triggers; Save persists the list.
+  const savedTriggers = Array.isArray(entry.loadTriggers) ? entry.loadTriggers : [];
+  const [triggers, setTriggers] = useState(savedTriggers);
+  const [newType, setNewType] = useState('keyword');
+  const [newPattern, setNewPattern] = useState('');
+  useEffect(() => {
+    setTriggers(Array.isArray(entry.loadTriggers) ? entry.loadTriggers : []);
+    setNewPattern('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry.id]);
+  const triggersDirty = JSON.stringify(triggers) !== JSON.stringify(savedTriggers);
+  const addTrigger = () => {
+    const pattern = newPattern.trim();
+    if (!pattern) return;
+    if (triggers.some(t => t.type === newType && t.pattern.toLowerCase() === pattern.toLowerCase())) { setNewPattern(''); return; }
+    setTriggers([...triggers, { type: newType, pattern }]);
+    setNewPattern('');
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
@@ -4167,6 +4209,54 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onOpe
             </div>
           )}
         </Lineage>
+        {onTriggers && (
+          <Lineage label="Auto-load when…">
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginBottom: 4 }}
+              title="Trigger patterns (#917): when an incoming task matches, this lesson is injected into the agent's knowledge-scoped.md for that session — visible in the Workspace Browser. No triggers = today's behaviour.">
+              {triggers.length === 0 ? 'No triggers — loads only via digest or search.' : 'Injected when the task matches:'}
+            </div>
+            {triggers.map((t, i) => (
+              <div key={`${t.type}:${t.pattern}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '1px 8px', borderRadius: 'var(--eb-radius-full)' }}>
+                  {t.type}: {t.pattern}
+                </span>
+                <button onClick={() => setTriggers(triggers.filter((_, j) => j !== i))} title="Remove this trigger" style={{ ...miniBtn, padding: '0 6px' }}>✕</button>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 4, marginTop: 4, alignItems: 'center' }}>
+              <select value={newType} onChange={e => setNewType(e.target.value)} style={{ ...inp, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+                <option value="keyword">keyword</option>
+                <option value="path">path</option>
+              </select>
+              <input
+                value={newPattern}
+                onChange={e => setNewPattern(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addTrigger()}
+                placeholder={newType === 'path' ? 'e.g. src/jobs/*.jcl' : 'e.g. jcl'}
+                style={{ ...inp, flex: 1, padding: '2px 6px', fontSize: 'var(--eb-text-xs)' }}
+              />
+              <button onClick={addTrigger} disabled={!newPattern.trim()} style={{ ...miniBtn }}>Add</button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              {(entry.tags || []).length > 0 && triggers.length === 0 && (
+                <button
+                  onClick={() => setTriggers((entry.tags || []).map(tag => ({ type: 'keyword', pattern: tag })))}
+                  title="Pre-fill keyword triggers from this entry's tags — you confirm with Save, nothing is derived silently"
+                  style={{ ...miniBtn }}>
+                  Derive from tags
+                </button>
+              )}
+              {triggersDirty && (
+                <button
+                  onClick={() => onTriggers(entry.id, entry.teamId, triggers)}
+                  title="Save the trigger list"
+                  style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+                  Save triggers
+                </button>
+              )}
+            </div>
+          </Lineage>
+        )}
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           {entry.teamId} · {entry.createdAt}{entry.status && entry.status !== 'active' ? ` · ${entry.status}` : ''}
         </div>

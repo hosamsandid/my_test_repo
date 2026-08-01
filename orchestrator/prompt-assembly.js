@@ -282,14 +282,24 @@ function knowledgeDigestSection(digestRef) {
   if (!digestRef) return "";
   return (
     `## Team Knowledge (digest)\n\n` +
-    `@${digestRef}\n\n` +
-    "The import above inlines the generated digest of your team's shared knowledge base, " +
+    `@${digestRef}\n` +
+    `@${SCOPED_KNOWLEDGE_FILENAME}\n\n` +
+    "The first import inlines the generated digest of your team's shared knowledge base, " +
     "so it is part of your context from the start of every session (regenerated before every " +
-    "run and whenever the team's knowledge changes — never edit the file itself). Anything " +
-    'beyond the digest budget is reachable with `knowledge search "<topic>"`; record new ' +
+    "run and whenever the team's knowledge changes — never edit the file itself). The second " +
+    "inlines task-scoped knowledge (#917): entries whose operator-set auto-load triggers " +
+    "match the current task, rebuilt before every run — empty when nothing matches. Anything " +
+    'beyond these is reachable with `knowledge search "<topic>"`; record new ' +
     "durable lessons with `knowledge add`."
   );
 }
+
+// #917: the task-scoped knowledge file — a SEPARATE file from the digest with a
+// SINGLE writer (the Python runtime, which alone knows the invocation prompt).
+// The digest's byte-identity mirror contract is deliberately untouched; the
+// orchestrator only ever seeds the empty-state stub so this import never
+// dangles. Keep the filename in sync with agent-entrypoint.py.
+const SCOPED_KNOWLEDGE_FILENAME = "knowledge-scoped.md";
 
 function blueprintSection(blueprintId) {
   if (!blueprintId) return "";
@@ -548,4 +558,5 @@ module.exports = {
   TRIGGER_SECTION,
   MEMORY_SECTION_UNIFIED,
   KNOWN_BASE_HEADINGS,
+  SCOPED_KNOWLEDGE_FILENAME,
 };

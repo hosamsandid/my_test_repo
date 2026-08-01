@@ -90,7 +90,11 @@ KEY_ORDER = (
     "v", "id", "kind", "text", "originAgent", "teamId", "createdAt",
     "correlationId", "sessionId", "sourceRefs", "convergence", "tags",
     "status", "updatedAt", "summary", "validFrom", "validTo", "supersededBy",
+    "loadTriggers",
 )
+
+# #917: the closed auto-load trigger-type set (mirrors knowledge-store.js).
+LOAD_TRIGGER_TYPES = ("keyword", "path")
 
 
 def resolve_team_id_from_config(cfg):
@@ -202,6 +206,15 @@ def validate_entry(entry):
     if "supersededBy" in entry and (not isinstance(entry.get("supersededBy"), str)
                                     or not re.fullmatch(r"[0-9a-f]{12}", entry["supersededBy"])):
         errors.append("supersededBy must be a 12-char hex entry id when present")
+    # Scoped auto-load triggers (#917) — optional; each { type, pattern }.
+    if "loadTriggers" in entry:
+        lt = entry.get("loadTriggers")
+        if not isinstance(lt, list) or any(
+            not isinstance(t, dict) or t.get("type") not in LOAD_TRIGGER_TYPES
+            or not isinstance(t.get("pattern"), str) or t["pattern"].strip() == ""
+            for t in lt
+        ):
+            errors.append("loadTriggers entries must be { type: keyword|path, pattern: <non-empty> }")
     return len(errors) == 0, errors
 
 

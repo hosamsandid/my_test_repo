@@ -20,6 +20,7 @@ const {
   resolvePromotionGates,
   knowledgeCurationConfig,
   resolveDecayHorizonDays,
+  normalizeLoadTriggers,
   mergeTeamKnowledgeConfig,
   buildDefaultManifest,
   kindFilePath,
@@ -49,7 +50,7 @@ const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
-const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
+const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
@@ -131,6 +132,9 @@ const KNOWLEDGE_VALIDITY_DIR = "/workspace/knowledge-validity";
 // Per-team read-side retrieval aggregate (#915): one compact JSON per team, one
 // row per entry (never an unbounded log, never a line in events.jsonl).
 const KNOWLEDGE_RETRIEVAL_DIR = "/workspace/knowledge-retrieval";
+// Per-team auto-load trigger sidecar (#917): { <canonicalId>: loadTriggers[] },
+// overlaid as a FIELD onto the canonical entry at re-projection (like validity).
+const KNOWLEDGE_TRIGGERS_DIR = "/workspace/knowledge-triggers";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -2497,6 +2501,21 @@ function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
   const tmp = target + ".tmp";
   fs.writeFileSync(tmp, markdown);
   fs.renameSync(tmp, target);
+  // #917: guarantee the scoped-knowledge stub exists so the CLAUDE.md
+  // `@`-import never dangles. STUB ONLY — the orchestrator never has the
+  // invocation prompt; the Python runtime is the single real writer and
+  // overwrites this before every run. Never overwrite an existing file (it may
+  // hold the last invocation's real matches, which the operator can browse).
+  const scoped = path.join(agentDir(id), SCOPED_KNOWLEDGE_FILENAME);
+  if (!fs.existsSync(scoped)) {
+    fs.writeFileSync(
+      scoped,
+      "# Task-Scoped Knowledge\n\n" +
+      "> GENERATED — do not edit. Auto-built before every run from team knowledge\n" +
+      "> whose auto-load triggers match the current task.\n\n" +
+      "No task-scoped knowledge for this session.\n",
+    );
+  }
 }
 
 // ── Legacy-memory migration (Memory/Knowledge unification, Phase 3) ─────────
@@ -3531,6 +3550,55 @@ function recordKnowledgeRetrieval(teamId, report) {
   return { entries: report.entryIds.length, source: report.source };
 }
 
+// Per-team operator auto-load triggers (#917): { <canonicalId>: loadTriggers[] }.
+// Same shared-volume JSON-per-team pattern as the validity sidecar; applied as
+// a field at each canonical re-projection so the agent-side scoped resolver
+// reads them straight off the canonical clone.
+function _triggersPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_TRIGGERS_DIR, `${seg}.json`);
+}
+
+function readKnowledgeTriggers(teamId) {
+  const p = _triggersPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch { return {}; }
+}
+
+function writeKnowledgeTriggers(teamId, map) {
+  const p = _triggersPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_TRIGGERS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
+// Set / clear a canonical KB entry's auto-load triggers (#917, operator-
+// initiated via the item card). Empty/invalid list clears. Re-projects like the
+// validity setter so the canonical clone — the file the Python resolver reads —
+// carries the field immediately. Best-effort on the git side.
+function setKnowledgeTriggers(teamId, id, loadTriggers) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  const clean = normalizeLoadTriggers(loadTriggers);
+  const map = readKnowledgeTriggers(teamId);
+  if (clean) map[id] = clean; else delete map[id];
+  writeKnowledgeTriggers(teamId, map);
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] triggers re-projection for '${teamId}' failed: ${err.message}`));
+  } catch (err) {
+    console.warn(`[Orchestrator] triggers re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, loadTriggers: clean || [] };
+}
+
 // Per-team operator review decisions for supervised-review mode: a map
 // { <canonicalId>: "approved" | "rejected" }. Same shared-volume JSON-per-team
 // pattern as the archived-id set. An id absent from the map is "pending" while
@@ -3734,6 +3802,8 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // Operator-set validity windows (#916) — same durable-sidecar pattern, applied
   // as fields (not a status) in _serializeCanonicalKind.
   const validityOverlay = readKnowledgeValidity(teamId);
+  // Operator-set auto-load triggers (#917) — same pattern.
+  const triggersOverlay = readKnowledgeTriggers(teamId);
 
   // Supervised-review overlay: when review mode is on, a canonical entry the
   // operator has not yet approved is stamped status:"pending" (held out of the
@@ -3794,7 +3864,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     const file = path.join(storeRoot, rel);
     const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
       pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds, summaries: resolvedSummaries,
-      validity: validityOverlay,
+      validity: validityOverlay, triggers: triggersOverlay,
     });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -4062,7 +4132,7 @@ function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshol
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
 function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
-  const { pendingIds, rejectedIds, summaries, validity } = review;
+  const { pendingIds, rejectedIds, summaries, validity, triggers } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -4105,6 +4175,13 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) 
         if (typeof vv.supersededBy === "string" && /^[0-9a-f]{12}$/.test(vv.supersededBy)) patch.supersededBy = vv.supersededBy;
         if (Object.keys(patch).length > 0) entry = { ...entry, ...patch };
       }
+    }
+    // Auto-load trigger overlay (#917): same sidecar-sourced field posture as
+    // validity — the canonical line carries the operator-authored triggers so
+    // the agent-side scoped resolver reads them off its checkout.
+    if (triggers) {
+      const tt = normalizeLoadTriggers(triggers[e.id]);
+      if (tt) entry = { ...entry, loadTriggers: tt };
     }
     out.push(serializeKnowledgeEntry(entry));
   }
@@ -10744,6 +10821,27 @@ async function main() {
           const id = String(p.id || '');
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           const result = setKnowledgeValidity(teamId, id, { validTo: p.validTo ?? null, supersededBy: p.supersededBy ?? null });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set / clear a KB entry's auto-load triggers (#917 scoped knowledge) ─────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/triggers') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = setKnowledgeTriggers(teamId, id, p.loadTriggers);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

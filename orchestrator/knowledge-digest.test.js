@@ -28,14 +28,28 @@ test('constants', () => {
 
 test('foldVisibleEntries: last writer wins, hidden statuses dropped, stable sort', () => {
   const folded = foldVisibleEntries(FIXTURE.entries);
-  // 5 distinct ids, one hidden (merged) → 4 visible
-  assert.equal(folded.length, 4);
+  // 7 distinct ids, one hidden (merged) → 6 visible (no clock ⇒ nothing expires)
+  assert.equal(folded.length, 6);
   assert.deepEqual(folded.map((e) => e.id), [
     'ddd000000004', 'aaa000000001', 'bbb000000002', 'ccc000000003',
+    'fff000000006', 'abc000000007',
   ]);
   // The canonical copy (updatedAt newer, convergence grown to 3) won the fold.
   const conv = folded.find((e) => e.id === 'aaa000000001');
   assert.equal(convergenceCount(conv), 3);
+});
+
+test('foldVisibleEntries: expired entries fold out with the injected clock (#916)', () => {
+  // fff…6 has validTo 2026-07-10 — before the fixture cases' generatedAt — so it
+  // expires; abc…7's future validTo keeps it visible. Same rule in all four
+  // fold mirrors (CLI, graph, digest JS+Py, canonical readers).
+  const folded = foldVisibleEntries(FIXTURE.entries, '2026-07-13T09:00:00Z');
+  assert.equal(folded.length, 5);
+  assert.ok(!folded.some((e) => e.id === 'fff000000006'));
+  assert.ok(folded.some((e) => e.id === 'abc000000007'));
+  // exactly on the boundary: validTo === now is NOT yet expired
+  const boundary = foldVisibleEntries(FIXTURE.entries, '2026-07-10T00:00:00Z');
+  assert.ok(boundary.some((e) => e.id === 'fff000000006'));
 });
 
 test('foldVisibleEntries: entries without id are skipped', () => {
@@ -65,9 +79,10 @@ test('includedIds lists the selected entries in render order', () => {
     generatedAt: '2026-07-13T09:00:00Z',
     entries: FIXTURE.entries,
   });
-  // Conventions first, then converged, then recent (newest first).
+  // Conventions first, then converged, then recent (newest first). The expired
+  // fff…6 entry (#916) is folded out by generatedAt; still-valid abc…7 is in.
   assert.deepEqual(res.includedIds, [
-    'aaa000000001', 'bbb000000002', 'ccc000000003', 'ddd000000004',
+    'aaa000000001', 'bbb000000002', 'abc000000007', 'ccc000000003', 'ddd000000004',
   ]);
 });
 

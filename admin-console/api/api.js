@@ -28,7 +28,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
@@ -3861,6 +3861,7 @@ function knowledgeTeamByAgent() {
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
 const KNOWLEDGE_REVIEW_DIR = path.join(WORKSPACE, 'knowledge-review');
+const KNOWLEDGE_VALIDITY_DIR = path.join(WORKSPACE, 'knowledge-validity');
 
 function readArchivedIdsFor(teamId) {
   const arr = readJsonFile(path.join(KNOWLEDGE_ARCHIVED_DIR, `${path.basename(teamId)}.json`), []);
@@ -3869,6 +3870,14 @@ function readArchivedIdsFor(teamId) {
 
 function readReviewDecisionsFor(teamId) {
   const obj = readJsonFile(path.join(KNOWLEDGE_REVIEW_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
+// #916: per-team validity sidecar { <id>: { validTo?, supersededBy? } } — the
+// orchestrator is the writer; read here so the overlay holds even when the
+// canonical clone's re-projection lags.
+function readValidityFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_VALIDITY_DIR, `${path.basename(teamId)}.json`), {});
   return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
 }
 
@@ -3920,6 +3929,15 @@ function gatherTeamEntries(teamId) {
   }
   const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
+  // #916: validity is a field overlay (never a status) — same legacy-'default'
+  // merge as the archive store so pre-re-homing decisions still hold.
+  const validity = { ...readValidityFor(teamId) };
+  if (teamId !== 'default') {
+    for (const [k, v] of Object.entries(readValidityFor('default'))) {
+      if (!(k in validity)) validity[k] = v;
+    }
+  }
+  entries = overlayValidity(entries, validity);
   return { entries, warnings };
 }
 
@@ -4322,6 +4340,35 @@ app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'archive failed' });
     res.json({ ok: true, id, archived });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set / clear a KB entry's validity window (#916 bitemporal validity). Proxies
+// to the orchestrator (sidecar writer + canonical re-projection). Setting
+// validTo expires the entry everywhere active on that date; null/'' clears it
+// (idempotent round trip). supersededBy records semantic replacement and never
+// by itself hides the entry.
+app.post('/api/knowledge/item/:id/validity', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamId, id,
+        validTo: typeof req.body?.validTo === 'string' ? req.body.validTo : null,
+        supersededBy: typeof req.body?.supersededBy === 'string' ? req.body.supersededBy : null,
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'validity update failed' });
+    res.json({ ok: true, id, validTo: out.validTo ?? null, supersededBy: out.supersededBy ?? null });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

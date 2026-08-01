@@ -241,6 +241,17 @@ is the whole compatibility story: the model was designed for it (`convergence[]`
 `status` incl. `merged`/`promoted`, `updatedAt` all already in the Phase-0
 schema), Phase 3 just populates it.
 
+**Expiry fold (#916 bitemporal validity).** "Hidden" carries one time-dependent
+clause besides the status folds: an id whose latest copy has `validTo` before the
+injected clock folds out of every active view exactly like `archived` — the
+digest injects `generatedAt`, the `knowledge` CLI and the graph builders pass
+wall-clock at the call site (the pure cores have no clock). One rule, four
+mirrors (CLI `visible_entries`, graph `foldExpired`, digest JS+Py
+`foldVisibleEntries`, canonical readers); a plain ISO string comparison in all of
+them. `supersededBy` is the *semantic-replacement* link and stays disjoint from
+the merge's `mergedInto`: merging is dedup of the same lesson, supersession is a
+newer fact replacing an outdated one — and supersession alone never hides.
+
 ---
 
 ## 5. `promote(from → to)` (decision d)

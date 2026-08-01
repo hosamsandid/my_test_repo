@@ -110,7 +110,7 @@ function entryTime(e) {
 // Drop every copy of an id whose LATEST copy (by updatedAt/createdAt) has a status
 // the predicate hides. Shared by foldArchived + foldReview: same latest-per-id
 // tie-break, only the hidden-status test differs. Identity when nothing matches.
-function foldByStatus(entries, isHidden) {
+function foldByLatest(entries, isHiddenEntry) {
   const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === 'object') : [];
   const latest = new Map();
   for (const e of list) {
@@ -120,13 +120,38 @@ function foldByStatus(entries, isHidden) {
     if (!prev || entryTime(e) >= entryTime(prev)) latest.set(id, e);
   }
   const hiddenIds = new Set();
-  for (const [id, e] of latest) if (isHidden(e.status)) hiddenIds.add(id);
+  for (const [id, e] of latest) if (isHiddenEntry(e)) hiddenIds.add(id);
   if (hiddenIds.size === 0) return list;
   return list.filter((e) => !(typeof e.id === 'string' && hiddenIds.has(e.id)));
 }
 
+function foldByStatus(entries, isHidden) {
+  return foldByLatest(entries, (e) => isHidden(e.status));
+}
+
 function foldArchived(entries) {
   return foldByStatus(entries, (s) => s === 'archived');
+}
+
+// ---------------------------------------------------------------------------
+// Expiry folding (#916 bitemporal validity)
+// ---------------------------------------------------------------------------
+
+// An entry whose validTo lies before the injected `now` is no longer current.
+// Field-derived (never a status); ISO-8601 UTC strings compare lexicographically
+// == chronologically, so this is a plain string comparison — identical in all
+// four fold mirrors (knowledge CLI, digest JS+Py, this module). No `now` ⇒
+// never expired (the pure cores have no clock).
+function entryExpired(e, now) {
+  const vt = e && typeof e.validTo === 'string' ? e.validTo : '';
+  return vt !== '' && typeof now === 'string' && now !== '' && vt < now;
+}
+
+// Drop every copy of an id whose LATEST copy has expired — exactly the archived
+// fold's latest-per-id semantics, keyed on the validTo field instead of status.
+// Identity when nothing is expired (or no clock is supplied).
+function foldExpired(entries, now) {
+  return foldByLatest(entries, (e) => entryExpired(e, now));
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +199,40 @@ function overlayStatuses(entries, { archivedIds = [], decisions = {}, reviewOn =
       return e.status === 'pending' || e.status === 'rejected' ? { ...e, status: 'active' } : e;
     }
     if (reviewOn) return e.status === 'pending' ? e : { ...e, status: 'pending' };
+    return e;
+  });
+}
+
+// Apply the operator-set validity window at READ time (#916) — the field-overlay
+// sibling of overlayStatuses: the orchestrator persists {entryId: {validTo?,
+// supersededBy?}} in a per-team sidecar and stamps the fields onto the canonical
+// file at re-projection; this re-derives the same fields over raw shard reads so
+// validity holds even when the git-sync side lags. The sidecar is the ONLY
+// writer of these fields, so it is authoritative both ways: an id present in
+// the map gets exactly the map's fields; an id absent has them stripped (a
+// stale canonical copy can't keep an entry expired after the operator cleared
+// it). Identity when the map is empty and no entry carries the fields.
+function overlayValidity(entries, validity = {}) {
+  const map = validity && typeof validity === 'object' ? validity : {};
+  const list = Array.isArray(entries) ? entries : [];
+  return list.map((e) => {
+    if (!e || typeof e !== 'object' || typeof e.id !== 'string') return e;
+    const v = map[e.id];
+    if (v && typeof v === 'object') {
+      const validTo = typeof v.validTo === 'string' && v.validTo.trim() ? v.validTo.trim() : null;
+      const supersededBy = typeof v.supersededBy === 'string' && /^[0-9a-f]{12}$/.test(v.supersededBy) ? v.supersededBy : null;
+      if (e.validTo === (validTo || undefined) && e.supersededBy === (supersededBy || undefined)) return e;
+      const next = { ...e };
+      if (validTo) next.validTo = validTo; else delete next.validTo;
+      if (supersededBy) next.supersededBy = supersededBy; else delete next.supersededBy;
+      return next;
+    }
+    if (e.validTo !== undefined || e.supersededBy !== undefined) {
+      const next = { ...e };
+      delete next.validTo;
+      delete next.supersededBy;
+      return next;
+    }
     return e;
   });
 }
@@ -227,7 +286,7 @@ function normStrArray(arr) {
 // Turn a raw KB entry into the item view the graph exposes (convergence surfaced,
 // provenance grouped). originAgent falls back to the first convergence id so a
 // hand-authored entry without the field still anchors an edge.
-function toItem(e) {
+function toItem(e, now = '') {
   const convergence = normStrArray(e.convergence);
   const originAgent =
     typeof e.originAgent === 'string' && e.originAgent.trim()
@@ -247,6 +306,11 @@ function toItem(e) {
     archived: e.status === 'archived',
     pending: e.status === 'pending',
     rejected: e.status === 'rejected',
+    // #916 bitemporal validity: validFrom semantically defaults to createdAt.
+    validFrom: typeof e.validFrom === 'string' ? e.validFrom : null,
+    validTo: typeof e.validTo === 'string' ? e.validTo : null,
+    supersededBy: typeof e.supersededBy === 'string' ? e.supersededBy : null,
+    expired: entryExpired(e, now),
     convergence,
     convergenceCount: convergence.length,
     converged: convergence.length >= 2,
@@ -292,14 +356,17 @@ function buildKnowledgeGraph({ scope, entries = [], skills = [], agents = [], no
   const parsed = parseScope(scope);
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
 
-  // includeArchived keeps status:"archived" entries visible (so the operator can
-  // find + unarchive them); the default view folds them out.
-  // Fold pipeline: merges → archived (unless includeArchived) → review-held
-  // (pending/rejected always fold out of the active graph; they live in the
-  // review queue). Each fold is identity when its status isn't present.
+  // includeArchived keeps status:"archived" AND expired entries visible (so the
+  // operator can find + unarchive/re-validate them — the item's `expired` flag
+  // distinguishes the two); the default view folds both out (#916: one reveal
+  // toggle, "Show retired & expired").
+  // Fold pipeline: merges → archived+expired (unless includeArchived) →
+  // review-held (pending/rejected always fold out of the active graph; they
+  // live in the review queue). Each fold is identity when nothing matches.
+  const nowIso = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
   const merged = foldMerges(entries);
-  const afterArchive = includeArchived ? merged : foldArchived(merged);
-  const allItems = dedupById(foldReview(afterArchive)).map(toItem);
+  const afterArchive = includeArchived ? merged : foldExpired(foldArchived(merged), nowIso);
+  const allItems = dedupById(foldReview(afterArchive)).map((e) => toItem(e, nowIso));
   const agentMeta = new Map(
     (Array.isArray(agents) ? agents : [])
       .filter((a) => a && typeof a.id === 'string')
@@ -522,7 +589,8 @@ function summarizeKnowledge({ scope, entries = [], now = Date.now() } = {}) {
   const nowMs = typeof now === 'number' ? now : Date.parse(now) || Date.now();
   // Held (pending/rejected) entries aren't in the curated KB yet, so a badge
   // must not count them as "learned" — fold them out like archived.
-  const items = dedupById(foldReview(foldArchived(foldMerges(entries)))).map(toItem);
+  const nowIso = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const items = dedupById(foldReview(foldExpired(foldArchived(foldMerges(entries)), nowIso))).map(toItem);
   let scoped;
   if (parsed.kind === 'agent') {
     scoped = items.filter((it) => it.originAgent === parsed.id || it.convergence.includes(parsed.id));
@@ -553,7 +621,10 @@ module.exports = {
   foldMerges,
   foldArchived,
   foldReview,
+  foldExpired,
+  entryExpired,
   overlayStatuses,
+  overlayValidity,
   selectReviewQueue,
   buildKnowledgeGraph,
   summarizeKnowledge,

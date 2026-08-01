@@ -121,6 +121,10 @@ const KNOWLEDGE_ARCHIVED_DIR = "/workspace/knowledge-archived";
 // Per-team operator review decisions (supervised-review mode). One JSON map per
 // team { <canonicalId>: "approved"|"rejected" }; an absent id is "pending".
 const KNOWLEDGE_REVIEW_DIR = "/workspace/knowledge-review";
+// Per-team bitemporal-validity sidecar (#916). One JSON map per team
+// { <canonicalId>: { validTo?, supersededBy? } }, overlaid as FIELDS onto the
+// canonical entry at re-projection (status untouched — readers derive "expired").
+const KNOWLEDGE_VALIDITY_DIR = "/workspace/knowledge-validity";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -3366,6 +3370,31 @@ function writeArchivedIds(teamId, list) {
   fs.writeFileSync(p, JSON.stringify([...new Set(Array.isArray(list) ? list : [])], null, 2));
 }
 
+// Per-team operator validity windows (#916): a map { <canonicalId>: { validTo?,
+// supersededBy? } }. Same shared-volume JSON-per-team pattern as the archived-id
+// set; overlaid as fields (never a status) at each canonical re-projection.
+function _validityPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_VALIDITY_DIR, `${seg}.json`);
+}
+
+function readKnowledgeValidity(teamId) {
+  const p = _validityPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch { return {}; }
+}
+
+function writeKnowledgeValidity(teamId, map) {
+  const p = _validityPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_VALIDITY_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
 // Per-team operator review decisions for supervised-review mode: a map
 // { <canonicalId>: "approved" | "rejected" }. Same shared-volume JSON-per-team
 // pattern as the archived-id set. An id absent from the map is "pending" while
@@ -3566,6 +3595,9 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
   const archivedCanonicalIds = new Set(readArchivedIds(teamId));
+  // Operator-set validity windows (#916) — same durable-sidecar pattern, applied
+  // as fields (not a status) in _serializeCanonicalKind.
+  const validityOverlay = readKnowledgeValidity(teamId);
 
   // Supervised-review overlay: when review mode is on, a canonical entry the
   // operator has not yet approved is stamped status:"pending" (held out of the
@@ -3626,6 +3658,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     const file = path.join(storeRoot, rel);
     const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
       pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds, summaries: resolvedSummaries,
+      validity: validityOverlay,
     });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -3893,7 +3926,7 @@ function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshol
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
 function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
-  const { pendingIds, rejectedIds, summaries } = review;
+  const { pendingIds, rejectedIds, summaries, validity } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -3922,6 +3955,20 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) 
     // byte-identical to the pre-#635 projection.
     if (summaries && summaries.has(e.id)) {
       entry = { ...entry, summary: summaries.get(e.id) };
+    }
+    // Bitemporal-validity overlay (#916): FIELDS on the canonical entry, never a
+    // status — the line keeps status:"active" and readers derive "expired" from
+    // validTo. Sidecar-sourced (shards never carry these), so clearing = the id
+    // leaving the sidecar ⇒ the fields simply aren't re-applied. Empty sidecar ⇒
+    // byte-identical projection.
+    if (validity) {
+      const vv = validity[e.id];
+      if (vv && typeof vv === "object") {
+        const patch = {};
+        if (typeof vv.validTo === "string" && vv.validTo.trim() !== "") patch.validTo = vv.validTo.trim();
+        if (typeof vv.supersededBy === "string" && /^[0-9a-f]{12}$/.test(vv.supersededBy)) patch.supersededBy = vv.supersededBy;
+        if (Object.keys(patch).length > 0) entry = { ...entry, ...patch };
+      }
     }
     out.push(serializeKnowledgeEntry(entry));
   }
@@ -4020,6 +4067,55 @@ function archiveKnowledgeEntry(teamId, id, archived) {
     console.warn(`[Orchestrator] archive re-projection for '${teamId}' failed: ${err.message}`);
   }
   return { id, archived: !!archived };
+}
+
+// Set / clear a canonical KB entry's validity window (#916, operator-initiated).
+// Non-destructive field overlay: updates the per-team validity sidecar, then
+// re-runs the collector so the canonical file is re-projected with the fields +
+// committed (git audit). Unlike archive there is NO promoted-entry guard —
+// expiring a promoted entry is allowed (AC5): the skill stays, the source entry
+// expires. `validTo` accepts a date (YYYY-MM-DD, normalized to the END of that
+// day so "valid until X" includes X) or a full ISO timestamp; null/'' clears.
+// `supersededBy` records semantic replacement (fact B replaces outdated fact A)
+// and NEVER by itself hides the old entry (AC4) — deliberately distinct from the
+// convergence merge's `mergedInto`. Best-effort on the git side.
+function setKnowledgeValidity(teamId, id, { validTo = null, supersededBy = null } = {}) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  let normalizedTo = null;
+  if (typeof validTo === "string" && validTo.trim() !== "") {
+    const raw = validTo.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) normalizedTo = `${raw}T23:59:59Z`;
+    else if (!Number.isNaN(Date.parse(raw))) normalizedTo = raw;
+    else throw new Error("validTo must be an ISO date or timestamp");
+  }
+  let normalizedBy = null;
+  if (typeof supersededBy === "string" && supersededBy.trim() !== "") {
+    if (!/^[0-9a-f]{12}$/.test(supersededBy.trim())) throw new Error("supersededBy must be a 12-char hex entry id");
+    normalizedBy = supersededBy.trim();
+  }
+  const map = readKnowledgeValidity(teamId);
+  if (!normalizedTo && !normalizedBy) {
+    delete map[id];
+  } else {
+    map[id] = {
+      ...(normalizedTo ? { validTo: normalizedTo } : {}),
+      ...(normalizedBy ? { supersededBy: normalizedBy } : {}),
+    };
+  }
+  writeKnowledgeValidity(teamId, map);
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  // Re-project + commit so the change is reflected + git-audited (and the digest
+  // fan-out picks it up immediately). Best-effort, mirrors archiveKnowledgeEntry.
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`));
+  } catch (err) {
+    console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, validTo: normalizedTo, supersededBy: normalizedBy };
 }
 
 // Explicit, operator-initiated removal of the source KB entries a freshly-written
@@ -10450,6 +10546,27 @@ async function main() {
           const id = String(p.id || '');
           if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
           const result = archiveKnowledgeEntry(teamId, id, p.archived !== false);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set / clear a KB entry's validity window (#916 bitemporal validity) ─────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/validity') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = setKnowledgeValidity(teamId, id, { validTo: p.validTo ?? null, supersededBy: p.supersededBy ?? null });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {

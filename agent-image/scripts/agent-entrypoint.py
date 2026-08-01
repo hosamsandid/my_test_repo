@@ -1914,10 +1914,19 @@ def _digest_convergence_count(e) -> int:
     return len(c) if isinstance(c, list) and c else 1
 
 
-def fold_visible_entries(entries) -> list:
+def _digest_entry_expired(e, now) -> bool:
+    """Bitemporal expiry (#916): field-derived, plain ISO string comparison —
+    identical in all four fold mirrors. No `now` ⇒ never expired."""
+    vt = e.get("validTo") if isinstance(e, dict) else None
+    return (isinstance(vt, str) and vt != ""
+            and isinstance(now, str) and now != "" and vt < now)
+
+
+def fold_visible_entries(entries, now="") -> list:
     """Collapse copies by id (last writer wins; ties keep the last seen, which
     is the canonical file since callers read shards before canonical), drop
-    hidden statuses. Mirrors foldVisibleEntries() in knowledge-digest.js."""
+    hidden statuses and expired entries (#916 — `now` is the injected clock,
+    the digest's generated_at). Mirrors foldVisibleEntries() in knowledge-digest.js."""
     latest: dict = {}
     order: list = []
     for e in entries if isinstance(entries, list) else []:
@@ -1930,7 +1939,8 @@ def fold_visible_entries(entries) -> list:
         elif _digest_entry_time(e) >= _digest_entry_time(latest[eid]):
             latest[eid] = e
     out = [latest[eid] for eid in order
-           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES]
+           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES
+           and not _digest_entry_expired(latest[eid], now)]
     # Same concatenated-string sort key as the JS comparator.
     out.sort(key=lambda e: f"{e.get('createdAt') or ''} {e.get('id') or ''}")
     return out
@@ -1971,7 +1981,7 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
     budget = (budget_tokens
               if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
               and budget_tokens > 0 else DEFAULT_DIGEST_TOKEN_BUDGET)
-    visible = fold_visible_entries(entries if entries is not None else [])
+    visible = fold_visible_entries(entries if entries is not None else [], now=generated_at)
 
     # Tier 1: all conventions, chronological (fold order is (createdAt, id)).
     conventions = [e for e in visible if e.get("kind") == "convention"]

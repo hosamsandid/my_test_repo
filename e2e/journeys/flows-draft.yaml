@@ -73,9 +73,12 @@ steps:
       I press Generate agent prompt, and the Studio turns my one-line note into a complete, well-structured system prompt for the role. It lays out the Business Analyst's core responsibilities — engage the human to clarify requirements before writing anything, ask focused questions about acceptance criteria and edge cases, convert confirmed requirements into a structured GitHub issue, and only post it once the human approves.
 
       That's a genuinely usable persona, drafted in seconds. And nothing is applied silently — it lands in an editable field, so I can review and adjust it before committing. I click Add agent, and the Business Analyst becomes the first node on my canvas.
+    # No screenshot here: the generated prompt lands in the SAME "Add agent"
+    # panel as flow-add-agent (only the prompt textarea differs), so a capture
+    # would be a near-duplicate. The generation is described in the notes of the
+    # add-agent slide instead.
     action:
       do: flows.generateAgentPrompt
-    screenshot: flow-generated-prompt
 
   - action:
       do: flows.confirmAddAgent
@@ -155,6 +158,12 @@ steps:
       As a final touch, I turn on Stages, and the flow organises itself into labelled bands: Requirements, containing the Business Analyst, and Build, containing the Developer. Stages are purely an organising layer — they group the agents into the phases of your process and make a larger flow readable at a glance, while the hand-off between them, our human-gated ready issue, stays exactly as we drew it.
 
       This is the finished draft. From here, one click on Materialize would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.
+    # Turn the stage-band view ON so the capture actually shows the Requirements/
+    # Build bands the narrative describes — without this the canvas is identical
+    # to flow-issue-channel (the stages are assigned but not rendered as bands).
+    action:
+      do: flows.showStages
+      stage: Requirements
     assert:
       do: flows.expectMaterializeAvailable
     screenshot: flow-stages

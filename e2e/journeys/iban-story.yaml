@@ -5,7 +5,7 @@ order: 30
 # CI + live (docs/journey-spec-concept.md §3.1, §6.2). Same YAML both ways:
 #   - `ci`   — runs on the fake stack (fake-claude playbooks + in-stack
 #              fake-github + git-remote). It asserts the PLATFORM WIRING: that a
-#              human `ready` label carries work hand-off to hand-off through the
+#              human `ready-for-implementation` label carries work hand-off to hand-off through the
 #              whole Core SDLC loop. It does NOT assert agent intelligence — the
 #              role "thinking" is scripted by the fake-claude playbooks
 #              (agent-image/e2e/fixtures/playbooks/); the diff content is arbitrary.
@@ -78,7 +78,7 @@ steps:
     narrative: |
       I describe the request to the Business Analyst in plain language: the transfer form should validate the IBAN. In the live demo the BA pushes back first — it asks the six product questions that genuinely need a human decision (validate on blur or submit? block or warn? what if the service is down? …) — and only then, with my answers in hand, finalizes the work item.
 
-      The result is a GitHub issue written in two layers: a plain-language Human Section any stakeholder can read, and an Agent Section with a problem statement, scope and numbered, testable acceptance criteria. It also states the hand-off rule: add the `ready` label when you want the Developer to pick it up. Until then, nothing happens — that's the first of the two human control points.
+      The result is a GitHub issue written in two layers: a plain-language Human Section any stakeholder can read, and an Agent Section with a problem statement, scope and numbered, testable acceptance criteria. It also states the hand-off rule: add the `ready-for-implementation` label when you want the Developer to pick it up. Until then, nothing happens — that's the first of the two human control points.
     action:
       do: chat.send
       text: "Our SEPA transfer form accepts any text in the IBAN field and always reports success. It should validate the IBAN against a public service before the transfer can go through."
@@ -91,25 +91,27 @@ steps:
       do: gh.expectIssueExists
       repo: e2e/fixture
 
-  # ── Slide 12: control point 1 — the human applies `ready` ───────────────────
+  # ── Slide 12: control point 1 — the human applies `ready-for-implementation` ─
   - id: human-approves
     voiceover: |
-      Here's the human control point. On GitHub I open the labels menu and apply ready. This label is a deliberate human gate — no agent can set it. By adding it, I approve what gets built, and the moment I do, it becomes an event the platform is listening for.
+      Here's the human control point. On GitHub I open the labels menu and apply ready-for-implementation. This label is a deliberate human gate — no agent can set it. By adding it, I approve what gets built, and the moment I do, it becomes an event the platform is listening for.
     narrative: |
-      This is the human go-signal: I open the Labels menu and apply `ready`. This label is deliberately a human gate — no agent sets it. By adding it, I'm approving what gets built. The moment I do, it becomes a GitHub event the platform is listening for — and that event is what wakes the next agent in the chain.
-    # The test acts as the human here — applying `ready` to the issue the BA just
-    # filed (number-agnostic: it labels the newest issue in the repo).
+      This is the human go-signal: I open the Labels menu and apply `ready-for-implementation`. This label is deliberately a human gate — no agent sets it. By adding it, I'm approving what gets built. The moment I do, it becomes a GitHub event the platform is listening for — and that event is what wakes the next agent in the chain.
+    # The test acts as the human here — applying `ready-for-implementation` to the
+    # issue the BA just filed (number-agnostic: it labels the newest issue in the
+    # repo). This label is the Developer's derived github-event channel trigger
+    # (core-sdlc: developer reacts to issues.labeled=ready-for-implementation).
     action:
       do: gh.applyLabelToLatestIssue
       repo: e2e/fixture
-      label: ready
+      label: ready-for-implementation
 
   # ── Slide 13: the Developer wakes and delivers ──────────────────────────────
   - id: developer-wakes
     voiceover: |
-      The ready label fired a trigger, and the Developer woke up automatically — no one opened this chat to prompt it. It implemented the whole change on its own: a testable client, the validation states wired into the form, passing tests, a green build — then opened a pull request and labelled it ready-for-review. The Developer never reviews or merges its own work.
+      The ready-for-implementation label fired a trigger, and the Developer woke up automatically — no one opened this chat to prompt it. It implemented the whole change on its own: a testable client, the validation states wired into the form, passing tests, a green build — then opened a pull request and labelled it ready-for-review. The Developer never reviews or merges its own work.
     narrative: |
-      The `ready` label fired a GitHub trigger, and the Developer agent woke up automatically — the trigger event is visible right in its chat, delivered over the session stream. No one opened this chat to prompt it; the label alone set it in motion. The Developer then does the whole implementation on its own — a feature branch, the change, tests — opens a Pull Request and labels it `ready-for-review`. The hand-off is again just a label, and that label is what will wake the Code Reviewer. The Developer never reviews or merges its own work.
+      The `ready-for-implementation` label fired a GitHub trigger, and the Developer agent woke up automatically — the trigger event is visible right in its chat, delivered over the session stream. No one opened this chat to prompt it; the label alone set it in motion. The Developer then does the whole implementation on its own — a feature branch, the change, tests — opens a Pull Request and labels it `ready-for-review`. The hand-off is again just a label, and that label is what will wake the Code Reviewer. The Developer never reviews or merges its own work.
     # Hop 2 — issues.labeled woke the Developer: assert the trigger.fired event on
     # the Developer's own session SSE stream (the "trigger visible in its chat").
     assert:

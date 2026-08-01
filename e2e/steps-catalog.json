@@ -974,6 +974,21 @@
       "example": "- action:\n    do: flows.setOutcomeMode\n    name: Dispatcher\n    mode: exactlyOne"
     },
     {
+      "name": "flows.showStages",
+      "module": "flows",
+      "description": "Turn ON the canvas stage-band view so a screenshot shows the assigned agents grouped into labelled bands (the state the flows-draft narrative describes), instead of the ungrouped graph. Two \"Stages\" controls exist: the first (in the top action bar) opens the StageManager dialog (cf. addStage); the second is the canvas band-toggle. Clicks the band-toggle and waits for a band header to render. Idempotent-ish: if the bands are already shown it is a no-op click guarded by the header check.",
+      "params": [
+        {
+          "name": "stage",
+          "required": false,
+          "type": "string",
+          "default": "Requirements",
+          "description": "A stage name expected to appear"
+        }
+      ],
+      "example": "- action:\n    do: flows.showStages\n    stage: Requirements"
+    },
+    {
       "name": "flows.suggestOutcomes",
       "module": "flows",
       "description": "Press \"Suggest outcomes…\" on the open Routing tab (#828) → POST /api/agent-outcomes/suggest (mock LLM in the E2E stack, heuristic fallback). Waits for the proposal to land highlighted-unconfirmed — nothing is persisted until Save, so this alone is the \"decline persists nothing\" path.",

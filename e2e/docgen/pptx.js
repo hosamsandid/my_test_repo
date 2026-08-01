@@ -30,15 +30,29 @@ const SLIDE_H = 7.5;
 
 // Build the ordered slide model. For each journey (already sorted by the loader
 // on `order` then id): one section slide (its title), then one content slide per
-// step that has narrative and/or a slide visual. `manifestsById` maps journeyId →
-// its run manifest (or null); it resolves a step's `screenshot: <name>` to the
-// captured file, exactly as render.js does for the Markdown page.
+// step that carries a slide VISUAL (a captured screenshot, or a concept step's
+// static `visual` asset). `manifestsById` maps journeyId → its run manifest (or
+// null); it resolves a step's `screenshot: <name>` to the captured file, exactly
+// as render.js does for the Markdown page.
+//
+// Speaker text is never its own slide. A step's narrative goes verbatim into the
+// speaker notes of a screenshot slide — its own, preceded by any narrative from
+// prose-only steps that ran before it (intros lead into the visual they set up).
+// Narrative left over at the end of a journey (trailing recaps, or a whole
+// journey that captured no screenshot) is folded onto the last visual slide, or
+// — when the journey has no visual at all — onto the section divider's notes. So
+// every authored word survives in the notes and the deck carries no prose-only
+// body slides (§3.2: "narrative goes into speaker notes").
 function buildDeckModel(journeys, manifestsById = {}) {
   const slides = [];
   for (const journey of journeys) {
-    slides.push({ type: 'section', journeyId: journey.id, title: journey.title });
+    const section = { type: 'section', journeyId: journey.id, title: journey.title, notes: '' };
+    slides.push(section);
 
     const shots = screenshotIndex(manifestsById[journey.id]);
+    let pending = []; // rendered narrative from prose-only steps awaiting a visual slide
+    let lastVisual = null; // the most recent visual slide, for the end-of-journey flush
+
     for (const step of journey.steps || []) {
       const narrative = step.narrative ? renderNarrative(step.narrative) : '';
       const isConcept = step.kind === 'narrative-only';
@@ -46,8 +60,8 @@ function buildDeckModel(journeys, manifestsById = {}) {
       // Resolve the slide visual. A concept (narrative-only) slide may carry a
       // static `visual` asset (§2.1); a normal step shows its captured screenshot,
       // but only when the run actually produced it (same guard as render.js — a
-      // step whose capture is missing degrades to a text slide, never a broken
-      // image).
+      // step whose capture is missing contributes its narrative to notes, never a
+      // broken image).
       let image = null;
       if (isConcept) {
         if (step.visual) image = { kind: 'visual', src: step.visual };
@@ -55,21 +69,37 @@ function buildDeckModel(journeys, manifestsById = {}) {
         image = { kind: 'screenshot', journeyId: journey.id, file: shots.get(step.screenshot) };
       }
 
-      // A step with neither narrative nor a visual is pure plumbing (e.g. logging
-      // in) — it produces no slide, just as it produces no doc output (§2.1).
-      if (!narrative && !image) continue;
+      if (image) {
+        // A visual is a slide. Its notes are the buffered lead-in narrative plus
+        // this step's own, in order — the words and paragraph breaks the author
+        // wrote survive unchanged (renderNarrative only normalises blank runs).
+        const slide = {
+          type: isConcept ? 'concept' : 'step',
+          journeyId: journey.id,
+          stepId: step.id || step.screenshot || null,
+          title: journey.title,
+          notes: [...pending, narrative].filter(Boolean).join('\n\n'),
+          image,
+        };
+        slides.push(slide);
+        lastVisual = slide;
+        pending = [];
+      } else if (narrative) {
+        // No visual: buffer the speaker text onto the next visual slide's notes
+        // rather than emitting a standalone prose slide.
+        pending.push(narrative);
+      }
+      // A step with neither visual nor narrative is pure plumbing (e.g. logging
+      // in) — it contributes nothing, just as it produces no doc output (§2.1).
+    }
 
-      slides.push({
-        type: isConcept ? 'concept' : 'step',
-        journeyId: journey.id,
-        stepId: step.id || step.screenshot || null,
-        title: journey.title,
-        // Narrative goes verbatim into the speaker notes (§3.2: "narrative goes
-        // into speaker notes"). renderNarrative only normalises blank-line runs;
-        // the words and paragraph breaks the author wrote survive unchanged.
-        notes: narrative,
-        image,
-      });
+    // Flush any narrative with no visual after it: onto the journey's last visual
+    // slide, or — if the journey produced none — onto the section divider's notes,
+    // so no authored word is lost yet no prose-only content slide is emitted.
+    if (pending.length) {
+      const tail = pending.join('\n\n');
+      if (lastVisual) lastVisual.notes = [lastVisual.notes, tail].filter(Boolean).join('\n\n');
+      else section.notes = tail;
     }
   }
   return { title: DECK_TITLE, journeyCount: journeys.length, slides };
@@ -92,7 +122,9 @@ async function buildDeckBuffer(model, { resolveImage } = {}) {
     const s = pres.addSlide();
 
     if (slide.type === 'section') {
-      // Section divider: the journey title, centred.
+      // Section divider: the journey title, centred. A journey that captured no
+      // screenshot parks its speaker text in the divider's notes (buildDeckModel).
+      if (slide.notes) s.addNotes(slide.notes);
       s.addText(slide.title, {
         x: 0.5, y: SLIDE_H / 2 - 0.9, w: SLIDE_W - 1, h: 1.8,
         fontSize: 40, bold: true, align: 'center', valign: 'middle',
@@ -102,19 +134,46 @@ async function buildDeckBuffer(model, { resolveImage } = {}) {
 
     if (slide.notes) s.addNotes(slide.notes);
 
-    const imgPath = slide.image && resolveImage ? resolveImage(slide.image) : null;
-    if (imgPath) {
-      // The screenshot/visual is the slide. `contain` keeps its aspect ratio
-      // inside the frame regardless of the captured viewport.
-      s.addImage({
-        path: imgPath,
-        x: 0.3, y: 0.4, w: SLIDE_W - 0.6, h: SLIDE_H - 0.8,
-        sizing: { type: 'contain', w: SLIDE_W - 0.6, h: SLIDE_H - 0.8 },
-      });
+    // resolveImage returns either a bare path (legacy) or { path, w, h } with the
+    // source pixel dimensions; support both.
+    const resolved = slide.image && resolveImage ? resolveImage(slide.image) : null;
+    let imgPath = null;
+    let pxW = null;
+    let pxH = null;
+    if (typeof resolved === 'string') imgPath = resolved;
+    else if (resolved && resolved.path) ({ path: imgPath, w: pxW, h: pxH } = resolved);
+
+    // The content box the screenshot is fitted into (16:9 canvas, small margins).
+    const BOX_X = 0.3;
+    const BOX_Y = 0.4;
+    const BOX_W = SLIDE_W - 0.6;
+    const BOX_H = SLIDE_H - 0.8;
+
+    if (imgPath && pxW && pxH) {
+      // Fit the image inside the box at its OWN aspect ratio and centre it.
+      // Passing exact w/h derived from the source pixels — not a `sizing` box —
+      // guarantees pptxgenjs never stretches a screenshot whose capture aspect
+      // differs from the frame (screenshots vary: full page vs. element).
+      const imgAspect = pxW / pxH;
+      const boxAspect = BOX_W / BOX_H;
+      let w;
+      let h;
+      if (imgAspect >= boxAspect) {
+        w = BOX_W;
+        h = BOX_W / imgAspect;
+      } else {
+        h = BOX_H;
+        w = BOX_H * imgAspect;
+      }
+      s.addImage({ path: imgPath, x: BOX_X + (BOX_W - w) / 2, y: BOX_Y + (BOX_H - h) / 2, w, h });
+    } else if (imgPath) {
+      // Dimensions unknown (non-PNG or unreadable) → aspect-preserving `contain`
+      // fallback, still never a stretch.
+      s.addImage({ path: imgPath, x: BOX_X, y: BOX_Y, w: BOX_W, h: BOX_H, sizing: { type: 'contain', w: BOX_W, h: BOX_H } });
     } else if (slide.notes) {
-      // No visual (concept slide, or a narrative step whose capture is missing):
-      // show the narrative on the slide body so it carries content, not just a
-      // blank canvas with notes.
+      // Visual expected but its file is missing (e.g. a concept slide whose static
+      // asset isn't on disk): show the narrative on the slide body so it carries
+      // content, not a blank canvas.
       s.addText(slide.notes, {
         x: 0.8, y: 0.7, w: SLIDE_W - 1.6, h: SLIDE_H - 1.4,
         fontSize: 18, align: 'left', valign: 'top',

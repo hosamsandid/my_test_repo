@@ -8,6 +8,7 @@ import LabelRegistryPanel from './process/LabelRegistryPanel';
 import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
+import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
@@ -437,12 +438,56 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }
 
   // Apply a Copilot proposal: the normal draft write — from then on it IS the
-  // draft, editable with every existing dialog. Clearing the preview drops the
-  // canvas back to the (now updated) draft graph.
-  const applyCopilotBundle = useCallback(async (b) => {
-    await persistDraft(b);
+  // draft, editable with every existing dialog. The chat history (#1071) rides
+  // along in the same PUT (`copilot` is storage metadata the server
+  // normalizes). Clearing the preview drops the canvas back to the (now
+  // updated) draft graph.
+  const applyCopilotBundle = useCallback(async (b, persistedMessages) => {
+    await persistDraft({ ...b, copilot: { messages: persistedMessages || [] } });
     setProposal(null);
   }, [persistDraft]);
+
+  // History-only write (#1071) — after each turn/decision. Best-effort: a
+  // failed history save must never surface as a chat error.
+  const persistCopilotHistory = useCallback(async (persistedMessages) => {
+    const cur = draftBundleRef.current;
+    if (!cur) return;
+    try { await persistDraft({ ...cur, copilot: { messages: persistedMessages || [] } }); }
+    catch { /* best-effort */ }
+  }, [persistDraft]);
+
+  // Canvas diff-highlighting (#1071 item 2): the proposal's node-level delta
+  // vs. the current draft — added green, modified amber, removed in the banner.
+  const proposalDiff = useMemo(
+    () => (proposal && isDraft ? proposalNodeDiff(draftBundle, proposal.bundle) : null),
+    [proposal, isDraft, draftBundle],
+  );
+
+  // Overlay the diff outlines on the freshly-rendered `.bp-node` cards — the
+  // same decorate-after-setData pattern as the anomaly badges above.
+  useEffect(() => {
+    const root = viewportRef.current;
+    if (!root) return;
+    const clear = () => root.querySelectorAll('.bp-node[data-copilot-diff]').forEach((el) => {
+      el.style.outline = '';
+      el.style.outlineOffset = '';
+      el.removeAttribute('data-copilot-diff');
+    });
+    clear();
+    if (!proposalDiff) return undefined;
+    const paint = (ids, color) => {
+      for (const id of ids) {
+        const node = root.querySelector(`.bp-node[data-id="${(window.CSS && window.CSS.escape) ? window.CSS.escape(id) : id}"]`);
+        if (!node) continue;
+        node.style.outline = `2px solid ${color}`;
+        node.style.outlineOffset = '2px';
+        node.setAttribute('data-copilot-diff', '1');
+      }
+    };
+    paint(proposalDiff.added, 'var(--eb-status-success, #16a34a)');
+    paint(proposalDiff.modified, 'var(--eb-status-warning, #d97706)');
+    return clear;
+  }, [proposalDiff, displayGraph]);
 
   // Live team: materialize a new role as a team-member immediately (#585) via the
   // existing member-create path — no draft round-trip. The member id mirrors the
@@ -485,13 +530,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     } catch (e) { setImportError(e.message); }
   }
 
-  // Source bundle for the Materialize dialog: an imported file or the open draft.
-  const materializeBundle = imported ? imported.bundle : isDraft ? draftBundle : null;
+  // Source bundle for the Materialize dialog: an imported file or the open
+  // draft. The `copilot` chat history is draft-storage metadata (#1071) —
+  // stripped here so it never reaches materialisation.
+  const materializeBundle = useMemo(() => {
+    const src = imported ? imported.bundle : isDraft ? draftBundle : null;
+    if (!src || src.copilot === undefined) return src;
+    const { copilot, ...rest } = src;
+    return rest;
+  }, [imported, isDraft, draftBundle]);
 
   async function exportBundle() {
     let bundle;
     if (isDraft) {
-      bundle = draftBundle;
+      // Strip the chat history from the portable export (#1071).
+      bundle = materializeBundle;
     } else {
       const url = `/api/process/template?team=${encodeURIComponent(scope)}`;
       const res = await fetch(url);
@@ -606,7 +659,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         }}>
           <Sparkles size={16} style={{ color: 'var(--eb-accent-primary)' }} />
           <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Proposal from Copilot ({proposal.graph?.nodes?.length || 0} nodes) — review it, then Apply or Discard.
+            Proposal from Copilot ({proposal.graph?.nodes?.length || 0} nodes
+            {proposalDiff && (proposalDiff.added.length || proposalDiff.modified.length)
+              ? ` · ${proposalDiff.added.length} added · ${proposalDiff.modified.length} modified`
+              : ''}) — review it, then Apply or Discard.
+            {proposalDiff && proposalDiff.removed.length > 0 && (
+              <> <span style={{ color: 'var(--eb-status-error)' }}>
+                Removes: {proposalDiff.removed.map(r => r.name).join(', ')}.
+              </span></>
+            )}
           </span>
           <button
             onClick={() => copilotActionsRef.current?.apply()}
@@ -879,6 +940,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         autoFocus={autoOpenCopilot}
         onPreview={setProposal}
         onApplyBundle={applyCopilotBundle}
+        onPersistHistory={persistCopilotHistory}
         onEditAsDraft={() => editAsDraft(true)}
         onClose={() => { setCopilotOpen(false); setProposal(null); }}
         actionsRef={copilotActionsRef}

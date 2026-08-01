@@ -105,6 +105,98 @@ export function latestProposal(entries) {
   return null;
 }
 
+// ── chat-history persistence (#1071 item 1) ──────────────────────────────────
+// The draft file carries `copilot: { messages: [] }` — storage metadata, never
+// part of the portable bundle. The client persists a compact projection of the
+// chat (the server normalizes again on write): error rows are transient and
+// dropped, proposal bundles are deliberately NOT persisted (they would bloat
+// the draft; a reloaded proposal card shows as superseded and the user
+// regenerates), and the history is capped to the last N turns.
+
+export const PERSISTED_HISTORY_CAP = 20;
+
+/** The compact, durable projection of the panel's chat entries. */
+export function toPersistedMessages(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter(e => e && (e.role === 'user' || e.role === 'assistant'))
+    .map(e => {
+      if (e.role === 'user') return { role: 'user', content: e.content };
+      return {
+        role: 'assistant',
+        ...(e.summary ? { summary: e.summary } : {}),
+        ...(Array.isArray(e.changes) && e.changes.length ? { changes: e.changes } : {}),
+        ...(Array.isArray(e.lints) && e.lints.length ? { lints: e.lints } : {}),
+        ok: !!e.ok,
+        status: e.status === 'proposed' ? 'superseded' : (e.status || 'superseded'),
+      };
+    })
+    .slice(-PERSISTED_HISTORY_CAP);
+}
+
+/** Rebuild live chat entries from a draft's persisted history. */
+export function hydrateMessages(persisted, nextId) {
+  const list = persisted && Array.isArray(persisted.messages) ? persisted.messages : [];
+  return list
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant'))
+    .map(m => (m.role === 'user'
+      ? { id: nextId(), role: 'user', content: String(m.content ?? '') }
+      : {
+        id: nextId(), role: 'assistant',
+        summary: typeof m.summary === 'string' ? m.summary : '',
+        changes: Array.isArray(m.changes) ? m.changes : [],
+        lints: Array.isArray(m.lints) ? m.lints : [],
+        ok: !!m.ok,
+        // A persisted proposal has no bundle to apply — it can never be
+        // actionable again, whatever was stored.
+        status: m.status === 'proposed' ? 'superseded' : (m.status || 'superseded'),
+        bundle: null, hasPreview: true,
+      }));
+}
+
+// ── canvas diff-highlighting (#1071 item 2) ──────────────────────────────────
+// While a proposal is pending, the preview graph badges the delta vs. the
+// current bundle: added nodes green, modified amber, removed listed in the
+// banner. Nodes are roles + humans, keyed by id; "modified" is a
+// key-order-insensitive deep comparison (mirrors the server's change diff).
+
+function stableStringify(x) {
+  if (Array.isArray(x)) return `[${x.map(stableStringify).join(',')}]`;
+  if (x && typeof x === 'object') {
+    return `{${Object.keys(x).sort().map(k => `${JSON.stringify(k)}:${stableStringify(x[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(x);
+}
+
+/**
+ * Diff proposed vs. current bundle at node granularity.
+ * @returns {{ added: string[], modified: string[], removed: {id, name}[] }}
+ */
+export function proposalNodeDiff(current, proposed) {
+  const nodesOf = (b) => {
+    const m = new Map();
+    for (const r of (b && Array.isArray(b.roles) ? b.roles : [])) {
+      if (r && typeof r.id === 'string' && r.id) m.set(r.id, { entity: r, name: r.displayName || r.id });
+    }
+    for (const h of (b && Array.isArray(b.humans) ? b.humans : [])) {
+      if (h && typeof h.id === 'string' && h.id && !m.has(h.id)) m.set(h.id, { entity: h, name: h.name || h.id });
+    }
+    return m;
+  };
+  const before = nodesOf(current);
+  const after = nodesOf(proposed);
+  const added = [];
+  const modified = [];
+  const removed = [];
+  for (const [id, { entity }] of after) {
+    if (!before.has(id)) added.push(id);
+    else if (stableStringify(before.get(id).entity) !== stableStringify(entity)) modified.push(id);
+  }
+  for (const [id, { name }] of before) {
+    if (!after.has(id)) removed.push({ id, name });
+  }
+  return { added, modified, removed };
+}
+
 // ── NDJSON progress stream (#1070) ───────────────────────────────────────────
 // POST /api/process/copilot streams `{type:'phase'}` lines while the
 // generate → validate → repair loop runs, terminated by `{type:'result'}` or

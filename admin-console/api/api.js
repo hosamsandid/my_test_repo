@@ -38,7 +38,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
-const { runCopilot } = require('./flow-copilot');
+const { runCopilot, sanitizeCopilotHistory } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
@@ -6218,6 +6218,11 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // Copilot chat history (#1071) — storage metadata like id/createdAt, never
+  // part of the portable bundle. Normalized on write: whitelisted fields only,
+  // capped length; anything malformed is dropped rather than persisted.
+  const copilot = sanitizeCopilotHistory(body.copilot);
+  if (copilot) draft.copilot = copilot; else delete draft.copilot;
   // Write the new-id entry first, then remove the old one, so a crash mid-rename
   // leaves the old record rather than losing the draft. No orphan/duplicate
   // remains once both steps complete (AC7).

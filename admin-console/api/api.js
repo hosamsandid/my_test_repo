@@ -4053,6 +4053,7 @@ app.get('/api/knowledge/graph', async (req, res) => {
   await augmentDigestInclusion(graph, teamIds);
   await augmentSkillRoles(graph, teamIds);
   augmentDisplaySummary(graph, entries);
+  await augmentRetrievalStats(graph, teamIds);
   res.json(graph);
 });
 
@@ -4098,6 +4099,43 @@ async function augmentDigestInclusion(graph, teamIds) {
   if (included.size === 0) return;
   for (const node of graph.nodes) {
     if (node.kind === 'item' && included.has(String(node.id).slice(5))) node.inDigest = true;
+  }
+}
+
+// Overlay the read-side retrieval truth (#915) on every item node: when was the
+// entry last returned by a `knowledge search`/`list` (strong signal) or inlined
+// into a digest build (weak signal), and how often. Sourced from the
+// orchestrator's per-team aggregate — never the live feed. Best-effort: an
+// unreachable orchestrator just means no "last used" info (nodes stay unmarked,
+// which the UI renders as "never used" only when the stats fetch succeeded).
+async function augmentRetrievalStats(graph, teamIds) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const byId = new Map();
+  let anyStats = false;
+  await Promise.all((teamIds || []).map(async (teamId) => {
+    try {
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      anyStats = true;
+      const entries = data && data.entries && typeof data.entries === 'object' ? data.entries : {};
+      for (const [id, row] of Object.entries(entries)) byId.set(id, row);
+    } catch { /* best effort */ }
+  }));
+  if (!anyStats) return;
+  graph.retrievalStats = true; // the UI may distinguish "no data yet" from "endpoint down"
+  for (const node of graph.nodes) {
+    if (node.kind !== 'item') continue;
+    const row = byId.get(String(node.id).slice(5));
+    if (!row) continue;
+    const a = typeof row.lastSearchAt === 'string' ? row.lastSearchAt : '';
+    const b = typeof row.lastDigestAt === 'string' ? row.lastDigestAt : '';
+    const last = a > b ? a : b;
+    if (last) node.lastUsedAt = last;
+    const hits = (Number.isInteger(row.searchHits) ? row.searchHits : 0)
+      + (Number.isInteger(row.digestCount) ? row.digestCount : 0);
+    if (hits > 0) node.usageCount = hits;
+    if (Number.isInteger(row.searchHits) && row.searchHits > 0) node.searchHits = row.searchHits;
   }
 }
 
@@ -4290,6 +4328,23 @@ app.get('/api/knowledge/summary', async (req, res) => {
   const entries = [];
   for (const teamId of teamIds) entries.push(...gatherTeamEntries(teamId).entries);
   res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
+});
+
+// Read-side retrieval aggregate (#915): per-entry "last used" truth + the
+// `since` baseline. Proxies the orchestrator's per-team aggregate store.
+app.get('/api/knowledge/retrieval-stats', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: (out && out.error) || 'retrieval-stats failed' });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 app.get('/api/knowledge/item/:id', (req, res) => {

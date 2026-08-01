@@ -32,7 +32,7 @@ function planTeamKnowledgePurge(teamId, roots = {}) {
   const seg = safeTeamSegment(teamId);
   if (!seg) return null;
 
-  const { cloneRoot, teamsDir, suggestionsDir, archivedDir, reviewDir, eventsFile } = roots;
+  const { cloneRoot, teamsDir, suggestionsDir, archivedDir, reviewDir, retrievalDir, eventsFile } = roots;
 
   const dirs = [];
   // Canonical KB clone: <cloneRoot>/<teamId>/ (mirrors canonicalClonePath).
@@ -49,6 +49,8 @@ function planTeamKnowledgePurge(teamId, roots = {}) {
   if (suggestionsDir) files.push(path.join(suggestionsDir, `${seg}.json`));
   if (archivedDir) files.push(path.join(archivedDir, `${seg}.json`));
   if (reviewDir) files.push(path.join(reviewDir, `${seg}.json`));
+  // Read-side retrieval aggregate (#915) — per-team telemetry dies with the team.
+  if (retrievalDir) files.push(path.join(retrievalDir, `${seg}.json`));
 
   return { teamId: seg, dirs, files, eventsFile: eventsFile || null };
 }

@@ -29,6 +29,7 @@ import {
   consolidationStartGate,
 } from './consolidation-view';
 import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
+import { lastUsedLabel, compareLastUsed } from './knowledge-retrieval-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -971,6 +972,7 @@ const TeamSection = React.forwardRef(function TeamSection({
                 onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
                 onRetire={() => onRetireItem(n)}
                 onUnarchive={() => onUnarchiveItem(n)}
+                retrievalOn={!!graph?.retrievalStats}
               />
             ))
           )}
@@ -2282,12 +2284,16 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
   const graph = data?.graph;
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
 
+  // #915: the Last-used column is sortable — null keeps the default
+  // newest-created order; 'desc' = most recently used first (never-used last);
+  // 'asc' = the least recently used first (the retire candidates).
+  const [usageSort, setUsageSort] = useState(null);
   const items = useMemo(() => {
     const list = (graph?.nodes || []).filter(n => n.kind === 'item');
     const now = Date.now();
     const DAY = 24 * 3600 * 1000;
     const q = filters.q.trim().toLowerCase();
-    return list
+    const out = list
       .map(n => ({ ...n, id: n.id.slice(5) })) // strip "item:" prefix
       .filter(n => {
         if (filters.kind !== 'all' && n.entryKind !== filters.kind) return false;
@@ -2303,7 +2309,9 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
         return true;
       })
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  }, [graph, filters]);
+    if (usageSort) out.sort((a, b) => (usageSort === 'asc' ? -compareLastUsed(a, b) : compareLastUsed(a, b)));
+    return out;
+  }, [graph, filters, usageSort]);
 
   const [picked, setPicked] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set());
@@ -2417,6 +2425,12 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
                 <th style={{ ...th, width: '55%' }}>Summary</th>
                 <th style={th}>Learned by</th>
                 <th style={th}>Created</th>
+                <th
+                  onClick={() => setUsageSort(s => (s === null ? 'desc' : s === 'desc' ? 'asc' : null))}
+                  title="When agents last retrieved this lesson (search or digest). Click to sort — least-recently-used first is the retire-candidate view."
+                  style={{ ...th, cursor: 'pointer', userSelect: 'none' }}>
+                  Last used{usageSort === 'desc' ? ' ↓' : usageSort === 'asc' ? ' ↑' : ''}
+                </th>
                 <th style={th}>Status</th>
                 <th style={{ ...th, textAlign: 'right' }} title="How many agents learned this independently">Converged</th>
               </tr>
@@ -2466,6 +2480,13 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
                         {n.convergenceCount > 1 ? <span style={{ color: 'var(--eb-text-muted)' }}> +{n.convergenceCount - 1}</span> : ''}
                       </td>
                       <td style={{ ...td, whiteSpace: 'nowrap', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>{fmtWhen(n.createdAt) || '—'}</td>
+                      <td
+                        title={n.lastUsedAt
+                          ? 'Last returned by a knowledge search or inlined into a digest build'
+                          : 'No agent has retrieved this lesson yet'}
+                        style={{ ...td, whiteSpace: 'nowrap', fontSize: 'var(--eb-text-xs)', color: n.lastUsedAt ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)' }}>
+                        {lastUsedLabel(n, Date.now(), !!graph?.retrievalStats) || '—'}
+                      </td>
                       <td style={{ ...td, whiteSpace: 'nowrap' }}>
                         {n.archived ? (
                           <span title="Retired from the active KB — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
@@ -2549,7 +2570,7 @@ function EmptyKnowledge({ autonomy, counts, filtered }) {
   );
 }
 
-function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive }) {
+function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive, retrievalOn }) {
   const canRetire = !item.archived && item.status !== 'promoted';
   const pickable = !item.archived && item.status !== 'promoted' && !!onPick;
   return (
@@ -2602,6 +2623,15 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
           learned by <strong style={{ color: 'var(--eb-text-secondary)' }}>{item.provenance?.originAgent || (item.convergence || [])[0] || '—'}</strong>
           {item.convergenceCount > 1 ? ` + ${item.convergenceCount - 1} more` : ''}
         </span>
+        {(item.lastUsedAt || retrievalOn) && (
+          <span
+            title={item.lastUsedAt
+              ? 'When this lesson was last returned by an agent’s knowledge search or inlined into a digest (#915 read-side telemetry)'
+              : 'No agent has retrieved this lesson yet — neither via knowledge search nor a digest build'}
+            style={{ fontSize: 'var(--eb-text-xs)', color: item.lastUsedAt ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)', whiteSpace: 'nowrap' }}>
+            · {lastUsedLabel(item, Date.now(), retrievalOn)}
+          </span>
+        )}
         {item.archived ? (
           <button onClick={(e) => { e.stopPropagation(); onUnarchive(); }} style={{ ...miniBtn, marginLeft: 'auto' }}>Un-retire</button>
         ) : canRetire && (

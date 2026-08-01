@@ -678,6 +678,36 @@ def _push_via_orchestrator(entries=None):
         return False, str(exc)
 
 
+def _post_retrieval(source, entry_ids):
+    """Read-side retrieval telemetry (#915): report which entry ids a local
+    search/list returned, so the orchestrator's per-team aggregate can track
+    "last used". Strictly best-effort fire-and-forget — a telemetry outage must
+    never break (or slow) search: short timeout, every failure silent. The query
+    text is deliberately NOT sent (privacy decision: ids + count suffice)."""
+    ids = [i for i in entry_ids if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)]
+    if not ids:
+        return
+    base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+            or os.environ.get("AEE_ORCHESTRATOR_URL")
+            or "http://orchestrator:4002").rstrip("/")
+    url = f"{base}/internal/agents/{_agent_id()}/knowledge/retrieval"
+    payload = json.dumps({
+        "source": source,
+        "entryIds": ids,
+        "hitCount": len(ids),
+        "ts": _default_now(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+    except Exception:  # noqa: BLE001 — telemetry is never allowed to fail the CLI
+        pass
+
+
 # ===========================================================================
 # Commands
 # ===========================================================================
@@ -840,6 +870,9 @@ def cmd_search(argv):
         sys.stderr.write(f'knowledge: no matches for "{query}"\n')
         sys.exit(1)
 
+    # #915: report the returned ids (after fold + limit) — never the query text.
+    _post_retrieval("search", [e.get("id") for e in matched])
+
     for e in matched:
         if as_json:
             print(serialize_entry(e))
@@ -857,6 +890,8 @@ def cmd_list(argv):
     entries = visible_entries([e for e, _ in pairs], now=_default_now())
     if mine:
         entries = [e for e in entries if e.get("originAgent") == _agent_id()]
+    # #915: a list is an explicit read too — same strong `search` signal.
+    _post_retrieval("search", [e.get("id") for e in entries])
     for e in entries:
         if as_json:
             print(serialize_entry(e))

@@ -405,3 +405,68 @@ PR; confirm the `LearningBadge` on the Agent/Team cards ticks.
 - **Curator** / auto-promotion, review gates on promotion edges → Phase 4.
 - **MCP** knowledge sources → Phase 5.
 - The `knowledge promote` CLI verb stays a **stub**.
+
+---
+
+## 12. Read-side retrieval telemetry (#915)
+
+The write path has emitted `harvest` events since Phase 2; this section adds the
+missing READ signal so "does the KB make agents better?" is answerable with data
+and the decay sweep (#919) has something to consume.
+
+**Transport.** `knowledge search`/`list` are fully local in the agent container
+(a checkout scan — they never touch the orchestrator), and the container cannot
+write the shared volume. The signal therefore travels over a new internal
+endpoint, the same agent→orchestrator pattern as the knowledge push:
+
+```
+POST /internal/agents/:id/knowledge/retrieval        (:4002, internal-only)
+{ "source": "search" | "digest", "entryIds": ["<12-hex>", …],
+  "hitCount": <n>, "ts": "<ISO — advisory; server clock is the fallback>" }
+```
+
+`teamId` is resolved server-side from the agent config (like the push endpoint).
+Two emitters, both best-effort fire-and-forget (3 s timeout, every failure
+silent — a telemetry outage must never break search or an invocation):
+
+- **`knowledge search` / `list`** → `source:"search"` (the strong signal — the
+  agent explicitly looked) with the returned ids after fold + limit. The query
+  text is **never** sent, not even hashed (privacy decision).
+- **the pre-invocation digest rebuild** (`_rebuild_knowledge_digest`,
+  agent-entrypoint.py) → `source:"digest"` (the weak signal — inlined
+  unconditionally) with the build's `includedIds`, once per rebuild after the
+  atomic write.
+
+`source:"scoped"` is reserved for #917's trigger-based loading layer.
+
+**Storage — aggregate, not a log.** One compact JSON per team at
+`/workspace/knowledge-retrieval/<teamId>.json` (atomic tmp+rename write, one row
+per entry — no retention machinery needed):
+
+```jsonc
+{ "since": "<ISO first-write — the #919 cold-start baseline>",
+  "entries": { "<entryId>": {
+      "lastSearchAt": "…", "searchHits": 3,
+      "lastDigestAt": "…", "digestCount": 41 } } }
+```
+
+`events.jsonl` and the SSE feed are **untouched** — retrieval never appends to
+the live feed (it would drown harvest/promotion events, and the feed has no
+retention). Pure core: `orchestrator/knowledge-retrieval.js`
+(`validateRetrieval` / `applyRetrieval` / `lastUsedAt`), unit-tested.
+
+**Read API.** `GET /internal/teams/:teamId/knowledge/retrieval-stats`
+(orchestrator; an empty aggregate is a valid 200 — "no data" IS the cold-start
+signal) → proxied as `GET /api/knowledge/retrieval-stats?team=<id>`. The graph
+route also overlays the truth onto item nodes (`augmentRetrievalStats` →
+`lastUsedAt` / `usageCount` / `searchHits`, plus a graph-level `retrievalStats`
+flag so the UI can distinguish "never used" from "telemetry unreachable").
+
+**UI.** Item cards show "used 5× · 2d ago" (amber "never used" when telemetry
+answered and the entry has no row — the operator-visible precursor of a #919
+retire suggestion); the overview table gains a sortable **Last used** column
+(ascending = least-recently-used first, the retire-candidate view). Retrieval
+events do **not** animate through the live feed.
+
+**Lifecycle.** Deleting a squad purges its retrieval-stats file
+(`planTeamKnowledgePurge` `retrievalDir` root).

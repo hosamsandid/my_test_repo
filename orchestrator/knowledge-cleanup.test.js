@@ -11,6 +11,7 @@ const ROOTS = {
   suggestionsDir: '/workspace/knowledge-suggestions',
   archivedDir: '/workspace/knowledge-archived',
   reviewDir: '/workspace/knowledge-review',
+  retrievalDir: '/workspace/knowledge-retrieval',
   eventsFile: '/workspace/knowledge-events/events.jsonl',
 };
 
@@ -27,6 +28,7 @@ test('plan lists every local team-scoped store for a valid team', () => {
     '/workspace/knowledge-suggestions/agent-studio.json',
     '/workspace/knowledge-archived/agent-studio.json',
     '/workspace/knowledge-review/agent-studio.json',
+    '/workspace/knowledge-retrieval/agent-studio.json', // #915 telemetry dies with the team
   ]);
   assert.equal(plan.eventsFile, '/workspace/knowledge-events/events.jsonl');
 });

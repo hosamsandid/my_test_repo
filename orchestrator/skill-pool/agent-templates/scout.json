@@ -5,7 +5,6 @@
   "description": "Generic per-stage preparer: checks readiness of incoming work, gathers evidence, then gives the stage's Author the go-ahead. Composable into any stage via the Flow-Weaver.",
   "icon": "search",
   "category": "pattern",
-  "envSuffix": "scout",
   "defaultEnabled": false,
   "patternRole": "scout",
   "stageAffinity": [],

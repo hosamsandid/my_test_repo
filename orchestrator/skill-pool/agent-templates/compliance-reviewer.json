@@ -5,7 +5,6 @@
   "description": "Reviews policy submissions for regulatory accuracy, internal consistency, and coverage gaps.",
   "icon": "search",
   "category": "reactive",
-  "envSuffix": "compliance",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Review like a trusted regulatory expert. Concrete and actionable — flag gaps with the specific regulation clause, not just general concerns.",

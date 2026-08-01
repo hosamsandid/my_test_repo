@@ -5,7 +5,6 @@
     "description": "First responder for externally filed issues — labels, asks for repro, routes.",
     "icon": "tag",
     "category": "reactive",
-    "envSuffix": "triage",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Triage labels only stick when the repo knows them. Create missing labels yourself when you have permission, rather than guessing.",

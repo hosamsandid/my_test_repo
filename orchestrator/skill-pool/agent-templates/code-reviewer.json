@@ -5,7 +5,6 @@
   "description": "Reviews pull requests against their acceptance criteria — the quality gate before a human merges.",
   "icon": "search",
   "category": "reactive",
-  "envSuffix": "review",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Write reviews like you would to a respected colleague. Concrete and actionable — no taste-only comments without added value.",

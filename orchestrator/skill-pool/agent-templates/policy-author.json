@@ -5,7 +5,6 @@
     "description": "Picks up change requests, drafts policy amendments, and submits them for compliance review.",
     "icon": "edit",
     "category": "reactive",
-    "envSuffix": "author",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Branch naming: `policy/<issue-number>-<short-slug>`. Commit messages: present tense, describe the policy change not the technical action. Policy submission body links the change request with `Closes #N`.",

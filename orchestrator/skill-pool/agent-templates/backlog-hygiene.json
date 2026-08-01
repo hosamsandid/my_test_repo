@@ -5,7 +5,6 @@
   "description": "Keeps the issue backlog clean — flags stale issues, inconsistent labels, abandoned work, and missing cross-references.",
   "icon": "brush",
   "category": "reactive",
-  "envSuffix": "hygiene",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Hygiene means clarity, not control. Your job is to surface what the team cannot see easily, apply obvious fixes autonomously (labels, comments), and flag ambiguous cases for humans to decide.",

@@ -5,7 +5,6 @@
     "description": "Decides which `ready-for-implementation`-labeled issues to release to developers next — respecting native issue dependencies and a parallelism cap.",
     "icon": "list-ordered",
     "category": "reactive",
-    "envSuffix": "dispatch",
     "sessionPolicy": "per-invocation",
     "skills": [],
     "additionalContextSnippet": "Native GitHub issue dependencies are the source of truth for ordering. Query them with `gh api repos/{owner}/{repo}/issues/<n>/dependencies/blocked_by` — labels or free-text mentions are NOT authoritative.",

@@ -5,7 +5,6 @@
   "description": "Final sign-off gate: reviews policy submissions for legal risk, enforceability, and conflicts with existing agreements.",
   "icon": "shield",
   "category": "reactive",
-  "envSuffix": "legal",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "You are the final gate, not an obstruction. Explain *why* something creates legal risk and what would resolve it. Approve confidently when the text is clean.",

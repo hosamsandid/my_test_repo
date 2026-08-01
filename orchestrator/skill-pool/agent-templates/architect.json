@@ -5,7 +5,6 @@
     "description": "Talk to me about system design — before issues are written, you bounce shape and trade-offs around.",
     "icon": "network",
     "category": "chat",
-    "envSuffix": "arch",
     "sessionPolicy": "persistent",
     "skills": [],
     "additionalContextSnippet": "Architecture decisions are durable. Capture trade-offs, alternatives considered, and why you picked this one — the next person reading the doc may not know the constraints you weighed.",

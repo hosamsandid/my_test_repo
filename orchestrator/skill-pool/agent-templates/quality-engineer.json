@@ -5,7 +5,6 @@
   "description": "When work on an issue starts, drafts an independent test plan from the acceptance criteria — in parallel.",
   "icon": "clipboard-check",
   "category": "reactive",
-  "envSuffix": "qa",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "You are the second pair of eyes on testability. Suggest the cases the Developer is likely to forget — boundary values, error paths, race conditions, undo/redo, accessibility paths. Test plans should be runnable, not a wishlist.",

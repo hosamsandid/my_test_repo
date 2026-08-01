@@ -26,6 +26,108 @@ const ALLOWED_TRANSITIONS = new Set(['team>team', 'team>global', 'agent>team']);
 // Mirror the api.js SKILL_NAME_RE so a generated name is always writable.
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
 
+// Pure sibling (same service, no IO): the import-side frontmatter parser is the
+// contract every promoted draft must satisfy (#921 — promoted ≡ imported).
+const { parseSkillMeta } = require('./skill-import');
+
+// ---------------------------------------------------------------------------
+// SKILL.md frontmatter (#921) — every draft this module produces must carry a
+// valid YAML frontmatter block with a non-empty `name` + one-line `description`,
+// so a promoted skill passes the same skill-import.js validateSkillMd contract
+// an imported archive does. These helpers MIRROR orchestrator/knowledge-curator.js
+// (#805) rather than importing them: the two services never require each other's
+// code (same discipline as the draft/provenance builders themselves).
+// ---------------------------------------------------------------------------
+
+const MAX_DESCRIPTION_LEN = 200; // keep the CLAUDE.md Skills list readable
+
+// Collapse any whitespace run (incl. newlines) to a single space and trim.
+function collapseLine(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+}
+
+// Truncate an already-collapsed line to one readable sentence-length line, cutting
+// on a word boundary and appending an ellipsis.
+function truncateLine(line, max = MAX_DESCRIPTION_LEN) {
+  const s = String(line == null ? '' : line);
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 1);
+  const sp = cut.lastIndexOf(' ');
+  const head = sp > max * 0.6 ? cut.slice(0, sp) : cut;
+  return `${head.replace(/[\s.,;:!?/–—-]+$/, '')}…`;
+}
+
+// Render one YAML scalar the fail-soft parseFrontmatterField reader accepts.
+// Backslashes are dropped and inner double-quotes folded to single-quotes so a
+// double-quoted scalar never needs escaping (the reader strips outer quotes but
+// does not un-escape). A value with no YAML-significant punctuation stays plain.
+function fmScalar(value) {
+  const s = collapseLine(value).replace(/\\/g, '').replace(/"/g, "'");
+  if (!s) return '""';
+  const plainSafe = /^[A-Za-z0-9][A-Za-z0-9 _.()/-]*$/.test(s);
+  return plainSafe ? s : `"${s}"`;
+}
+
+// Build a fresh frontmatter block: `---` / name / description / `---`.
+function renderSkillFrontmatter({ name, description } = {}) {
+  const n = collapseLine(name) || 'team-skill';
+  const d = truncateLine(collapseLine(description)) || 'Team knowledge skill.';
+  return ['---', `name: ${fmScalar(n)}`, `description: ${fmScalar(d)}`, '---'].join('\n');
+}
+
+const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * Guarantee `skillMd` begins with exactly one valid YAML frontmatter block that
+ * carries a non-empty `name` and `description` (#921 AC1/AC2).
+ *
+ * - No block yet → prepend one built from the supplied fallback name/description.
+ * - A block already present → inject only the MISSING key(s); a present, non-empty
+ *   `name`/`description` is preserved verbatim (never overwrite a stronger
+ *   authored value, and never double-wrap an already-frontmattered LLM body).
+ * Pure (string in, string out).
+ */
+function ensureSkillFrontmatter(skillMd, { name, description } = {}) {
+  let md = String(skillMd == null ? '' : skillMd).replace(/^﻿/, '');
+  md = md.replace(/^\s+(?=---[ \t]*\r?\n)/, ''); // tolerate a stray blank before a block
+  const fName = collapseLine(name);
+  const fDesc = truncateLine(collapseLine(description));
+  const m = FRONTMATTER_RE.exec(md);
+  if (m) {
+    const body = m[1];
+    const rest = md.slice(m[0].length);
+    const meta = parseSkillMeta(md);
+    const inject = [];
+    if (!meta.name) inject.push(`name: ${fmScalar(fName || 'team-skill')}`);
+    if (!meta.description) inject.push(`description: ${fmScalar(fDesc || 'Team knowledge skill.')}`);
+    if (inject.length === 0) return md; // already complete
+    const newBody = inject.concat(body ? [body] : []).join('\n');
+    return `---\n${newBody}\n---\n${rest}`;
+  }
+  return `${renderSkillFrontmatter({ name: fName, description: fDesc })}\n\n${md.replace(/^\n+/, '')}`;
+}
+
+// Derive a deterministic one-line "Use this when …" description from a candidate
+// (#921 — the description is what auto-triggers the skill, so it must say when to
+// load it, and it is always auto-filled: the dialog preview is the human
+// checkpoint, never a TODO placeholder). No LLM, no secrets — only the lesson
+// title + lesson count the KB already exposes.
+function deriveSkillDescription(candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const title = collapseLine(c.text) || 'this team knowledge';
+  const topic = title.replace(/[.:;!?]+$/, '');
+  const aggregated = c.source === 'related' || c.source === 'manual';
+  const n = c.lessonCount || (Array.isArray(c.members) ? c.members.length : 0) || 1;
+  if (aggregated && n > 1) {
+    return truncateLine(collapseLine(
+      `Use this when a task touches the topic of these ${n} related team lessons: ${topic}.`,
+    ));
+  }
+  return truncateLine(collapseLine(
+    `Use this when a task involves ${topic} — team-recorded guidance worth applying.`,
+  ));
+}
+
 // ---------------------------------------------------------------------------
 // Skill name
 // ---------------------------------------------------------------------------
@@ -136,7 +238,11 @@ function buildHeuristicSkillDraft(candidate) {
   }
   lines.push('');
 
-  return { name, skillMd: lines.join('\n'), llmDrafted: false };
+  // #921: prepend YAML frontmatter (name + "Use this when …" description) so the
+  // promoted skill satisfies the same skill-import.js contract an imported one does.
+  const description = deriveSkillDescription(c);
+  const skillMd = ensureSkillFrontmatter(lines.join('\n'), { name, description });
+  return { name, description, skillMd, llmDrafted: false };
 }
 
 // Build a candidate-shaped record straight from raw KB entries — the ad-hoc
@@ -231,6 +337,19 @@ function buildSkillDraftRequest(candidate) {
   const lessonCount = c.lessonCount || members.length || 1;
   const budget = draftBudget(lessonCount, aggregated);
   const kinds = Array.isArray(c.kinds) && c.kinds.length ? c.kinds.join(', ') : (c.kind || 'fact');
+  // #921: the draft must open with the same frontmatter contract skill-import.js
+  // validates — name is fixed (the heuristic slug), the description is the model's
+  // to write in the auto-trigger "Use this when …" style.
+  const frontmatterInstruction = [
+    '- Start the document with EXACTLY this YAML frontmatter block, then the content. Keep the',
+    '  `name` line verbatim; replace the description placeholder with ONE line in the style',
+    '  "Use this when …" that tells an agent when to load this skill:',
+    '  ---',
+    `  name: ${slugifySkillName(c.text, c.kind)}`,
+    '  description: >-',
+    '    Use this when <complete this sentence>.',
+    '  ---',
+  ].join('\n');
 
   const instruction = aggregated
     ? [
@@ -251,7 +370,8 @@ function buildSkillDraftRequest(candidate) {
         '- PRESERVE the substance: every distinct fact must remain represented somewhere (generalised into a pattern where appropriate) — do not silently drop knowledge.',
         '',
         'Requirements for the SKILL.md you produce:',
-        '- Start with a single H1 title line, then the thematic H2 sections described above.',
+        frontmatterInstruction,
+        '- After the frontmatter, a single H1 title line, then the thematic H2 sections described above.',
         '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
         `- Practical and readable (roughly ${budget.wordRange} words) — scale the depth to the material, do not pad.`,
         '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
@@ -267,7 +387,8 @@ function buildSkillDraftRequest(candidate) {
         facts,
         '',
         'Requirements for the SKILL.md you produce:',
-        '- Start with a single H1 title line, then short sections.',
+        frontmatterInstruction,
+        '- After the frontmatter, a single H1 title line, then short sections.',
         '- Capture the durable, reusable knowledge — no PR/issue-specific or run-specific detail.',
         `- Practical and concise (roughly ${budget.wordRange} words).`,
         '- Do NOT invent tool names, repo names, file paths or credentials that were not stated.',
@@ -352,7 +473,13 @@ function validatePromotion(input) {
   }
   const skillMd = typeof b.skillMd === 'string' ? b.skillMd : '';
   if (skillMd.trim() === '') return { ok: false, error: 'skillMd must be non-empty' };
-  return { ok: true, from, to, name, entryIds, skillMd };
+  // #921: promoted ≡ imported — a body without parseable `name`+`description`
+  // frontmatter can't round-trip through skill-import.js. Warning only, never a
+  // rejection: existing promoted skills lack frontmatter, and a hard gate would
+  // break re-promotion/extension of legacy content.
+  const meta = parseSkillMeta(skillMd);
+  const warnings = meta.name && meta.description ? [] : ['missing-frontmatter'];
+  return { ok: true, from, to, name, entryIds, skillMd, warnings };
 }
 
 // Build the provenance record written beside SKILL.md. Carries every link the
@@ -855,6 +982,8 @@ module.exports = {
   DEFAULT_PROMOTION_GATES,
   DEFAULT_SKILL_RESYNC_MODE,
   slugifySkillName,
+  ensureSkillFrontmatter,
+  deriveSkillDescription,
   buildHeuristicSkillDraft,
   candidateFromEntries,
   buildSkillDraftRequest,

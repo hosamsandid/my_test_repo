@@ -28,6 +28,7 @@ import {
   isResumable, mergeForDomain, planDomainRows, planFoldTotals,
   consolidationStartGate,
 } from './consolidation-view';
+import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -4127,6 +4128,17 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const [targetName, setTargetName] = useState(suggestion.matchedSkill?.name || '');
   const [skills, setSkills] = useState([]); // all eligible skills (every source/tier)
 
+  // #921: the *name field* is the single source of truth for the draft's
+  // frontmatter `name:` — whenever it changes (typing, or a draft arriving), the
+  // preview's header is rewritten to match. The ref lets async draft handlers
+  // read the freshest name without re-subscribing.
+  const nameRef = useRef(name);
+  nameRef.current = name;
+  useEffect(() => {
+    if (mode !== 'create') return;
+    setSkillMd(md => syncFrontmatterName(md, name.trim()));
+  }, [name, mode]);
+
   // manual = operator multi-select (no stored suggestion); aggregated = the
   // lessons are distinct and the skill is their synthesis (manual OR the
   // collector's related-theme card).
@@ -4171,6 +4183,16 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
     return skills.filter(s => s.source === 'pool').map(s => ({ name: s.name, scope: 'global' }));
   }, [skills, tier, teamId, columnSkills]);
   const canExtend = eligible.length > 0;
+
+  // #921: exact name collision with a skill already in the target tier — a
+  // non-blocking inline hint with a suggested free suffix ("Add to an existing
+  // skill" stays the intended path for a genuine same-skill collision).
+  const takenNames = useMemo(() => new Set(eligible.map(s => s.name)), [eligible]);
+  const nameCollision = mode === 'create' && !!name.trim() && takenNames.has(name.trim());
+  const suggestedName = nameCollision ? suggestFreeName(name.trim(), takenNames) : '';
+  // #921: advisory only — a frontmatter-less draft still promotes (legacy bodies
+  // keep working) but can't be exported/re-imported until a header is added.
+  const missingFrontmatter = mode === 'create' && !!skillMd.trim() && !hasFrontmatterMeta(skillMd);
 
   // The selected target's INTRINSIC scope drives the effective promotion scope: a
   // team-tier extend of a global/adopted skill still writes the global pool file
@@ -4237,7 +4259,8 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
       .then(r => (r.ok ? r.json() : null))
       .then(d => {
         if (d?.draft) {
-          setSkillMd(md => md || d.draft.skillMd || '');
+          // #921: an operator-typed name wins over the draft's — sync the header.
+          setSkillMd(md => md || syncFrontmatterName(d.draft.skillMd || '', nameRef.current.trim()));
           setName(n => n || d.draft.name || '');
         }
       })
@@ -4266,7 +4289,16 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         });
     req
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
+      .then(d => {
+        if (d?.draft?.skillMd) {
+          // #921: keep the operator's name if one is typed (single source of
+          // truth), syncing the incoming draft's frontmatter to it; only an
+          // empty field adopts the draft's name.
+          const kept = (nameRef.current || d.draft.name || '').trim();
+          setSkillMd(syncFrontmatterName(d.draft.skillMd, kept));
+          if (!nameRef.current.trim() && d.draft.name) setName(d.draft.name);
+        }
+      })
       .catch(() => setError('Draft failed'))
       .finally(() => setBusy(''));
   };
@@ -4406,6 +4438,15 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           <>
             <label style={lbl}>Skill name</label>
             <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+            {nameCollision && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+                A skill named “{name.trim()}” already exists here. Consider{' '}
+                <button onClick={() => setName(suggestedName)} style={{ ...btn, display: 'inline-flex', padding: '0 4px' }}>
+                  {suggestedName}
+                </button>
+                {' '}— or use “Add to an existing skill” to fold this knowledge into it.
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -4444,6 +4485,13 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         </div>
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
+        {missingFrontmatter && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+            This draft has no <code>name</code>/<code>description</code> frontmatter header. It still
+            promotes, but the skill can’t be exported and re-imported until a header is added, and the
+            description is what tells agents when to load it.
+          </div>
+        )}
 
         {/* Activation is the default last step of every pool-filling flow. In
             CREATE it adds the new skill to the team. In EXTEND (#630 AC2) the

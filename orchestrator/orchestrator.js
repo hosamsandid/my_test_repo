@@ -43,6 +43,7 @@ const knowledgeConsolidation = require("./knowledge-consolidation");
 const knowledgeCleanup = require("./knowledge-cleanup");
 const knowledgeRetrieval = require("./knowledge-retrieval");
 const knowledgeDecay = require("./knowledge-decay");
+const knowledgeEmbeddings = require("./knowledge-embeddings");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
@@ -135,6 +136,9 @@ const KNOWLEDGE_RETRIEVAL_DIR = "/workspace/knowledge-retrieval";
 // Per-team auto-load trigger sidecar (#917): { <canonicalId>: loadTriggers[] },
 // overlaid as a FIELD onto the canonical entry at re-projection (like validity).
 const KNOWLEDGE_TRIGGERS_DIR = "/workspace/knowledge-triggers";
+// Per-team embedding-vector cache (#918): derived artifacts, OUTSIDE the git KB
+// (recomputable at will), computed only by the nightly backstop pass.
+const KNOWLEDGE_VECTORS_DIR = "/workspace/knowledge-vectors";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -2034,6 +2038,7 @@ function purgeTeamKnowledge(teamId) {
     archivedDir: KNOWLEDGE_ARCHIVED_DIR,
     reviewDir: KNOWLEDGE_REVIEW_DIR,
     retrievalDir: KNOWLEDGE_RETRIEVAL_DIR,
+    vectorsDir: KNOWLEDGE_VECTORS_DIR,
     eventsFile: KNOWLEDGE_EVENTS_FILE,
   });
   if (!plan) return; // unsafe id → remove nothing
@@ -3518,6 +3523,90 @@ function runTeamDecaySweep(teamId) {
   return { raised, health: health.status };
 }
 
+// ── #918 embedding backend + per-team vector cache ──────────────────────────
+// The backend is a lazy singleton (model loads on first embed, only in the
+// backstop). A load failure (library/model absent) downgrades to unavailable
+// once, logged once — never an error loop, never on the push path.
+let _embeddingBackend = null;
+let _embeddingWarned = false;
+function getEmbeddingBackend() {
+  if (_embeddingBackend === null) {
+    _embeddingBackend = knowledgeEmbeddings.createEmbeddingBackend({});
+  }
+  return _embeddingBackend;
+}
+
+function _vectorsPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_VECTORS_DIR, `${seg}.jsonl`);
+}
+
+function readVectorCache(teamId) {
+  const p = _vectorsPath(teamId);
+  if (!p) return [];
+  try { return knowledgeEmbeddings.parseVectorCache(fs.readFileSync(p, "utf8")); } catch { return []; }
+}
+
+function writeVectorCache(teamId, rows) {
+  const p = _vectorsPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_VECTORS_DIR, { recursive: true });
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, knowledgeEmbeddings.serializeVectorCache(rows));
+  fs.renameSync(tmp, p);
+}
+
+// The `semantic` clustering context (#918) for one projection run: vectors from
+// the team's cache whose contentHash still matches the entry's current text,
+// plus the per-team cosine threshold. Null when the cache holds nothing usable
+// — the seam then runs bit-for-bit lexical-only, zero overhead.
+function teamSemanticCtx(teamId, entries, env) {
+  try {
+    const vectors = knowledgeEmbeddings.buildVectorLookup(readVectorCache(teamId), entries);
+    if (!vectors) return null;
+    const { cosineThreshold } = knowledgeConvergenceConfig(env);
+    return { vectors, cosineThreshold };
+  } catch { return null; }
+}
+
+// Nightly backstop embedding pass (#918): (re-)embed entries whose contentHash
+// is missing/stale, prune vectors of vanished ids. NEVER on the push path — a
+// freshly pushed entry matches lexically immediately and semantically after
+// this pass (the backstop re-runs the collector right after, idempotent via
+// stableSuggestionId). Best-effort throughout.
+async function runTeamEmbeddingPass(teamId) {
+  const backend = getEmbeddingBackend();
+  if (!backend.available) return { embedded: 0, skipped: backend.reason };
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return { embedded: 0, skipped: "no-clone" };
+  const resolved = resolveTeamKbRepo(teamId);
+  const env = teamKnowledgeEnv(teamId, resolved ? resolved.env : null);
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const entries = foldVisibleEntries(readKbStoreEntries(storeRoot), now);
+  const cache = readVectorCache(teamId);
+  const plan = knowledgeEmbeddings.planEmbeddingPass({ entries, cache });
+  if (plan.toEmbed.length === 0 && plan.pruned === 0) return { embedded: 0, skipped: null };
+  let fresh = [];
+  if (plan.toEmbed.length > 0) {
+    try {
+      const vectors = await backend.embed(plan.toEmbed.map((e) => e.text));
+      fresh = plan.toEmbed
+        .map((e, i) => ({ id: e.id, contentHash: e.contentHash, vector: vectors[i] }))
+        .filter((r) => Array.isArray(r.vector) && r.vector.length > 0);
+    } catch (err) {
+      if (!_embeddingWarned) {
+        _embeddingWarned = true;
+        console.warn(`[Orchestrator] embedding backend failed (semantic convergence stays off): ${err.message}`);
+      }
+      return { embedded: 0, skipped: "backend-error" };
+    }
+  }
+  writeVectorCache(teamId, [...plan.keep, ...fresh]);
+  return { embedded: fresh.length, pruned: plan.pruned, skipped: null };
+}
+
 // Per-team read-side retrieval aggregate (#915) — same shared-volume JSON-per-
 // team pattern. Written atomically (tmp+rename): the emitters are fire-and-
 // forget, so a torn read must never be possible.
@@ -3671,7 +3760,9 @@ function baselineReviewApprovals(teamId, env) {
     if (shardEntries.length === 0) return;
     const { simThreshold } = knowledgeConvergenceConfig(env);
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+    const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+      simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env), now,
+    });
     const decisions = readReviewDecisions(teamId);
     for (const kind of KNOWLEDGE_KINDS) {
       const bucket = proj.byKind[kind];
@@ -3776,7 +3867,11 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
 
   const { simThreshold, convergenceThreshold, relatedThreshold } = knowledgeConvergenceConfig(env);
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+  // #918: the semantic clustering context — backstop-computed vectors, or null
+  // (bit-for-bit lexical) when no cache exists. Never blocks the push path.
+  const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+    simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env), now,
+  });
 
   // Read the candidate store once — it drives both the promoted-status overlay on
   // the canonical files (Phase 4 git audit) and the suggestion / auto-promotion
@@ -5040,7 +5135,9 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
     teamSquadMemberIds(teamId),
   );
   const { simThreshold } = knowledgeConvergenceConfig(env);
-  const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold }).clusters;
+  const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+    simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env),
+  }).clusters;
   const cluster = clusters.find((c) => c.memberIds.includes(entryId));
   if (!cluster) throw new Error(`entry '${entryId}' not found in the team knowledge base`);
 
@@ -11702,9 +11799,12 @@ async function main() {
     for (const teamId of teamIds) {
       try {
         refreshKnowledgeClone(teamId, { force: true });
-        runConvergenceCollector(teamId) // #855: async, non-blocking
-          // #919: the decay sweep + curation-health pass rides the same nightly
-          // backstop, AFTER the collector so clone + candidate store are fresh.
+        // #918: embed missing/stale vectors BEFORE the collector, so this very
+        // pass can already link semantically; then the collector (#855 async),
+        // then #919's decay/health sweep. Each step best-effort, chained.
+        runTeamEmbeddingPass(teamId)
+          .catch((err) => console.warn(`[Orchestrator] embedding pass for '${teamId}' failed: ${err.message}`))
+          .then(() => runConvergenceCollector(teamId))
           .then(() => runTeamDecaySweep(teamId))
           .catch((err) => console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`));
       } catch (err) {

@@ -204,6 +204,37 @@ suggestion is referenced.
 
 ---
 
+### 3.1 Semantic layer (#918 — embeddings behind the seam)
+
+Lexical Jaccard misses paraphrases and DE↔EN duplicates. The #918 layer plugs
+meaning-based matching in **beside** the lexical seam, strictly additively:
+same-kind entries link when `similar(...)` **or** `cosine(va, vb) ≥
+cosineThreshold` (default **0.80**, clamped in `knowledgeConvergenceConfig`
+beside the other thresholds); cross-kind linking stays exact-only (#605 —
+embeddings must not reintroduce over-merging). With no backend/cache the
+`semantic` context is `null` and behaviour is **bit-for-bit lexical**.
+
+- **Backend** (`orchestrator/knowledge-embeddings.js`): a local multilingual
+  MiniLM-class model, operator-provisioned via `AEE_EMBEDDING_MODEL_PATH` and
+  loaded lazily through `@xenova/transformers` (offline WASM feature-extraction
+  — no hosted API, no Python sidecar; neither library nor model ship in the
+  default image, so the flag is off until the operator installs both).
+- **Vector cache**: `/workspace/knowledge-vectors/<teamId>.jsonl` —
+  `{ id, contentHash, vector }` per entry, **outside** the git KB (derived,
+  recomputable); staleness by `contentHash`, pruning of vanished ids; purged
+  with the team.
+- **Job home**: the **curator backstop** interval (no new scheduler) runs the
+  embedding pass *before* the collector — pushes never wait on a model; a fresh
+  entry matches lexically at once and semantically after the next backstop
+  pass, which re-raises any missed suggestion idempotently
+  (`stableSuggestionId`).
+- **Transparency**: a cluster containing a semantic-only link is flagged
+  (`semanticLink` → candidate `semanticMatch`) and its suggestion card shows a
+  "semantic match — grouped by meaning, not wording" hint.
+- **Eval gate**: `knowledge-embeddings.fixture.json` (DE↔EN + disjoint-vocabulary
+  paraphrases must converge; near-miss distinct facts must not) — CI-run when a
+  model is present, skips cleanly otherwise; threshold changes must keep it green.
+
 ## 4. Merge in JSONL, without breaking anything (decision c)
 
 The invariants Phase 1/2 rely on, and how Phase 3 keeps them:

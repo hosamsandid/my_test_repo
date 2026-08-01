@@ -12,6 +12,7 @@ const ROOTS = {
   archivedDir: '/workspace/knowledge-archived',
   reviewDir: '/workspace/knowledge-review',
   retrievalDir: '/workspace/knowledge-retrieval',
+  vectorsDir: '/workspace/knowledge-vectors',
   eventsFile: '/workspace/knowledge-events/events.jsonl',
 };
 
@@ -29,6 +30,7 @@ test('plan lists every local team-scoped store for a valid team', () => {
     '/workspace/knowledge-archived/agent-studio.json',
     '/workspace/knowledge-review/agent-studio.json',
     '/workspace/knowledge-retrieval/agent-studio.json', // #915 telemetry dies with the team
+    '/workspace/knowledge-vectors/agent-studio.jsonl', // #918 vector cache
   ]);
   assert.equal(plan.eventsFile, '/workspace/knowledge-events/events.jsonl');
 });

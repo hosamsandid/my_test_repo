@@ -592,3 +592,54 @@ test('toDigestOnlyRow: lean, keyed by the same stable id a candidate would carry
   assert.equal(row.routedAt, NOW);
   assert.ok(!/correlationId|sessionId|token/i.test(JSON.stringify(row)));
 });
+
+// ── #918 semantic convergence layer (synthetic vectors — no model needed) ────
+
+const { semanticLinks: _semanticLinks, toCandidate: _toCandidate } = require('./knowledge-convergence');
+
+function _semEntry(id, text, over = {}) {
+  return { v: 1, id, kind: 'fact', text, originAgent: over.agent || 'dev-1',
+    teamId: 'acme', createdAt: over.createdAt || '2026-07-01T10:00:00Z',
+    correlationId: '$e', convergence: [over.agent || 'dev-1'], status: 'active', ...over };
+}
+
+test('#918: a paraphrase pair with no token overlap clusters ONLY with the semantic context, and is flagged', () => {
+  const a = _semEntry('a'.repeat(12), 'Der Build schlägt hinter dem Proxy fehl', { agent: 'dev-1' });
+  const b = _semEntry('b'.repeat(12), 'npm install fails behind the corporate firewall', { agent: 'dev-2', createdAt: '2026-07-02T10:00:00Z' });
+  // lexical-only (no context): two clusters — bit-for-bit today's behaviour
+  const plain = clusterEntries([a, b], { simThreshold: 0.6 });
+  assert.equal(plain.length, 2);
+  assert.ok(plain.every((c) => !c.semanticLink));
+  // with vectors: one cluster, semantic-linked, candidate carries the hint
+  const semantic = { vectors: new Map([[a.id, [1, 0]], [b.id, [1, 0]]]), cosineThreshold: 0.8 };
+  const merged = clusterEntries([a, b], { simThreshold: 0.6, semantic });
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].semanticLink, true);
+  assert.equal(merged[0].convergenceCount, 2);
+  const cand = _toCandidate(merged[0], { teamId: 'acme', now: '2026-07-08T12:00:00Z' });
+  assert.equal(cand.semanticMatch, true);
+  // a lexically-linked cluster carries NO semantic flag
+  const lex = clusterEntries([
+    _semEntry('c'.repeat(12), 'branch from origin main always'),
+    _semEntry('d'.repeat(12), 'always branch from origin main', { agent: 'dev-2' }),
+  ], { simThreshold: 0.6, semantic: { vectors: new Map(), cosineThreshold: 0.8 } });
+  assert.equal(lex.length, 1);
+  assert.ok(!lex[0].semanticLink);
+  assert.ok(!('semanticMatch' in _toCandidate(lex[0], { teamId: 'acme', now: '2026-07-08T12:00:00Z' })));
+});
+
+test('#918: below-threshold cosine and missing vectors never link; cross-kind stays exact-only', () => {
+  const a = _semEntry('a'.repeat(12), 'poller polls every thirty seconds');
+  const b = _semEntry('b'.repeat(12), 'digest budget is three thousand tokens', { agent: 'dev-2' });
+  // orthogonal vectors → no link
+  const ortho = { vectors: new Map([[a.id, [1, 0]], [b.id, [0, 1]]]), cosineThreshold: 0.8 };
+  assert.equal(clusterEntries([a, b], { simThreshold: 0.6, semantic: ortho }).length, 2);
+  // one vector missing → no link (a fresh push matches only lexically until the backstop)
+  const half = { vectors: new Map([[a.id, [1, 0]]]), cosineThreshold: 0.8 };
+  assert.equal(clusterEntries([a, b], { simThreshold: 0.6, semantic: half }).length, 2);
+  assert.equal(_semanticLinks(a, b, half), false);
+  // cross-kind: identical vectors must NOT link fuzzy cross-kind pairs (#605 rule kept)
+  const conv = _semEntry('c'.repeat(12), 'completely different wording here', { kind: 'convention', agent: 'dev-2' });
+  const cross = { vectors: new Map([[a.id, [1, 0]], [conv.id, [1, 0]]]), cosineThreshold: 0.8 };
+  assert.equal(clusterEntries([a, conv], { simThreshold: 0.6, semantic: cross }).length, 2);
+});

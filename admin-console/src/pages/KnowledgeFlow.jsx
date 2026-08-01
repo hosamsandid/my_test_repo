@@ -3527,6 +3527,13 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
           {' '}· horizon {evidence.horizonDays}d
         </div>
       )}
+      {suggestion.semanticMatch && (
+        <div
+          title="Some of these lessons were grouped by meaning (embedding similarity), not word overlap — worth a quick sanity check that they really are the same lesson before promoting."
+          style={{ fontSize: 10, color: 'var(--eb-text-muted)', cursor: 'help' }}>
+          ⚡ semantic match — grouped by meaning, not wording
+        </div>
+      )}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
         {suggestion.text}
         {related && suggestion.lessonCount > 1 && (

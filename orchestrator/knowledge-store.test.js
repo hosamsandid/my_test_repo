@@ -283,23 +283,23 @@ test('knowledgeReviewEnabled defaults off and is tolerant', () => {
 // --- knowledgeConvergenceConfig ---------------------------------------------
 
 test('knowledgeConvergenceConfig defaults for legacy env', () => {
-  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
-  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
+  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3, cosineThreshold: 0.8 });
+  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3, cosineThreshold: 0.8 });
 });
 
 test('knowledgeConvergenceConfig honours + clamps overrides', () => {
   assert.deepEqual(
-    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 } }),
-    { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 },
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4, cosineThreshold: 0.8 } }),
+    { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4, cosineThreshold: 0.8 },
   );
   // clamp: sim out of range, threshold below 2 / non-int
   assert.deepEqual(
     knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 5, convergenceThreshold: 1, relatedThreshold: 5 } }),
-    { simThreshold: 1, convergenceThreshold: 2, relatedThreshold: 1 },
+    { simThreshold: 1, convergenceThreshold: 2, relatedThreshold: 1, cosineThreshold: 0.8 },
   );
   assert.deepEqual(
     knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: -1, convergenceThreshold: 2.5, relatedThreshold: -1 } }),
-    { simThreshold: 0, convergenceThreshold: 2, relatedThreshold: 0 },
+    { simThreshold: 0, convergenceThreshold: 2, relatedThreshold: 0, cosineThreshold: 0.8 },
   );
 });
 
@@ -514,4 +514,13 @@ test('#917: loadTriggers round-trip, validation, normalization', () => {
   assert.equal(normalizeLoadTriggers([]), null);
   assert.equal(normalizeLoadTriggers([{ type: 'bad', pattern: 'x' }]), null);
   assert.equal(normalizeLoadTriggers('junk'), null);
+});
+
+test('#918: cosineThreshold joins the convergence config with the same clamp posture', () => {
+  const { knowledgeConvergenceConfig } = require('./knowledge-store');
+  assert.equal(knowledgeConvergenceConfig(null).cosineThreshold, 0.8); // default
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 0.9 } }).cosineThreshold, 0.9);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 7 } }).cosineThreshold, 1);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: -1 } }).cosineThreshold, 0);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 'x' } }).cosineThreshold, 0.8);
 });

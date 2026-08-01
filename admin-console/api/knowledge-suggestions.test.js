@@ -62,7 +62,9 @@ test('buildHeuristicSkillDraft: contains texts + provenance, no secrets', () => 
   const d = buildHeuristicSkillDraft(candidate());
   assert.match(d.name, /^[a-z0-9-]+$/);
   assert.equal(d.llmDrafted, false);
-  assert.ok(d.skillMd.startsWith('# '));
+  // #921: the draft opens with the import-grade frontmatter, then the H1 body.
+  assert.ok(d.skillMd.startsWith('---\n'));
+  assert.match(d.skillMd, /\n---\n\n# /);
   assert.ok(d.skillMd.includes('This repo unit-tests pure helper cores only'));
   assert.ok(d.skillMd.includes('IO verified manually'));
   assert.ok(d.skillMd.includes('acme-dev-1'));
@@ -126,7 +128,7 @@ test('promotionSuggestionView: merges candidate + draft; defaults draft when abs
   assert.equal(v.id, '9f3a12bc7de0');
   assert.equal(v.convergenceCount, 2);
   assert.ok(v.draft.name);
-  assert.ok(v.draft.skillMd.startsWith('# '));
+  assert.ok(v.draft.skillMd.startsWith('---\n')); // #921 frontmatter
   assert.equal(v.draft.llmDrafted, false);
 
   const withDraft = promotionSuggestionView(candidate(), { name: 'custom', skillMd: '# custom', llmDrafted: true });
@@ -617,4 +619,74 @@ test('buildSummaryRequest: tolerates a missing/blank entry without throwing', ()
   const req = buildSummaryRequest(null);
   assert.ok(Array.isArray(req.messages) && req.messages.length === 1);
   assert.equal(typeof req.messages[0].content, 'string');
+});
+
+// ── #921: SKILL.md frontmatter (promoted ≡ imported) ────────────────────────
+
+const { ensureSkillFrontmatter, deriveSkillDescription } = require('./knowledge-suggestions');
+const { validateSkillMd } = require('./skill-import');
+
+test('#921 AC1: heuristic draft carries frontmatter and round-trips through validateSkillMd', () => {
+  const d = buildHeuristicSkillDraft(candidate());
+  const v = validateSkillMd(d.skillMd);
+  assert.equal(v.ok, true, v.error);
+  assert.equal(v.name, d.name);
+  assert.match(v.name, /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/); // writable slug
+  assert.match(v.description, /^Use this when /);
+});
+
+test('#921 AC1: aggregated and garbage candidates round-trip too', () => {
+  const agg = buildHeuristicSkillDraft(candidate({ source: 'related', lessonCount: 2 }));
+  assert.equal(validateSkillMd(agg.skillMd).ok, true);
+  assert.match(validateSkillMd(agg.skillMd).description, /^Use this when /);
+  // never-throw posture extends to the contract: even an empty candidate's draft imports
+  const empty = buildHeuristicSkillDraft({});
+  assert.equal(validateSkillMd(empty.skillMd).ok, true);
+});
+
+test('#921 AC2: both AI meta-prompts open with the frontmatter contract', () => {
+  for (const cand of [candidate(), candidate({ source: 'manual', lessonCount: 5 })]) {
+    const p = buildSkillDraftRequest(cand).messages[0].content;
+    assert.match(p, /EXACTLY this YAML frontmatter block/);
+    assert.match(p, /name: this-repo-unit-tests-pure-helper/);
+    assert.match(p, /description: >-/);
+    assert.match(p, /Use this when/);
+    assert.match(p, /After the frontmatter, a single H1 title line/);
+  }
+});
+
+test('#921: ensureSkillFrontmatter prepends, injects missing keys, never double-wraps', () => {
+  // no block → prepended, import-valid
+  const wrapped = ensureSkillFrontmatter('# Title\n\nbody', { name: 'my-skill', description: 'Use this when testing.' });
+  assert.equal(validateSkillMd(wrapped).ok, true);
+  assert.equal(validateSkillMd(wrapped).name, 'my-skill');
+  // complete block → returned unchanged (no double wrap)
+  assert.equal(ensureSkillFrontmatter(wrapped, { name: 'other', description: 'x' }), wrapped);
+  // partial block → only the missing key injected, authored value preserved
+  const partial = '---\nname: authored-name\n---\n# T\n';
+  const fixed = ensureSkillFrontmatter(partial, { name: 'fallback', description: 'Use this when x.' });
+  const v = validateSkillMd(fixed);
+  assert.equal(v.ok, true);
+  assert.equal(v.name, 'authored-name');
+  assert.equal(v.description, 'Use this when x.');
+});
+
+test('#921: deriveSkillDescription is auto-trigger-styled, one line, bounded', () => {
+  const single = deriveSkillDescription(candidate());
+  assert.match(single, /^Use this when /);
+  assert.ok(!single.includes('\n'));
+  const agg = deriveSkillDescription(candidate({ source: 'manual', lessonCount: 3 }));
+  assert.match(agg, /3 related team lessons/);
+  const long = deriveSkillDescription(candidate({ text: 'x'.repeat(500) }));
+  assert.ok(long.length <= 200);
+});
+
+test('#921 AC5: validatePromotion warns (never rejects) on a frontmatter-less body', () => {
+  const base = { from: 'team', to: 'team', name: 'my-skill', entryIds: ['aaaaaaaaaaaa'] };
+  const legacy = validatePromotion({ ...base, skillMd: '# Legacy body' });
+  assert.equal(legacy.ok, true);
+  assert.deepEqual(legacy.warnings, ['missing-frontmatter']);
+  const modern = validatePromotion({ ...base, skillMd: buildHeuristicSkillDraft(candidate()).skillMd });
+  assert.equal(modern.ok, true);
+  assert.deepEqual(modern.warnings, []);
 });

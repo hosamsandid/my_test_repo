@@ -4545,7 +4545,13 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+  // #921: the LLM is instructed to open with frontmatter, but the round-trip
+  // contract (promoted ≡ imported) must hold even when it disobeys — inject any
+  // missing key from the heuristic draft's derived values (no-op when complete).
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model });
 });
 
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
@@ -4594,7 +4600,11 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+  // #921: same disobedient-model guard as the suggestion draft above.
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
 });
 
 // Generate-and-store human-readable summaries (#635, AC3) for a team's KB entries
@@ -4948,7 +4958,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     cleanup = await cleanupPromotedSource(teamId, v.entryIds, { name: v.name, tier: v.to });
   }
 
-  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov, ...(cleanup ? { cleanup } : {}) });
+  res.status(201).json({
+    name: v.name, tier: v.to, teamId, provenance: prov,
+    ...(cleanup ? { cleanup } : {}),
+    // #921: non-blocking — the skill was written; the caller may surface that it
+    // lacks the import-grade frontmatter header.
+    ...(Array.isArray(v.warnings) && v.warnings.length ? { warnings: v.warnings } : {}),
+  });
 });
 
 // List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill

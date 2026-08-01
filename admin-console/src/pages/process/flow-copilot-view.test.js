@@ -9,6 +9,8 @@ import {
   copilotErrorInfo,
   supersedePending,
   latestProposal,
+  phaseLabel,
+  consumeCopilotStream,
 } from './flow-copilot-view.js';
 
 test('starter prompts: three chips, whole-flow example first', () => {
@@ -107,4 +109,66 @@ test('latestProposal finds the newest actionable card, else null', () => {
   assert.equal(latestProposal(entries).summary, 'b');
   assert.equal(latestProposal([{ role: 'assistant', status: 'applied' }]), null);
   assert.equal(latestProposal(undefined), null);
+});
+
+// ── NDJSON progress stream (#1070) ──────────────────────────────────────────
+
+test('phaseLabel maps the server phases to live status lines', () => {
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating' }), 'Generating…');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'validating' }), 'Validating…');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 1 }), 'Repairing (1/2)…');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 2 }), 'Repairing (2/2)…');
+  assert.equal(phaseLabel(null), 'Generating…');
+});
+
+// Synthetic OK response whose body streams the given chunks.
+function streamedRes(chunks) {
+  const enc = new TextEncoder();
+  return {
+    body: new ReadableStream({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(enc.encode(c));
+        controller.close();
+      },
+    }),
+  };
+}
+
+test('consumeCopilotStream forwards phases and resolves with the result payload', async () => {
+  const phases = [];
+  const result = await consumeCopilotStream(streamedRes([
+    '{"type":"phase","phase":"generating"}\n',
+    '{"type":"phase","phase":"validating"}\n{"type":"result","ok":true,"summary":"built","bundle":{"processTemplateVersion":1},"model":"m"}\n',
+  ]), (ev) => phases.push(ev.phase));
+  assert.deepEqual(phases, ['generating', 'validating']);
+  assert.equal(result.ok, true);
+  assert.equal(result.summary, 'built');
+  assert.equal(result.model, 'm');
+});
+
+test('consumeCopilotStream reassembles a line split across chunks', async () => {
+  const result = await consumeCopilotStream(streamedRes([
+    '{"type":"result","ok":tr', 'ue,"summary":"split"}\n',
+  ]), null);
+  assert.equal(result.summary, 'split');
+});
+
+test('consumeCopilotStream throws with status on a terminal error event', async () => {
+  await assert.rejects(
+    consumeCopilotStream(streamedRes(['{"type":"error","status":502,"error":"LLM request failed: timeout"}\n']), null),
+    (err) => err.status === 502 && /timeout/.test(err.message));
+});
+
+test('consumeCopilotStream treats a stream without a result as a dropped connection', async () => {
+  await assert.rejects(
+    consumeCopilotStream(streamedRes(['{"type":"phase","phase":"generating"}\n']), null),
+    /Connection lost/);
+});
+
+test('consumeCopilotStream survives corrupt lines and a missing trailing newline', async () => {
+  const result = await consumeCopilotStream(streamedRes([
+    'garbage-not-json\n',
+    '{"type":"result","ok":false,"summary":"tail"}',
+  ]), null);
+  assert.equal(result.summary, 'tail');
 });

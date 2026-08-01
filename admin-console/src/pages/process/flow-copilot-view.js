@@ -104,3 +104,60 @@ export function latestProposal(entries) {
   }
   return null;
 }
+
+// ── NDJSON progress stream (#1070) ───────────────────────────────────────────
+// POST /api/process/copilot streams `{type:'phase'}` lines while the
+// generate → validate → repair loop runs, terminated by `{type:'result'}` or
+// `{type:'error'}` (the /api/teams/stream mould). Pre-stream failures
+// (bad request, no provider) stay plain non-ok JSON and never reach here.
+
+/** The live status line for a phase event. The server's repair budget is 2. */
+export function phaseLabel(ev, maxRepairs = 2) {
+  if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…`;
+  if (ev && ev.phase === 'validating') return 'Validating…';
+  return 'Generating…';
+}
+
+/**
+ * Consume the NDJSON body of an OK copilot response: forward phase events to
+ * `onPhase`, resolve with the terminal result payload. Throws (with `.status`
+ * when the server reported one) on a terminal error event — and on a stream
+ * that ends without a result, which is what a dropped connection looks like;
+ * both surface as a retryable transport error row.
+ */
+export async function consumeCopilotStream(res, onPhase) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buf = '';
+  let result = null;
+  let errorEv = null;
+  const handle = (ev) => {
+    if (!ev || typeof ev !== 'object') return;
+    if (ev.type === 'phase') { if (onPhase) onPhase(ev); }
+    else if (ev.type === 'result') result = ev;
+    else if (ev.type === 'error') errorEv = ev;
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try { handle(JSON.parse(line)); } catch { /* skip a corrupt line */ }
+    }
+  }
+  // Trailing partial line (defensive — the server always ends with a newline,
+  // but a dropped connection mid-line must not crash the parser).
+  const tail = buf.trim();
+  if (tail) { try { handle(JSON.parse(tail)); } catch { /* ignore */ } }
+  if (errorEv) {
+    const err = new Error(errorEv.error || `HTTP ${errorEv.status || 502}`);
+    err.status = errorEv.status || 502;
+    throw err;
+  }
+  if (!result) throw new Error('Connection lost during generation');
+  return result;
+}

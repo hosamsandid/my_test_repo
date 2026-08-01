@@ -6033,13 +6033,19 @@ app.post('/api/process/weave', (req, res) => {
   }
 });
 
-/* ─── Flow Copilot (#1068, spec #1047) ──────────────────────────────────
+/* ─── Flow Copilot (#1068/#1070, spec #1047) ────────────────────────────
  * Natural-language flow generation/revision. Stateless: the client resends the
  * conversation + current bundle each turn; generate → sanitize → STRICT
  * validate → lint → repair (≤ 2 iterations) lives in flow-copilot.js. This
  * route only resolves the model (same posture as /api/agent-prompt/generate —
  * no heuristic fallback exists at whole-flow scope, so no provider is a hard
- * 400) and owns the LLM transport. Mutating POST → audited automatically. */
+ * 400) and owns the LLM transport. Mutating POST → audited automatically.
+ *
+ * A turn can take 20–60s (up to 3 LLM calls), so the response is NDJSON
+ * progress lines (#1070) in the /api/teams/stream mould: request-shape and
+ * provider errors stay plain 400 JSON (headers not sent yet); once generation
+ * starts, `{type:'phase', …}` events stream as the loop advances, terminated
+ * by `{type:'result', …Phase-1 payload}` or `{type:'error', status, error}`. */
 app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const messages = Array.isArray(body.messages) ? body.messages : null;
@@ -6074,15 +6080,36 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     return extractMessageText(result.body);
   };
 
+  // NDJSON stream plumbing — see POST /api/teams/stream for the rationale of
+  // flushHeaders/setNoDelay and of watching res (not req) for disconnect.
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  if (typeof res.socket?.setNoDelay === 'function') {
+    res.socket.setNoDelay(true);
+  }
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) aborted = true;
+  });
+  function emit(ev) {
+    if (aborted) return;
+    try {
+      res.write(JSON.stringify(ev) + '\n');
+    } catch { /* socket gone */ }
+  }
+
   try {
-    const out = await runCopilot({ bundle: body.bundle, messages, callLlm });
-    res.json({ ...out, model: target.model });
+    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
+    emit({ type: 'result', ...out, model: target.model });
   } catch (err) {
     // Transport failure with no bundle to fall back to, or no parseable reply
     // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
     // returns ok:false for that.
-    res.status(502).json({ error: err.message });
+    emit({ type: 'error', status: 502, error: err.message });
   }
+  if (!aborted) res.end();
 });
 
 /* ─── Process-template registry (#419) ──────────────────────────────────

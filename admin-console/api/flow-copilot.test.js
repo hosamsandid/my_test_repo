@@ -349,3 +349,69 @@ test('repair message lists error findings only', () => {
   assert.match(msg, /\[invalid-bundle\] roles must be a non-empty array/);
   assert.match(msg, /COMPLETE bundle/);
 });
+
+// ── progress events (#1070) ──────────────────────────────────────────────────
+
+test('clean first answer emits generating → validating', async () => {
+  const phases = [];
+  await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build the flow' }],
+    callLlm: async () => reply(fixture()),
+    formatDoc: 'doc', addendum: 'add',
+    onProgress: (ev) => phases.push(ev),
+  });
+  assert.deepEqual(phases, [
+    { type: 'phase', phase: 'generating' },
+    { type: 'phase', phase: 'validating' },
+  ]);
+});
+
+test('repair loop emits repairing with 1-based iterations between validations', async () => {
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  const phases = [];
+  await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build it' }],
+    callLlm: async () => reply(bad),
+    formatDoc: 'doc', addendum: 'add',
+    onProgress: (ev) => phases.push(ev),
+  });
+  assert.deepEqual(phases, [
+    { type: 'phase', phase: 'generating' },
+    { type: 'phase', phase: 'validating' },
+    { type: 'phase', phase: 'repairing', iteration: 1 },
+    { type: 'phase', phase: 'validating' },
+    { type: 'phase', phase: 'repairing', iteration: 2 },
+    { type: 'phase', phase: 'validating' },
+  ]);
+});
+
+test('transport failure mid-repair stops the phase stream after the repairing event', async () => {
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  let calls = 0;
+  const phases = [];
+  await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build it' }],
+    callLlm: async () => {
+      if (++calls === 1) return reply(bad);
+      throw new Error('LLM request failed: timeout');
+    },
+    formatDoc: 'doc', addendum: 'add',
+    onProgress: (ev) => phases.push(ev),
+  });
+  assert.deepEqual(phases.map(p => p.phase), ['generating', 'validating', 'repairing']);
+});
+
+test('omitting onProgress keeps the loop working (no hook required)', async () => {
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build the flow' }],
+    callLlm: async () => reply(fixture()),
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.equal(out.ok, true);
+});

@@ -20,6 +20,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
@@ -27,7 +28,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
@@ -3860,6 +3861,7 @@ function knowledgeTeamByAgent() {
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
 const KNOWLEDGE_REVIEW_DIR = path.join(WORKSPACE, 'knowledge-review');
+const KNOWLEDGE_VALIDITY_DIR = path.join(WORKSPACE, 'knowledge-validity');
 
 function readArchivedIdsFor(teamId) {
   const arr = readJsonFile(path.join(KNOWLEDGE_ARCHIVED_DIR, `${path.basename(teamId)}.json`), []);
@@ -3868,6 +3870,14 @@ function readArchivedIdsFor(teamId) {
 
 function readReviewDecisionsFor(teamId) {
   const obj = readJsonFile(path.join(KNOWLEDGE_REVIEW_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
+// #916: per-team validity sidecar { <id>: { validTo?, supersededBy? } } — the
+// orchestrator is the writer; read here so the overlay holds even when the
+// canonical clone's re-projection lags.
+function readValidityFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_VALIDITY_DIR, `${path.basename(teamId)}.json`), {});
   return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
 }
 
@@ -3919,6 +3929,15 @@ function gatherTeamEntries(teamId) {
   }
   const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
+  // #916: validity is a field overlay (never a status) — same legacy-'default'
+  // merge as the archive store so pre-re-homing decisions still hold.
+  const validity = { ...readValidityFor(teamId) };
+  if (teamId !== 'default') {
+    for (const [k, v] of Object.entries(readValidityFor('default'))) {
+      if (!(k in validity)) validity[k] = v;
+    }
+  }
+  entries = overlayValidity(entries, validity);
   return { entries, warnings };
 }
 
@@ -4326,6 +4345,35 @@ app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
   }
 });
 
+// Set / clear a KB entry's validity window (#916 bitemporal validity). Proxies
+// to the orchestrator (sidecar writer + canonical re-projection). Setting
+// validTo expires the entry everywhere active on that date; null/'' clears it
+// (idempotent round trip). supersededBy records semantic replacement and never
+// by itself hides the entry.
+app.post('/api/knowledge/item/:id/validity', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamId, id,
+        validTo: typeof req.body?.validTo === 'string' ? req.body.validTo : null,
+        supersededBy: typeof req.body?.supersededBy === 'string' ? req.body.supersededBy : null,
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'validity update failed' });
+    res.json({ ok: true, id, validTo: out.validTo ?? null, supersededBy: out.supersededBy ?? null });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // Nominate a KB entry for promotion (operator-initiated, from the agent-chat
 // Knowledge tab). Raises a promotion-suggestion card for the entry's convergence
 // cluster — works below the convergence threshold too; never promotes by itself.
@@ -4544,7 +4592,13 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+  // #921: the LLM is instructed to open with frontmatter, but the round-trip
+  // contract (promoted ≡ imported) must hold even when it disobeys — inject any
+  // missing key from the heuristic draft's derived values (no-op when complete).
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model });
 });
 
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
@@ -4593,7 +4647,11 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+  // #921: same disobedient-model guard as the suggestion draft above.
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
 });
 
 // Generate-and-store human-readable summaries (#635, AC3) for a team's KB entries
@@ -4947,7 +5005,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     cleanup = await cleanupPromotedSource(teamId, v.entryIds, { name: v.name, tier: v.to });
   }
 
-  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov, ...(cleanup ? { cleanup } : {}) });
+  res.status(201).json({
+    name: v.name, tier: v.to, teamId, provenance: prov,
+    ...(cleanup ? { cleanup } : {}),
+    // #921: non-blocking — the skill was written; the caller may surface that it
+    // lacks the import-grade frontmatter header.
+    ...(Array.isArray(v.warnings) && v.warnings.length ? { warnings: v.warnings } : {}),
+  });
 });
 
 // List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill
@@ -5649,6 +5713,60 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
   try {
     const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-anomalies`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/members — running/busy/trigger state for every
+// member, feeding the team-wide disable/enable preview dialog.
+app.get('/api/teams/:teamId/members', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/members`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/disable — bulk-disable every enabled member.
+// Body: { mode: 'drain' | 'abort' }, required.
+app.post('/api/teams/:teamId/disable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const mode = req.body?.mode;
+  if (mode !== 'drain' && mode !== 'abort') return res.status(400).json({ error: "mode must be 'drain' or 'abort'" });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/disable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/enable — bulk-enable every member the earlier
+// disable tagged disabledByTeam.
+app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/enable`, { method: 'POST' });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);
   } catch (err) {
@@ -8104,6 +8222,53 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   if (ep.authTokenId) deleteLlmEndpointToken(ep.authTokenId);
   saveLlmEndpointsIndex(list.filter(e => e.id !== ep.id));
   res.status(204).end();
+});
+
+// Returns enabled, materialized agents whose effective LLM endpoint is :id.
+// Used by the UI to prompt a respawn after credential rotation. Discovery
+// logic lives in respawn-agents.js (pure, unit-tested) — this route only
+// does I/O (loading configs) and wires the result into a JSON response.
+app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  res.json({ agents });
+});
+
+// Respawn all enabled agents bound to :id so they pick up the rotated credential
+// without requiring a manual disable→enable cycle. Discovery + the bounded
+// worker-pool both live in respawn-agents.js (pure, unit-tested); this route
+// does I/O and decides the default concurrency policy.
+app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  // Bounded concurrency: an unbounded Promise.all here would fan out one
+  // stop+recreate container-lifecycle call per agent simultaneously, which
+  // can overwhelm the orchestrator's libpod socket and the host's container
+  // runtime on a large squad (observed directly while load-testing this
+  // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
+  // for their hardware; the default is conservative for a local Podman host.
+  const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
+  const { respawned, skipped } = await respawnWithConcurrency(
+    agents.map(a => a.id),
+    requestedConcurrency,
+    id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
+  );
+  res.json({ respawned, skipped });
 });
 
 // Shared between the stored-endpoint routes (use the persisted token) and the

@@ -1945,13 +1945,27 @@ class BuildKnowledgeDigest(unittest.TestCase):
                 self.assertEqual(res["tokensUsed"], case["expectedTokensUsed"])
 
     def test_fold_last_writer_wins_and_hides_statuses(self):
+        # No injected clock ⇒ nothing expires (#916): 7 distinct ids, merged hidden.
         folded = entrypoint.fold_visible_entries(self.fixture["entries"])
         self.assertEqual(
             [e["id"] for e in folded],
-            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003"],
+            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003",
+             "fff000000006", "abc000000007"],
         )
         conv = next(e for e in folded if e["id"] == "aaa000000001")
         self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
+
+    def test_fold_expired_with_injected_clock(self):
+        # #916: fff…6 (validTo 2026-07-10) expires by the fixture generatedAt;
+        # abc…7's future validTo keeps it. Boundary (validTo == now) not expired.
+        folded = entrypoint.fold_visible_entries(
+            self.fixture["entries"], now="2026-07-13T09:00:00Z")
+        ids = [e["id"] for e in folded]
+        self.assertNotIn("fff000000006", ids)
+        self.assertIn("abc000000007", ids)
+        boundary = entrypoint.fold_visible_entries(
+            self.fixture["entries"], now="2026-07-10T00:00:00Z")
+        self.assertIn("fff000000006", [e["id"] for e in boundary])
 
     def test_included_ids_render_order(self):
         res = entrypoint.build_knowledge_digest(
@@ -1959,7 +1973,8 @@ class BuildKnowledgeDigest(unittest.TestCase):
             entries=self.fixture["entries"],
         )
         self.assertEqual(res["includedIds"], [
-            "aaa000000001", "bbb000000002", "ccc000000003", "ddd000000004",
+            "aaa000000001", "bbb000000002", "abc000000007", "ccc000000003",
+            "ddd000000004",
         ])
 
     def test_multiline_text_flattened(self):

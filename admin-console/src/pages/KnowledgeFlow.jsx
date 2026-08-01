@@ -28,6 +28,7 @@ import {
   isResumable, mergeForDomain, planDomainRows, planFoldTotals,
   consolidationStartGate,
 } from './consolidation-view';
+import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -353,6 +354,22 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
+  // #916: set/clear an entry's validity window ("this stops being true on X" —
+  // distinct from Retire). Reload posture mirrors archiveItem.
+  const setItemValidity = useCallback((id, teamId, validTo) => {
+    return fetch(`/api/knowledge/item/${encodeURIComponent(id)}/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, validTo }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => {
+        setSelected(null); setDetail(null);
+        const t = (teams || []).find(x => x.id === teamId);
+        return loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+      })
+      .catch(() => {});
+  }, [teams, loadTeamData]);
+
   // Bulk retire / un-retire for the overview table. Each id is flipped
   // independently (already-in-target-state ids are filtered out by the caller,
   // so this never errors on a no-op), then the team slice is reloaded once.
@@ -522,7 +539,7 @@ export default function KnowledgeFlow() {
         <Chip
           active={filters.showArchived}
           title="Also show retired knowledge — it’s hidden by default but kept for audit"
-          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
+          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show retired &amp; expired</Chip>
       </div>
       )}
 
@@ -581,6 +598,8 @@ export default function KnowledgeFlow() {
               onClose={() => { setSelected(null); setDetail(null); }}
               onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)}
               onArchive={(id, teamId, archived) => archiveItem(id, teamId ?? selected.teamId, archived)}
+              onValidity={(id, teamId, validTo) => setItemValidity(id, teamId ?? selected.teamId, validTo)}
+              onOpenItem={(id, teamId) => openItem(id, teamId ?? selected.teamId)}
             />
           </div>
         )}
@@ -2563,6 +2582,9 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
         {item.archived && (
           <span title="Retired from the active knowledge base — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
         )}
+        {item.expired && !item.archived && (
+          <span title={`No longer valid since ${(item.validTo || '').slice(0, 10)} — dropped from the digest, search and active graph; kept in git`} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>expired</span>
+        )}
         {item.converged && (
           <span
             title={`${item.convergenceCount} agents learned this independently of each other — a strong signal it’s true and important. Converged knowledge is what gets suggested as a skill.`}
@@ -3920,10 +3942,14 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
 
 /* ── Provenance drill-down (right rail) ─────────────────────────────────────── */
 
-function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
+function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onOpenItem }) {
   const { entry, links } = detail;
   const archived = entry.status === 'archived';
   const promoted = entry.status === 'promoted';
+  // #916 bitemporal validity: expiry is derived from validTo (field, not status).
+  const expired = typeof entry.validTo === 'string' && entry.validTo !== '' && entry.validTo < new Date().toISOString();
+  const [validDate, setValidDate] = useState((entry.validTo || '').slice(0, 10));
+  useEffect(() => { setValidDate((entry.validTo || '').slice(0, 10)); }, [entry.id, entry.validTo]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
@@ -3964,6 +3990,52 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
             title="Agents that learned this on their own, without seeing each other’s notes — the more, the stronger the signal">
             {entry.convergence?.length || 1}× — {(entry.convergence || []).join(', ') || entry.originAgent}
           </div>
+        </Lineage>
+        <Lineage label="Validity">
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: expired ? 'var(--eb-status-warning)' : 'var(--eb-text-primary)' }}
+            title="When this fact was (or is) true. Expired entries drop out of the digest, search and the active graph automatically — nothing is deleted.">
+            From {(entry.validFrom || entry.createdAt || '?').slice(0, 10)} · {entry.validTo
+              ? <>until {entry.validTo.slice(0, 10)}{expired ? ' — expired' : ''}</>
+              : 'open-ended'}
+          </div>
+          {entry.supersededBy && (
+            <button
+              onClick={() => onOpenItem && onOpenItem(entry.supersededBy, entry.teamId)}
+              title="This fact was replaced by a newer entry — open it"
+              style={{
+                marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
+                background: 'var(--eb-accent-muted)', border: 'none', padding: '1px 8px',
+                borderRadius: 'var(--eb-radius-full)', cursor: onOpenItem ? 'pointer' : 'default',
+              }}>
+              superseded by {entry.supersededBy}
+            </button>
+          )}
+          {onValidity && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+              <input
+                type="date"
+                value={validDate}
+                onChange={e => setValidDate(e.target.value)}
+                title="Valid until — the date this stops being true (inclusive)"
+                style={{ ...inp, padding: '2px 6px', fontSize: 'var(--eb-text-xs)', width: 'auto', flex: 1 }}
+              />
+              <button
+                onClick={() => onValidity(entry.id, entry.teamId, validDate)}
+                disabled={!validDate || validDate === (entry.validTo || '').slice(0, 10)}
+                title="Set the valid-until date — the entry expires everywhere active on that date"
+                style={{ ...miniBtn }}>
+                Set
+              </button>
+              {entry.validTo && (
+                <button
+                  onClick={() => onValidity(entry.id, entry.teamId, null)}
+                  title="Clear the valid-until date — the entry is current again everywhere"
+                  style={{ ...miniBtn }}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
         </Lineage>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           {entry.teamId} · {entry.createdAt}{entry.status && entry.status !== 'active' ? ` · ${entry.status}` : ''}
@@ -4127,6 +4199,17 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const [targetName, setTargetName] = useState(suggestion.matchedSkill?.name || '');
   const [skills, setSkills] = useState([]); // all eligible skills (every source/tier)
 
+  // #921: the *name field* is the single source of truth for the draft's
+  // frontmatter `name:` — whenever it changes (typing, or a draft arriving), the
+  // preview's header is rewritten to match. The ref lets async draft handlers
+  // read the freshest name without re-subscribing.
+  const nameRef = useRef(name);
+  nameRef.current = name;
+  useEffect(() => {
+    if (mode !== 'create') return;
+    setSkillMd(md => syncFrontmatterName(md, name.trim()));
+  }, [name, mode]);
+
   // manual = operator multi-select (no stored suggestion); aggregated = the
   // lessons are distinct and the skill is their synthesis (manual OR the
   // collector's related-theme card).
@@ -4171,6 +4254,16 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
     return skills.filter(s => s.source === 'pool').map(s => ({ name: s.name, scope: 'global' }));
   }, [skills, tier, teamId, columnSkills]);
   const canExtend = eligible.length > 0;
+
+  // #921: exact name collision with a skill already in the target tier — a
+  // non-blocking inline hint with a suggested free suffix ("Add to an existing
+  // skill" stays the intended path for a genuine same-skill collision).
+  const takenNames = useMemo(() => new Set(eligible.map(s => s.name)), [eligible]);
+  const nameCollision = mode === 'create' && !!name.trim() && takenNames.has(name.trim());
+  const suggestedName = nameCollision ? suggestFreeName(name.trim(), takenNames) : '';
+  // #921: advisory only — a frontmatter-less draft still promotes (legacy bodies
+  // keep working) but can't be exported/re-imported until a header is added.
+  const missingFrontmatter = mode === 'create' && !!skillMd.trim() && !hasFrontmatterMeta(skillMd);
 
   // The selected target's INTRINSIC scope drives the effective promotion scope: a
   // team-tier extend of a global/adopted skill still writes the global pool file
@@ -4237,7 +4330,8 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
       .then(r => (r.ok ? r.json() : null))
       .then(d => {
         if (d?.draft) {
-          setSkillMd(md => md || d.draft.skillMd || '');
+          // #921: an operator-typed name wins over the draft's — sync the header.
+          setSkillMd(md => md || syncFrontmatterName(d.draft.skillMd || '', nameRef.current.trim()));
           setName(n => n || d.draft.name || '');
         }
       })
@@ -4266,7 +4360,16 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         });
     req
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
+      .then(d => {
+        if (d?.draft?.skillMd) {
+          // #921: keep the operator's name if one is typed (single source of
+          // truth), syncing the incoming draft's frontmatter to it; only an
+          // empty field adopts the draft's name.
+          const kept = (nameRef.current || d.draft.name || '').trim();
+          setSkillMd(syncFrontmatterName(d.draft.skillMd, kept));
+          if (!nameRef.current.trim() && d.draft.name) setName(d.draft.name);
+        }
+      })
       .catch(() => setError('Draft failed'))
       .finally(() => setBusy(''));
   };
@@ -4406,6 +4509,15 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           <>
             <label style={lbl}>Skill name</label>
             <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+            {nameCollision && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+                A skill named “{name.trim()}” already exists here. Consider{' '}
+                <button onClick={() => setName(suggestedName)} style={{ ...btn, display: 'inline-flex', padding: '0 4px' }}>
+                  {suggestedName}
+                </button>
+                {' '}— or use “Add to an existing skill” to fold this knowledge into it.
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -4444,6 +4556,13 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         </div>
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
+        {missingFrontmatter && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+            This draft has no <code>name</code>/<code>description</code> frontmatter header. It still
+            promotes, but the skill can’t be exported and re-imported until a header is added, and the
+            description is what tells agents when to load it.
+          </div>
+        )}
 
         {/* Activation is the default last step of every pool-filling flow. In
             CREATE it adds the new skill to the team. In EXTEND (#630 AC2) the

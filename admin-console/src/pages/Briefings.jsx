@@ -12,6 +12,50 @@ const ProcessGraphPanel = lazy(() =>
 
 const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
 const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
+const SIDEBAR_WIDTH_KEY = 'flowsPaneWidth';
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 600;
+const DETAILS_MIN = 300;
+const DIVIDER_W = 12;
+
+function loadSidebarWidth() {
+  try {
+    const v = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+    return Number.isFinite(v) ? v : 260;
+  } catch { return 260; }
+}
+
+function ResizeDivider({ onMouseDown, disabled = false }) {
+  const [hovered, setHovered] = React.useState(false);
+  const showGrab = hovered && !disabled;
+  return (
+    <div
+      onMouseDown={disabled ? undefined : onMouseDown}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: DIVIDER_W,
+        flexShrink: 0,
+        cursor: disabled ? 'default' : 'col-resize',
+        position: 'relative',
+        zIndex: 5,
+        userSelect: 'none',
+      }}
+    >
+      <div style={{
+        position: 'absolute',
+        left: '50%',
+        top: 0,
+        bottom: 0,
+        width: showGrab ? 3 : 1,
+        transform: 'translateX(-50%)',
+        background: showGrab ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+        transition: 'background 0.15s, width 0.15s',
+        pointerEvents: 'none',
+      }} />
+    </div>
+  );
+}
 
 const BP_LIFECYCLE_ROWS = [
   { state: 'draft',      desc: 'Work item created but not yet scoped.' },
@@ -373,6 +417,65 @@ export default function Briefings() {
   const [bannerDismissed, setBannerDismissed] = useState(
     () => localStorage.getItem(BANNER_KEY) === 'true'
   );
+
+  // Resizable left sidebar — width persisted in localStorage.
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const [resizing, setResizing] = useState(false);
+  const containerRef = useRef(null);
+  const dragRef = useRef(null);
+  const [containerW, setContainerW] = useState(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)); } catch {}
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width;
+      if (w) setContainerW(w);
+    });
+    ro.observe(el);
+    setContainerW(el.getBoundingClientRect().width || null);
+    return () => ro.disconnect();
+  }, []);
+
+  const effSidebarWidth = navCollapsed
+    ? 40
+    : Math.max(SIDEBAR_MIN, Math.min(
+        SIDEBAR_MAX,
+        containerW ? Math.min(sidebarWidth, containerW - DIVIDER_W - DETAILS_MIN) : sidebarWidth
+      ));
+
+  const startDrag = useCallback((e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = effSidebarWidth;
+    const containerNow = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
+    const upperCap = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, containerNow - DIVIDER_W - DETAILS_MIN));
+    dragRef.current = { startX, startWidth, lowerCap: SIDEBAR_MIN, upperCap };
+
+    setResizing(true);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const onMove = (ev) => {
+      if (!dragRef.current) return;
+      const { startX: sx, startWidth: sw, lowerCap: lo, upperCap: hi } = dragRef.current;
+      setSidebarWidth(Math.max(lo, Math.min(hi, sw + (ev.clientX - sx))));
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      setResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [effSidebarWidth]);
   // Selection: a process scope (`proc`) takes precedence over a BriefingPack
   // flow (`flow`). `proc` is a team id, 'draft:<id>', or 'import'.
   const proc = searchParams.get('proc');
@@ -544,24 +647,26 @@ export default function Briefings() {
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 
   return (
-    <div style={{
-      display: 'flex',
-      height: 'calc(100vh - var(--eb-header-height))',
-      margin: 'calc(-1 * var(--eb-space-6))',
-      background: 'var(--eb-bg-app)',
-      overflow: 'hidden',
-    }}>
+    <div
+      ref={containerRef}
+      style={{
+        display: 'flex',
+        height: 'calc(100vh - var(--eb-header-height))',
+        margin: 'calc(-1 * var(--eb-space-6))',
+        background: 'var(--eb-bg-app)',
+        overflow: 'hidden',
+      }}
+    >
       {/* Left column: Flow list */}
       <div style={{
-        width: navCollapsed ? 40 : 260,
-        minWidth: navCollapsed ? 40 : 260,
+        width: effSidebarWidth,
+        minWidth: effSidebarWidth,
         height: '100%',
-        borderRight: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        transition: 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
+        transition: resizing ? 'none' : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
         flexShrink: 0,
       }}>
         {navCollapsed ? (
@@ -749,6 +854,8 @@ export default function Briefings() {
           </>
         )}
       </div>
+
+      <ResizeDivider onMouseDown={startDrag} disabled={navCollapsed} />
 
       {/* Right pane: banner + graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>

@@ -556,3 +556,67 @@ test('overlayStatuses: review off leaves undecided entries untouched but still a
   );
   assert.deepEqual(out.map((e) => e.status), ['active', 'rejected']);
 });
+
+// ── #916 bitemporal validity: foldExpired / overlayValidity / reveal ─────────
+
+const { foldExpired, entryExpired, overlayValidity } = require('./knowledge-graph');
+
+test('#916: entryExpired is a plain ISO string comparison, inert without a clock', () => {
+  const e = entry({ validTo: '2026-07-01T00:00:00Z' });
+  assert.equal(entryExpired(e, '2026-07-08T12:00:00Z'), true);
+  assert.equal(entryExpired(e, '2026-06-30T00:00:00Z'), false);
+  assert.equal(entryExpired(e, '2026-07-01T00:00:00Z'), false); // boundary: not yet expired
+  assert.equal(entryExpired(e, ''), false); // no clock ⇒ never expired
+  assert.equal(entryExpired(entry(), '2026-07-08T12:00:00Z'), false); // no validTo
+});
+
+test('#916 AC2: foldExpired hides every copy of an id whose LATEST copy expired', () => {
+  const nowIso = '2026-07-08T12:00:00Z';
+  const staleLive = entry({ id: 'exp1exp1exp1', createdAt: '2026-07-01T00:00:00Z' });
+  const expiredCanonical = entry({ id: 'exp1exp1exp1', createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-05T00:00:00Z', validTo: '2026-07-06T00:00:00Z' });
+  const alive = entry({ id: 'ok1ok1ok1ok1', validTo: '2026-12-31T23:59:59Z' });
+  const out = foldExpired([staleLive, expiredCanonical, alive], nowIso);
+  assert.deepEqual(out.map((e) => e.id), ['ok1ok1ok1ok1']);
+  // identity when nothing expires
+  assert.equal(foldExpired([alive], nowIso).length, 1);
+});
+
+test('#916 AC2/AC3: default graph folds expired out; includeArchived reveals with expired flag; clearing restores', () => {
+  const expired = entry({ id: 'exp2exp2exp2', validTo: '2026-07-01T00:00:00Z' });
+  const active = entry({ id: 'act1act1act1' });
+  const base = { scope: 'team:acme', agents: [{ id: 'acme-dev-1', parentTeamId: 'acme' }], now: NOW };
+  const dflt = buildKnowledgeGraph({ ...base, entries: [expired, active] });
+  const dfltIds = dflt.nodes.filter((n) => n.kind === 'item').map((n) => n.id);
+  assert.ok(!dfltIds.some((id) => id.includes('exp2exp2exp2')));
+  const reveal = buildKnowledgeGraph({ ...base, entries: [expired, active], includeArchived: true });
+  const item = reveal.nodes.find((n) => n.kind === 'item' && n.id.includes('exp2exp2exp2'));
+  assert.ok(item, 'expired entry revealed under includeArchived');
+  // AC3: clearing validTo (field gone) restores the entry to the default view
+  const { validTo, ...cleared } = expired;
+  const restored = buildKnowledgeGraph({ ...base, entries: [cleared, active] });
+  assert.ok(restored.nodes.some((n) => n.kind === 'item' && n.id.includes('exp2exp2exp2')));
+});
+
+test('#916 AC4: supersededBy is carried on the item but does not hide the entry', () => {
+  const superseded = entry({ id: 'old1old1old1', supersededBy: 'new1new1new1' });
+  const g = buildKnowledgeGraph({ scope: 'team:acme', entries: [superseded], agents: [], now: NOW });
+  const node = g.nodes.find((n) => n.kind === 'item' && n.id.includes('old1old1old1'));
+  assert.ok(node, 'supersededBy alone never hides an entry');
+});
+
+test('#916: overlayValidity is authoritative both ways and identity when empty', () => {
+  const plain = entry({ id: 'val1val1val1' });
+  const carrying = entry({ id: 'val2val2val2', validTo: '2026-07-01T00:00:00Z', supersededBy: 'new1new1new1' });
+  // empty map + no fields anywhere ⇒ same references (identity)
+  assert.equal(overlayValidity([plain], {})[0], plain);
+  // map applies fields
+  const applied = overlayValidity([plain], { val1val1val1: { validTo: '2026-08-01T00:00:00Z' } })[0];
+  assert.equal(applied.validTo, '2026-08-01T00:00:00Z');
+  assert.ok(!('supersededBy' in applied));
+  // id absent from the map ⇒ stale fields stripped (operator cleared it)
+  const stripped = overlayValidity([carrying], {})[0];
+  assert.ok(!('validTo' in stripped) && !('supersededBy' in stripped));
+  // malformed supersededBy in the map is ignored
+  const bad = overlayValidity([plain], { val1val1val1: { supersededBy: 'nope' } })[0];
+  assert.ok(!('supersededBy' in bad));
+});

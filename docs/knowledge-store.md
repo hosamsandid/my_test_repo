@@ -27,6 +27,9 @@ One entry = one line in a JSONL file. Fields (`orchestrator/knowledge-store.js`)
 | `tags` | string[] | ○ | Optional topic filters. |
 | `status` | enum | ✓ | `active` (default). Overlay statuses (stamped by the orchestrator on the canonical view, never on a shard): `merged` \| `promoted` \| `archived` \| `pending` \| `rejected` (the last two = supervised-review holds, see `docs/knowledge-governance.md`). |
 | `updatedAt` | string | ○ | Set when convergence/merge touches it (Phase 3). |
+| `validFrom` | string | ○ | Bitemporal validity (#916): when the fact became true. Semantically defaults to `createdAt` when absent — never backfilled onto existing lines. |
+| `validTo` | string | ○ | When the fact stops being true. **Expiry is field-derived, not a status**: the canonical line keeps `status:"active"`; every active read surface (digest, `knowledge search`, graph, canonical consumers) folds an id out once its latest copy's `validTo` lies before the injected clock — a plain ISO string comparison, identical in all four fold mirrors. Operator-set via the per-team `knowledge-validity` sidecar, overlaid at re-projection (same pattern as the archive overlay); a date-only input is normalized to the end of that day (inclusive "valid until"). |
+| `supersededBy` | string | ○ | 12-hex id of the entry that semantically replaces this one ("fact B replaces outdated fact A"). Deliberately distinct from the convergence merge's `mergedInto`; setting it does **not** by itself hide the entry (hiding needs `validTo` or archive — explicit, never implied). |
 
 **Mandatory provenance (validated, locked decision):** `originAgent`, `teamId`,
 `createdAt` are required **and** at least one of `correlationId`, `sessionId`, or a

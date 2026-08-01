@@ -82,6 +82,35 @@
         "c"
       ],
       "status": "active"
+    },
+    {
+      "v": 1,
+      "id": "fff000000006",
+      "kind": "fact",
+      "text": "Expired lesson (validTo in the past)",
+      "originAgent": "b",
+      "teamId": "demo-team",
+      "createdAt": "2026-07-05T10:00:00Z",
+      "convergence": [
+        "b"
+      ],
+      "status": "active",
+      "validTo": "2026-07-10T00:00:00Z"
+    },
+    {
+      "v": 1,
+      "id": "abc000000007",
+      "kind": "fact",
+      "text": "Still-valid lesson (validTo in the future)",
+      "originAgent": "a",
+      "teamId": "demo-team",
+      "createdAt": "2026-07-06T10:00:00Z",
+      "convergence": [
+        "a"
+      ],
+      "status": "active",
+      "validFrom": "2026-07-06T10:00:00Z",
+      "validTo": "2026-12-31T23:59:59Z"
     }
   ],
   "cases": [
@@ -91,11 +120,11 @@
       "generatedAt": "2026-07-13T09:00:00Z",
       "budgetTokens": null,
       "useEntries": true,
-      "expectedMarkdown": "# Team Knowledge Digest\n\n> GENERATED — do not edit. Auto-built from the team knowledge base (team `demo-team`);\n> regenerated before every run and whenever the team's knowledge changes.\n> Contribute with `knowledge add fact|entity|convention \"<one-line statement>\"`;\n> everything beyond this digest is searchable with `knowledge search \"<topic>\"`.\n>\n> Generated: 2026-07-13T09:00:00Z · Included: 4 of 4 entries (conventions 1/1, facts 2/2, entities 1/1) · ~47 of 3000 tokens\n\n## Conventions — how we do things here\n\n- Branch from origin/main (2026-07-01, 3× confirmed)\n\n## Validated lessons — independently learned by several agents\n\n- fact: CI runs on Node 22 (2×, 2026-07-02)\n\n## Recent lessons\n\n- entity: github-poller.js polls every 30s (2026-07-03)\n- fact: Old lesson (2026-06-01)\n",
-      "expectedIncluded": 4,
-      "expectedTotal": 4,
+      "expectedMarkdown": "# Team Knowledge Digest\n\n> GENERATED — do not edit. Auto-built from the team knowledge base (team `demo-team`);\n> regenerated before every run and whenever the team's knowledge changes.\n> Contribute with `knowledge add fact|entity|convention \"<one-line statement>\"`;\n> everything beyond this digest is searchable with `knowledge search \"<topic>\"`.\n>\n> Generated: 2026-07-13T09:00:00Z · Included: 5 of 5 entries (conventions 1/1, facts 3/3, entities 1/1) · ~63 of 3000 tokens\n\n## Conventions — how we do things here\n\n- Branch from origin/main (2026-07-01, 3× confirmed)\n\n## Validated lessons — independently learned by several agents\n\n- fact: CI runs on Node 22 (2×, 2026-07-02)\n\n## Recent lessons\n\n- fact: Still-valid lesson (validTo in the future) (2026-07-06)\n- entity: github-poller.js polls every 30s (2026-07-03)\n- fact: Old lesson (2026-06-01)\n",
+      "expectedIncluded": 5,
+      "expectedTotal": 5,
       "expectedOmitted": 0,
-      "expectedTokensUsed": 47
+      "expectedTokensUsed": 63
     },
     {
       "name": "small-budget",
@@ -103,10 +132,10 @@
       "generatedAt": "2026-07-13T09:00:00Z",
       "budgetTokens": 15,
       "useEntries": true,
-      "expectedMarkdown": "# Team Knowledge Digest\n\n> GENERATED — do not edit. Auto-built from the team knowledge base (team `demo-team`);\n> regenerated before every run and whenever the team's knowledge changes.\n> Contribute with `knowledge add fact|entity|convention \"<one-line statement>\"`;\n> everything beyond this digest is searchable with `knowledge search \"<topic>\"`.\n>\n> Generated: 2026-07-13T09:00:00Z · Included: 1 of 4 entries (conventions 1/1, facts 0/2, entities 0/1) · ~14 of 15 tokens\n\n## Conventions — how we do things here\n\n- Branch from origin/main (2026-07-01, 3× confirmed)\n\n_…and 3 more entries beyond the digest budget — find them with `knowledge search \"<topic>\"`._\n",
+      "expectedMarkdown": "# Team Knowledge Digest\n\n> GENERATED — do not edit. Auto-built from the team knowledge base (team `demo-team`);\n> regenerated before every run and whenever the team's knowledge changes.\n> Contribute with `knowledge add fact|entity|convention \"<one-line statement>\"`;\n> everything beyond this digest is searchable with `knowledge search \"<topic>\"`.\n>\n> Generated: 2026-07-13T09:00:00Z · Included: 1 of 5 entries (conventions 1/1, facts 0/3, entities 0/1) · ~14 of 15 tokens\n\n## Conventions — how we do things here\n\n- Branch from origin/main (2026-07-01, 3× confirmed)\n\n_…and 4 more entries beyond the digest budget — find them with `knowledge search \"<topic>\"`._\n",
       "expectedIncluded": 1,
-      "expectedTotal": 4,
-      "expectedOmitted": 3,
+      "expectedTotal": 5,
+      "expectedOmitted": 4,
       "expectedTokensUsed": 14
     },
     {

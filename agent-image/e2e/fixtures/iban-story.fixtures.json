@@ -1,11 +1,11 @@
 [
   {
     "match": "validate the IBAN",
-    "reply": "I looked at the transfer form: it never checks the IBAN today. I've opened a GitHub issue capturing the acceptance criteria. Add the `ready` label when you want the Developer to start.",
+    "reply": "I looked at the transfer form: it never checks the IBAN today. I've opened a GitHub issue capturing the acceptance criteria. Add the `ready-for-implementation` label when you want the Developer to start.",
     "playbook": "ba-create-issue.sh"
   },
   {
-    "match": "applied the `ready` label to an issue from **Business Analyst**",
+    "match": "applied the `ready-for-implementation` label to an issue from **Business Analyst**",
     "reply": "Issue is ready — I created a feature branch, scaffolded the IBAN validation, and opened a pull request labelled `ready-for-review` for the Code Reviewer.",
     "playbook": "developer-implement.sh"
   },

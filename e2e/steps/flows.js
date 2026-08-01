@@ -408,6 +408,36 @@ async function closeStages(ctx) {
 }
 
 /**
+ * Turn ON the canvas stage-band view so a screenshot shows the assigned agents
+ * grouped into labelled bands (the state the flows-draft narrative describes),
+ * instead of the ungrouped graph. Two "Stages" controls exist: the first (in
+ * the top action bar) opens the StageManager dialog (cf. addStage); the second
+ * is the canvas band-toggle. Clicks the band-toggle and waits for a band header
+ * to render. Idempotent-ish: if the bands are already shown it is a no-op click
+ * guarded by the header check.
+ *
+ * @param {string} [params.stage=Requirements] - A stage name expected to appear
+ *   as a band header once the view is on (the wait target).
+ * @example
+ * - action:
+ *     do: flows.showStages
+ *     stage: Requirements
+ */
+async function showStages(ctx, { stage = 'Requirements' } = {}) {
+  const { page } = ctx;
+  const toggles = page.getByRole('button', { name: 'Stages', exact: true });
+  // The band-toggle is the last "Stages" control (the StageManager opener comes
+  // first in the DOM). Click it unless a band header is already visible.
+  const header = page.locator('.rf__stage-band, [data-stage-band]').filter({ hasText: stage });
+  if (!(await header.first().isVisible().catch(() => false))) {
+    await toggles.last().click();
+  }
+  // Wait for the stage name to render on the canvas as a band label (the dialog
+  // is closed by now, so this text can only be the band header).
+  await expect(page.getByText(stage, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+}
+
+/**
  * Assign an agent node to a stage via its inspector (Details → "Stage (layout
  * column)" → Save). Opens the node, sets the stage, persists (PUT).
  *
@@ -1524,6 +1554,7 @@ module.exports = {
   expectIssueChannel,
   addStage,
   closeStages,
+  showStages,
   assignStage,
   expectMaterializeAvailable,
   openRouting,

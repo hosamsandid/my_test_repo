@@ -22,16 +22,40 @@ const { readManifest, REPO_ROOT, DEFAULT_ARTIFACTS } = require('./index');
 // committed — see .gitignore (`/artifacts/*.pptx`).
 const DEFAULT_DECK = path.resolve(REPO_ROOT, 'artifacts', 'agent-studio-walkthrough.pptx');
 
-// Turn a logical image ref from the model into an absolute on-disk path, or null
-// when the file is absent (the slide then degrades to a text slide). Screenshots
-// live at <artifactsDir>/<journeyId>/<file>; a concept slide's static `visual` is
-// resolved relative to the journeys dir (where `visual: diagrams/x.png` sits).
+// Read a PNG's intrinsic pixel dimensions from its IHDR header (width at byte
+// offset 16, height at 20, both big-endian). Returns {w, h} or {w:null, h:null}
+// for a non-PNG or unreadable file — the caller then falls back to `contain`
+// sizing. Screenshots are always PNG (the Playwright recorder), so this is the
+// hot path that lets the deck fit each shot at its true aspect ratio.
+function pngSize(abs) {
+  try {
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const buf = Buffer.alloc(24);
+      fs.readSync(fd, buf, 0, 24, 0);
+      if (buf.readUInt32BE(0) !== 0x89504e47) return { w: null, h: null };
+      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return { w: null, h: null };
+  }
+}
+
+// Turn a logical image ref from the model into { path, w, h } (absolute path +
+// source pixel dimensions), or null when the file is absent (the slide then
+// degrades to a text slide). Screenshots live at <artifactsDir>/<journeyId>/
+// <file>; a concept slide's static `visual` is resolved relative to the journeys
+// dir (where `visual: diagrams/x.png` sits). The dimensions let buildDeckBuffer
+// place each image at its own aspect ratio instead of stretching it.
 function resolveImagePath(ref, { artifactsDir, journeysDir }) {
   if (!ref) return null;
   let abs = null;
   if (ref.kind === 'screenshot') abs = path.join(artifactsDir, ref.journeyId, ref.file);
   else if (ref.kind === 'visual') abs = path.resolve(journeysDir, ref.src);
-  return abs && fs.existsSync(abs) ? abs : null;
+  if (!abs || !fs.existsSync(abs)) return null;
+  return { path: abs, ...pngSize(abs) };
 }
 
 // Generate the walkthrough deck. Returns a summary the CLI logs, including the

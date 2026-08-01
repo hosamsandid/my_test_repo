@@ -49,6 +49,7 @@ const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
@@ -120,6 +121,10 @@ const KNOWLEDGE_ARCHIVED_DIR = "/workspace/knowledge-archived";
 // Per-team operator review decisions (supervised-review mode). One JSON map per
 // team { <canonicalId>: "approved"|"rejected" }; an absent id is "pending".
 const KNOWLEDGE_REVIEW_DIR = "/workspace/knowledge-review";
+// Per-team bitemporal-validity sidecar (#916). One JSON map per team
+// { <canonicalId>: { validTo?, supersededBy? } }, overlaid as FIELDS onto the
+// canonical entry at re-projection (status untouched — readers derive "expired").
+const KNOWLEDGE_VALIDITY_DIR = "/workspace/knowledge-validity";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -374,7 +379,15 @@ function startAgentProcess(config) {
   );
   child.on('exit', (code) => {
     console.log(`[Orchestrator] Agent ${id} exited (code ${code})`);
-    agentProcesses.delete(id);
+    // Only clear the map entry if it still points at THIS child. A respawn
+    // calls stopAgentProcess() (kill + delete) then immediately sets a new
+    // child for the same id; the OLD child's exit event can fire after that
+    // point (container teardown is async), and would otherwise delete the
+    // NEW child's entry — making a genuinely running agent look stopped to
+    // every subsequent respawn call (agentProcesses.has(id) → false).
+    if (agentProcesses.get(id) === child) {
+      agentProcesses.delete(id);
+    }
   });
 
   agentProcesses.set(id, child);
@@ -2072,6 +2085,34 @@ function listAgentIds() {
   );
 }
 
+// All team-member configs belonging to teamId — shared by
+// listTeamMembersWithState/disableTeam/enableTeam so the membership
+// filter (role + parentTeamId) lives in exactly one place.
+function teamMemberConfigs(teamId) {
+  return listAgentIds()
+    .map((id) => loadAgentConfig(id))
+    .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+}
+
+// Busy/active-trigger snapshot for an agent — shared by disableAgent's own
+// busy-warning path and the team-members preview listing, so both report
+// identical state for the same agent.
+function agentBusyState(id) {
+  let statusJson = null;
+  try {
+    statusJson = JSON.parse(
+      fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
+    );
+  } catch { /* no status file = idle */ }
+
+  let triggers = null;
+  try {
+    triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
+  } catch { /* no triggers file */ }
+
+  return deriveBusyState(statusJson, triggers);
+}
+
 // ============================================================
 // Matrix helpers (admin operations only — no routing identity)
 // ============================================================
@@ -3329,6 +3370,31 @@ function writeArchivedIds(teamId, list) {
   fs.writeFileSync(p, JSON.stringify([...new Set(Array.isArray(list) ? list : [])], null, 2));
 }
 
+// Per-team operator validity windows (#916): a map { <canonicalId>: { validTo?,
+// supersededBy? } }. Same shared-volume JSON-per-team pattern as the archived-id
+// set; overlaid as fields (never a status) at each canonical re-projection.
+function _validityPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_VALIDITY_DIR, `${seg}.json`);
+}
+
+function readKnowledgeValidity(teamId) {
+  const p = _validityPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch { return {}; }
+}
+
+function writeKnowledgeValidity(teamId, map) {
+  const p = _validityPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_VALIDITY_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
 // Per-team operator review decisions for supervised-review mode: a map
 // { <canonicalId>: "approved" | "rejected" }. Same shared-volume JSON-per-team
 // pattern as the archived-id set. An id absent from the map is "pending" while
@@ -3529,6 +3595,9 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
   const archivedCanonicalIds = new Set(readArchivedIds(teamId));
+  // Operator-set validity windows (#916) — same durable-sidecar pattern, applied
+  // as fields (not a status) in _serializeCanonicalKind.
+  const validityOverlay = readKnowledgeValidity(teamId);
 
   // Supervised-review overlay: when review mode is on, a canonical entry the
   // operator has not yet approved is stamped status:"pending" (held out of the
@@ -3589,6 +3658,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     const file = path.join(storeRoot, rel);
     const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
       pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds, summaries: resolvedSummaries,
+      validity: validityOverlay,
     });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -3856,7 +3926,7 @@ function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshol
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
 function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
-  const { pendingIds, rejectedIds, summaries } = review;
+  const { pendingIds, rejectedIds, summaries, validity } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -3885,6 +3955,20 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) 
     // byte-identical to the pre-#635 projection.
     if (summaries && summaries.has(e.id)) {
       entry = { ...entry, summary: summaries.get(e.id) };
+    }
+    // Bitemporal-validity overlay (#916): FIELDS on the canonical entry, never a
+    // status — the line keeps status:"active" and readers derive "expired" from
+    // validTo. Sidecar-sourced (shards never carry these), so clearing = the id
+    // leaving the sidecar ⇒ the fields simply aren't re-applied. Empty sidecar ⇒
+    // byte-identical projection.
+    if (validity) {
+      const vv = validity[e.id];
+      if (vv && typeof vv === "object") {
+        const patch = {};
+        if (typeof vv.validTo === "string" && vv.validTo.trim() !== "") patch.validTo = vv.validTo.trim();
+        if (typeof vv.supersededBy === "string" && /^[0-9a-f]{12}$/.test(vv.supersededBy)) patch.supersededBy = vv.supersededBy;
+        if (Object.keys(patch).length > 0) entry = { ...entry, ...patch };
+      }
     }
     out.push(serializeKnowledgeEntry(entry));
   }
@@ -3983,6 +4067,55 @@ function archiveKnowledgeEntry(teamId, id, archived) {
     console.warn(`[Orchestrator] archive re-projection for '${teamId}' failed: ${err.message}`);
   }
   return { id, archived: !!archived };
+}
+
+// Set / clear a canonical KB entry's validity window (#916, operator-initiated).
+// Non-destructive field overlay: updates the per-team validity sidecar, then
+// re-runs the collector so the canonical file is re-projected with the fields +
+// committed (git audit). Unlike archive there is NO promoted-entry guard —
+// expiring a promoted entry is allowed (AC5): the skill stays, the source entry
+// expires. `validTo` accepts a date (YYYY-MM-DD, normalized to the END of that
+// day so "valid until X" includes X) or a full ISO timestamp; null/'' clears.
+// `supersededBy` records semantic replacement (fact B replaces outdated fact A)
+// and NEVER by itself hides the old entry (AC4) — deliberately distinct from the
+// convergence merge's `mergedInto`. Best-effort on the git side.
+function setKnowledgeValidity(teamId, id, { validTo = null, supersededBy = null } = {}) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  let normalizedTo = null;
+  if (typeof validTo === "string" && validTo.trim() !== "") {
+    const raw = validTo.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) normalizedTo = `${raw}T23:59:59Z`;
+    else if (!Number.isNaN(Date.parse(raw))) normalizedTo = raw;
+    else throw new Error("validTo must be an ISO date or timestamp");
+  }
+  let normalizedBy = null;
+  if (typeof supersededBy === "string" && supersededBy.trim() !== "") {
+    if (!/^[0-9a-f]{12}$/.test(supersededBy.trim())) throw new Error("supersededBy must be a 12-char hex entry id");
+    normalizedBy = supersededBy.trim();
+  }
+  const map = readKnowledgeValidity(teamId);
+  if (!normalizedTo && !normalizedBy) {
+    delete map[id];
+  } else {
+    map[id] = {
+      ...(normalizedTo ? { validTo: normalizedTo } : {}),
+      ...(normalizedBy ? { supersededBy: normalizedBy } : {}),
+    };
+  }
+  writeKnowledgeValidity(teamId, map);
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  // Re-project + commit so the change is reflected + git-audited (and the digest
+  // fan-out picks it up immediately). Best-effort, mirrors archiveKnowledgeEntry.
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`));
+  } catch (err) {
+    console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, validTo: normalizedTo, supersededBy: normalizedBy };
 }
 
 // Explicit, operator-initiated removal of the source KB entries a freshly-written
@@ -5996,6 +6129,10 @@ class Orchestrator {
         // stage layout after materialisation.
         ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
+        // A member created while its team is disabled is tagged so
+        // enableTeam brings it back automatically later — see
+        // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+        ...(isTeamDisabled(teamCfg) ? { disabledByTeam: true } : {}),
       };
       saveAgentConfig(memberId, stubConfig);
       // Pre-write triggers so the materialized agent has them immediately;
@@ -6074,7 +6211,10 @@ class Orchestrator {
       // Process stage band (#362 E) — recorded so the live graph reproduces the
       // draft's stage layout after materialisation.
       ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
-      enabled: true,
+      // A member created while its team is disabled comes up disabled too,
+      // tagged so enableTeam brings it back automatically — see
+      // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+      ...newMemberFieldsForTeam(teamCfg),
     };
     saveAgentConfig(memberId, memberConfig);
     saveAgentPrompt(memberId, effectivePrompt, "team-member", env);
@@ -6084,7 +6224,7 @@ class Orchestrator {
     }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
-    startAgentProcess(memberConfig);
+    if (memberConfig.enabled !== false) startAgentProcess(memberConfig);
 
     console.log(
       `[Orchestrator] Created team-member ${memberId} (team=${teamId}` +
@@ -7085,12 +7225,39 @@ class Orchestrator {
     return { source, suggested, siblings };
   }
 
+  // Throws a team-disabled error if cfg is a team-member whose parent team
+  // is currently disabled — the lockout for the team-wide disable feature
+  // (docs/superpowers/specs/2026-07-31-team-wide-disable-design.md). A
+  // member's own enable/disable toggle must not do anything while its team
+  // is off; this guard makes that true no matter which route calls in
+  // (PUT /api/agents/:id, the internal /enable|/disable routes, or any
+  // future caller).
+  //
+  // `bypass` is for disableTeam's OWN internal per-member disableAgent()
+  // calls only — never set by any external route. Without it, retrying
+  // disableTeam after a partial failure (team already flipped to disabled,
+  // one member still enabled because its disableAgent() call failed for an
+  // unrelated reason) would deadlock: this guard would now block that same
+  // member's disableAgent() forever, and it's never disabledByTeam-tagged
+  // (its disable never succeeded), so enableTeam can't reach it either.
+  _assertNotLockedByTeam(cfg, bypass = false) {
+    if (bypass) return;
+    const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+    if (isMemberLockedByTeam(cfg, teamCfg)) {
+      const err = new Error(`Team '${cfg.parentTeamId}' is disabled — enable the team first`);
+      err.code = 'team-disabled';
+      err.teamId = cfg.parentTeamId;
+      throw err;
+    }
+  }
+
   // Materialize a stub bp-instance agent (or re-enable a previously-active
   // one). Idempotent: a stub gets full provisioning on the first call;
   // subsequent calls just (re)spawn the agent-runner process.
   async enableAgent(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg);
 
     // Already-materialized agents: just flip enabled and respawn.
     if (cfg.token) {
@@ -7194,32 +7361,15 @@ class Orchestrator {
   //   executions start, but leave the process running to let the current
   //   invocation finish naturally.
   // mode === 'abort'  → write enabled=false and kill the process right away.
-  async disableAgent(id, { mode } = {}) {
+  async disableAgent(id, { mode, bypassTeamLock = false } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg, bypassTeamLock);
 
     const isRunning = agentProcesses.has(id);
 
     if (!mode && isRunning) {
-      // Check for active state before disabling without an explicit mode.
-      let isBusy = false;
-      try {
-        const status = JSON.parse(
-          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
-        );
-        isBusy = status?.state === 'busy';
-      } catch { /* no status file = idle */ }
-
-      let activeTriggers = [];
-      try {
-        const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
-        if (Array.isArray(triggers)) {
-          activeTriggers = triggers
-            .filter(t => t.enabled !== false && t.id)
-            .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
-        }
-      } catch { /* no triggers file */ }
-
+      const { busy: isBusy, activeTriggers } = agentBusyState(id);
       if (isBusy || activeTriggers.length > 0) {
         return {
           id,
@@ -7243,6 +7393,139 @@ class Orchestrator {
     }
 
     return { id, enabled: false };
+  }
+
+  // Members + running/busy/trigger state for the team-wide disable/enable
+  // preview dialog. Read-only — makes no config changes.
+  listTeamMembersWithState(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+
+    const members = teamMemberConfigs(teamId)
+      .map((c) => {
+        const { busy, activeTriggers } = agentBusyState(c.id);
+        return {
+          id: c.id,
+          displayName: c.displayName || c.id,
+          enabled: c.enabled !== false,
+          disabledByTeam: c.disabledByTeam === true,
+          running: agentProcesses.has(c.id),
+          busy,
+          activeTriggers,
+        };
+      });
+
+    return { teamId, teamEnabled: !isTeamDisabled(teamCfg), members };
+  }
+
+  // Disable every currently-enabled member of teamId in one bulk action,
+  // tagging each one disabledByTeam so enableTeam later knows to bring back
+  // only these — members already enabled===false are left completely
+  // untouched (see docs/superpowers/specs/2026-07-31-team-wide-disable-design.md).
+  // Idempotent/retry-safe: the team config is flipped to disabled=false
+  // unconditionally at the end EVEN IF some members failed, so a retry after
+  // a partial failure must still be able to disable the members that are
+  // still enabled — bypassTeamLock:true on the per-member disableAgent()
+  // call below is what makes that retry actually work (see
+  // _assertNotLockedByTeam's comment for why a retry would otherwise
+  // deadlock on any member left enabled by the first attempt).
+  async disableTeam(teamId, { mode } = {}) {
+    if (mode !== 'drain' && mode !== 'abort') {
+      throw new Error("mode must be 'drain' or 'abort'");
+    }
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const memberConfigs = teamMemberConfigs(teamId);
+    const { toDisable, skip } = planTeamDisable(memberConfigs);
+
+    const disabled = [];
+    const failed = [];
+    for (const id of toDisable) {
+      try {
+        await this.disableAgent(id, { mode, bypassTeamLock: true });
+      } catch (err) {
+        // disableAgent never touched disk (it threw before/at its own save,
+        // e.g. the lockout guard or "not found") — nothing to reconcile.
+        failed.push({ id, error: err.message });
+        continue;
+      }
+      // disableAgent's own work (warning-check/mode/stop-process) is now
+      // confirmed done: enabled=false is already on disk. Tag
+      // disabledByTeam in one more save so enableTeam later knows to bring
+      // this member back. If that save throws, the member is left
+      // disabled-but-untagged and enableTeam would never find it again — so
+      // best-effort roll it back to enabled here, keeping the on-disk state
+      // consistent with reporting it under `failed` (never disabled).
+      try {
+        const cfg = loadAgentConfig(id);
+        const updated = { ...cfg, disabledByTeam: true };
+        saveAgentConfig(id, updated);
+        this.agentConfigs.set(id, { config: updated });
+        disabled.push(id);
+      } catch (err) {
+        try {
+          const cfg = loadAgentConfig(id);
+          const reverted = { ...cfg, enabled: true };
+          saveAgentConfig(id, reverted);
+          this.agentConfigs.set(id, { config: reverted });
+        } catch (rollbackErr) {
+          console.error(`[Orchestrator] team ${teamId}: member ${id} was disabled but could not be tagged disabledByTeam, AND the rollback to enabled also failed — it is now disabled without disabledByTeam tracking and needs manual re-enable: ${rollbackErr.message}`);
+        }
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    const teamUpdated = { ...teamCfg, enabled: false };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    console.log(`[Orchestrator] team ${teamId} disabled → ${disabled.length} member(s) disabled, ${skip.length} already off, ${failed.length} failed`);
+    return { teamId, disabled, skipped: skip, failed };
+  }
+
+  // Re-enable every member disableTeam previously tagged disabledByTeam.
+  // Members disabled independently before the team went down, or never
+  // activated, are left exactly as they are (see the design spec). The
+  // team's own config flips to enabled FIRST, so the per-member
+  // enableAgent() calls below don't trip their own lockout guard.
+  async enableTeam(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const teamUpdated = { ...teamCfg, enabled: true };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    const memberConfigs = teamMemberConfigs(teamId);
+    const { toEnable, skip } = planTeamEnable(memberConfigs);
+
+    const enabled = [];
+    const failed = [];
+    for (const id of toEnable) {
+      try {
+        await this.enableAgent(id);
+        // Deliberate asymmetry vs. disableTeam's rollback: if this tag-clear
+        // write fails after enableAgent() already succeeded, the member is
+        // left enabled but still tagged disabledByTeam. That's harmless — the
+        // member is already up and working, and the stale tag self-heals on
+        // the next disable/enable cycle. disableTeam rolls back instead
+        // because leaving a member disabled-and-untagged there would make it
+        // invisible to future enableTeam calls, which matters more.
+        const cfg = loadAgentConfig(id);
+        const { disabledByTeam, ...rest } = cfg;
+        saveAgentConfig(id, rest);
+        this.agentConfigs.set(id, { config: rest });
+        enabled.push(id);
+      } catch (err) {
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    console.log(`[Orchestrator] team ${teamId} enabled → ${enabled.length} member(s) re-enabled, ${skip.length} left as-is, ${failed.length} failed`);
+    return { teamId, enabled, skipped: skip, failed };
   }
 
   // Re-inject an environment's credentials into every running agent bound to it.
@@ -9471,9 +9754,9 @@ async function main() {
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] enableAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
+          const status = httpStatusForAgentActionError(err);
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
         }
       })();
       return;
@@ -9551,9 +9834,9 @@ async function main() {
             res.end(JSON.stringify(result));
           } catch (err) {
             console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
-            const status = /not found/i.test(err.message) ? 404 : 500;
+            const status = httpStatusForAgentActionError(err);
             res.writeHead(status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
+            res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
           }
         })();
       });
@@ -10273,6 +10556,27 @@ async function main() {
       return;
     }
 
+    // ── Set / clear a KB entry's validity window (#916 bitemporal validity) ─────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/validity') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = setKnowledgeValidity(teamId, id, { validTo: p.validTo ?? null, supersededBy: p.supersededBy ?? null });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
     // ── Persist human-readable summaries for canonical KB entries (#635) ────────
     if (req.method === 'POST' && req.url === '/internal/knowledge/summaries') {
       let body = '';
@@ -10504,6 +10808,70 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, results }));
+      return;
+    }
+
+    // ── List a team's members with running/busy/trigger state ────────────
+    // Feeds the team-wide disable/enable preview dialog in the admin console.
+    const teamMembersMatch = req.method === 'GET' && req.url.match(/^\/internal\/teams\/([^/]+)\/members$/);
+    if (teamMembersMatch) {
+      const teamId = decodeURIComponent(teamMembersMatch[1]);
+      try {
+        const result = orchestrator.listTeamMembersWithState(teamId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        const status = httpStatusForTeamActionError(err);
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // ── Disable an entire team's members in one bulk action ───────────────
+    // Body: { mode: 'drain' | 'abort' } — required, applied uniformly to
+    // every currently-enabled member (the preview dialog already showed the
+    // operator which members are busy before they picked one mode).
+    const teamDisableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/disable$/);
+    if (teamDisableMatch) {
+      const teamId = decodeURIComponent(teamDisableMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.disableTeam(teamId, { mode: parsed.mode });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] disableTeam error for ${teamId}: ${err.message}`);
+            const status = httpStatusForTeamActionError(err, { hasMode: true });
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
+      return;
+    }
+
+    // ── Re-enable an entire team's cascade-disabled members ───────────────
+    const teamEnableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/enable$/);
+    if (teamEnableMatch) {
+      const teamId = decodeURIComponent(teamEnableMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.enableTeam(teamId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] enableTeam error for ${teamId}: ${err.message}`);
+          const status = httpStatusForTeamActionError(err);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
       return;
     }
 

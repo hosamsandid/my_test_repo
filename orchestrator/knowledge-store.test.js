@@ -457,3 +457,35 @@ test('mergeTeamKnowledgeConfig: an override key set to a falsy value still wins 
   const merged = mergeTeamKnowledgeConfig(env, { knowledgeAutonomy: 0 });
   assert.equal(knowledgeAutonomyLevel(merged), 0);
 });
+
+// ── #916 bitemporal validity fields ─────────────────────────────────────────
+
+test('#916 AC1: validFrom/validTo/supersededBy round-trip; absent ⇒ byte-identical legacy line', () => {
+  const withValidity = makeKnowledgeEntry({
+    ...baseInput,
+    validFrom: '2026-07-01T00:00:00Z',
+    validTo: '2026-09-01T00:00:00Z',
+    supersededBy: 'dddddddddddd',
+  }, inject);
+  const line = serializeEntry(withValidity);
+  assert.deepEqual(parseEntry(line), withValidity);
+  // validity keys serialize after summary, in KEY_ORDER position
+  const keys = Object.keys(JSON.parse(line));
+  assert.deepEqual(keys.slice(-3), ['validFrom', 'validTo', 'supersededBy']);
+  // a legacy entry (no validity input) emits no validity keys at all
+  const legacy = makeKnowledgeEntry(baseInput, inject);
+  assert.ok(!('validFrom' in legacy) && !('validTo' in legacy) && !('supersededBy' in legacy));
+  const v = validateKnowledgeEntry(legacy);
+  assert.equal(v.ok, true);
+});
+
+test('#916: validation rejects malformed validity fields, tolerates absent ones', () => {
+  const good = makeKnowledgeEntry(baseInput, inject);
+  assert.equal(validateKnowledgeEntry({ ...good, validTo: '' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, validFrom: 42 }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, supersededBy: 'not-hex' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, supersededBy: 'dddddddddddd' }).ok, true);
+  // a malformed supersededBy INPUT is dropped (never emitted), not thrown
+  const dropped = makeKnowledgeEntry({ ...baseInput, supersededBy: 'nope' }, inject);
+  assert.ok(!('supersededBy' in dropped));
+});

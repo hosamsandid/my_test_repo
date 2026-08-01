@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspens
 import { useSearchParams, Link } from 'react-router-dom';
 import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
@@ -10,6 +11,7 @@ const ProcessGraphPanel = lazy(() =>
   import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
 const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
+const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
 
 const BP_LIFECYCLE_ROWS = [
   { state: 'draft',      desc: 'Work item created but not yet scoped.' },
@@ -363,6 +365,8 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
 }
 
 export default function Briefings() {
+  const { user } = useAuth();
+  const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -407,12 +411,46 @@ export default function Briefings() {
   const drafts = Array.isArray(draftsList) ? draftsList : [];
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
 
+  function persistLastSelected(kind, value) {
+    if (!lastSelectedKey) return;
+    try { localStorage.setItem(lastSelectedKey, JSON.stringify({ kind, value })); } catch { /* ignore */ }
+  }
+
   function selectFlow(id) {
+    persistLastSelected('flow', id);
     setSearchParams({ flow: id });
   }
   function selectProc(scope) {
+    // 'import' is a transient state (reading a file); don't persist it.
+    if (scope !== 'import') persistLastSelected('proc', scope);
     setSearchParams({ proc: scope });
   }
+
+  // Restore the last-viewed flow on mount when the URL carries no selection.
+  // Mirrors the Agent Chat last-agent restore pattern. Waits for both agents
+  // and drafts to load so the stored id can be validated against live data.
+  useEffect(() => {
+    if (proc || selectedFlow) return;
+    if (!lastSelectedKey) return;
+    if (agents === null || draftsList === null) return;
+
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(lastSelectedKey)); } catch { /* ignore */ }
+    if (!stored) return;
+
+    if (stored.kind === 'proc') {
+      const value = stored.value;
+      if (value === 'import') return; // ephemeral; don't restore
+      const validTeam = teams.find(t => t.id === value);
+      const validDraft = value.startsWith('draft:') && drafts.find(d => `draft:${d.id}` === value);
+      if (validTeam || validDraft) setSearchParams({ proc: value }, { replace: true });
+    } else if (stored.kind === 'flow') {
+      if (orchestrators.find(o => o.id === stored.value)) {
+        setSearchParams({ flow: stored.value }, { replace: true });
+      }
+    }
+  }, [agents, draftsList, proc, selectedFlow, lastSelectedKey,
+      teams, drafts, orchestrators, setSearchParams]);
 
   async function newProcess() {
     try {

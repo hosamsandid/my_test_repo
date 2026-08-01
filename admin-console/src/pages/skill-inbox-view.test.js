@@ -160,5 +160,5 @@ test('hasNewEvidence compares evidence timestamps against last visit', () => {
 });
 
 test('SUGGESTION_SOURCES is the triage filter vocabulary', () => {
-  assert.deepEqual(SUGGESTION_SOURCES, ['convergence', 'related', 'agent-nominated', 'manual']);
+  assert.deepEqual(SUGGESTION_SOURCES, ['convergence', 'related', 'agent-nominated', 'manual', 'decay']); // #919
 });

@@ -878,6 +878,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             KB not synced yet — reading agents’ local lessons
           </span>
         )}
+        <CurationHealthStrip teamId={team.id} />
       </div>
 
       {/* Learning controls — visible, on the team they govern, with feedback */}
@@ -1757,6 +1758,20 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
       .catch(e => feedback('error', `Dismiss failed: ${e.message}`));
   }, [teamId, feedback, reload]);
 
+  // #919: confirm a decay card — archive the lesson via the SAME non-destructive
+  // path as the manual Retire button, then resolve the card (dismiss, reason
+  // 'retired' — stamped, never offered in the manual dismiss dialog).
+  const doRetireDecay = useCallback((s) => {
+    fetch(`/api/knowledge/item/${encodeURIComponent(s.canonicalId)}/archive`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, archived: true }),
+    })
+      .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); })
+      .then(() => dismissSuggestion(teamId, s.id, 'retired'))
+      .then(() => { feedback('ok', 'Lesson retired — find it under “Show retired & expired”; un-retirable any time.'); reload(); })
+      .catch(e => feedback('error', `Retire failed: ${e.message}`));
+  }, [teamId, feedback, reload]);
+
   // Basket resets when the team changes underneath us.
   useEffect(() => { setBasket(new Map()); setReviewOpen(false); }, [teamId]);
 
@@ -1955,6 +1970,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
                   onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
+                  onRetire={s.source === 'decay' ? () => doRetireDecay(s) : undefined}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -1967,6 +1983,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
                   onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
+                  onRetire={s.source === 'decay' ? () => doRetireDecay(s) : undefined}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -3423,8 +3440,12 @@ const amberCard = {
   marginBottom: 'var(--eb-space-2)',
 };
 
-function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMerge, inBasket, selectable, selected, onToggleSelect }) {
+function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMerge, onRetire, inBasket, selectable, selected, onToggleSelect }) {
   const related = suggestion.source === 'related';
+  // #919: a decay card proposes RETIRING an unused lesson (never promoting) —
+  // its primary action archives via the same path as the manual Retire button.
+  const decay = suggestion.source === 'decay';
+  const evidence = decay && suggestion.evidence && typeof suggestion.evidence === 'object' ? suggestion.evidence : null;
   const dismissed = suggestion.status === 'dismissed';
   const stale = suggestion.status === 'stale';
   const resolved = dismissed || stale; // dimmed + restore-only
@@ -3445,28 +3466,43 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
               : <Circle size={14} style={{ color: 'var(--eb-text-muted)' }} />}
           </button>
         )}
-        {related
-          ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-          : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
+        {decay
+          ? <Archive size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          : related
+            ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+            : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
         <span
-          title={related
-            ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
-            : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
+          title={decay
+            ? 'No agent has retrieved this lesson for a long time — consider retiring it. Confirming uses the same non-destructive archive as the manual Retire button; nothing is deleted.'
+            : related
+              ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
+              : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
           style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
-          {related ? 'Related lessons — suggested skill' : 'Suggested skill'}
+          {decay ? 'Retire suggestion — unused lesson' : related ? 'Related lessons — suggested skill' : 'Suggested skill'}
         </span>
         <span
           style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={related
-            ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
-            : suggestion.source === 'agent-nominated'
-              ? 'An agent itself nominated this as worth promoting'
-              : `${suggestion.convergenceCount} agents learned this independently`}>
-          {related
-            ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
-            : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
+          title={decay
+            ? 'How long this lesson has gone unretrieved (searches and digest builds both count as use)'
+            : related
+              ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
+              : suggestion.source === 'agent-nominated'
+                ? 'An agent itself nominated this as worth promoting'
+                : `${suggestion.convergenceCount} agents learned this independently`}>
+          {decay
+            ? (evidence ? `unused ${evidence.unusedDays}d` : 'unused')
+            : related
+              ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
+              : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
         </span>
       </div>
+      {evidence && (
+        <div style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>
+          not used in {evidence.unusedDays} days · {evidence.searchHits} search{evidence.searchHits === 1 ? '' : 'es'} ·{' '}
+          {evidence.digestCount > 0 ? `${evidence.digestCount} digest inline${evidence.digestCount === 1 ? '' : 's'}` : 'never in a digest'}
+          {' '}· horizon {evidence.horizonDays}d
+        </div>
+      )}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
         {suggestion.text}
         {related && suggestion.lessonCount > 1 && (
@@ -3497,12 +3533,20 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
                 <Ban size={11} /> Dismiss
               </button>
             )}
-            {onAddMerge && (
+            {!decay && onAddMerge && (
               <button onClick={onAddMerge} disabled={inBasket} title="Collect this suggestion in the merge basket to combine several into one skill" style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Combine size={11} /> {inBasket ? 'In basket' : 'Add to merge'}
               </button>
             )}
-            <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
+            {decay ? (
+              onRetire && (
+                <button onClick={onRetire} title="Retire this lesson — same non-destructive archive as the manual Retire button (kept in git, un-retirable any time)" style={primaryBtn}>
+                  <Archive size={12} /> Retire lesson
+                </button>
+              )
+            ) : (
+              <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
+            )}
           </>
         )}
       </div>
@@ -3689,6 +3733,35 @@ function SummaryPill({ label, value, title }) {
 
 // The collapsed strip: a read-only summary of the live configuration plus a
 // single action that opens the slide-out panel (#566). Nothing is edited here.
+/* #919: the curation-health strip — the 30-day counters the nightly pass
+ * persists, amber when the convergence pipeline looks silently dead (pushes
+ * happening, nothing converging). Ambient only: the feed carries one event per
+ * state transition; this strip is the always-visible surface. Renders nothing
+ * until the first nightly pass has produced a record. */
+function CurationHealthStrip({ teamId }) {
+  const [health, setHealth] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setHealth(null);
+    fetch(`/api/knowledge/curation-health?team=${encodeURIComponent(teamId)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(h => { if (alive) setHealth(h); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [teamId]);
+  if (!health || health.status === 'unknown' || !health.windowDays) return null;
+  const silent = health.status === 'silent';
+  return (
+    <span
+      title={silent
+        ? `Agents pushed knowledge ${health.pushesSeen}× in the last ${health.windowDays} days, but nothing was raised or promoted — the convergence pipeline may be silently broken.`
+        : `Curation activity over the last ${health.windowDays} days: suggestions raised, skills promoted, suggestions dismissed.`}
+      style={{ fontSize: 'var(--eb-text-xs)', color: silent ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', cursor: 'help' }}>
+      {silent ? '⚠ ' : ''}curation {health.windowDays}d: {health.suggestionsRaised} raised · {health.promoted} promoted · {health.dismissed} dismissed
+    </span>
+  );
+}
+
 function ControlStrip({ teamId, gates, onChanged }) {
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -3717,6 +3790,12 @@ function ControlStrip({ teamId, gates, onChanged }) {
               value={tr === 'team>global' ? 'always reviewed' : ((g[tr] || 'review') === 'auto' ? 'automatic' : 'needs review')}
               title={GATE_TIPS[tr]} />
           ))}
+          <SummaryPill
+            label="Forgetting"
+            value={gates.decayHorizonDays === 0 ? 'off' : `${gates.decayHorizonDays ?? 60} days`}
+            title={gates.decayHorizonDays === 0
+              ? 'The nightly sweep never proposes retiring unused lessons for this team.'
+              : `Lessons unused for ${gates.decayHorizonDays ?? 60} days get a retire suggestion — you confirm or dismiss; nothing is archived automatically.`} />
           <SummaryPill
             label="Storage"
             title="Where this team’s shared knowledge is stored."
@@ -3871,6 +3950,27 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
         onReview={(enabled) => call('review', '/api/knowledge/review-mode', { teamId, enabled })}
         onGate={(transition, mode) => call(transition, '/api/knowledge/gates', { teamId, transition, mode })}
       />
+
+      {/* Forgetting (#919) — the nightly sweep only PROPOSES; retiring is always
+          a human click, at every autonomy level. */}
+      <PanelSection
+        title="Forgetting"
+        blurb="Propose retiring lessons nobody has used for a while. A lesson counts as used whenever an agent's knowledge search returns it or a digest inlines it — so the conventions and validated lessons the team lives off are never proposed. Stale lessons show up as retire suggestions in the skills inbox; you confirm or dismiss each one, and confirming uses the same reversible archive as the manual Retire button. Nothing is ever archived automatically.">
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+          {[[0, 'Off'], [30, '30 days'], [60, '60 days'], [90, '90 days']].map(([days, label]) => (
+            <Chip
+              key={days}
+              active={(gates.decayHorizonDays ?? 60) === days}
+              title={days === 0
+                ? 'Never propose retiring lessons — today’s behaviour exactly'
+                : `Propose retiring lessons unused for ${days} days${days === 60 ? ' (default)' : ''}`}
+              onClick={() => (gates.decayHorizonDays ?? 60) !== days && busy !== 'decay'
+                && call('decay', '/api/knowledge/decay', { teamId, decayHorizonDays: days })}>
+              {label}{days === 60 ? ' · default' : ''}
+            </Chip>
+          ))}
+        </div>
+      </PanelSection>
 
       {/* Storage */}
       <PanelSection

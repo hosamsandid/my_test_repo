@@ -5343,7 +5343,48 @@ app.get('/api/knowledge/gates', (req, res) => {
     store: knowledgeStoreView(env),
     repositories: teamRepositories(env),
     githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
+    decayHorizonDays: knowledgeSuggestions.resolveDecayHorizonDays(env), // #919
   });
+});
+
+// Set the per-team decay horizon (#919): after how many unused days the nightly
+// sweep PROPOSES retiring a lesson (0 = off). Proxies the orchestrator's
+// knowledge-config writer — the same per-team override file as autonomy/gates.
+app.put('/api/knowledge/decay', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const days = Number(req.body?.decayHorizonDays);
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!Number.isInteger(days) || days < 0) return res.status(400).json({ error: 'decayHorizonDays must be a non-negative integer (0 = off)' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, config: { decayHorizonDays: days } }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'decay config update failed' });
+    res.json({ ok: true, decayHorizonDays: days });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Curation health (#919): the 30-day counters + silent-convergence status the
+// nightly pass persists. `status:"unknown"` until the first pass has run.
+app.get('/api/knowledge/curation-health', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/curation-health`);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: (out && out.error) || 'curation-health failed' });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // Flip one promotion transition between "auto" and "review" (the operator's one

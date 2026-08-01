@@ -859,6 +859,8 @@ const GATE_MODES = ['auto', 'review'];
 const DEFAULT_PROMOTION_GATES = { 'team>team': 'auto', 'team>global': 'review', 'agent>team': 'review' };
 // Auto-resync gate default (#629 AC5) — MIRRORS knowledge-store.DEFAULT_SKILL_RESYNC_MODE.
 const DEFAULT_SKILL_RESYNC_MODE = 'review';
+// Decay-sweep horizon default (#919) — MIRRORS knowledge-store.DEFAULT_DECAY_HORIZON_DAYS.
+const DEFAULT_DECAY_HORIZON_DAYS = 60;
 
 function resolvePromotionGates(env) {
   const raw = env && typeof env.knowledgePromotionGates === 'object' && env.knowledgePromotionGates
@@ -882,6 +884,16 @@ function resolveSkillResyncMode(env) {
   return GATE_MODES.includes(raw) ? raw : DEFAULT_SKILL_RESYNC_MODE;
 }
 
+// Resolve the per-team decay horizon (#919) — MIRRORS
+// knowledge-store.resolveDecayHorizonDays (the orchestrator's copy drives the
+// sweep; this one only DISPLAYS the setting). 0 = off; invalid/absent → 60.
+function resolveDecayHorizonDays(env) {
+  const raw = env && env.decayHorizonDays;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return DEFAULT_DECAY_HORIZON_DAYS;
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // Per-team knowledge config overlay (#570)
 // ---------------------------------------------------------------------------
@@ -889,7 +901,7 @@ function resolveSkillResyncMode(env) {
 // The four knowledge-config groups keyed PER TEAM (#570) instead of on the
 // shared environment. Mirror of the orchestrator's knowledge-store.TEAM_KNOWLEDGE_KEYS
 // (the two runtimes never cross-require, so the list is duplicated verbatim).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
 
 // Overlay a team's persisted knowledge-config overrides onto a base environment,
 // producing the env-shaped object the pure readers (teamAutonomyLevel /
@@ -1004,6 +1016,8 @@ module.exports = {
   buildShareProvenance,
   resolvePromotionGates,
   resolveSkillResyncMode,
+  resolveDecayHorizonDays,
+  DEFAULT_DECAY_HORIZON_DAYS,
   promotionSuggestionView,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,

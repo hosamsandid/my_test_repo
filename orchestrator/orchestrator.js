@@ -19,6 +19,7 @@ const {
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,
+  resolveDecayHorizonDays,
   mergeTeamKnowledgeConfig,
   buildDefaultManifest,
   kindFilePath,
@@ -30,7 +31,7 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const knowledgeFeed = require("./knowledge-feed");
-const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
+const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
@@ -40,6 +41,7 @@ const knowledgeDistillation = require("./knowledge-distillation");
 const knowledgeConsolidation = require("./knowledge-consolidation");
 const knowledgeCleanup = require("./knowledge-cleanup");
 const knowledgeRetrieval = require("./knowledge-retrieval");
+const knowledgeDecay = require("./knowledge-decay");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
@@ -3056,6 +3058,12 @@ function writeTeamKnowledgeConfig(teamId, patch) {
     clean.knowledgePromotionGates = gates;
   }
 
+  if ('decayHorizonDays' in src) {
+    const days = Number(src.decayHorizonDays);
+    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new Error('decayHorizonDays must be an integer 0..3650 (0 = off)');
+    clean.decayHorizonDays = days;
+  }
+
   if (!Object.keys(clean).length) throw new Error('no valid knowledge-config keys in patch');
   writeTeamKnowledgeOverrides(teamId, clean);
   return clean;
@@ -3398,6 +3406,97 @@ function writeKnowledgeValidity(teamId, map) {
   if (!p) return;
   fs.mkdirSync(KNOWLEDGE_VALIDITY_DIR, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
+// Per-team curation-health record (#919) — sibling file of the candidate store
+// (<team>.health.json). Written by the nightly decay/health pass; served
+// read-only to the admin console's health strip.
+function _curationHealthPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${seg}.health.json`);
+}
+
+function readCurationHealth(teamId) {
+  const p = _curationHealthPath(teamId);
+  if (!p) return null;
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : null;
+  } catch { return null; }
+}
+
+function writeCurationHealth(teamId, health) {
+  const p = _curationHealthPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_SUGGESTIONS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(health, null, 2));
+}
+
+// Tolerant read of the whole live feed (the health counter needs the harvest
+// history; the file is bounded in practice and this runs once per backstop).
+function _readFeedEvents() {
+  let raw;
+  try { raw = fs.readFileSync(KNOWLEDGE_EVENTS_FILE, "utf8"); } catch { return []; }
+  const out = [];
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      if (obj && typeof obj === "object") out.push(obj);
+    } catch { /* keep going — one bad line never hides the history */ }
+  }
+  return out;
+}
+
+// #919 nightly decay sweep + curation-health refresh for one team. Runs inside
+// the curator backstop AFTER the collector pass (so the canonical clone and
+// candidate store are fresh). PROPOSES only: stale entries become
+// `source:"decay"` cards in the existing suggestion store; confirming a card in
+// the UI runs the exact same archive path as the manual Retire button. Best-
+// effort — any failure is logged, never thrown into the backstop loop.
+function runTeamDecaySweep(teamId) {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const resolved = resolveTeamKbRepo(teamId);
+  const rawEnv = resolved ? resolved.env : null;
+  const env = teamKnowledgeEnv(teamId, rawEnv); // #570: per-team knowledge config
+  const horizonDays = resolveDecayHorizonDays(env);
+
+  let raised = 0;
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (clonePath && fs.existsSync(path.join(clonePath, ".git"))) {
+    const storeRoot = path.join(clonePath, _kbStoreRel(env));
+    const rawEntries = readKbStoreEntries(storeRoot);
+    const candidates = readKnowledgeCandidates(teamId);
+    const plan = knowledgeDecay.planDecaySuggestions({
+      // post-fold: merged/archived/pending/rejected/expired (#916) already gone
+      entries: foldVisibleEntries(rawEntries, now),
+      retrieval: readRetrievalStats(teamId),
+      includedIds: buildKnowledgeDigest({ teamId, generatedAt: now, entries: rawEntries }).includedIds,
+      candidates,
+      horizonDays,
+      now,
+    });
+    if (plan.raise.length) {
+      writeKnowledgeCandidates(teamId, [...candidates, ...plan.raise]);
+      if (plan.batch) appendKnowledgeEvents([plan.batch]);
+      raised = plan.raise.length;
+    }
+  }
+
+  // Curation health (the Gap-3 silent-convergence monitor) — computed even when
+  // no clone exists yet; one `curation-health` feed event per state TRANSITION.
+  const health = knowledgeDecay.computeCurationHealth({
+    candidates: readKnowledgeCandidates(teamId),
+    events: _readFeedEvents(),
+    teamId,
+    now,
+  });
+  const transition = knowledgeDecay.planHealthTransition(readCurationHealth(teamId), health, { teamId, now });
+  writeCurationHealth(teamId, health);
+  if (transition) appendKnowledgeEvents([transition]);
+  return { raised, health: health.status };
 }
 
 // Per-team read-side retrieval aggregate (#915) — same shared-volume JSON-per-
@@ -11023,6 +11122,21 @@ async function main() {
       }
     }
 
+    // GET /internal/teams/:teamId/knowledge/curation-health — the #919 health
+    // record the nightly pass persists. `status: "unknown"` until the first
+    // pass has run (never a 404 — "no record yet" is a valid answer).
+    const curationHealthMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/curation-health$/);
+    if (curationHealthMatch) {
+      const teamId = decodeURIComponent(curationHealthMatch[1]);
+      try {
+        const health = readCurationHealth(teamId);
+        return sendJson(res, 200, { teamId, ...(health || { status: 'unknown' }) });
+      } catch (err) {
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
     // GET /internal/teams/:teamId/knowledge/retrieval-stats — the read-side
     // aggregate (#915): per-entry last-used truth + the `since` baseline the
     // Gap-5 decay sweep needs. Empty aggregate (no telemetry yet) is a valid
@@ -11491,6 +11605,9 @@ async function main() {
       try {
         refreshKnowledgeClone(teamId, { force: true });
         runConvergenceCollector(teamId) // #855: async, non-blocking
+          // #919: the decay sweep + curation-health pass rides the same nightly
+          // backstop, AFTER the collector so clone + candidate store are fresh.
+          .then(() => runTeamDecaySweep(teamId))
           .catch((err) => console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`));
       } catch (err) {
         console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`);

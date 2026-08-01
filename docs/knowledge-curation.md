@@ -22,7 +22,22 @@ Status: **design of record for #463** — approved (§0 decisions confirmed) and
 implemented on `integration/knowledge-flow` (stacked on Phase 3, commit 88d78ee).
 Follow-up (post-approval, on request): the two optional sub-decisions were then
 built too — the `knowledge promote --to agent` CLI verb (§4) and a **manual**
-archive action (§6). Fully-automatic staleness/supersession archiving stays out.
+archive action (§6).
+
+**Forgetting doctrine (evolved by #919):** fully-automatic staleness archiving
+stays out — but the system may automatically **propose** it. The nightly curator
+backstop sweeps each team's #915 retrieval aggregate and raises `source:"decay"`
+retire-suggestion cards (per-team `decayHorizonDays`, default 60, 0 = off;
+hard-gated until the telemetry baseline is a full horizon old) for active
+entries with zero retrievals of any source within the horizon. Digest-included,
+promoted and review-held entries are exempt (digest inclusion = "the team lives
+off this"). Confirming a card runs the **exact same** non-destructive archive
+overlay as the manual Retire button — even at autonomy level 3 the archive
+itself is always a human click (retirement destroys context; level-3 promotion
+only adds). The same pass persists the per-team **curation-health** record
+(30-day raised/promoted/dismissed/pushes counters; `status:"silent"` when
+pushes happen but nothing converges — the Gap-3 failure signature) with one
+`curation-health` feed event per state transition.
 
 ---
 

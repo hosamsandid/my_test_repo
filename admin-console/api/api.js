@@ -38,6 +38,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const { weaveProcess } = require('./flow-weaver');
+const { runCopilot } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
@@ -6029,6 +6030,58 @@ app.post('/api/process/weave', (req, res) => {
     res.json({ bundle, notes });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+/* ─── Flow Copilot (#1068, spec #1047) ──────────────────────────────────
+ * Natural-language flow generation/revision. Stateless: the client resends the
+ * conversation + current bundle each turn; generate → sanitize → STRICT
+ * validate → lint → repair (≤ 2 iterations) lives in flow-copilot.js. This
+ * route only resolves the model (same posture as /api/agent-prompt/generate —
+ * no heuristic fallback exists at whole-flow scope, so no provider is a hard
+ * 400) and owns the LLM transport. Mutating POST → audited automatically. */
+app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
+  const body = req.body || {};
+  const messages = Array.isArray(body.messages) ? body.messages : null;
+  if (!messages || !messages.length) return res.status(400).json({ error: 'messages must be a non-empty array' });
+  for (const m of messages) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string') {
+      return res.status(400).json({ error: "each message needs role 'user'|'assistant' and string content" });
+    }
+  }
+  if (body.bundle !== undefined && (body.bundle === null || typeof body.bundle !== 'object' || Array.isArray(body.bundle))) {
+    return res.status(400).json({ error: 'bundle must be an object' });
+  }
+
+  const target = resolveGenerationTarget(body.llmEndpointId);
+  if (target.error) return res.status(400).json({ error: target.error });
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  // Whole-bundle generations are big (16k max_tokens) — a generous transport
+  // timeout, unlike the short one-shot suggestion calls.
+  const callLlm = async (payload) => {
+    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000);
+    if (result.error || result.status < 200 || result.status >= 300) {
+      const detail = result.error
+        || (result.body && (result.body.error?.message || result.body.error || result.body.message))
+        || `HTTP ${result.status}`;
+      throw new Error(`LLM request failed: ${detail}`);
+    }
+    return extractMessageText(result.body);
+  };
+
+  try {
+    const out = await runCopilot({ bundle: body.bundle, messages, callLlm });
+    res.json({ ...out, model: target.model });
+  } catch (err) {
+    // Transport failure with no bundle to fall back to, or no parseable reply
+    // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
+    // returns ok:false for that.
+    res.status(502).json({ error: err.message });
   }
 });
 

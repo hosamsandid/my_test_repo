@@ -2175,8 +2175,38 @@ def _rebuild_knowledge_digest() -> None:
         tmp = target.with_suffix(".md.tmp")
         tmp.write_text(res["markdown"], encoding="utf-8")
         tmp.replace(target)
+        # #915 read-side telemetry: the digest's includedIds are inlined into the
+        # agent's context this invocation — report them as the weak `digest`
+        # retrieval signal (once per rebuild, after the atomic write). Strictly
+        # best-effort: a telemetry outage must never break the invocation.
+        _report_digest_retrieval(res.get("includedIds") or [])
     except Exception as exc:  # noqa: BLE001 — never break an invocation
         print(f"[Runner] knowledge digest rebuild failed: {exc}", file=sys.stderr)
+
+
+def _report_digest_retrieval(included_ids) -> None:
+    """POST {source:"digest", entryIds} to the orchestrator's retrieval endpoint
+    (#915). Fire-and-forget: short timeout, every failure silent."""
+    try:
+        ids = [i for i in included_ids
+               if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)]
+        agent_id = os.environ.get("AGENT_ID", "")
+        if not ids or not agent_id:
+            return
+        base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+                or "http://orchestrator:4002").rstrip("/")
+        url = f"{base}/internal/agents/{agent_id}/knowledge/retrieval"
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        payload = json.dumps({"source": "digest", "entryIds": ids,
+                              "hitCount": len(ids), "ts": ts}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+    except Exception:  # noqa: BLE001 — telemetry never breaks an invocation
+        pass
 
 
 # ---- Memory hint (port from agent-runner.js) ----

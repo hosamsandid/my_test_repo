@@ -39,6 +39,7 @@ const knowledgeRouting = require("./knowledge-routing");
 const knowledgeDistillation = require("./knowledge-distillation");
 const knowledgeConsolidation = require("./knowledge-consolidation");
 const knowledgeCleanup = require("./knowledge-cleanup");
+const knowledgeRetrieval = require("./knowledge-retrieval");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
@@ -125,6 +126,9 @@ const KNOWLEDGE_REVIEW_DIR = "/workspace/knowledge-review";
 // { <canonicalId>: { validTo?, supersededBy? } }, overlaid as FIELDS onto the
 // canonical entry at re-projection (status untouched — readers derive "expired").
 const KNOWLEDGE_VALIDITY_DIR = "/workspace/knowledge-validity";
+// Per-team read-side retrieval aggregate (#915): one compact JSON per team, one
+// row per entry (never an unbounded log, never a line in events.jsonl).
+const KNOWLEDGE_RETRIEVAL_DIR = "/workspace/knowledge-retrieval";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -2023,6 +2027,7 @@ function purgeTeamKnowledge(teamId) {
     suggestionsDir: KNOWLEDGE_SUGGESTIONS_DIR,
     archivedDir: KNOWLEDGE_ARCHIVED_DIR,
     reviewDir: KNOWLEDGE_REVIEW_DIR,
+    retrievalDir: KNOWLEDGE_RETRIEVAL_DIR,
     eventsFile: KNOWLEDGE_EVENTS_FILE,
   });
   if (!plan) return; // unsafe id → remove nothing
@@ -3393,6 +3398,38 @@ function writeKnowledgeValidity(teamId, map) {
   if (!p) return;
   fs.mkdirSync(KNOWLEDGE_VALIDITY_DIR, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
+// Per-team read-side retrieval aggregate (#915) — same shared-volume JSON-per-
+// team pattern. Written atomically (tmp+rename): the emitters are fire-and-
+// forget, so a torn read must never be possible.
+function _retrievalPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_RETRIEVAL_DIR, `${seg}.json`);
+}
+
+function readRetrievalStats(teamId) {
+  const p = _retrievalPath(teamId);
+  if (!p) return { since: null, entries: {} };
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      return { since: typeof obj.since === "string" ? obj.since : null, entries: obj.entries && typeof obj.entries === "object" ? obj.entries : {} };
+    }
+  } catch { /* fresh */ }
+  return { since: null, entries: {} };
+}
+
+function recordKnowledgeRetrieval(teamId, report) {
+  const p = _retrievalPath(teamId);
+  if (!p) throw new Error("invalid teamId");
+  const next = knowledgeRetrieval.applyRetrieval(readRetrievalStats(teamId), report);
+  fs.mkdirSync(KNOWLEDGE_RETRIEVAL_DIR, { recursive: true });
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next));
+  fs.renameSync(tmp, p);
+  return { entries: report.entryIds.length, source: report.source };
 }
 
 // Per-team operator review decisions for supervised-review mode: a map
@@ -10031,6 +10068,47 @@ async function main() {
       return;
     }
 
+    // ── Read-side retrieval telemetry (#915) — the READ choke-point ─────────────
+    // `knowledge search` is fully local in the agent container (a checkout scan;
+    // it never touches us) and the container cannot write the shared volume, so
+    // the read signal arrives over this endpoint — the same agent→orchestrator
+    // pattern as the knowledge push. Updates the compact per-team aggregate
+    // ONLY; never events.jsonl, never the SSE feed.
+    const knRetrievalMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/knowledge\/retrieval$/);
+    if (knRetrievalMatch) {
+      const id = decodeURIComponent(knRetrievalMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          let payload = {};
+          try { payload = JSON.parse(body || '{}'); } catch { payload = {}; }
+          const v = knowledgeRetrieval.validateRetrieval(payload, {
+            now: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          });
+          if (!v.ok) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: v.error }));
+            return;
+          }
+          const teamId = agentKnowledgeTeamId(cfg); // server-side, same as push
+          const result = recordKnowledgeRetrieval(teamId, v);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, teamId, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+        }
+      });
+      return;
+    }
+
     // ── Ensure/refresh a team's canonical KB clone (Phase 2) ────────────────────
     // The admin-console calls this opportunistically (fire-and-forget) before it
     // reads the KB shards, so the on-disk copy is current. Best-effort, throttled
@@ -10941,6 +11019,21 @@ async function main() {
         });
       } catch (err) {
         console.error(`[Orchestrator] digest-status error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // GET /internal/teams/:teamId/knowledge/retrieval-stats — the read-side
+    // aggregate (#915): per-entry last-used truth + the `since` baseline the
+    // Gap-5 decay sweep needs. Empty aggregate (no telemetry yet) is a valid
+    // 200, never a 404 — "no data" is itself the cold-start signal.
+    const retrievalStatsMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/retrieval-stats$/);
+    if (retrievalStatsMatch) {
+      const teamId = decodeURIComponent(retrievalStatsMatch[1]);
+      try {
+        return sendJson(res, 200, { teamId, ...readRetrievalStats(teamId) });
+      } catch (err) {
         return sendJson(res, 500, { error: err.message });
       }
     }

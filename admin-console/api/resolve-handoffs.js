@@ -12,11 +12,12 @@
 //   • `artifact`   edges  ≡ findAffectedBps input-artifact dependents
 //   • `label` / `review` / `manual` edges = the new, generalized reach.
 //
-// Loop protection: **Layer 0 (self-loop) is enforced here** — a node never hands
-// off to itself. Layers 2 (`from` filter) and 3 (conversation throttle) are NOT
-// bypassed: they remain the caller's responsibility (github-poller), applied to
-// the candidates this returns. This module answers *what is downstream*, never
-// *whether to deliver*.
+// Graph semantics: a node is never its own downstream target (no self hand-off
+// edge in the reachability sense). This is NOT event-source filtering — the
+// github-poller no longer filters by origin at all (a trigger fires on any
+// matching event, self included); the only delivery backstop is the caller's
+// conversation throttle, applied to the candidates this returns. This module
+// answers *what is downstream*, never *whether to deliver*.
 
 function asArray(x) { return Array.isArray(x) ? x : []; }
 
@@ -45,7 +46,7 @@ function resolveHandoffs(graph, source) {
 
   for (const e of edges) {
     if (e.from !== node) continue;
-    if (e.to == null || e.to === node) continue; // Layer 0 — no self hand-off
+    if (e.to == null || e.to === node) continue; // graph semantics — no self hand-off edge
 
     let match = false;
     switch (e.on) {

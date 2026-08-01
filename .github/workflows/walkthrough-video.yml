@@ -1,0 +1,93 @@
+name: Walkthrough video
+
+# Dedicated, MANUAL walkthrough-video lane (#749, docs/journey-spec-concept.md §3.3,
+# e2e/video/README.md).
+#
+# The walkthrough render used to be the `journey-video` job bolted onto the nightly
+# E2E workflow (e2e.yml, cron + dispatch of the *whole* F0–F4 run), so the video
+# could only be produced as a side effect of the full suite. This workflow extracts
+# it so it stands on its own and is started on demand from the Actions UI, with
+# inputs to choose which chapters to render, the (future) narration language, and
+# the slowMo pace.
+#
+# workflow_dispatch ONLY — no schedule, no pull_request. It never runs
+# automatically (least of all on PRs). The render is self-contained from committed
+# fixtures (screenshots + Edge-TTS mp3s): no stack, no podman, no network — only
+# headless Chromium + ffmpeg, both installed here (agent containers lack them, so
+# the render lives in CI, never in the agent — see the README's "Container
+# feasibility").
+on:
+  workflow_dispatch:
+    inputs:
+      journeys:
+        description: "Chapters to render: 'all' or comma-separated ids (team-setup, iban-story)"
+        required: false
+        default: 'all'
+        type: string
+      language:
+        description: 'Narration language (prep for the language decision — not yet consumed)'
+        required: false
+        default: 'en'
+        type: choice
+        options:
+          - en
+          - de
+      slowmo:
+        description: 'slowMo per interaction, ms (reserved — the audio-driven render ignores it for now)'
+        required: false
+        default: '350'
+        type: string
+
+concurrency:
+  group: walkthrough-video
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Render the walkthrough video (Revideo, screenshots-per-step) ────────────
+  # Reuses the screenshots the journey run already captured (committed as
+  # fixtures) — no second recording, no stack. `render:walkthrough` renders each
+  # chapter the `journeys` input selects, then muxes the narration; the result
+  # lands in e2e/video/out/final/ and is uploaded as `walkthrough-video`, exactly
+  # as the old nightly job did.
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # workflow_dispatch inputs → the env the render dispatcher reads:
+      #   WALKTHROUGH_JOURNEYS → chapter selection (scripts/render-walkthrough.mjs)
+      #   WALKTHROUGH_LANG     → reserved for the narration/language work
+      #   WALKTHROUGH_SLOWMO   → reserved (audio-driven render ignores it)
+      WALKTHROUGH_JOURNEYS: ${{ inputs.journeys }}
+      WALKTHROUGH_LANG: ${{ inputs.language }}
+      WALKTHROUGH_SLOWMO: ${{ inputs.slowmo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ffmpeg + fonts
+        # ffmpeg + a headless Chromium (installed below) are what the Revideo render
+        # needs; neither is assumed in agent containers, which is why the render
+        # lives in CI. fonts-dejavu-core gives the captions a font.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Render selected walkthrough chapters (Revideo, screenshots-per-step)
+        # `npx puppeteer browsers install` is belt-and-braces: on npm builds that
+        # block postinstall scripts the Chromium download is skipped, so we force it.
+        run: |
+          cd e2e/video && npm ci && npx puppeteer browsers install chrome
+          npm run render:walkthrough
+
+      - name: Upload walkthrough video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walkthrough-video
+          path: e2e/video/out/final/
+          if-no-files-found: ignore
+          retention-days: 7

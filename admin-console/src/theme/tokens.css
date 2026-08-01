@@ -308,6 +308,43 @@ select option:disabled {
   animation: eb-status-pulse 1.4s ease-in-out infinite;
 }
 
+/* ─── Icon-only action button: fast tooltip (no native-title delay) ──
+   Pairs with admin-console/src/components/IconButton.jsx. Rendered via a
+   React portal into document.body with position: fixed (coordinates from
+   the button's getBoundingClientRect()) so it can never be clipped by an
+   ancestor's `overflow` — e.g. DataTable's horizontal-scroll wrapper —
+   the way an absolutely-positioned in-flow tooltip would be. Shown on
+   hover AND focus so the label is reachable via keyboard too. */
+.eb-icon-btn-wrap {
+  display: inline-flex;
+}
+.eb-icon-btn-tooltip {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  background: var(--eb-bg-elevated);
+  color: var(--eb-text-primary);
+  border: 1px solid var(--eb-border-default);
+  padding: 2px 8px;
+  border-radius: var(--eb-radius-sm);
+  font-size: var(--eb-text-xs);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* ─── Tablet-width (≤768px) action-row wrap ───────────────────────────
+   Added as a className alongside existing inline flex styles (which
+   never set flex-wrap), so it only takes effect at the breakpoint and
+   never changes desktop layout. Applied to both the outer row and the
+   inner action-button group so overflowing rows wrap as a whole first,
+   and individual buttons wrap too if the group itself is still tight. */
+@media (max-width: 768px) {
+  .eb-wrap-md {
+    flex-wrap: wrap;
+    row-gap: var(--eb-space-2);
+  }
+}
+
 /* ─── Shiki dual-theme switching (rehype-pretty-code) ────────────────────
    rehype-pretty-code v0.13 with `theme: { light, dark }` emits CSS
    variables `--shiki-light`, `--shiki-light-bg`, `--shiki-dark`,
@@ -356,3 +393,52 @@ select option:disabled {
   color:            var(--shiki-dark);
   background-color: var(--shiki-dark-bg);
 }
+
+/* ─── InfoTip: rich multi-line explanation popover ───────────────────
+   Pairs with admin-console/src/components/InfoTip.jsx. Same portal +
+   position:fixed approach as .eb-icon-btn-tooltip, but sized for
+   sentences: wraps, readable max width, soft shadow. */
+.eb-infotip-pop {
+  position: fixed;
+  transform: translateX(-50%);
+  max-width: 300px;
+  background: var(--eb-bg-elevated);
+  color: var(--eb-text-secondary);
+  border: 1px solid var(--eb-border-default);
+  padding: 8px 10px;
+  border-radius: var(--eb-radius-md);
+  font-size: var(--eb-text-xs);
+  line-height: 1.5;
+  white-space: normal;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+
+/* ── Knowledge Flow (Shared Agent Learning, Phase 2) ─────────────────────── */
+@keyframes kf-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes kf-pulse {
+  0%   { stroke-width: 2; }
+  50%  { stroke-width: 5; }
+  100% { stroke-width: 2; }
+}
+.kf-node-pulse { animation: kf-node-pulse 900ms ease-out; }
+@keyframes kf-node-pulse {
+  0%   { filter: drop-shadow(0 0 0 var(--eb-accent-primary)); }
+  40%  { filter: drop-shadow(0 0 6px var(--eb-accent-primary)); }
+  100% { filter: drop-shadow(0 0 0 var(--eb-accent-primary)); }
+}
+.kf-spin { animation: kf-spin 900ms linear infinite; }
+@keyframes kf-spin { to { transform: rotate(360deg); } }
+/* One-click retire (veto) on an item card — revealed on hover so it never
+   clutters the card, but is one click away. */
+.kf-item .kf-retire { opacity: 0; transition: opacity 120ms ease; }
+.kf-item:hover .kf-retire { opacity: 1; }
+/* Combine-selection checkbox: hidden until hover while nothing is selected
+   (same pattern as .kf-retire); once a selection exists, every checkbox stays
+   visible so the operator sees what else can be ticked. */
+.kf-item .kf-pick { opacity: 0; transition: opacity 120ms ease; }
+.kf-item:hover .kf-pick { opacity: 1; }

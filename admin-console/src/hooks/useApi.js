@@ -17,6 +17,9 @@ export function useApi(url) {
   const hasData = useRef(false);
 
   const fetchData = useCallback(async () => {
+    // A falsy URL means "nothing to fetch" — callers use this to skip a request
+    // for scopes whose data is derived client-side (e.g. drafts/imports).
+    if (!url) { setData(null); setError(null); setLoading(false); return; }
     if (!hasData.current) setLoading(true);
     setError(null);
     try {

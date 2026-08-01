@@ -9,21 +9,22 @@ const path = require('path');
 const { buildProcessGraph, computeLints, listenKeys, classifyKind } = require('./process-graph');
 
 function lintCodes(g) { return g.lints.map(l => l.code); }
-const { deriveEmitsForTrigger } = require('./emits-derivation');
 
 const TEMPLATES_DIR = path.join(
   __dirname, '..', '..', 'orchestrator', 'skill-pool', 'agent-templates',
 );
 
-// Mirror of api.js#effectiveTriggers for the template level (derive on).
+// Mirror of api.js's template-level graph gathering (#783): a template's label
+// hand-offs come from its role-level `emits`; triggers contribute listen side
+// only.
 function templateNode(tpl) {
-  const triggers = (tpl.triggers || []).map(tr => {
-    const t = { ...tr, prompt: tr.promptTemplate };
-    if (Array.isArray(tr.emits)) return t;
-    const sug = deriveEmitsForTrigger(t, tpl.promptTemplate || '');
-    return { ...t, emits: sug.map(s => s.label), emitsDerived: sug.length > 0 };
-  });
-  return { id: tpl.id, role: 'template', displayName: tpl.displayName, triggers };
+  const triggers = (tpl.triggers || []).map(tr => ({ ...tr, prompt: tr.promptTemplate }));
+  return {
+    id: tpl.id, role: 'template', displayName: tpl.displayName,
+    emits: Array.isArray(tpl.emits) ? tpl.emits : [],
+    ...(tpl.outcomes ? { outcomes: tpl.outcomes } : {}),
+    triggers,
+  };
 }
 function loadTpl(id) {
   return JSON.parse(fs.readFileSync(path.join(TEMPLATES_DIR, `${id}.json`), 'utf8'));
@@ -45,17 +46,42 @@ test('listenKeys: labelFilter wins over the carrying event', () => {
   assert.deepEqual(listenKeys({ type: 'cron', cron: '* * * * *' }), []);
 });
 
-test('classifyKind', () => {
-  assert.equal(classifyKind('human:fdd-approved'), 'gate');
-  assert.equal(classifyKind('hold'), 'brake');
-  assert.equal(classifyKind('needs:human'), 'brake');
-  assert.equal(classifyKind('pull_request_review.submitted'), 'review');
-  assert.equal(classifyKind('stage:td'), 'agent');
+// #928 AC1 — classification reads the CONFIG FLAGS, never the label's name.
+test('classifyKind reads the label-registry flags', () => {
+  const reg = { labels: [
+    { name: 'approved-for-dispatch', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+    { name: 'ready-for-review', humanGate: false, brake: false },
+  ] };
+  assert.equal(classifyKind('approved-for-dispatch', reg), 'gate');
+  assert.equal(classifyKind('human-decision-required', reg), 'brake');
+  assert.equal(classifyKind('ready-for-review', reg), 'agent');
+  assert.equal(classifyKind('pull_request_review.submitted', reg), 'review');
+});
+
+test("classifyKind reads a channel's gate: 'human' flag", () => {
+  const src = { agents: [{ id: 'dev', channels: [{ artifact: 'issue', from: 'ba', label: 'design-approved', gate: 'human' }] }] };
+  assert.equal(classifyKind('design-approved', src), 'gate');
+  // An ungated channel label stays a plain agent label.
+  const plain = { agents: [{ id: 'dev', channels: [{ artifact: 'pr', from: 'ba', label: 'ready-for-review' }] }] };
+  assert.equal(classifyKind('ready-for-review', plain), 'agent');
+});
+
+// #928 AC8 — the retired name convention carries no meaning of its own any more.
+test('classifyKind: the retired human:* / hold / needs:human names are plain agent labels', () => {
+  assert.equal(classifyKind('human:fdd-approved'), 'agent');
+  assert.equal(classifyKind('hold'), 'agent');
+  assert.equal(classifyKind('needs:human'), 'agent');
+});
+
+test('classifyKind: a gate flag wins over a brake flag on the same label', () => {
+  const reg = { labels: [{ name: 'both', humanGate: true, brake: true }] };
+  assert.equal(classifyKind('both', reg), 'gate');
 });
 
 test('emitter→listener edge forms on a matching label', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't1', type: 'github-event', events: ['issues.opened'], emits: ['dispatch'] }] },
+    { id: 'a', emits: ['dispatch'], triggers: [{ id: 't1', type: 'github-event', events: ['issues.opened'] }] },
     { id: 'b', triggers: [{ id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
   ]);
   const e = edgesBetween(g, 'a', 'b');
@@ -75,26 +101,20 @@ test('orphan listener: nothing can set the label (agents-only origin)', () => {
   assert.ok(g.lints.some(l => l.code === 'orphan-listener' && l.severity === 'warning'));
 });
 
-test('human-set listener (#410): explicit from:humans is a human edge, no lint', () => {
+test('label listener with no agent emitter is a plain orphan (origin filters removed)', () => {
+  // With source/origin filters gone there is no `from` to infer human-settability
+  // from, so a label nobody emits is always a plain orphan (warning). A human
+  // applying the label still fires the trigger at runtime — this is only about
+  // what the static graph can prove.
   const g = buildProcessGraph([
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'priorisiert', from: 'humans' }] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'priorisiert' }] },
   ]);
   const e = g.edges.find(x => x.to === 'b' && x.label === 'priorisiert');
   assert.equal(e.from, null);
-  assert.equal(e.humanSet, true);
-  assert.ok(!e.orphan);
-  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
-});
-
-test('human-reachable listener (#410): default origin keeps an advisory info lint', () => {
-  const g = buildProcessGraph([
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch' }] },
-  ]);
-  const e = g.edges.find(x => x.to === 'b' && x.label === 'dispatch');
-  assert.equal(e.humanSet, true);
-  assert.equal(e.humanAssumed, true);
+  assert.equal(e.orphan, true);
+  assert.ok(!e.humanSet && !e.humanAssumed, 'no human-origin inference any more');
   const lint = g.lints.find(l => l.code === 'orphan-listener');
-  assert.equal(lint.severity, 'info');
+  assert.equal(lint.severity, 'warning');
 });
 
 test('http trigger (#410): becomes a webhook edge from outside', () => {
@@ -111,7 +131,7 @@ test('http trigger (#410): becomes a webhook edge from outside', () => {
 
 test('dead-end emitter: nothing listens on the emitted label', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['stage:done'] }] },
+    { id: 'a', emits: ['stage:done'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
   ]);
   const e = g.edges.find(x => x.from === 'a' && x.deadEnd);
   assert.ok(e);
@@ -119,19 +139,41 @@ test('dead-end emitter: nothing listens on the emitted label', () => {
   assert.equal(e.label, 'stage:done');
 });
 
+// #928 AC1/AC2 — edge origination is flag-driven; both labels carry ordinary,
+// action-style names with no `human:` prefix anywhere.
 test('human gate and brake edges originate from null and are tagged', () => {
+  const g = buildProcessGraph([
+    { id: 'rel', triggers: [
+      { id: 't1', type: 'github-event', labelFilter: 'approved-for-go-live' },
+      { id: 't2', type: 'github-event', labelFilter: 'human-decision-required' },
+    ] },
+  ], { labels: [
+    { name: 'approved-for-go-live', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+  ] });
+  const gate = g.edges.find(e => e.label === 'approved-for-go-live');
+  assert.equal(gate.from, null);
+  assert.equal(gate.kind, 'gate');
+  const brake = g.edges.find(e => e.label === 'human-decision-required');
+  assert.equal(brake.kind, 'brake');
+  assert.deepEqual(g.gates, [{ label: 'approved-for-go-live', humanOnly: true }]);
+});
+
+// #928 AC8 — without the flags the very same wiring is plain agent routing:
+// two orphan listeners, no gate, no brake.
+test('the same listeners WITHOUT flags are plain agent labels (name convention retired)', () => {
   const g = buildProcessGraph([
     { id: 'rel', triggers: [
       { id: 't1', type: 'github-event', labelFilter: 'human:go-live-approved' },
       { id: 't2', type: 'github-event', labelFilter: 'hold' },
     ] },
   ]);
-  const gate = g.edges.find(e => e.label === 'human:go-live-approved');
-  assert.equal(gate.from, null);
-  assert.equal(gate.kind, 'gate');
-  const brake = g.edges.find(e => e.label === 'hold');
-  assert.equal(brake.kind, 'brake');
-  assert.deepEqual(g.gates, [{ label: 'human:go-live-approved', humanOnly: true }]);
+  assert.deepEqual(g.gates, []);
+  for (const label of ['human:go-live-approved', 'hold']) {
+    const e = g.edges.find(x => x.label === label);
+    assert.equal(e.kind, 'agent');
+    assert.equal(e.orphan, true);
+  }
 });
 
 test('cron/once become self-loop timer edges; node is not an entry point if it has a github trigger', () => {
@@ -155,7 +197,7 @@ test('DM-only agent (no triggers) is an entry point', () => {
 
 test('one emitter feeding two listeners yields two edges', () => {
   const g = buildProcessGraph([
-    { id: 'src', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['go'] }] },
+    { id: 'src', emits: ['go'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
     { id: 'l1', triggers: [{ id: 't', type: 'github-event', labelFilter: 'go' }] },
     { id: 'l2', triggers: [{ id: 't', type: 'github-event', labelFilter: 'go' }] },
   ]);
@@ -163,42 +205,68 @@ test('one emitter feeding two listeners yields two edges', () => {
   assert.equal(edgesBetween(g, 'src', 'l2').length, 1);
 });
 
-test('label registry tags gates and brakes', () => {
+test('label registry tags gates and brakes from the config flags', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [
-      { id: 't', type: 'github-event', labelFilter: 'human:td-approved', emits: ['stage:build'] },
-      { id: 'h', type: 'github-event', labelFilter: 'hold' },
+    { id: 'a', emits: ['stage:build'], triggers: [
+      { id: 't', type: 'github-event', labelFilter: 'td-approved' },
+      { id: 'h', type: 'github-event', labelFilter: 'human-decision-required' },
     ] },
-  ]);
+  ], { labels: [
+    { name: 'td-approved', humanGate: true, brake: false },
+    { name: 'human-decision-required', humanGate: false, brake: true },
+  ] });
   const byName = Object.fromEntries(g.labels.map(l => [l.name, l]));
-  assert.equal(byName['human:td-approved'].humanGate, true);
-  assert.equal(byName['hold'].brake, true);
+  assert.equal(byName['td-approved'].humanGate, true);
+  assert.equal(byName['human-decision-required'].brake, true);
   assert.equal(byName['stage:build'].humanGate, false);
 });
 
-test('template level: shipped dispatcher + developer derive emits onto nodes', () => {
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), templateNode(loadTpl('developer'))]);
-  const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
-  const dispatcherEmits = dispatcher.triggers.flatMap(t => t.emits);
-  assert.ok(dispatcherEmits.includes('{{dispatchLabel}}'),
-    'dispatcher should derive {{dispatchLabel}} as an emitted label');
+// #928 AC6 — a flagged label survives the export round-trip even when no port
+// references it yet, so re-importing the bundle does not silently lose the gate.
+test('label registry echoes back unreferenced registry entries with their flags', () => {
+  const g = buildProcessGraph([{ id: 'a', triggers: [] }], {
+    labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }],
+  });
+  const byName = Object.fromEntries(g.labels.map(l => [l.name, l]));
+  assert.deepEqual(byName['approved-for-dispatch'], { name: 'approved-for-dispatch', humanGate: true, brake: false });
+});
 
-  const developer = g.nodes.find(n => n.id === 'developer');
-  const assigned = developer.triggers.find(t => t.id === 'developer-assigned');
-  assert.ok(assigned.emits.includes('started:{{agentId}}'));
-  assert.equal(assigned.emitsDerived, true);
+test('template level: shipped dispatcher carries its role-level emits onto its node', () => {
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher'))]);
+  const dispatcher = g.nodes.find(n => n.id === 'dispatcher');
+  assert.ok(dispatcher.emits.includes('dispatched-for-implementation'),
+    'dispatcher should carry `dispatched-for-implementation` as a role-level emitted label');
 });
 
 test('template level: a synthetic listener wires to a shipped emitter', () => {
-  // Prove the mechanism end-to-end: someone listening on {{dispatchLabel}} gets
-  // an edge from the dispatcher (which emits it).
+  // Prove the mechanism end-to-end: someone listening on
+  // `dispatched-for-implementation` gets an edge from the dispatcher (which
+  // emits it).
+  const listener = {
+    id: 'consumer', role: 'template',
+    triggers: [{ id: 'l', type: 'github-event', labelFilter: 'dispatched-for-implementation' }],
+  };
+  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
+  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
+  assert.ok(e, 'expected dispatcher → consumer edge on `dispatched-for-implementation`');
+  assert.equal(e.label, 'dispatched-for-implementation');
+});
+
+test('template level: {{var}} label tokens still wire emitter to listener', () => {
+  // Placeholders are matched verbatim at template level — resolved only at
+  // materialisation. The shipped catalog no longer uses them, but imported /
+  // hand-authored templates may.
+  const emitter = {
+    id: 'producer', role: 'template', emits: ['{{dispatchLabel}}'],
+    triggers: [{ id: 'e', type: 'github-event', events: ['issues.opened'] }],
+  };
   const listener = {
     id: 'consumer', role: 'template',
     triggers: [{ id: 'l', type: 'github-event', labelFilter: '{{dispatchLabel}}' }],
   };
-  const g = buildProcessGraph([templateNode(loadTpl('dispatcher')), listener]);
-  const e = g.edges.find(x => x.from === 'dispatcher' && x.to === 'consumer');
-  assert.ok(e, 'expected dispatcher → consumer edge on {{dispatchLabel}}');
+  const g = buildProcessGraph([emitter, listener]);
+  const e = g.edges.find(x => x.from === 'producer' && x.to === 'consumer');
+  assert.ok(e, 'expected producer → consumer edge on {{dispatchLabel}}');
   assert.equal(e.label, '{{dispatchLabel}}');
 });
 
@@ -221,44 +289,65 @@ test('lint: orphan listener fires and is keyed to the target node', () => {
 
 test('lint: dead-end emitter fires', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', events: ['x'], emits: ['stage:done'] }] },
+    { id: 'a', emits: ['stage:done'], triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', events: ['x'] }] },
   ]);
   assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.nodeId === 'a'));
 });
 
-test('lint: unguarded self-trigger when from is absent', () => {
+test('lint: no unguarded-self-trigger lint (origin filters removed)', () => {
+  // The lint keyed off the absence of a `from` origin filter; with source
+  // filtering gone, self-triggering is allowed by design (the Layer-3 throttle
+  // is the backstop), so the lint must no longer fire.
   const g = buildProcessGraph([
     { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['issues.opened'] }] },
   ]);
-  assert.ok(g.lints.some(l => l.code === 'unguarded-self-trigger' && l.triggerId === 't'));
-  // ...and does NOT fire when a from filter is present
-  const g2 = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['issues.opened'] }] },
-  ]);
-  assert.ok(!g2.lints.some(l => l.code === 'unguarded-self-trigger'));
+  assert.ok(!g.lints.some(l => l.code === 'unguarded-self-trigger'));
 });
 
 test('lint: competing stage labels', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['stage:td', 'stage:build'] }] },
+    { id: 'a', emits: ['stage:td', 'stage:build'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
   ]);
   assert.ok(g.lints.some(l => l.code === 'competing-stage' && l.nodeId === 'a'));
 });
 
-test('lint: gate-violation when an agent emits a human:* label (error severity)', () => {
+// #928 AC2 — gate-violation fires on the FLAG, independent of the label's name.
+test('lint: gate-violation when an agent emits a flagged gate label (error severity)', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['human:fdd-approved'] }] },
-  ]);
+    { id: 'a', emits: ['fdd-approved'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] },
+  ], { labels: [{ name: 'fdd-approved', humanGate: true, brake: false }] });
   const v = g.lints.find(l => l.code === 'gate-violation');
   assert.ok(v);
   assert.equal(v.severity, 'error');
   assert.equal(v.nodeId, 'a');
 });
 
+test("lint: gate-violation also fires for a gate declared only by a channel's gate: 'human'", () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['design-approved'], triggers: [] },
+    { id: 'b', triggers: [], channels: [{ artifact: 'issue', from: 'a', label: 'design-approved', gate: 'human' }] },
+  ]);
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'a' && l.label === 'design-approved'));
+});
+
+// #928 AC3 — a brake is AGENT-applied (the reworker pausing the loop for a human
+// decision), so emitting it must stay clean: no gate-violation, no dead-end.
+test('lint: a brake label emitted by an agent trips NOTHING', () => {
+  const g = buildProcessGraph([
+    { id: 'reworker', emits: ['human-decision-required'], triggers: [] },
+  ], { labels: [{ name: 'human-decision-required', humanGate: false, brake: true }] });
+  assert.ok(!g.lints.some(l => l.code === 'gate-violation'));
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
+});
+
 test('lint: a clean wired pair produces no lints', () => {
   const g = buildProcessGraph([
-    { id: 'a', triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'], emits: ['dispatch'] }] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch' }] },
+    { id: 'a', emits: ['dispatch'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
+    // The listener carries its derived claim (#958): since `unclaimed-listener`
+    // is advisory, a pair is only fully clean once the label listener also
+    // declares what it takes over when it wakes.
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch',
+      claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
   assert.deepEqual(g.lints, []);
 });
@@ -276,6 +365,48 @@ test('github channel: derived channel triggers do not produce label/event edges'
   ]);
   assert.equal(g.edges.filter(e => e.external).length, 0);
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
+test('lint: duplicate-listener flags a manual trigger duplicating a derived channel listener; removing it clears the lint (\#826)', () => {
+  const derived = { id: 'rev-on-pr', type: 'github-event', channel: true,
+    events: ['pull_request.opened', 'pull_request.reopened'] };
+  const manual = { id: 'rev-manual', type: 'github-event',
+    events: ['pull_request.reopened', 'pull_request.opened'] }; // same set, different order
+  // With the manual duplicate present.
+  const dup = buildProcessGraph([
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [derived, manual] },
+  ]);
+  const l = dup.lints.find(x => x.code === 'duplicate-listener' && x.nodeId === 'rev');
+  assert.ok(l, 'duplicate-listener raised');
+  assert.equal(l.severity, 'warning');
+  assert.deepEqual([...l.triggerIds].sort(), ['rev-manual', 'rev-on-pr']);
+  // Deleting the manual trigger clears the lint.
+  const clean = buildProcessGraph([
+    { id: 'dev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', channels: [{ artifact: 'pr', from: 'dev' }], triggers: [derived] },
+  ]);
+  assert.ok(!clean.lints.some(x => x.code === 'duplicate-listener'));
+});
+
+test('lint: duplicate-listener requires matching labelFilter, not just events (\#826)', () => {
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+      { id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' },
+    ] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'duplicate-listener'), 'different labels are distinct listeners');
+});
+
+test('lint: duplicate-listener does NOT fire on per-upstream data-flow push triggers (\#826)', () => {
+  const g = buildProcessGraph([
+    { id: 'c', triggers: [
+      { id: 'c-on-push-up1', type: 'github-event', dataFlow: true, events: ['push'] },
+      { id: 'c-on-push-up2', type: 'github-event', dataFlow: true, events: ['push'] },
+    ] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'duplicate-listener'), 'intentional one-per-upstream listeners');
 });
 
 test('lint: a producer whose artifact nobody consumes is flagged (info)', () => {
@@ -312,6 +443,46 @@ test('channel-label listener: extra emitters wire feedback edges, pinned produce
   assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
 });
 
+test('channel-label + labelFilter trigger on the same label draws ONE edge, not two (#537)', () => {
+  // The Core-SDLC shape: reworker emits `ready-for-review`; code-reviewer both
+  // consumes developer's PR channel on that label AND has an explicit
+  // `pull_request.labeled` labelFilter trigger for it. The trigger loop already
+  // wires reworker→code-reviewer, so the #401 channel back-emitter loop must not
+  // draw a second, trigger-less duplicate.
+  const g = buildProcessGraph([
+    { id: 'developer', triggers: [], github: { producesPr: true } },
+    { id: 'reworker', triggers: [], emits: ['ready-for-review'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'pr', from: 'developer', label: 'ready-for-review' }], triggers: [
+      { id: 't1783952055673966', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const edges = edgesBetween(g, 'reworker', 'code-reviewer').filter(e => e.kind === 'agent');
+  assert.equal(edges.length, 1);
+  // The surviving edge is the trigger-backed one (carries the triggerId + events),
+  // not the trigger-less channel duplicate.
+  assert.equal(edges[0].triggerId, 't1783952055673966');
+  assert.deepEqual(edges[0].events, ['pull_request.labeled']);
+  // The channel back-emitter loop drew nothing trigger-less for this pair.
+  assert.ok(!edges.some(e => e.triggerId == null));
+});
+
+test('#401 still holds when the same consumer has an unrelated labelFilter trigger (#537 regression guard)', () => {
+  // code-reviewer listens on `go` ONLY via a channel (no labelFilter trigger for
+  // it), while also carrying a labelFilter trigger for a DIFFERENT label. The
+  // #537 guard must be per-label: the `go` feedback edge from a third emitter
+  // must still be drawn.
+  const g = buildProcessGraph([
+    { id: 'intake', triggers: [], github: { producesIssue: true }, emits: ['go'] },
+    { id: 'router', triggers: [], emits: ['go'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'issue', from: 'intake', label: 'go' }], triggers: [
+      { id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' },
+    ] },
+  ]);
+  const goEdges = g.edges.filter(e => e.label === 'go' && e.kind === 'agent');
+  assert.deepEqual(goEdges.map(e => `${e.from}->${e.to}`).sort(), ['router->code-reviewer']);
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'go'));
+});
+
 test('channel without a routing label contributes no label-listen key', () => {
   // A bare PR channel (open, not labelled) must not turn arbitrary emits into edges.
   const g = buildProcessGraph([
@@ -322,41 +493,72 @@ test('channel without a routing label contributes no label-listen key', () => {
   assert.ok(g.lints.some(l => l.code === 'dead-end-emitter' && l.label === 'whatever'));
 });
 
-test('a human-approval gate (downstream waits on human:*) renders as a gate and never trips gate-violation', () => {
-  // The #346 shape: downstream listens on the gate label; nobody emits it.
+test('a human-approval gate (downstream waits on a flagged label) renders as a gate and never trips gate-violation', () => {
+  // The #346 shape: downstream listens on the gate label; nobody emits it. The
+  // label is named as a plain action (#928/#927) — the flag makes it a gate.
   const g = buildProcessGraph([
     { id: 'release', triggers: [
-      { id: 'gate', type: 'github-event', from: 'humans', events: ['issues.labeled'], labelFilter: 'human:go-live-approved' },
+      { id: 'gate', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved-for-go-live' },
     ] },
-  ]);
-  const gateEdge = g.edges.find(e => e.label === 'human:go-live-approved');
+  ], { labels: [{ name: 'approved-for-go-live', humanGate: true, brake: false }] });
+  const gateEdge = g.edges.find(e => e.label === 'approved-for-go-live');
   assert.equal(gateEdge.kind, 'gate');
   assert.equal(gateEdge.from, null);
-  assert.deepEqual(g.gates, [{ label: 'human:go-live-approved', humanOnly: true }]);
+  assert.deepEqual(g.gates, [{ label: 'approved-for-go-live', humanOnly: true }]);
   assert.ok(!g.lints.some(l => l.code === 'gate-violation'));
   // and it is NOT an orphan-listener (gates are external, not orphans)
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
+// #928 edge case — a label that is BOTH listened-for and flagged humanGate keeps
+// its human-origin edge; the agent that also emits it does not get an agent edge.
+test('a listened-for label flagged humanGate keeps the human-origin edge', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['approved-for-go-live'], triggers: [] },
+    { id: 'release', triggers: [{ id: 'g', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved-for-go-live' }] },
+  ], { labels: [{ name: 'approved-for-go-live', humanGate: true, brake: false }] });
+  const edges = g.edges.filter(e => e.label === 'approved-for-go-live');
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].from, null);
+  assert.equal(edges[0].kind, 'gate');
+  assert.ok(!g.edges.some(e => e.from === 'rogue' && e.label === 'approved-for-go-live'));
 });
 
 
 test('node view exposes the expected fields', () => {
   const g = buildProcessGraph([{
     id: 'dev', role: 'team-member', displayName: 'Developer', sessionPolicy: 'per-invocation',
-    environmentId: 'team-x',
-    triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self',
-      labelFilter: 'assigned:dev', emits: ['started:dev'], emitsDerived: true }],
+    environmentId: 'team-x', emits: ['started:dev'],
+    triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
+      labelFilter: 'assigned:dev' }],
   }]);
   const n = g.nodes[0];
   assert.equal(n.role, 'team-member');
   assert.equal(n.displayName, 'Developer');
   assert.equal(n.sessionPolicy, 'per-invocation');
   assert.equal(n.environmentId, 'team-x');
+  // Agent-level emits carry the label hand-offs (#414/#783).
+  assert.deepEqual(n.emits, ['started:dev']);
   const t = n.triggers[0];
   assert.deepEqual(t.events, ['issues.labeled']);
-  assert.equal(t.from, 'any-except-self');
+  assert.ok(!('from' in t), 'origin filter removed from the trigger view');
   assert.equal(t.labelFilter, 'assigned:dev');
-  assert.deepEqual(t.emits, ['started:dev']);
-  assert.equal(t.emitsDerived, true);
+  // Trigger view no longer carries emits (#783).
+  assert.ok(!('emits' in t));
+});
+
+test('trigger-level emits are ignored — only agent-level emits wire edges (#783)', () => {
+  // A legacy trigger still carrying `emits` must NOT produce a hand-off edge; the
+  // agent-level emit is the sole source. Proves AC4 (t.emits is no longer read).
+  const g = buildProcessGraph([
+    { id: 'a', triggers: [{ id: 't', type: 'github-event', events: ['x'], emits: ['legacy'] }] },
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'legacy' }] },
+  ]);
+  assert.equal(edgesBetween(g, 'a', 'b').length, 0, 'no edge from a trigger-level emit');
+  // The listener is a plain orphan (nobody emits the label at the agent level).
+  assert.ok(g.lints.some(l => l.code === 'orphan-listener' && l.nodeId === 'b'));
+  // …and there is no dead-end-emitter lint for the ignored trigger emit.
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
 });
 
 test('agent-level emits wire a label hand-off without a pre-existing trigger', () => {
@@ -369,4 +571,716 @@ test('agent-level emits wire a label hand-off without a pre-existing trigger', (
   assert.ok(e, 'A→B label edge exists from the agent-level emit');
   // Not flagged as an orphan listener.
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
+});
+
+// ─── outcome-port lints (#830, agent-outcomes concept §8) ────────────────────
+
+// A downstream agent that listens on `label` via a labelFilter trigger — used to
+// give an outcome edge a consumer so a lint clears when "fixed".
+const outcomeListener = (id, label) => ({
+  id, role: 'agent',
+  triggers: [{ id: `${id}-t`, type: 'github-event', events: ['issues.labeled'], labelFilter: label }],
+});
+// A dispatcher-style node carrying an authored outcomes port and no triggers.
+const withOutcomes = (id, mode, options) => ({ id, role: 'agent', triggers: [], outcomes: { mode, options } });
+
+test('lint: outcome-without-consumer fires (warning) and clears when a listener exists', () => {
+  const emitter = withOutcomes('reviewer', 'exactlyOne', [
+    { id: 'accept', actions: [{ type: 'setLabel', label: 'ready-to-merge' }] },
+    { id: 'reject', actions: [{ type: 'setLabel', label: 'revisions-required' }] },
+  ]);
+  // Nobody listens on either label → two outcome-without-consumer lints, and NO
+  // dead-end-emitter (that legacy code must not double-report an outcome edge).
+  const orphaned = buildProcessGraph([emitter]);
+  const owc = orphaned.lints.filter(l => l.code === 'outcome-without-consumer');
+  assert.equal(owc.length, 2);
+  assert.ok(owc.every(l => l.severity === 'warning' && l.nodeId === 'reviewer' && l.outcome));
+  assert.ok(!orphaned.lints.some(l => l.code === 'dead-end-emitter'),
+    'an outcome dead-end is reported as outcome-without-consumer, not dead-end-emitter');
+
+  // Wire a consumer for each label → the lint clears.
+  const wired = buildProcessGraph([
+    emitter, outcomeListener('merger', 'ready-to-merge'), outcomeListener('reworker', 'revisions-required'),
+  ]);
+  assert.ok(!wired.lints.some(l => l.code === 'outcome-without-consumer'));
+});
+
+test('lint: outcome-without-consumer exempts `none` (terminal-by-design) actions', () => {
+  const g = buildProcessGraph([
+    withOutcomes('closer', 'anyOf', [{ id: 'done', title: 'Closed', actions: [{ type: 'none' }] }]),
+  ]);
+  assert.ok(!g.lints.some(l => l.code === 'outcome-without-consumer'));
+  assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
+});
+
+test('AC2: an outcome label consumed via a human-gated channel is not a false outcome-without-consumer / orphan pair', () => {
+  // `author` sets `needs-review` from an outcome; `qa` consumes it through a
+  // human-gated PR channel (a human applies the label). The channel makes `qa` a
+  // label listener on `needs-review`, so the emit has a consumer and the listener
+  // has an emitter — neither lint may fire.
+  const g = buildProcessGraph([
+    withOutcomes('author', 'anyOf', [{ id: 'to-review', actions: [{ type: 'setLabel', label: 'needs-review' }] }]),
+    { id: 'qa', role: 'agent', triggers: [],
+      channels: [{ artifact: 'pr', from: 'author', label: 'needs-review', gate: 'human' }] },
+  ]);
+  assert.ok(!g.lints.some(l => l.code === 'outcome-without-consumer'),
+    'the human-gated channel consumes the outcome label');
+  assert.ok(!g.lints.some(l => l.code === 'orphan-listener'),
+    'the outcome emitter satisfies the channel listener');
+  // The label registers as a listen key (that is what suppresses both lints); the
+  // author→qa edge itself is the on:'github' port edge, drawn in unified-graph.
+  assert.ok(g.labels.some(l => l.name === 'needs-review'));
+});
+
+test('lint: switch-with-one-option fires (info) for exactlyOne with <2 options and clears at two', () => {
+  const one = buildProcessGraph([
+    withOutcomes('gate', 'exactlyOne', [{ id: 'only', actions: [{ type: 'setLabel', label: 'go' }] }]),
+    outcomeListener('next', 'go'),
+  ]);
+  const swo = one.lints.find(l => l.code === 'switch-with-one-option');
+  assert.ok(swo && swo.severity === 'info' && swo.nodeId === 'gate');
+
+  const two = buildProcessGraph([
+    withOutcomes('gate', 'exactlyOne', [
+      { id: 'a', actions: [{ type: 'setLabel', label: 'go' }] },
+      { id: 'b', actions: [{ type: 'setLabel', label: 'stop' }] },
+    ]),
+    outcomeListener('next', 'go'), outcomeListener('halt', 'stop'),
+  ]);
+  assert.ok(!two.lints.some(l => l.code === 'switch-with-one-option'));
+});
+
+test('lint: switch-with-one-option does NOT fire for an anyOf with one option', () => {
+  const g = buildProcessGraph([
+    withOutcomes('emit', 'anyOf', [{ id: 'only', actions: [{ type: 'setLabel', label: 'go' }] }]),
+    outcomeListener('next', 'go'),
+  ]);
+  assert.ok(!g.lints.some(l => l.code === 'switch-with-one-option'));
+});
+
+test('lint: same-label-multiple-outcomes fires (warning) under exactlyOne when two options set one label', () => {
+  const dup = buildProcessGraph([
+    withOutcomes('router', 'exactlyOne', [
+      { id: 'path-a', actions: [{ type: 'setLabel', label: 'ready' }] },
+      { id: 'path-b', actions: [{ type: 'setLabel', label: 'ready' }] },
+    ]),
+    outcomeListener('dev', 'ready'),
+  ]);
+  const slm = dup.lints.find(l => l.code === 'same-label-multiple-outcomes');
+  assert.ok(slm && slm.severity === 'warning' && slm.nodeId === 'router' && slm.label === 'ready');
+
+  // Distinct labels per branch → cleared.
+  const distinct = buildProcessGraph([
+    withOutcomes('router', 'exactlyOne', [
+      { id: 'path-a', actions: [{ type: 'setLabel', label: 'ready' }] },
+      { id: 'path-b', actions: [{ type: 'setLabel', label: 'hold-off' }] },
+    ]),
+    outcomeListener('dev', 'ready'), outcomeListener('wait', 'hold-off'),
+  ]);
+  assert.ok(!distinct.lints.some(l => l.code === 'same-label-multiple-outcomes'));
+});
+
+test('lint: same-label-multiple-outcomes does NOT fire under anyOf (both branches may run)', () => {
+  const g = buildProcessGraph([
+    withOutcomes('multi', 'anyOf', [
+      { id: 'a', actions: [{ type: 'setLabel', label: 'ping' }] },
+      { id: 'b', actions: [{ type: 'setLabel', label: 'ping' }] },
+    ]),
+    outcomeListener('rx', 'ping'),
+  ]);
+  assert.ok(!g.lints.some(l => l.code === 'same-label-multiple-outcomes'));
+});
+
+test('lint: human-label-as-outcome fires (error) for a FLAGGED gate outcome label', () => {
+  const human = buildProcessGraph([
+    withOutcomes('rogue', 'anyOf', [{ id: 'approve', actions: [{ type: 'setLabel', label: 'approved-for-dispatch' }] }]),
+  ], { labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }] });
+  const hlo = human.lints.find(l => l.code === 'human-label-as-outcome');
+  assert.ok(hlo && hlo.severity === 'error' && hlo.nodeId === 'rogue' && hlo.label === 'approved-for-dispatch' && hlo.outcome === 'approve');
+  // The gate label is filtered out of the emit index, so gate-violation must not
+  // also fire (human-label-as-outcome is its outcome-port successor).
+  assert.ok(!human.lints.some(l => l.code === 'gate-violation'));
+
+  // #928 AC3 — a BRAKE outcome is legitimate (the reworker pausing the loop) and
+  // must NOT fire human-label-as-outcome any more.
+  const brake = buildProcessGraph([
+    withOutcomes('rogue', 'anyOf', [{ id: 'pause', actions: [{ type: 'setLabel', label: 'human-decision-required' }] }]),
+  ], { labels: [{ name: 'human-decision-required', humanGate: false, brake: true }] });
+  assert.ok(!brake.lints.some(l => l.code === 'human-label-as-outcome'));
+  assert.ok(!brake.lints.some(l => l.code === 'gate-violation'));
+
+  // A clean, non-gate outcome label → no human-label-as-outcome.
+  const clean = buildProcessGraph([
+    withOutcomes('ok', 'anyOf', [{ id: 'go', actions: [{ type: 'setLabel', label: 'ready' }] }]),
+    outcomeListener('next', 'ready'),
+  ]);
+  assert.ok(!clean.lints.some(l => l.code === 'human-label-as-outcome'));
+});
+
+test('AC3: a legacy flat-emits agent produces the identical lint set (no outcome-port lints)', () => {
+  const legacy = buildProcessGraph([
+    { id: 'a', role: 'agent', emits: ['stage:done'], triggers: [] },
+  ]);
+  // Unchanged: a flat emit nobody listens on is still a dead-end-emitter …
+  assert.ok(legacy.lints.some(l => l.code === 'dead-end-emitter' && l.nodeId === 'a'));
+  // … and none of the new outcome-port lints appear for a legacy agent.
+  for (const code of ['outcome-without-consumer', 'switch-with-one-option', 'same-label-multiple-outcomes', 'human-label-as-outcome']) {
+    assert.ok(!legacy.lints.some(l => l.code === code), `legacy flow must not emit ${code}`);
+  }
+});
+
+// --- loop trigger normalisation (#932) -------------------------------------
+
+test('triggerView: loop trigger carries its stop-contract summary', () => {
+  const g = buildProcessGraph([
+    {
+      id: 'dev', role: 'agent', triggers: [{
+        id: 'drain', type: 'loop', enabled: true,
+        until: { command: 'npm test', env: { CI: '1' } },
+        maxIterations: 25, minGapSeconds: 5,
+        // fields the graph view must NOT surface:
+        prompt: 'do the thing', roomId: '!r:local',
+      }],
+    },
+  ]);
+  const t = g.nodes[0].triggers[0];
+  assert.equal(t.type, 'loop');
+  assert.equal(t.maxIterations, 25);
+  assert.equal(t.minGapSeconds, 5);
+  assert.deepEqual(t.until, { command: 'npm test' }); // env/prompt/roomId not leaked
+  assert.ok(!('prompt' in t) && !('roomId' in t) && !('env' in t));
+});
+
+test('triggerView: loop carries the verifier shape but never the command/env (#933)', () => {
+  const gCmd = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 5,
+      verify: { command: 'npm run lint', env: { CI: '1' } },
+    }] },
+  ]);
+  assert.deepEqual(gCmd.nodes[0].triggers[0].verify, { mode: 'command' });
+
+  const gAgent = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 5, verify: { agentId: 'team-x-reviewer' },
+    }] },
+  ]);
+  assert.deepEqual(gAgent.nodes[0].triggers[0].verify,
+    { mode: 'agent', agentId: 'team-x-reviewer' });
+
+  const gNone = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
+  ]);
+  assert.ok(!('verify' in gNone.nodes[0].triggers[0]));
+});
+
+test('triggerView: loop without an until command omits the until summary', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 3 }] },
+  ]);
+  const t = g.nodes[0].triggers[0];
+  assert.equal(t.maxIterations, 3);
+  assert.ok(!('until' in t));
+  assert.ok(!('minGapSeconds' in t));
+});
+
+test('a loop trigger emits a kind:loop self-edge carrying its stop-contract summary (#936)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 25, maxTokens: 2000000,
+      until: { command: 'npm test', env: { CI: '1' } },
+      verify: { agentId: 'team-x-reviewer' },
+      prompt: 'work it', roomId: '!r:local',
+    }] },
+  ]);
+  // One self-edge (like a cron timer) but a distinct kind so the canvas can
+  // draw the stop-contract badge instead of a schedule row.
+  assert.equal(g.edges.length, 1);
+  const e = g.edges[0];
+  assert.equal(e.kind, 'loop');
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'dev');
+  assert.equal(e.triggerId, 'l');
+  // The render-ready summary carries budget / until / verifier — and nothing
+  // secret (the command string / env were already redacted by triggerView).
+  assert.deepEqual(e.loop, {
+    maxIterations: 25,
+    maxTokens: 2000000,
+    until: { command: 'npm test' },
+    verify: { mode: 'agent', agentId: 'team-x-reviewer' },
+  });
+  // No orphan/dead-end noise from a self-edge.
+  assert.equal(g.lints.length, 0);
+});
+
+test('a loop trigger self-edge omits absent stop-contract fields (#936)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
+  ]);
+  assert.equal(g.edges.length, 1);
+  assert.deepEqual(g.edges[0].loop, { maxIterations: 5 });
+  assert.equal(g.lints.length, 0);
+});
+
+// ─── unclaimed-listener (#958, concept §3.5) ──────────────────────────────────
+
+test('lint: unclaimed-listener fires (info) for a label listener without a claim', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ]);
+  const l = g.lints.find(x => x.code === 'unclaimed-listener');
+  assert.ok(l, 'expected an unclaimed-listener lint');
+  assert.equal(l.severity, 'info');   // ADVISORY — must never block a shipped bundle
+  assert.equal(l.nodeId, 'b');
+  assert.equal(l.label, 'ready');
+  assert.deepEqual(l.triggerIds, ['t']);
+});
+
+test('lint: unclaimed-listener stays silent once the listener carries its claim', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready',
+      claim: { remove: 'ready', add: 'ready:wip' } }] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'unclaimed-listener'));
+});
+
+test('lint: unclaimed-listener ignores raw event and claim-label listeners', () => {
+  const g = buildProcessGraph([
+    // No labelFilter → nothing to claim.
+    { id: 'a', triggers: [{ id: 't1', type: 'github-event', events: ['push'] }] },
+    // Listening on a claim label → claiming it would derive `ready:wip:wip`.
+    { id: 'b', triggers: [{ id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready:wip' }] },
+    // Not a github-event trigger at all.
+    { id: 'c', triggers: [{ id: 't3', type: 'cron', cron: '0 3 * * *' }] },
+  ]);
+  assert.ok(!g.lints.some(x => x.code === 'unclaimed-listener'));
+});
+
+test('#958: a claim rides on the listener edge and on the node trigger port', () => {
+  const claim = { remove: 'ready', add: 'ready:wip' };
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', claim }] },
+  ]);
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'b');
+  assert.deepEqual(e.claim, claim, 'the listener edge carries the claim (canvas badge)');
+  const port = g.nodes.find(n => n.id === 'b').triggers.find(t => t.id === 't');
+  assert.deepEqual(port.claim, claim, 'the node trigger port carries the claim (Routing readout)');
+});
+
+test('#958: a gate listener also carries its claim on the human-sourced edge', () => {
+  // `ready` is the canonical case: a HUMAN applies it, the agent claims it.
+  const claim = { remove: 'ready', add: 'ready:wip' };
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', claim }] },
+  ], { labels: [{ name: 'ready', humanGate: true }] });
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'dev');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null);          // comes from outside (a human)
+  assert.deepEqual(e.claim, claim);
+});
+
+test('#958: a malformed claim is not surfaced on the graph', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready',
+      claim: { remove: 'ready' } }] },  // no `add`
+  ]);
+  const e = g.edges.find(x => x.label === 'ready' && x.to === 'b');
+  assert.equal(e.claim, undefined);
+  // ...and it still counts as unclaimed, so the blind spot stays visible.
+  assert.ok(g.lints.some(x => x.code === 'unclaimed-listener' && x.nodeId === 'b'));
+});
+
+// ── #981: explicit human touchpoints ─────────────────────────────────────────
+
+test('#981: flagging a listened-but-unemitted label humanGate clears orphan-listener and draws the gate edge', () => {
+  const mk = (labels) => buildProcessGraph([
+    { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+  ], labels ? { labels } : undefined);
+  const before = mk(null);
+  assert.ok(lintCodes(before).includes('orphan-listener'));
+  const after = mk([{ name: 'ready-3', humanGate: true }]);
+  assert.ok(!lintCodes(after).includes('orphan-listener'));
+  const e = after.edges.find(x => x.label === 'ready-3' && x.to === 'dev3');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null); // a human applies it — unified-graph pins it to @human
+});
+
+test('#981: a brake emit becomes a hand-off edge instead of a dropped dead-end (no lint)', () => {
+  const mk = (labels) => buildProcessGraph([
+    { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+  ], labels ? { labels } : undefined);
+  const before = mk(null);
+  assert.ok(lintCodes(before).includes('dead-end-emitter'));
+  const after = mk([{ name: 'human-decision-needed', brake: true }]);
+  assert.ok(!lintCodes(after).includes('dead-end-emitter'));
+  assert.ok(!lintCodes(after).includes('outcome-without-consumer'));
+  const e = after.edges.find(x => x.label === 'human-decision-needed' && x.from === 'reworker');
+  assert.ok(e, 'the emit is VISIBLE as a hand-off, not dropped (pre-#981 regression)');
+  assert.equal(e.kind, 'brake');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.to, null);
+  assert.ok(!e.deadEnd);
+});
+
+test('#981: an OUTCOME setting a brake label hands off with its outcome id (no outcome-without-consumer)', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'exactlyOne', options: [
+      { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready-for-test' }] },
+      { id: 'blocked', title: 'Blocked', actions: [{ type: 'setLabel', label: 'human-decision-required' }] },
+    ] } },
+    { id: 'qa', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-for-test' }] },
+  ], { labels: [{ name: 'human-decision-required', brake: true }] });
+  assert.ok(!lintCodes(g).some(c => c === 'outcome-without-consumer'));
+  const e = g.edges.find(x => x.label === 'human-decision-required' && x.from === 'dev');
+  assert.equal(e.kind, 'brake');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.outcome, 'blocked');
+});
+
+test('#981: a brake emit hands off to the human even when another agent re-listens on the label', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['needs-decision'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'needs-decision' }] },
+  ], { labels: [{ name: 'needs-decision', brake: true }] });
+  // Emit side: a → human. Listen side: human (null) → b. The human sits in between.
+  assert.ok(g.edges.some(e => e.from === 'a' && e.handoff === 'human' && e.label === 'needs-decision'));
+  assert.ok(g.edges.some(e => e.from === null && e.to === 'b' && e.kind === 'brake' && e.label === 'needs-decision'));
+});
+
+test('#981: prAudience human clears producer-unconsumed and draws the delivery edge; unset lints as before', () => {
+  const before = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ]);
+  assert.ok(lintCodes(before).includes('producer-unconsumed'));
+  const after = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true, prAudience: 'human' }, triggers: [] },
+  ]);
+  assert.ok(!lintCodes(after).includes('producer-unconsumed'));
+  const e = after.edges.find(x => x.kind === 'delivery' && x.from === 'dev');
+  assert.equal(e.artifact, 'pr');
+  assert.equal(e.handoff, 'human');
+  // The audience flag rides on the node's github port (round-trip via export).
+  assert.equal(after.nodes[0].github.prAudience, 'human');
+});
+
+test('#981: issueAudience is independent of prAudience', () => {
+  const g = buildProcessGraph([
+    { id: 'triage', github: { producesPr: true, producesIssue: true, issueAudience: 'human' }, triggers: [] },
+  ]);
+  const deliveries = g.edges.filter(x => x.kind === 'delivery');
+  assert.deepEqual(deliveries.map(d => d.artifact), ['issue']);
+  // The PR side still lints — only the issue side declared a human consumer.
+  assert.ok(g.lints.some(l => l.code === 'producer-unconsumed' && /pull requests/.test(l.message)));
+});
+
+test('#981: gate-violation still fires when an agent declares an emit of a humanGate label', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['ready-3'], triggers: [] },
+  ], { labels: [{ name: 'ready-3', humanGate: true }] });
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'rogue'));
+});
+
+test('#981: humanTouchpoints enumerates injection / decision / delivery; empty without flags', () => {
+  const g = buildProcessGraph([
+    { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+    { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    { id: 'merger', github: { producesPr: true, prAudience: 'human' }, triggers: [] },
+    { id: 'dispatcher', channels: [{ artifact: 'issue', from: 'analyst', label: 'dispatch', gate: 'human' }], triggers: [] },
+    { id: 'analyst', github: { producesIssue: true }, triggers: [] },
+  ], { labels: [
+    { name: 'ready-3', humanGate: true },
+    { name: 'human-decision-needed', brake: true },
+  ] });
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'injection', agentId: 'dispatcher', label: 'dispatch', artifact: 'issue' },
+    { type: 'injection', label: 'ready-3', agentId: 'dev3' },
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+    { type: 'delivery', artifact: 'pr', agentId: 'merger' },
+  ]);
+
+  const none = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ]);
+  assert.deepEqual(none.humanTouchpoints, []);
+});
+
+test('#981: one label listened by two triggers yields ONE injection touchpoint', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [
+      { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' },
+      { id: 't2', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'go' },
+    ] },
+  ], { labels: [{ name: 'go', humanGate: true }] });
+  assert.equal(g.humanTouchpoints.filter(t => t.type === 'injection').length, 1);
+});
+
+// ── #987: named human roles as first-class flow nodes ────────────────────────
+
+test('#987: a human role synthesizes a kind:human node, no triggers/session', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [] },
+  ], { humans: [{ id: 'reviewer', name: 'Issue Reviewer', description: 'reviews issues', stage: 'triage' }] });
+  const hn = g.nodes.find(n => n.id === 'reviewer');
+  assert.ok(hn, 'human node present');
+  assert.equal(hn.kind, 'human');
+  assert.equal(hn.role, 'human');
+  assert.equal(hn.displayName, 'Issue Reviewer');
+  assert.equal(hn.stage, 'triage');
+  assert.deepEqual(hn.triggers, []);
+  assert.equal(hn.sessionPolicy, null);
+  assert.equal(hn.synthetic, true);
+});
+
+test('#987 AC2: a gate label emitted by a human draws humanId → listener; classifies as gate with NO registry flag', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+  ], { humans: [{ id: 'reviewer', name: 'Issue Reviewer', emits: ['dispatch'] }] });
+  // No `labels` registry at all — the human's emit alone makes `dispatch` a gate.
+  const e = g.edges.find(x => x.label === 'dispatch' && x.to === 'dispatcher');
+  assert.ok(e, 'edge present');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, 'reviewer'); // bound to the named human, not null/@human
+  assert.ok(!lintCodes(g).includes('orphan-listener'));
+});
+
+test('#987 AC2: registry-flag gate path is unchanged (no human emits it → from null)', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'approved' }] },
+  ], { labels: [{ name: 'approved', humanGate: true }], humans: [{ id: 'reviewer', name: 'R', emits: ['other'] }] });
+  const e = g.edges.find(x => x.label === 'approved' && x.to === 'dispatcher');
+  assert.equal(e.kind, 'gate');
+  assert.equal(e.from, null);
+});
+
+test('#987 AC3: a brake consumed by a human draws emitter → humanId; unbound brakes keep null', () => {
+  const bound = buildProcessGraph([
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ], {
+    labels: [{ name: 'needs-decision', brake: true }],
+    humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'needs-decision' }] }],
+  });
+  const be = bound.edges.find(x => x.label === 'needs-decision' && x.from === 'reworker');
+  assert.equal(be.kind, 'brake');
+  assert.equal(be.handoff, 'human');
+  assert.equal(be.to, 'lead');
+
+  const unbound = buildProcessGraph([
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ], { labels: [{ name: 'needs-decision', brake: true }] });
+  const ue = unbound.edges.find(x => x.label === 'needs-decision' && x.from === 'reworker');
+  assert.equal(ue.to, null); // generic @human
+});
+
+test('#987 AC4: Issue-Reviewer scenario renders BA → Issue Reviewer → Dispatcher, no @human', () => {
+  const g = buildProcessGraph([
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+  ], {
+    humans: [{
+      id: 'issue-reviewer', name: 'Issue Reviewer',
+      emits: ['dispatch'],
+      consumes: [{ artifact: 'issue', from: 'ba' }],
+    }],
+  });
+  // BA → Issue Reviewer (delivery of the issue).
+  const delivery = g.edges.find(e => e.kind === 'delivery' && e.from === 'ba');
+  assert.ok(delivery, 'delivery edge present');
+  assert.equal(delivery.to, 'issue-reviewer');
+  assert.equal(delivery.artifact, 'issue');
+  // Issue Reviewer → Dispatcher (the dispatch gate).
+  const gate = g.edges.find(e => e.kind === 'gate' && e.label === 'dispatch');
+  assert.equal(gate.from, 'issue-reviewer');
+  assert.equal(gate.to, 'dispatcher');
+  // No producer-unconsumed for the BA's issue (the human consumes it).
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  // No generic @human anywhere in this process graph (all edges named).
+  assert.ok(!g.edges.some(e => e.from === null && e.kind === 'gate'));
+});
+
+test('#987 AC5: a PR bound to a human suppresses producer-unconsumed and draws the delivery', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], { humans: [{ id: 'maintainer', name: 'Maintainer', consumes: [{ artifact: 'pr', from: 'dev' }] }] });
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  const e = g.edges.find(x => x.kind === 'delivery' && x.from === 'dev');
+  assert.equal(e.to, 'maintainer');
+  assert.equal(e.artifact, 'pr');
+});
+
+test('#1003: produces* projection — an outcome-only producer graphs identically to a consistent flag-carrier', () => {
+  const outcomes = { mode: 'anyOf', options: [{ id: 'opens-pr', title: 'Opens PR', actions: [{ type: 'openPr' }] }] };
+  const consumer = { id: 'qa', triggers: [], channels: [{ artifact: 'pr', from: 'dev' }] };
+  // Outcome only (what the #1003 engine writes) vs. outcome + legacy flag
+  // (an already-consistent agent): node.github, edges and lints must agree.
+  const outcomeOnly = buildProcessGraph([{ id: 'dev', outcomes, triggers: [] }, consumer], {});
+  const withFlag = buildProcessGraph([{ id: 'dev', outcomes, github: { producesPr: true }, triggers: [] }, consumer], {});
+  const devA = outcomeOnly.nodes.find(n => n.id === 'dev');
+  const devB = withFlag.nodes.find(n => n.id === 'dev');
+  assert.deepEqual(devA.github, { producesPr: true });
+  assert.deepEqual(devA.github, devB.github);
+  assert.deepEqual(outcomeOnly.edges, withFlag.edges);
+  assert.deepEqual(outcomeOnly.lints, withFlag.lints);
+});
+
+test('#1001 (D4): an outcomes-authored openIssue reviewed by a bound human raises no consumer lint', () => {
+  // The concept §1 D4 repro, via the outcomes port (not raw github flags): BA's
+  // outcome opens an issue, a named human role reviews it. The reviewer IS the
+  // consumer — the graph must draw the delivery and raise neither
+  // producer-unconsumed nor outcome-without-consumer.
+  const roles = [
+    { id: 'ba', outcomes: { mode: 'anyOf', options: [{ id: 'ticket', title: 'Opens issue', actions: [{ type: 'openIssue' }] }] }, triggers: [] },
+    { id: 'dev', triggers: [] },
+  ];
+  const withHuman = buildProcessGraph(roles, {
+    humans: [{ id: 'ba-human', name: 'BA Human', consumes: [{ artifact: 'issue', from: 'ba' }] }],
+  });
+  assert.ok(!lintCodes(withHuman).includes('producer-unconsumed'));
+  assert.ok(!lintCodes(withHuman).includes('outcome-without-consumer'));
+  const e = withHuman.edges.find(x => x.kind === 'delivery' && x.from === 'ba');
+  assert.equal(e.to, 'ba-human');
+  assert.equal(e.artifact, 'issue');
+  // Without the binding the advisory smell fires — the suppression is the
+  // reviewer, not the outcome shape.
+  const withoutHuman = buildProcessGraph(roles, { humans: [{ id: 'ba-human', name: 'BA Human' }] });
+  assert.ok(lintCodes(withoutHuman).includes('producer-unconsumed'));
+});
+
+test('#987 AC6: gate-violation fires when an agent emits a human-emitted label', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', emits: ['dispatch'], triggers: [] },
+  ], { humans: [{ id: 'reviewer', name: 'R', emits: ['dispatch'] }] });
+  assert.ok(g.lints.some(l => l.code === 'gate-violation' && l.nodeId === 'rogue' && l.label === 'dispatch'));
+});
+
+test('#987 AC7: humanTouchpoints carry role when bound', () => {
+  const g = buildProcessGraph([
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] },
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], {
+    labels: [{ name: 'needs-decision', brake: true }],
+    humans: [{
+      id: 'reviewer', name: 'Issue Reviewer',
+      emits: ['dispatch'],
+      consumes: [{ artifact: 'issue', from: 'ba' }, { label: 'needs-decision' }, { artifact: 'pr', from: 'dev' }],
+    }],
+  });
+  const injection = g.humanTouchpoints.find(t => t.type === 'injection' && t.label === 'dispatch');
+  assert.equal(injection.role, 'reviewer');
+  const decision = g.humanTouchpoints.find(t => t.type === 'decision');
+  assert.equal(decision.role, 'reviewer');
+  const deliveries = g.humanTouchpoints.filter(t => t.type === 'delivery');
+  assert.ok(deliveries.every(d => d.role === 'reviewer'));
+});
+
+test('#987: a label emitted by two humans yields two gate edges + two injection touchpoints', () => {
+  const g = buildProcessGraph([
+    { id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' }] },
+  ], { humans: [
+    { id: 'lead-a', name: 'Lead A', emits: ['go'] },
+    { id: 'lead-b', name: 'Lead B', emits: ['go'] },
+  ] });
+  const gates = g.edges.filter(e => e.kind === 'gate' && e.label === 'go');
+  assert.deepEqual(gates.map(e => e.from).sort(), ['lead-a', 'lead-b']);
+  assert.equal(g.humanTouchpoints.filter(t => t.type === 'injection').length, 2);
+});
+
+test('#987: first matching human in humans[] order wins for a consumed artifact', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', github: { producesPr: true }, triggers: [] },
+  ], { humans: [
+    { id: 'first', name: 'First', consumes: [{ artifact: 'pr', from: 'dev' }] },
+    { id: 'second', name: 'Second', consumes: [{ artifact: 'pr', from: 'dev' }] },
+  ] });
+  const deliveries = g.edges.filter(e => e.kind === 'delivery' && e.from === 'dev');
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].to, 'first');
+});
+
+test('#987 AC8: a flow with no humans[] is byte-identical to omitting the option', () => {
+  const agents = [
+    { id: 'ba', github: { producesIssue: true }, triggers: [] },
+    { id: 'dev', emits: ['ready'], triggers: [] },
+    { id: 'qa', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ];
+  const opts = { labels: [{ name: 'ready', humanGate: false }] };
+  const withEmpty = buildProcessGraph(agents, { ...opts, humans: [] });
+  const without = buildProcessGraph(agents, opts);
+  assert.deepEqual(withEmpty, without);
+});
+
+test('#1004: a marked outcome is an endpoint, not a dead-end — no lint, endpoint edge', () => {
+  const mk = (extra) => buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'archived' }], ...extra },
+    ] } },
+  ], {});
+  // Unmarked: the dead-end warning fires (outcome-without-consumer, #830).
+  const open = mk({});
+  assert.ok(lintCodes(open).includes('outcome-without-consumer'));
+  assert.ok(open.edges.some(e => e.label === 'archived' && e.deadEnd));
+  // Terminal: a proper endpoint — edge carries `endpoint`, no lint.
+  const term = mk({ terminal: true });
+  assert.ok(!lintCodes(term).includes('outcome-without-consumer'));
+  const te = term.edges.find(e => e.label === 'archived');
+  assert.equal(te.endpoint, 'terminal');
+  assert.ok(!te.deadEnd);
+  // External with note: endpoint + note forwarded for the port chip.
+  const ext = mk({ external: { note: 'state marker for the org board' } });
+  assert.ok(!lintCodes(ext).includes('outcome-without-consumer'));
+  const ee = ext.edges.find(e => e.label === 'archived');
+  assert.equal(ee.endpoint, 'external');
+  assert.equal(ee.note, 'state marker for the org board');
+});
+
+test('#1004: a marked artifact outcome suppresses producer-unconsumed', () => {
+  const mk = (extra) => buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', title: 'Ships PR', actions: [{ type: 'openPr' }], ...extra },
+    ] } },
+  ], {});
+  assert.ok(lintCodes(mk({})).includes('producer-unconsumed'), 'unmarked producer still lints');
+  assert.ok(!lintCodes(mk({ terminal: true })).includes('producer-unconsumed'), 'the merged PR IS the product');
+  assert.ok(!lintCodes(mk({ external: {} })).includes('producer-unconsumed'), 'external consumer declared');
+});
+
+test('#1006: raw-trigger-nonconformant lint — visible deviation, advisory only', () => {
+  const g = buildProcessGraph([
+    { id: 'rogue', triggers: [
+      { id: 't-two', type: 'github-event', events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
+      { id: 't-ok', type: 'github-event', events: ['issues.labeled'], labelFilter: 'fine', claim: { remove: 'fine', add: 'fine:wip' } },
+      { id: 't-badclaim', type: 'github-event', events: ['issues.labeled'], labelFilter: 'x', claim: { remove: 'x', add: 'nope' } },
+    ] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.equal(raws.length, 2);
+  assert.ok(raws.every(l => l.severity === 'info'), 'advisory, never blocking');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]).sort(), ['t-badclaim', 't-two']);
+});
+
+test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger lint', () => {
+  // A derived listener is ENGINE-written and regenerated on every port
+  // reconcile — the operator cannot "edit it to conform". The unlabelled
+  // PR-open channel derivation carries the two-event open pair; that must not
+  // flag every team that uses a plain PR channel.
+  const g = buildProcessGraph([
+    { id: 'consumer', channels: [{ artifact: 'pr', from: 'producer' }], triggers: [
+      { id: 'consumer-on-pr', type: 'github-event', channel: true,
+        events: ['pull_request.opened', 'pull_request.reopened'], prompt: 'p' },
+      { id: 'push-from-up', type: 'github-event', dataFlow: true,
+        events: ['push', 'push'], prompt: 'p' },
+      { id: 'hand-authored-two', type: 'github-event',
+        events: ['issues.labeled', 'pull_request.labeled'], labelFilter: 'go', prompt: 'p' },
+    ] },
+    { id: 'producer', github: { producesPr: true }, triggers: [] },
+  ], {});
+  const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
+  assert.deepEqual(raws.map(l => l.triggerIds[0]), ['hand-authored-two'],
+    'only the hand-authored deviation is flagged');
 });

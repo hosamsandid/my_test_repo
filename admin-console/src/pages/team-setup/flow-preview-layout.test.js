@@ -33,7 +33,9 @@ test('ellipsize truncates with … and keeps short strings intact', () => {
 test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
   const bundle = {
     roles: [
-      role('author', 'Build', { emits: ['done'], triggers: [{ emits: ['done'] }] }),
+      // Label hand-offs derive from role-level `emits` only (#783); a trigger
+      // no longer contributes emits.
+      role('author', 'Build', { emits: ['done'] }),
       role('reviewer', 'Build', {
         channels: [{ artifact: 'pr', from: 'author' }],
         triggers: [{ labelFilter: 'done' }],
@@ -45,9 +47,10 @@ test('bundleEdges: channels + label hand-offs, deduped, no self-edges', () => {
     ['author→reviewer:PR', 'author→reviewer:done']);
 });
 
-// Two rework loops within one stage column: each back edge gets its own lane
-// below the grid, so each label sits on its own line.
-test('back edges get one label line per edge', () => {
+// Two rework loops within one stage column route as brackets in that column's
+// right gutter (local to the stage, not dragged into a band below the whole
+// grid), each with its own staggered label line.
+test('intra-column loops route in the column gutter with one label line each', () => {
   const bundle = {
     stages: ['Build'],
     roles: [
@@ -58,13 +61,16 @@ test('back edges get one label line per edge', () => {
   const layout = computePreviewLayout(bundle);
   assert.equal(layout.back.length, 2);
   assert.equal(layout.forward.length, 0);
+  // labels sit in the gutter to the right of the single column's boxes, not in
+  // a lane band below the grid
+  const boxRight = PAD + NODE_W;
+  for (const e of layout.back) {
+    assert.ok(e.labelX > boxRight, `label ${e.labelText} not in the gutter`);
+    assert.ok(typeof e.d === 'string' && e.d.startsWith('M'), 'edge has a bracket path');
+  }
+  // each loop gets its own staggered label line
   const ys = layout.back.map(e => e.labelY).sort((a, b) => a - b);
-  assert.equal(ys[1] - ys[0], LANE_STEP);
-  // lanes live below the node grid
-  const gridBottom = PAD + HEADER + ROW_H + NODE_H;
-  assert.ok(ys[0] > gridBottom);
-  // svg is tall enough to hold both lanes
-  assert.ok(layout.height >= ys[1] + 4);
+  assert.ok(ys[1] - ys[0] >= LABEL_GAP, `labels ${ys[0]}/${ys[1]} not staggered`);
 });
 
 // Two hand-offs sharing the corridor between the same two columns are
@@ -102,10 +108,21 @@ test('oversized label is nudged off the node row', () => {
 // The issue's reproduction case: the curated Extended SDLC template (10 roles,
 // several loops + PR channels) must render with no overlapping labels and no
 // label sitting inside a node box.
-test('extended-sdlc preview: labels neither overlap nor cover node boxes', () => {
+//
+// The edge set comes from the SERVER graph via previewEdgesFromGraph (#1009):
+// since #831 retired flat `emits` in favour of authored outcomes, the local
+// bundleEdges derivation no longer sees the label hand-offs — which is exactly
+// the preview-vs-Flows divergence #1009 closed. This test therefore exercises
+// the same data path the wizard now renders.
+test('extended-sdlc preview: labels neither overlap nor cover node boxes', async () => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const { processTemplateToUnified, buildUnifiedGraph } = require('../../../api/unified-graph.js');
   const bundle = JSON.parse(readFileSync(
     new URL('../../../../orchestrator/skill-pool/process-templates/extended-sdlc.json', import.meta.url), 'utf8'));
-  const layout = computePreviewLayout(bundle);
+  const flow = processTemplateToUnified(bundle);
+  const graph = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundle.humans || [] });
+  const layout = computePreviewLayout(bundle, previewEdgesFromGraph(graph));
   assert.ok(layout.back.length > 0, 'expected rework/escalation loops');
   const boxes = labelBoxes(layout);
   assert.ok(boxes.length >= 10, 'expected a busy preview');
@@ -129,6 +146,44 @@ test('extended-sdlc preview: labels neither overlap nor cover node boxes', () =>
   }
 });
 
+// Forward edge paths must start ≥3 px past the source box right edge and end
+// ≥6 px before the target box left edge (acceptance criteria, #548).
+// Back edge paths must also end ≥6 px before the target box left edge.
+test('forward and back edge endpoints respect required gaps', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [
+      role('a', 'S1', { emits: ['go'] }),
+      role('b', 'S2', { triggers: [{ labelFilter: 'go' }], emits: ['back'] }),
+      role('c', 'S1', { triggers: [{ labelFilter: 'back' }] }),
+    ],
+  };
+  const layout = computePreviewLayout(bundle);
+  const aNode = layout.nodes.find(n => n.role.id === 'a');
+  const bNode = layout.nodes.find(n => n.role.id === 'b');
+  const fwd = layout.forward[0];
+  const bkEdge = layout.back[0];
+
+  // Extract the start point of the forward edge (M x y).
+  const fwdStart = fwd.d.match(/^M\s+([\d.]+)\s+([\d.]+)/);
+  const fwdStartX = parseFloat(fwdStart[1]);
+  assert.ok(fwdStartX >= aNode.x + NODE_W + 3,
+    `forward start gap too small: ${fwdStartX} vs box right ${aNode.x + NODE_W}`);
+
+  // Extract the last coordinate of the forward edge cubic bezier (... x2 y2).
+  const fwdEnd = fwd.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const fwdEndX = parseFloat(fwdEnd[1]);
+  assert.ok(bNode.x - fwdEndX >= 6,
+    `forward end gap too small: box.x=${bNode.x}, path ends at ${fwdEndX}`);
+
+  // Back edge: last segment ends at [e.b.x - offset, entryY]; extract last L point.
+  const bkEnd = bkEdge.d.match(/([\d.]+)\s+([\d.]+)$/);
+  const bkEndX = parseFloat(bkEnd[1]);
+  const cNode = layout.nodes.find(n => n.role.id === 'c');
+  assert.ok(cNode.x - bkEndX >= 6,
+    `back edge end gap too small: box.x=${cNode.x}, path ends at ${bkEndX}`);
+});
+
 // Column geometry is unchanged in spirit: one column per stage, unstaged roles
 // in a trailing column.
 test('unstaged roles land in a trailing column', () => {
@@ -141,4 +196,58 @@ test('unstaged roles land in a trailing column', () => {
   assert.equal(xs.get('a'), PAD);
   assert.equal(xs.get('x'), PAD + COL_W);
   assert.equal(layout.width, PAD * 2 + COL_W + NODE_W);
+});
+
+// ─── #1009: the preview renders the SERVER edge set ──────────────────────────
+
+import { previewEdgesFromGraph } from './flow-preview-layout.js';
+
+test('#1009: previewEdgesFromGraph maps server edges onto the preview model', () => {
+  const graph = { edges: [
+    { from: 'ba', to: 'dev', on: 'github', artifact: 'issue', label: 'ready-for-implementation', gate: 'human' },
+    { from: 'dev', to: 'reviewer', on: 'github', artifact: 'pr' },
+    { from: 'reviewer', to: 'rework', on: 'label', label: 'revisions-required' },
+    { from: 'a', to: 'b', on: 'dependency' },
+    { from: 'a', to: 'b', on: 'artifact', label: 'report.md' },
+    { from: 'x', to: 'y', on: 'review' },
+  ] };
+  assert.deepEqual(previewEdgesFromGraph(graph), [
+    { from: 'ba', to: 'dev', label: 'ready-for-implementation', gate: true, styleKey: 'gate' },
+    { from: 'dev', to: 'reviewer', label: 'PR', gate: false, styleKey: 'pr' },
+    { from: 'reviewer', to: 'rework', label: 'revisions-required', gate: false, styleKey: 'label' },
+    { from: 'a', to: 'b', label: 'depends-on', gate: false, styleKey: 'dependency' },
+    { from: 'a', to: 'b', label: 'report.md', gate: false, styleKey: 'artifact' },
+    { from: 'x', to: 'y', label: 'review', gate: false, styleKey: 'review' },
+  ]);
+});
+
+test('#1009: actor/self edges and null endpoints are dropped (no box to attach to)', () => {
+  const graph = { edges: [
+    { from: null, to: 'dev', on: 'label', label: 'approved', kind: 'gate' }, // unbound gate edge
+    { from: '@github', to: 'triage', on: 'event' },
+    { from: '@timer', to: 'curator', on: 'timer' },
+    { from: 'looper', to: 'looper', on: 'loop' },
+  ] };
+  assert.deepEqual(previewEdgesFromGraph(graph), []);
+  assert.deepEqual(previewEdgesFromGraph(null), []);
+  assert.deepEqual(previewEdgesFromGraph({}), []);
+});
+
+test('#1009: computePreviewLayout uses the server edge set when provided', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [role('a', 'S1', { emits: ['go'] }), role('b', 'S2', {
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' }],
+    })],
+  };
+  // Local derivation sees the label hand-off; the server override replaces it.
+  const local = computePreviewLayout(bundle);
+  assert.equal(local.forward.length, 1);
+  assert.equal(local.forward[0].label, 'go');
+  const server = computePreviewLayout(bundle, [
+    { from: 'a', to: 'b', label: 'ready', gate: false, styleKey: 'issue' },
+  ]);
+  assert.equal(server.forward.length, 1);
+  assert.equal(server.forward[0].label, 'ready');
+  assert.equal(server.forward[0].styleKey, 'issue');
 });

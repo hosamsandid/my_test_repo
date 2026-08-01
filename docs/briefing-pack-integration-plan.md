@@ -1,6 +1,6 @@
 # Briefing Pack Integration Plan
 
-Integration of the ACE (Agent Command Environment) Briefing Pack system from `i-sase` into the `e-vgh-claw` Matrix-based agent stack.
+Integration of the ACE (Agent Command Environment) Briefing Pack system from `i-sase` into the `agent-studio` Matrix-based agent stack.
 
 Status: superseded. Sections describing a "multi-agent room" or central orchestrator-as-router no longer apply — the stack is now DM-only (one Matrix user + one DM room per agent, no shared room). The next iteration of this plan will replace BP-status messages in the multi-agent room with status updates posted to the orchestrator-agent's DM room with the human, and BP-instance agents will spawn as children of an orchestrator agent rather than appearing in a shared room. Treat the rest of this document as historical context.
 
@@ -49,7 +49,7 @@ Make every Briefing Pack a first-class chat partner inside the Admin Console:
 - Each dispatch creates a Git worktree at `.worktrees/<agent-id>-<bp-hash>/` on branch `agent/<agent-id>/<bp-hash>`.
 - BP Explorer: FastAPI server on port 8765 with Vanilla-JS frontend.
 
-### e-vgh-claw
+### agent-studio
 
 - Matrix-based stack (Conduwuit + Cinny + Orchestrator + Admin Console).
 - Orchestrator (`orchestrator.js`) creates Matrix users, seeds workspaces from a Working Environment (skills, optional Git clone, additional context), spawns one `agent-runner.js` child process per agent.
@@ -60,7 +60,7 @@ Make every Briefing Pack a first-class chat partner inside the Admin Console:
 
 ## 3. Core Idea: BP ↔ Agent 1:1 Mapping
 
-| ACE concept | e-vgh-claw concept | How they connect |
+| ACE concept | agent-studio concept | How they connect |
 |---|---|---|
 | Briefing Pack `brief.md` | Matrix agent `@bp-<hash>:local` | The BP hash is part of the agent ID |
 | ACE `agent-id` (assigned at dispatch, 8-char hex) | Same string used as the Matrix agent suffix | Worktree path and Matrix identity stay in sync |

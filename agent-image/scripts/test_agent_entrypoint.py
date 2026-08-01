@@ -1,0 +1,2984 @@
+#!/usr/bin/env python3
+"""Unit tests for the pure helpers in agent-entrypoint.py.
+
+The entrypoint has no heavy top-level imports (matrix-nio / markdown / croniter
+are imported lazily inside functions), so the module loads with the standard
+library alone. Run with:
+
+    python3 -m unittest agent-image/scripts/test_agent_entrypoint.py
+
+or directly:
+
+    python3 agent-image/scripts/test_agent_entrypoint.py
+"""
+import asyncio
+import importlib.util
+import subprocess
+import tempfile
+import unittest
+import unittest.mock
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+_MODULE_PATH = Path(__file__).resolve().parent / "agent-entrypoint.py"
+_spec = importlib.util.spec_from_file_location("agent_entrypoint", _MODULE_PATH)
+entrypoint = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(entrypoint)
+
+fmt = entrypoint._format_ask_user_question
+github_event_detail = entrypoint.TriggerScheduler._github_event_detail
+map_stream_json_line = entrypoint._map_stream_json_line
+
+
+class FormatAskUserQuestion(unittest.TestCase):
+    def test_single_question_with_descriptions(self):
+        out = fmt({
+            "questions": [{
+                "header": "Auth method",
+                "question": "Which auth method should we use?",
+                "options": [
+                    {"label": "OAuth", "description": "Delegated login via provider"},
+                    {"label": "API key", "description": "Static bearer token"},
+                ],
+            }],
+        })
+        self.assertIn("**Auth method**", out)
+        self.assertIn("Which auth method should we use?", out)
+        self.assertIn("- **OAuth** — Delegated login via provider", out)
+        self.assertIn("- **API key** — Static bearer token", out)
+        self.assertNotIn("{", out)  # human-readable, not raw JSON
+
+    def test_multiple_questions_all_included(self):
+        out = fmt({
+            "questions": [
+                {"header": "Q1", "question": "First?", "options": [{"label": "A"}]},
+                {"header": "Q2", "question": "Second?", "options": [{"label": "B"}]},
+            ],
+        })
+        for token in ("**Q1**", "First?", "**Q2**", "Second?", "- **A**", "- **B**"):
+            self.assertIn(token, out)
+
+    def test_option_without_description_omits_dash(self):
+        out = fmt({"questions": [
+            {"header": "H", "question": "Pick", "options": [{"label": "Only"}]},
+        ]})
+        self.assertIn("- **Only**", out)
+        self.assertNotIn("- **Only** —", out)
+
+    def test_multiselect_hint(self):
+        out = fmt({"questions": [{
+            "header": "H", "question": "Pick some", "multiSelect": True,
+            "options": [{"label": "A"}, {"label": "B"}],
+        }]})
+        self.assertIn("pick more than one", out)
+
+    def test_non_multiselect_omits_hint(self):
+        out = fmt({"questions": [
+            {"header": "H", "question": "Pick one", "options": [{"label": "A"}]},
+        ]})
+        self.assertNotIn("pick more than one", out)
+
+    def test_answer_hint_present(self):
+        out = fmt({"questions": [
+            {"header": "H", "question": "Q", "options": [{"label": "A"}]},
+        ]})
+        self.assertIn("Reply here to answer", out)
+
+    def test_invalid_inputs_return_none(self):
+        for bad in (None, "nope", 42, {}, {"questions": []}, {"questions": "x"}):
+            self.assertIsNone(fmt(bad))
+
+    def test_all_empty_questions_return_none(self):
+        self.assertIsNone(fmt({"questions": [{}, {"options": []}]}))
+
+    def test_malformed_options_skipped(self):
+        out = fmt({"questions": [{
+            "header": "H", "question": "Q",
+            "options": [None, "bad", {"description": "no label"}, {"label": "Good"}],
+        }]})
+        self.assertIn("- **Good**", out)
+        self.assertNotIn("no label", out)
+
+
+class BuildHarvestHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+
+    def test_negative_or_noninteger_is_empty(self):
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")  # not an int -> today's behaviour
+        self.assertEqual(self.fn(None), "")
+
+    def test_level_1_mentions_knowledge_add(self):
+        out = self.fn(1)
+        self.assertIn("knowledge add", out)
+        self.assertIn("knowledge search", out)
+
+    def test_higher_levels_still_harvest(self):
+        for lvl in (2, 3):
+            self.assertIn("knowledge add", self.fn(lvl))
+
+
+class GithubEventDetail(unittest.TestCase):
+    def test_issues_event_includes_number_title_url(self):
+        detail = github_event_detail("issues.labeled", {
+            "issue": {"number": 470, "title": "Fix login bug",
+                       "html_url": "https://github.com/o/r/issues/470"},
+        })
+        self.assertEqual(
+            detail, "Issue #470: Fix login bug — https://github.com/o/r/issues/470")
+
+    def test_pull_request_event_includes_number_title_url(self):
+        detail = github_event_detail("pull_request.opened", {
+            "pull_request": {"number": 12, "title": "Add feature",
+                              "html_url": "https://github.com/o/r/pull/12"},
+        })
+        self.assertEqual(
+            detail, "PR #12: Add feature — https://github.com/o/r/pull/12")
+
+    def test_pull_request_review_event_uses_pull_request_key(self):
+        detail = github_event_detail("pull_request_review.submitted", {
+            "pull_request": {"number": 12, "title": "Add feature",
+                              "html_url": "https://github.com/o/r/pull/12"},
+        })
+        self.assertEqual(
+            detail, "PR #12: Add feature — https://github.com/o/r/pull/12")
+
+    def test_push_event_includes_branch(self):
+        detail = github_event_detail("push", {"ref": "refs/heads/main"})
+        self.assertEqual(detail, "branch `main`")
+
+    def test_push_event_includes_short_sha_when_present(self):
+        detail = github_event_detail("push", {
+            "ref": "refs/heads/main", "head": "abcdef1234567890",
+        })
+        self.assertEqual(detail, "branch `main` @ `abcdef1`")
+
+    def test_unrecognized_event_returns_none(self):
+        self.assertIsNone(github_event_detail("release.published", {"release": {}}))
+
+    def test_missing_fields_returns_none(self):
+        self.assertIsNone(github_event_detail("issues.labeled", {"issue": {"number": 1}}))
+        self.assertIsNone(github_event_detail("pull_request.opened", {}))
+        self.assertIsNone(github_event_detail("push", {}))
+
+    def test_non_dict_payload_does_not_raise(self):
+        self.assertIsNone(github_event_detail("issues.labeled", {"issue": "not-a-dict"}))
+
+
+class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        ), client
+
+    async def test_issues_event_body_includes_detail_and_description(self):
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event", "description": "BA marked ready"}
+        ctx = {"github": {
+            "event": "issues.labeled",
+            "repo": "o/r",
+            "payload": {"issue": {"number": 470, "title": "Fix login bug",
+                                   "html_url": "https://github.com/o/r/issues/470"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("Issue #470: Fix login bug", body)
+        self.assertIn("https://github.com/o/r/issues/470", body)
+        self.assertIn("BA marked ready", body)
+
+    async def test_push_event_body_includes_branch(self):
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event"}
+        ctx = {"github": {"event": "push", "repo": "o/r",
+                           "payload": {"ref": "refs/heads/feature/x"}}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("branch `feature/x`", body)
+
+    async def test_missing_payload_falls_back_to_legacy_body(self):
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event", "description": "desc"}
+        ctx = {"github": {"event": "release.published", "repo": "o/r"}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(
+            body, "⚡ Trigger fired (GitHub: `release.published` on `o/r`) — desc — starting work…")
+
+    async def test_cron_and_http_notices_unchanged(self):
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "c1", "type": "cron", "description": "nightly"}, None, "!room:local")
+        cron_body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(cron_body, "⚡ Trigger fired (cron: `c1`) — nightly — starting work…")
+
+        await scheduler._post_trigger_notice(
+            {"id": "h1", "type": "http", "description": "hook"}, None, "!room:local")
+        http_body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(http_body, "⚡ Trigger fired (HTTP: `h1`) — hook — starting work…")
+
+    async def test_io_aee_trigger_content_unchanged(self):
+        scheduler, client = self._scheduler()
+        ctx = {"github": {"event": "issues.opened", "repo": "o/r",
+                           "payload": {"issue": {"number": 1, "title": "T",
+                                                  "html_url": "https://x/1"}}}}
+        await scheduler._post_trigger_notice(
+            {"id": "g1", "type": "github-event"}, ctx, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertEqual(content["io.aee.trigger"],
+                          {"triggerId": "g1", "triggerType": "github-event",
+                           "event": "issues.opened"})
+
+
+class DescribeInFlightMarker(unittest.TestCase):
+    """#506: human-readable detail used in the crash-reconciliation notice."""
+
+    def test_once_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker(
+                {"kind": "once", "triggerId": "o1"}),
+            "one-shot trigger `o1`",
+        )
+
+    def test_pending_http_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker(
+                {"kind": "pending", "triggerId": "h1", "triggerType": "http"}),
+            "http trigger `h1`",
+        )
+
+    def test_pending_github_event_marker(self):
+        self.assertEqual(
+            entrypoint.TriggerScheduler._describe_in_flight_marker({
+                "kind": "pending", "triggerId": "t-gh", "triggerType": "github-event",
+                "repo": "o/r", "event": "issues.labeled",
+            }),
+            "github-event trigger `t-gh` (`issues.labeled` on `o/r`)",
+        )
+
+
+class InFlightMarkerReconciliation(unittest.IsolatedAsyncioTestCase):
+    """#506: crash reconciliation for the pending-queue-drain race (Race 1)
+    and the once-trigger-removal race (Race 2) — durable markers must be
+    written before the risky mutation, cleared once execution genuinely
+    completes, and surfaced as a visible notice if still present at the next
+    scheduler startup."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        client = AsyncMock()
+        send_formatted = AsyncMock(return_value="$evt")
+        scheduler = entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=send_formatted, blueprint_id=None,
+        )
+        return scheduler, client, send_formatted
+
+    def _write_dm_room(self):
+        entrypoint._atomic_write_json(self.workdir / "dm-room.json", {"roomId": "!room:local"})
+
+    async def _drain_all_tasks(self):
+        for t in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+            await t
+
+    # -- Race 1: pending-queue drain -----------------------------------------
+
+    def test_attach_pending_markers_marks_http_and_github_event_entries_only(self):
+        entries = [
+            {"triggerId": "t-http"},
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+            {"kind": "handover-dm", "roomId": "!x", "body": "hi"},
+            {"kind": "session-reset", "roomId": "!x"},
+        ]
+        entrypoint.TriggerScheduler._attach_pending_markers(entries)
+
+        self.assertIn("_inFlightMarkerId", entries[0])
+        self.assertIn("_inFlightMarkerId", entries[1])
+        self.assertNotIn("_inFlightMarkerId", entries[2])
+        self.assertNotIn("_inFlightMarkerId", entries[3])
+
+        markers = entrypoint._load_in_flight()
+        self.assertEqual(len(markers), 2)
+        gh_marker = next(m for m in markers if m["triggerId"] == "t-gh")
+        self.assertEqual(gh_marker["triggerType"], "github-event")
+        self.assertEqual(gh_marker["repo"], "o/r")
+        self.assertEqual(gh_marker["event"], "issues.labeled")
+        http_marker = next(m for m in markers if m["triggerId"] == "t-http")
+        self.assertEqual(http_marker["triggerType"], "http")
+
+    async def test_process_pending_clears_marker_on_normal_completion(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([
+            {"id": "t-gh", "type": "github-event", "enabled": True, "prompt": "p"},
+        ])
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_process_pending_clears_marker_even_when_trigger_not_found(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([])  # no matching trigger — a legitimate, non-crash outcome
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "missing"},
+        ])
+
+        await scheduler._process_pending()
+
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_process_pending_never_marks_control_kind_entries(self):
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"kind": "handover-dm", "roomId": "!room:local", "body": "hand-off"},
+        ])
+        scheduler._execute_handover_dm = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute_handover_dm.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    # -- Race 2: once-trigger removal -----------------------------------------
+
+    async def test_sync_marks_once_trigger_before_removal_then_clears_after_execution(self):
+        scheduler, _client, _send = self._scheduler()
+        past = (datetime.now(tz=entrypoint._TRIGGER_TZ) - timedelta(minutes=1)).isoformat()
+        entrypoint._save_triggers([
+            {"id": "o1", "type": "once", "at": past, "prompt": "p", "roomId": "!room:local"},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._sync()
+
+        # By the time _sync() returns, the trigger has already been removed
+        # from triggers.json and its marker persisted — both happen before
+        # the spawned execution task is even scheduled to run.
+        self.assertEqual(entrypoint._load_triggers(), [])
+        in_flight = entrypoint._load_in_flight()
+        self.assertEqual(len(in_flight), 1)
+        self.assertEqual(in_flight[0]["kind"], "once")
+        self.assertEqual(in_flight[0]["triggerId"], "o1")
+
+        await self._drain_all_tasks()
+
+        scheduler._execute.assert_awaited_once()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    # -- startup reconciliation (AC1/AC2/AC3) ---------------------------------
+
+    async def test_reconcile_in_flight_posts_notice_for_each_orphaned_marker(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        self._write_dm_room()
+        entrypoint._save_in_flight([
+            {"id": "once:o1:1", "kind": "once", "triggerId": "o1"},
+            {"id": "pending:t-gh:1:0", "kind": "pending", "triggerId": "t-gh",
+             "triggerType": "github-event", "repo": "o/r", "event": "issues.labeled"},
+        ])
+
+        await scheduler._reconcile_in_flight()
+
+        self.assertEqual(entrypoint._load_in_flight(), [])  # AC3: cleared, no re-fire
+        self.assertEqual(send_formatted.await_count, 2)
+        bodies = [call.args[1] for call in send_formatted.await_args_list]
+        self.assertTrue(any("one-shot trigger `o1`" in b for b in bodies))
+        self.assertTrue(any(
+            "github-event trigger `t-gh`" in b and "issues.labeled" in b and "o/r" in b
+            for b in bodies
+        ))
+        self.assertTrue(all("automatic re-run" in b for b in bodies))  # AC3: informational only
+
+    async def test_reconcile_in_flight_noop_when_nothing_orphaned(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        self._write_dm_room()
+
+        await scheduler._reconcile_in_flight()  # AC4: no false positives
+
+        send_formatted.assert_not_awaited()
+
+    async def test_reconcile_in_flight_skips_notice_without_dm_room_but_still_clears(self):
+        scheduler, _client, send_formatted = self._scheduler()
+        entrypoint._save_in_flight([{"id": "once:o1:1", "kind": "once", "triggerId": "o1"}])
+
+        await scheduler._reconcile_in_flight()
+
+        send_formatted.assert_not_awaited()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+
+class ResultEventTokens(unittest.TestCase):
+    """#490: the result-event wrapper must surface cache tokens alongside
+    input/output so the admin console can count them into the context-window
+    fill (prompt caching means input_tokens alone understates it)."""
+
+    def _tokens(self, usage):
+        line = __import__("json").dumps({"type": "result", "usage": usage})
+        events = map_stream_json_line(line, "corr-1")
+        return next(e for e in events if e["type"] == "result")["tokens"]
+
+    def test_cache_tokens_included_when_present(self):
+        tokens = self._tokens({
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": 20, "cache_read_input_tokens": 3000,
+        })
+        self.assertEqual(tokens, {
+            "input": 100, "output": 50,
+            "cacheCreationInput": 20, "cacheReadInput": 3000,
+        })
+
+    def test_cache_tokens_default_to_zero_when_absent(self):
+        tokens = self._tokens({"input_tokens": 100, "output_tokens": 50})
+        self.assertEqual(tokens["cacheCreationInput"], 0)
+        self.assertEqual(tokens["cacheReadInput"], 0)
+
+    def test_cache_tokens_default_to_zero_when_null(self):
+        tokens = self._tokens({
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": None, "cache_read_input_tokens": None,
+        })
+        self.assertEqual(tokens["cacheCreationInput"], 0)
+        self.assertEqual(tokens["cacheReadInput"], 0)
+
+
+class ResultEventModelUsage(unittest.TestCase):
+    """#654: the result-event wrapper must now also surface the raw per-model
+    `modelUsage` map (previously dropped) so the usage-record emitter can build
+    the per-model four-class split."""
+
+    def test_model_usage_passed_through_raw(self):
+        line = __import__("json").dumps({
+            "type": "result",
+            "usage": {"input_tokens": 10, "output_tokens": 42},
+            "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}},
+        })
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertEqual(ev["modelUsage"],
+                         {"claude-sonnet-4-6": {"inputTokens": 8, "outputTokens": 40}})
+
+    def test_model_usage_none_when_absent(self):
+        line = __import__("json").dumps({"type": "result", "usage": {}})
+        ev = next(e for e in map_stream_json_line(line, "corr-1")
+                  if e["type"] == "result")
+        self.assertIsNone(ev["modelUsage"])
+
+
+class SystemInitProvenance(unittest.TestCase):
+    """#980: the system_init row carries an immutable, non-secret record of how
+    the run was executed (provider, auth type, endpoint, requested model),
+    captured at run time from the AEE_LLM_* env the orchestrator injects."""
+
+    INIT_LINE = __import__("json").dumps({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "sess-123",
+        "model": "claude-opus-4-8",
+    })
+
+    def _init(self, line=None, **env):
+        with unittest.mock.patch.dict("os.environ", env, clear=False):
+            events = map_stream_json_line(line or self.INIT_LINE, "corr-1")
+        return next(e for e in events if e["type"] == "system_init")
+
+    def test_provenance_present_for_api_key_binding(self):
+        ev = self._init(
+            AEE_LLM_BINDING="bound",
+            AEE_LLM_PROVIDER_ID="db-endpoint",
+            AEE_LLM_PROVIDER_NAME="DB",
+            AEE_LLM_AUTH_TYPE="api-key",
+            AEE_LLM_BASE_URL="https://llm.example.com/v1",
+            AEE_LLM_REQUESTED_MODEL="claude-opus-4-8",
+        )
+        self.assertEqual(ev["model"], "claude-opus-4-8")  # effective, from CLI
+        prov = ev["provenance"]
+        self.assertEqual(prov["binding"], "bound")
+        self.assertEqual(prov["providerName"], "DB")
+        self.assertEqual(prov["authType"], "api-key")
+        self.assertEqual(prov["baseUrl"], "https://llm.example.com/v1")
+        self.assertEqual(prov["requestedModel"], "claude-opus-4-8")
+
+    def test_provenance_absent_when_env_unset_legacy_path(self):
+        # Clear the discriminator so the legacy/no-binding path is exercised even
+        # if the ambient environment happens to carry AEE_LLM_* vars.
+        with unittest.mock.patch.dict("os.environ", {}, clear=True):
+            events = map_stream_json_line(self.INIT_LINE, "corr-1")
+        ev = next(e for e in events if e["type"] == "system_init")
+        self.assertNotIn("provenance", ev)
+        # Legacy shape is otherwise unchanged (model + sessionId still present).
+        self.assertEqual(ev["model"], "claude-opus-4-8")
+        self.assertEqual(ev["sessionId"], "sess-123")
+
+    def test_env_fallback_binding_names_the_state(self):
+        ev = self._init(AEE_LLM_BINDING="env-fallback")
+        self.assertEqual(ev["provenance"]["binding"], "env-fallback")
+        self.assertIsNone(ev["provenance"]["providerName"])
+
+    def test_missing_binding_distinct_from_env_fallback(self):
+        ev = self._init(AEE_LLM_BINDING="missing")
+        self.assertEqual(ev["provenance"]["binding"], "missing")
+
+    def test_requested_model_arg_overrides_spawn_time_env(self):
+        # A mid-session model switch re-reads config.json per run; the actual
+        # --model value (passed as requested_model) wins over the spawn-time env.
+        with unittest.mock.patch.dict(
+                "os.environ",
+                {"AEE_LLM_BINDING": "bound",
+                 "AEE_LLM_REQUESTED_MODEL": "claude-opus-4-8"},
+                clear=False):
+            events = map_stream_json_line(
+                self.INIT_LINE, "corr-1", None, requested_model="opus-latest")
+        ev = next(e for e in events if e["type"] == "system_init")
+        self.assertEqual(ev["provenance"]["requestedModel"], "opus-latest")
+
+    def test_no_secret_material_in_row(self):
+        # AC8: even if a rogue token-ish env is set, provenance only reads the
+        # allow-listed non-secret keys — no token/authTokenId ever appears.
+        ev = self._init(
+            AEE_LLM_BINDING="bound",
+            AEE_LLM_PROVIDER_ID="sub",
+            AEE_LLM_AUTH_TYPE="oauth-token",
+            AEE_LLM_REQUESTED_MODEL="claude-sonnet-5",
+            ANTHROPIC_AUTH_TOKEN="sk-should-never-appear",
+            CLAUDE_CODE_OAUTH_TOKEN="oauth-should-never-appear",
+        )
+        blob = __import__("json").dumps(ev)
+        self.assertNotIn("sk-should-never-appear", blob)
+        self.assertNotIn("oauth-should-never-appear", blob)
+        # No secret-bearing keys leak (the `oauth-token` authType legitimately
+        # contains the word "token", so match on key names, not any substring).
+        for key in ev.get("provenance", {}):
+            self.assertNotIn("token", key.lower())
+
+
+class BuildUsageRecord(unittest.TestCase):
+    """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
+    (emitter) is asserted against the SAME golden fixture the JS aggregator uses
+    (admin-console/api/usage-summary.fixture.json), so the canonical usage-record
+    schema cannot drift between the Python emitter and the JS aggregator."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "admin-console" / "api" / "usage-summary.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_records(self):
+        for case in self.fixture["records"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.build_usage_record(case["input"]),
+                    case["expected"],
+                )
+
+    def test_normalize_model_usage_ignores_non_dict_and_defaults(self):
+        self.assertEqual(entrypoint._normalize_model_usage(None), {})
+        self.assertEqual(entrypoint._normalize_model_usage({"m": "bad"}), {})
+        self.assertEqual(
+            entrypoint._normalize_model_usage({"m": {"inputTokens": 3}}),
+            {"m": {"input": 3, "output": 0,
+                   "cacheCreationInput": 0, "cacheReadInput": 0}},
+        )
+
+
+class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
+    """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
+    active, http/github-event pending entries must not be drained/processed
+    while active, and a cron trigger whose fire fell inside the window gets
+    exactly one catch-up run once it ends."""
+
+    def setUp(self):
+        # The once-fire path writes a durable in-flight marker (#506) via
+        # _agent_workdir(), which reads os.environ["AGENT_ID"]. Point it at a
+        # throwaway dir so the firing test is hermetic — same pattern as
+        # InFlightMarkerReconciliation.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_maintenance_active_true_when_orchestrator_reports_active(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": true}')):
+            self.assertTrue(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_reports_inactive(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, '{"ok": true, "active": false}')):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_when_orchestrator_unreachable(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(0, "connection refused")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_maintenance_active_false_on_malformed_body(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint.TriggerScheduler, "_orch_get",
+                           return_value=(200, "not json")):
+            self.assertFalse(await scheduler._maintenance_active())
+
+    async def test_once_trigger_not_fired_while_maintenance_active(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=True)):
+            await scheduler._sync()
+        save_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._fired_once)
+
+    async def test_once_trigger_fires_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+        past = (entrypoint.datetime.now(entrypoint._TRIGGER_TZ)
+                - timedelta(minutes=1)).isoformat()
+        trigger = {"id": "o1", "type": "once", "at": past, "enabled": True}
+        # _execute MUST be mocked (#606): the once-firing path calls the real
+        # _execute via asyncio.create_task, which would spawn a real Claude run /
+        # write the live session log when this suite is run inside a live agent
+        # container. Patching it here is the correct unit boundary — firing the
+        # once trigger means "call _execute once".
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(entrypoint, "_save_triggers") as save_mock, \
+             patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            # Let the create_task-scheduled coroutine run so no task is left
+            # pending at teardown.
+            await entrypoint.asyncio.sleep(0)
+        execute_mock.assert_called_once()
+        save_mock.assert_called_once()
+        self.assertIn("o1", scheduler._fired_once)
+
+    async def test_under_test_harness_suppresses_execute(self):
+        # Defense in depth (#606): even if a test forgets to mock _execute, the
+        # real _execute must be inert under a test harness — it must never spawn
+        # a Claude run, post to Matrix, or write the live session log.
+        self.assertTrue(entrypoint._under_test_harness())
+        scheduler = self._scheduler()
+        trigger = {"id": "o1", "type": "once", "at": "2020-01-01T00:00:00Z",
+                   "enabled": True}
+        with patch.object(entrypoint, "_load_dm_room_id",
+                          return_value="!room:local") as room_mock, \
+             patch.object(entrypoint, "_call_claude_once") as claude_mock, \
+             patch.object(entrypoint, "_append_event") as append_mock:
+            await scheduler._execute(trigger)
+        claude_mock.assert_not_called()
+        append_mock.assert_not_called()
+        room_mock.assert_not_called()
+        self.assertNotIn("o1", scheduler._running)
+
+    async def test_pending_loop_skips_processing_during_maintenance(self):
+        scheduler = self._scheduler()
+        process_mock = AsyncMock()
+
+        async def fake_maintenance_active():
+            scheduler._shutdown_event.set()
+            return True
+
+        with patch.object(scheduler, "_process_pending", process_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active):
+            await scheduler._pending_loop()
+        process_mock.assert_not_called()
+
+    async def test_pending_loop_processes_when_maintenance_inactive(self):
+        scheduler = self._scheduler()
+
+        async def fake_process_pending():
+            scheduler._shutdown_event.set()
+
+        maintenance_mock = AsyncMock(return_value=False)
+        with patch.object(scheduler, "_process_pending", fake_process_pending), \
+             patch.object(scheduler, "_maintenance_active", maintenance_mock):
+            await scheduler._pending_loop()
+        maintenance_mock.assert_called_once()
+
+    async def test_cron_runner_skips_and_catches_up_exactly_once(self):
+        scheduler = self._scheduler()
+
+        async def fake_execute(_trigger):
+            scheduler._shutdown_event.set()
+
+        execute_mock = AsyncMock(side_effect=fake_execute)
+        maintenance_calls = []
+
+        async def fake_maintenance_active():
+            maintenance_calls.append(None)
+            # Active on the trigger's scheduled fire; inactive on the
+            # follow-up check inside the wait-it-out loop (maintenance ended).
+            return len(maintenance_calls) == 1
+
+        with patch.object(scheduler, "_execute", execute_mock), \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            await scheduler._cron_runner({"id": "c1", "type": "cron"}, "* * * * *")
+        execute_mock.assert_called_once()
+        self.assertEqual(len(maintenance_calls), 2)
+
+
+class LoopTriggerValidation(unittest.TestCase):
+    """#932: a `loop` trigger must declare a positive-integer `maxIterations`
+    (no unbounded loop may be authored); optional `until`/`minGapSeconds` are
+    shape-checked."""
+
+    def test_valid_loop_accepted(self):
+        ok, reason = entrypoint._validate_loop_trigger({
+            "id": "l", "type": "loop", "maxIterations": 10,
+            "until": {"command": "npm test", "env": {"CI": "1"}},
+            "minGapSeconds": 5,
+        })
+        self.assertTrue(ok, reason)
+
+    def test_valid_loop_minimal(self):
+        ok, _ = entrypoint._validate_loop_trigger({"maxIterations": 1})
+        self.assertTrue(ok)
+
+    def test_missing_maxIterations_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger({"id": "l", "type": "loop"})
+        self.assertFalse(ok)
+        self.assertIn("maxIterations", reason)
+
+    def test_zero_or_negative_maxIterations_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": 0})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": -3})[0])
+
+    def test_non_int_maxIterations_rejected(self):
+        # bool is an int subclass in Python — must be rejected explicitly.
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": True})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": 2.5})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger({"maxIterations": "5"})[0])
+
+    def test_bad_until_shape_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": "npm test"})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {"command": "  "}})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {"command": "x", "env": "CI=1"}})[0])
+
+    def test_until_command_optional(self):
+        # An `until` object with no command (env-only / empty) is allowed —
+        # such a loop simply runs to `maxIterations`.
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "until": {}})[0])
+
+    def test_bad_minGapSeconds_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": -1})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": "5"})[0])
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "minGapSeconds": True})[0])
+
+    def test_maxTokens_optional_positive_int(self):
+        # #934: an optional token budget, positive-int when present.
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "maxTokens": 2_000_000})[0])
+        self.assertTrue(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5})[0])  # absent is fine
+
+    def test_bad_maxTokens_rejected(self):
+        for bad in (0, -10, 2.5, "1000", True):
+            ok, reason = entrypoint._validate_loop_trigger(
+                {"maxIterations": 5, "maxTokens": bad})
+            self.assertFalse(ok, f"maxTokens={bad!r} should be rejected")
+            self.assertIn("maxTokens", reason)
+
+
+class LoopStopDecision(unittest.TestCase):
+    """#932: the pure done-vs-exhausted decision evaluated after each iteration."""
+
+    def test_until_exit_zero_is_done(self):
+        self.assertEqual(entrypoint._loop_stop_decision(1, 25, 0), "done")
+
+    def test_until_nonzero_continues_below_cap(self):
+        self.assertIsNone(entrypoint._loop_stop_decision(1, 25, 1))
+
+    def test_cap_reached_is_exhausted(self):
+        self.assertEqual(entrypoint._loop_stop_decision(25, 25, 1), "exhausted")
+
+    def test_no_until_command_runs_to_exhausted(self):
+        # until_exit_code None (no until.command) → never "done".
+        self.assertIsNone(entrypoint._loop_stop_decision(1, 3, None))
+        self.assertEqual(entrypoint._loop_stop_decision(3, 3, None), "exhausted")
+
+    def test_done_wins_over_exhausted_on_final_iteration(self):
+        # Goal met on the last permitted iteration reports done, not exhausted.
+        self.assertEqual(entrypoint._loop_stop_decision(25, 25, 0), "done")
+
+    # -- #934: token budget + backstop → paused ------------------------------
+
+    def test_token_budget_exhausted(self):
+        # Cumulative output tokens over the budget → exhausted, below → continue.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 1, tokens_spent=2000, max_tokens=1500),
+            "exhausted")
+        self.assertIsNone(
+            entrypoint._loop_stop_decision(
+                1, 25, 1, tokens_spent=1000, max_tokens=1500))
+
+    def test_token_budget_boundary_is_inclusive(self):
+        # Spend == budget is "exceeded" (>=), matching the concept wording.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, None, tokens_spent=1500, max_tokens=1500),
+            "exhausted")
+
+    def test_no_budget_never_exhausts_on_tokens(self):
+        # max_tokens None → tokens are ignored, only the iteration cap applies.
+        self.assertIsNone(
+            entrypoint._loop_stop_decision(
+                1, 25, None, tokens_spent=10_000_000, max_tokens=None))
+
+    def test_done_wins_over_token_budget(self):
+        # A goal met on the iteration that also crosses the budget reports done.
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 0, tokens_spent=9999, max_tokens=10),
+            "done")
+
+    def test_backstop_trip_is_paused(self):
+        # #611 backstop → paused, and it wins over every other stop condition
+        # (the spawn was dropped — no work happened this iteration).
+        self.assertEqual(
+            entrypoint._loop_stop_decision(
+                1, 25, 0, tokens_spent=9999, max_tokens=10,
+                backstop_tripped=True),
+            "paused")
+
+
+class RecordOutputTokens(unittest.TestCase):
+    """#934: summing an invocation's output tokens for the loop budget."""
+
+    def test_sums_per_model_output(self):
+        rec = {"modelUsage": {
+            "claude-opus-4-8": {"output": 300, "input": 5},
+            "claude-haiku-4-5": {"output": 200, "input": 1},
+        }, "tokens": {"output": 999}}
+        # modelUsage wins over the top-level tokens.output.
+        self.assertEqual(entrypoint._record_output_tokens(rec), 500)
+
+    def test_falls_back_to_tokens_output_when_no_model_usage(self):
+        self.assertEqual(
+            entrypoint._record_output_tokens(
+                {"modelUsage": {}, "tokens": {"output": 42}}),
+            42)
+
+    def test_robust_to_garbage(self):
+        self.assertEqual(entrypoint._record_output_tokens(None), 0)
+        self.assertEqual(entrypoint._record_output_tokens({}), 0)
+        self.assertEqual(entrypoint._record_output_tokens(
+            {"modelUsage": {"m": {"output": None}}, "tokens": {}}), 0)
+        # bool must not be counted as an int output.
+        self.assertEqual(entrypoint._record_output_tokens(
+            {"tokens": {"output": True}}), 0)
+
+
+class LoopRunner(unittest.IsolatedAsyncioTestCase):
+    """#932: `_loop_runner` chains iterations through `_execute` and stops on the
+    stop contract, posting exactly one terminal outcome DM."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        client = AsyncMock()
+        return entrypoint.TriggerScheduler(
+            client=client, agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 10, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_loop_runs_iterations_until_until_done(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            until={"command": "npm test"}, maxIterations=10)
+        precheck = patch.object(
+            entrypoint, "_run_pre_check",
+            side_effect=[(1, ""), (1, ""), (0, "all green")])
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             precheck:
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("all green", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_exhausted_without_until(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(maxIterations=3)  # no `until` → runs to cap
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        self.assertIn("3 / 3", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_exhausted_when_until_never_passes(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "false"}, maxIterations=2)
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still failing")):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 2)
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("exhausted", scheduler._send_formatted.await_args.args[1])
+
+    async def test_loop_pauses_for_maintenance_then_resumes(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "npm test"}, maxIterations=5)
+        maintenance_calls = []
+
+        async def fake_maintenance_active():
+            maintenance_calls.append(None)
+            # Active on the first check (pause), inactive afterwards (resume).
+            return len(maintenance_calls) == 1
+
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", fake_maintenance_active), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(0, "ok")):
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_awaited_once()  # one catch-up iteration, then done
+        self.assertGreaterEqual(len(maintenance_calls), 2)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_shutdown_before_iteration_posts_no_dm(self):
+        scheduler = self._scheduler()
+        scheduler._shutdown_event.set()
+        trigger = self._loop_trigger(maxIterations=5)
+        with patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_not_awaited()
+        scheduler._send_formatted.assert_not_awaited()
+        self.assertNotIn("lp", scheduler._loop_done)
+
+    # -- #934: token budget + backstop → paused ------------------------------
+
+    async def test_loop_stops_exhausted_when_token_budget_exceeded(self):
+        # Each iteration reports 400 output tokens; a 1000-token budget is
+        # exceeded after the 3rd iteration → exhausted before the iteration cap.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            until={"command": "false"}, maxIterations=25, maxTokens=1000)
+
+        async def fake_execute(_trigger, ctx=None, loop_sink=None, **_kw):
+            if loop_sink is not None:
+                loop_sink["outputTokens"] = 400
+
+        with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 3)  # 400*3 = 1200 >= 1000
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        # tokens spent vs budget is surfaced in the report.
+        self.assertIn("1200 / 1000", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_pauses_when_backstop_trips(self):
+        # The backstop drops the very first spawn → paused, no iteration counted,
+        # `until` never consulted.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(until={"command": "npm test"}, maxIterations=5)
+
+        async def fake_execute(_trigger, ctx=None, loop_sink=None, **_kw):
+            if loop_sink is not None:
+                loop_sink["backstopTripped"] = True
+
+        precheck = patch.object(entrypoint, "_run_pre_check",
+                                side_effect=AssertionError("until must not run"))
+        with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             precheck:
+            await scheduler._loop_runner(trigger)
+        execute_mock.assert_awaited_once()
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("paused", body)
+        self.assertIn("backstop", body.lower())
+        # No iteration counted (spawn was dropped before any work).
+        self.assertIn("0 / 5", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_execute_flags_backstop_trip_into_loop_sink(self):
+        # #934 wiring: _execute writes backstopTripped into the sink a loop
+        # runner passes when the #611 backstop denies the spawn.
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=10, window_sec=60)
+        scheduler._backstop.try_acquire()  # fill to the ceiling
+        trigger = {"id": "t1", "type": "loop", "maxIterations": 3}
+        sink: dict = {}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_post_backstop_warning", AsyncMock()):
+            await scheduler._execute(trigger, loop_sink=sink)
+        self.assertTrue(sink.get("backstopTripped"))
+
+
+class LaunchedLoopLifecycle(unittest.IsolatedAsyncioTestCase):
+    """#1020: a chat-launched loop (`launched: true`) is a one-off run, not a
+    standing subscription. It self-removes from triggers.json on any terminal
+    outcome (no lingering enabled entry) and is never auto-resumed after a
+    container restart. A declarative (non-launched) loop keeps its legacy
+    persist-and-re-run posture untouched."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 2, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_launched_loop_self_removes_on_terminal_outcome(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(launched=True)
+        entrypoint._save_triggers([trigger])
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        # AC6: no enabled entry left behind once the run ends.
+        self.assertEqual(entrypoint._load_triggers(), [])
+        # The terminal outcome DM still fires (it reads the in-memory snapshot).
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_declarative_loop_is_not_removed_on_completion(self):
+        # Backward-compat: a loop WITHOUT `launched` keeps persisting (a
+        # declarative flow loop must survive to re-run on the next lifetime).
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger()  # no `launched`
+        entrypoint._save_triggers([trigger])
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual([t["id"] for t in entrypoint._load_triggers()], ["lp"])
+
+    async def test_stale_launched_loop_pruned_and_not_armed(self):
+        # AC7: a launched loop still present at startup was interrupted — it is
+        # pruned (AC6) and never armed (no auto-resume from iteration 0).
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([self._loop_trigger(launched=True)])
+        scheduler._capture_stale_launched_loops()  # startup snapshot
+        self.assertEqual(scheduler._stale_launched_loops, {"lp"})
+        with patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        self.assertEqual(entrypoint._load_triggers(), [])
+        self.assertNotIn("lp", scheduler._loop_tasks)
+        runner_mock.assert_not_awaited()
+
+    async def test_fresh_launched_loop_arms_and_persists(self):
+        # A launch that arrives AFTER startup (not in the stale set) arms
+        # normally and stays in the file while it runs.
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([self._loop_trigger(launched=True)])
+        # No _capture_stale_launched_loops() → the fresh launch is not stale.
+        with patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            await asyncio.sleep(0)  # let the spawned runner task start
+            self.assertIn("lp", scheduler._loop_tasks)
+        self.assertEqual([t["id"] for t in entrypoint._load_triggers()], ["lp"])
+        runner_mock.assert_awaited_once()
+        await scheduler.stop()
+
+
+class VerifySpecValidation(unittest.TestCase):
+    """#933: `verify` must take exactly one of command / agentId / selfGraded."""
+
+    def test_command_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "npm test", "env": {}}})
+        self.assertTrue(ok)
+
+    def test_agent_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"agentId": "team-x-reviewer"}})
+        self.assertTrue(ok)
+
+    def test_self_graded_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"selfGraded": True}})
+        self.assertTrue(ok)
+
+    def test_empty_verify_object_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {}})
+        self.assertFalse(ok)
+        self.assertIn("one of", reason)
+
+    def test_two_forms_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "x", "agentId": "y"}})
+        self.assertFalse(ok)
+        self.assertIn("exactly one", reason)
+
+    def test_non_object_verify_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": "npm test"})[0])
+
+    def test_blank_command_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "   "}})[0])
+
+    def test_bad_env_rejected(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"command": "x", "env": []}})[0])
+
+    def test_selfgraded_must_be_bool(self):
+        self.assertFalse(entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"selfGraded": "yes"}})[0])
+
+
+class ParseVerifyVerdict(unittest.TestCase):
+    """#933: read a machine verdict out of a verifier agent's free-form reply."""
+
+    def test_pass_marker(self):
+        passed, out = entrypoint._parse_verify_verdict("Looks good.\n[PASS]")
+        self.assertTrue(passed)
+        self.assertIn("Looks good", out)
+
+    def test_fail_marker(self):
+        passed, out = entrypoint._parse_verify_verdict("Missing tests.\n[FAIL]")
+        self.assertFalse(passed)
+        self.assertIn("Missing tests", out)
+
+    def test_fail_wins_over_pass(self):
+        passed, _ = entrypoint._parse_verify_verdict("[PASS] but actually [FAIL]")
+        self.assertFalse(passed)
+
+    def test_alternate_markers(self):
+        self.assertTrue(entrypoint._parse_verify_verdict("VERDICT: PASS")[0])
+        self.assertFalse(entrypoint._parse_verify_verdict("ace:fail")[0])
+
+    def test_no_marker_is_fail_closed(self):
+        passed, out = entrypoint._parse_verify_verdict("I think it's probably fine")
+        self.assertFalse(passed)
+        self.assertIn("probably fine", out)
+
+    def test_empty_reply_fail_closed(self):
+        passed, out = entrypoint._parse_verify_verdict("")
+        self.assertFalse(passed)
+        self.assertIn("no verdict", out)
+
+
+class SelectSiblingVerifier(unittest.TestCase):
+    """#933: prefer a reviewer sibling; never the worker itself."""
+
+    def test_prefers_reviewer_by_role(self):
+        roster = [
+            {"agentId": "t-dev2", "role": "team-member"},
+            {"agentId": "t-rev", "role": "code-reviewer"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-rev")
+        self.assertTrue(sel["reviewer"])
+        self.assertFalse(sel["ambiguous"])
+
+    def test_reviewer_hint_in_id_or_displayname(self):
+        roster = [{"agentId": "t-quality-gate", "role": "team-member",
+                   "displayName": "Quality Gate"}]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-quality-gate")
+        self.assertTrue(sel["reviewer"])
+
+    def test_never_selects_self(self):
+        roster = [{"agentId": "t-dev", "role": "reviewer"}]  # self, reviewer-ish
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertIsNone(sel["agentId"])
+
+    def test_falls_back_to_any_sibling_when_no_reviewer(self):
+        roster = [
+            {"agentId": "t-zeta", "role": "team-member"},
+            {"agentId": "t-alpha", "role": "team-member"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-alpha")  # sorted, deterministic
+        self.assertFalse(sel["reviewer"])
+        self.assertTrue(sel["ambiguous"])
+
+    def test_ambiguous_when_several_reviewers(self):
+        roster = [
+            {"agentId": "t-rev-b", "role": "reviewer"},
+            {"agentId": "t-rev-a", "role": "reviewer"},
+        ]
+        sel = entrypoint._select_sibling_verifier("t-dev", roster)
+        self.assertEqual(sel["agentId"], "t-rev-a")  # sorted tie-break
+        self.assertTrue(sel["ambiguous"])
+
+    def test_no_siblings(self):
+        sel = entrypoint._select_sibling_verifier("t-dev", [])
+        self.assertIsNone(sel["agentId"])
+        self.assertEqual(sel["candidates"], 0)
+
+
+class ResolveLoopVerify(unittest.TestCase):
+    """#933: enforced-separate-role default (concept §4.6 decision 1)."""
+
+    def test_authored_command_honoured(self):
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"command": "npm test", "env": {"A": "1"}}},
+            "dev", is_team=True, roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "command")
+        self.assertEqual(plan["command"], "npm test")
+        self.assertEqual(plan["source"], "authored")
+
+    def test_authored_agent_honoured(self):
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"agentId": "some-other"}}, "dev",
+            is_team=True, roster=[])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "some-other")
+        self.assertEqual(plan["source"], "authored")
+
+    def test_team_empty_verify_enforces_sibling(self):
+        plan = entrypoint._resolve_loop_verify(
+            {}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+        self.assertEqual(plan["source"], "enforced-sibling")
+
+    def test_team_cannot_self_grade_out_of_separation(self):
+        # An explicit selfGraded ack on a team agent is overridden by a sibling.
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"selfGraded": True}}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+
+    def test_team_agentid_pointing_at_self_is_re_enforced(self):
+        # The worker can never be its own verifier — even if authored so.
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"agentId": "dev"}}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+        self.assertNotEqual(plan["agentId"], "dev")
+
+    def test_lone_member_team_degrades_to_self_graded(self):
+        plan = entrypoint._resolve_loop_verify(
+            {}, "dev", is_team=True, roster=[])
+        self.assertEqual(plan["mode"], "self-graded")
+        self.assertEqual(plan["source"], "team-no-sibling")
+
+    def test_standalone_defaults_to_self_graded(self):
+        plan = entrypoint._resolve_loop_verify({}, "solo", is_team=False, roster=[])
+        self.assertEqual(plan["mode"], "self-graded")
+        self.assertEqual(plan["source"], "standalone-default")
+
+
+class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
+    """#933: the per-iteration verifier gate in `_loop_runner`."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    def _loop_trigger(self, **kw):
+        t = {"id": "lp", "type": "loop", "enabled": True, "roomId": "!room:local",
+             "maxIterations": 10, "prompt": "do it"}
+        t.update(kw)
+        return t
+
+    async def test_command_verify_failure_blocks_until_and_feeds_forward(self):
+        # verify fails twice (blocks progress each time — `until` never checked),
+        # then passes; only after a pass does `until` (also green) end the loop.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            verify={"command": "lint"}, until={"command": "npm test"},
+            maxIterations=10)
+        verify_results = iter([(1, "lint error A"), (1, "lint error B"), (0, "clean")])
+        until_results = iter([(0, "tests green")])
+
+        async def fake_verify_plan(_t):
+            return {"mode": "command", "command": "lint", "env": {},
+                    "note": "command verifier (authored)"}
+
+        def fake_pre_check(cmd, env):
+            return next(verify_results) if cmd == "lint" else next(until_results)
+
+        ctxs = []
+
+        async def fake_execute(trig, ctx=None, loop_sink=None):
+            ctxs.append(ctx)
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", fake_execute), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", side_effect=fake_pre_check):
+            await scheduler._loop_runner(trigger)
+
+        # 3 iterations: fail, fail, pass→until green→done.
+        self.assertEqual(len(ctxs), 3)
+        # First iteration has no feedback; the next two carry the prior failure.
+        self.assertIsNone(ctxs[0])
+        self.assertIn("lint error A", ctxs[1]["loopFeedback"])
+        self.assertIn("lint error B", ctxs[2]["loopFeedback"])
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("done", body)
+        self.assertIn("Verifier-blocked iterations: 2", body)
+
+    async def test_verify_never_passes_exhausts_at_cap(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(verify={"command": "lint"}, maxIterations=3)
+
+        async def fake_verify_plan(_t):
+            return {"mode": "command", "command": "lint", "env": {}, "note": "cmd"}
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", AsyncMock()) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "still broken")):
+            await scheduler._loop_runner(trigger)
+
+        # maxIterations bounds the loop even when verify never passes (guardrail).
+        self.assertEqual(execute_mock.await_count, 3)
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("exhausted", body)
+        self.assertIn("Verifier-blocked iterations: 3", body)
+
+    async def test_agent_form_verify_routes_and_gates(self):
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            verify={"agentId": "reviewer-1"}, until={"command": "npm test"},
+            maxIterations=5)
+
+        async def fake_verify_plan(_t):
+            return {"mode": "agent", "agentId": "reviewer-1", "note": "agent verifier"}
+
+        verify_calls = []
+
+        async def fake_agent_verify(target, trig, iteration):
+            verify_calls.append((target, iteration))
+            return (False, "please fix X") if iteration == 1 else (True, "ok [PASS]")
+
+        with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
+             patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_run_agent_verify", fake_agent_verify), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(0, "green")):
+            await scheduler._loop_runner(trigger)
+
+        self.assertEqual(verify_calls, [("reviewer-1", 1), ("reviewer-1", 2)])
+        self.assertIn("done", scheduler._send_formatted.await_args.args[1])
+
+
+class RunAgentVerify(unittest.IsolatedAsyncioTestCase):
+    """#933 AC2: the requester side enqueues + polls for a verdict."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="dev", user_id="@dev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_enqueues_then_polls_verdict(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "roomId": "!r:local", "prompt": "task",
+                   "verify": {"agentId": "rev"}}
+        posts = []
+
+        def fake_post(route, payload):
+            posts.append((route, payload))
+            return 202, ""
+
+        # First poll: not found; second: the verdict landed.
+        gets = iter([(200, '{"found": false}'),
+                     (200, '{"found": true, "passed": true, "output": "great"}')])
+
+        with patch.object(scheduler, "_orch_post_json", side_effect=fake_post), \
+             patch.object(scheduler, "_orch_get", side_effect=lambda r: next(gets)), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)):
+            passed, output = await scheduler._run_agent_verify("rev", trigger, 1)
+
+        self.assertTrue(passed)
+        self.assertEqual(output, "great")
+        # The artifact was routed to the target agent's pending queue.
+        self.assertIn("/internal/agents/rev/enqueue-pending", posts[0][0])
+        self.assertEqual(posts[0][1]["kind"], "loop-verify")
+        self.assertEqual(posts[0][1]["iteration"], 1)
+
+    async def test_undeliverable_request_fails_closed(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "prompt": "t", "verify": {"agentId": "rev"}}
+        with patch.object(scheduler, "_orch_post_json", return_value=(500, "boom")), \
+             patch.object(scheduler, "_orch_get") as get_mock:
+            passed, output = await scheduler._run_agent_verify("rev", trigger, 1)
+        self.assertFalse(passed)
+        self.assertIn("could not deliver", output)
+        get_mock.assert_not_called()  # never polled — delivery failed
+
+    async def test_timeout_fails_closed(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "VERIFY_WAIT_SEC", 0):
+            passed, output = await scheduler._poll_verify_verdict("tok", "rev")
+        self.assertFalse(passed)
+        self.assertIn("did not return a verdict", output)
+
+
+class ExecuteLoopVerify(unittest.IsolatedAsyncioTestCase):
+    """#933 AC2: the verifier side runs Claude and posts a verdict back."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="rev", user_id="@rev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_runs_claude_and_posts_verdict(self):
+        scheduler = self._scheduler()
+        entry = {"kind": "loop-verify", "token": "tok-1", "requestedBy": "dev",
+                 "loopId": "lp", "iteration": 2, "task": "build the thing"}
+        posts = []
+        with patch.object(entrypoint, "_call_claude",
+                          return_value="Reviewed. Looks correct.\n[PASS]"), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!rev:local"), \
+             patch.object(scheduler, "_orch_post_json",
+                          side_effect=lambda r, p: posts.append((r, p)) or (202, "")):
+            await scheduler._execute_loop_verify(entry)
+
+        self.assertEqual(posts[0][0], "/internal/loop-verify/verdict")
+        self.assertEqual(posts[0][1]["token"], "tok-1")
+        self.assertTrue(posts[0][1]["passed"])
+
+    async def test_claude_failure_posts_fail_closed_verdict(self):
+        scheduler = self._scheduler()
+        entry = {"kind": "loop-verify", "token": "tok-2", "task": "x"}
+        posts = []
+        with patch.object(entrypoint, "_call_claude", side_effect=RuntimeError("boom")), \
+             patch.object(entrypoint, "_load_dm_room_id", return_value="!rev:local"), \
+             patch.object(scheduler, "_orch_post_json",
+                          side_effect=lambda r, p: posts.append((r, p)) or (202, "")):
+            await scheduler._execute_loop_verify(entry)
+
+        self.assertFalse(posts[0][1]["passed"])
+        self.assertIn("failed", posts[0][1]["output"])
+
+    async def test_missing_token_skips(self):
+        scheduler = self._scheduler()
+        with patch.object(scheduler, "_orch_post_json") as post_mock:
+            await scheduler._execute_loop_verify({"kind": "loop-verify"})
+        post_mock.assert_not_called()
+
+
+class ResolveVerifyPlan(unittest.IsolatedAsyncioTestCase):
+    """#933: `_resolve_verify_plan` threads team membership + roster."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="dev", user_id="@dev:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_team_empty_verify_fetches_roster_and_enforces(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"role": "team-member", "parentTeamId": "t"}), \
+             patch.object(scheduler, "_fetch_team_roster",
+                          AsyncMock(return_value=[{"agentId": "rev", "role": "reviewer"}])) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_awaited_once()
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["agentId"], "rev")
+
+    async def test_authored_verifier_skips_roster_fetch(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x",
+                   "verify": {"command": "npm test"}}
+        with patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"role": "team-member", "parentTeamId": "t"}), \
+             patch.object(scheduler, "_fetch_team_roster", AsyncMock()) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_not_awaited()
+        self.assertEqual(plan["mode"], "command")
+
+    async def test_standalone_skips_roster_fetch(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_dm_agent_config", return_value={"role": "agent"}), \
+             patch.object(scheduler, "_fetch_team_roster", AsyncMock()) as roster_mock:
+            plan = await scheduler._resolve_verify_plan(trigger)
+        roster_mock.assert_not_awaited()
+        self.assertEqual(plan["mode"], "self-graded")
+
+
+class LoopSyncScheduling(unittest.IsolatedAsyncioTestCase):
+    """#932: `_sync` schedules a valid loop once, rejects an invalid one, and
+    never re-arms a loop that already reached a terminal state."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir",
+                               return_value=Path(self._tmpdir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(), blueprint_id=None,
+        )
+
+    async def test_sync_schedules_valid_loop(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True,
+                   "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+            await entrypoint.asyncio.sleep(0)
+        runner_mock.assert_called_once()
+        self.assertIn("lp", scheduler._loop_tasks)
+
+    async def test_sync_rejects_loop_without_maxIterations(self):
+        scheduler = self._scheduler()
+        trigger = {"id": "lp", "type": "loop", "enabled": True, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        runner_mock.assert_not_called()
+        self.assertNotIn("lp", scheduler._loop_tasks)
+
+    async def test_sync_does_not_rearm_terminated_loop(self):
+        scheduler = self._scheduler()
+        scheduler._loop_done.add("lp")
+        trigger = {"id": "lp", "type": "loop", "enabled": True,
+                   "maxIterations": 5, "prompt": "x"}
+        with patch.object(entrypoint, "_load_triggers", return_value=[trigger]), \
+             patch.object(scheduler, "_loop_runner", AsyncMock()) as runner_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._sync()
+        runner_mock.assert_not_called()
+        self.assertNotIn("lp", scheduler._loop_tasks)
+
+
+class TriggerBackstopUnit(unittest.TestCase):
+    """#611: the pure per-agent backstop that caps concurrent + per-window
+    triggered Claude spawns so a self-triggering loop can't fan out unbounded."""
+
+    def _clock(self):
+        # A mutable, injectable monotonic clock.
+        state = {"t": 1000.0}
+        return state, (lambda: state["t"])
+
+    def test_concurrency_ceiling_denies_when_full(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=2, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "concurrency")
+        self.assertEqual(d.active, 2)
+
+    def test_release_frees_a_slot(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_release_never_goes_negative(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        b.release()
+        b.release()
+        self.assertEqual(b.snapshot()["active"], 0)
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_rate_limit_denies_after_window_full(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=3, window_sec=300, clock=clock)
+        # Three spawns fit in the window; the fourth is dropped.
+        for _ in range(3):
+            self.assertTrue(b.try_acquire().allowed)
+            b.release()  # concurrency disabled, but release keeps active honest
+        d = b.try_acquire()
+        self.assertFalse(d.allowed)
+        self.assertEqual(d.reason, "rate")
+
+    def test_rate_limit_recovers_after_window_slides(self):
+        state, clock = self._clock()
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=2, window_sec=300, clock=clock)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertTrue(b.try_acquire().allowed)
+        self.assertFalse(b.try_acquire().allowed)
+        # Advance past the window — the old spawns age out.
+        state["t"] += 301
+        self.assertTrue(b.try_acquire().allowed)
+
+    def test_zero_limits_disable_the_backstop(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=0, max_per_window=0, window_sec=0)
+        for _ in range(50):
+            self.assertTrue(b.try_acquire().allowed)
+
+    def test_warn_fires_once_per_episode_then_resets_on_success(self):
+        b = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        self.assertTrue(b.try_acquire().allowed)  # at ceiling
+        first = b.try_acquire()
+        self.assertFalse(first.allowed)
+        self.assertTrue(first.warn)            # first drop warns
+        second = b.try_acquire()
+        self.assertFalse(second.allowed)
+        self.assertFalse(second.warn)          # subsequent drops stay silent
+        b.release()
+        self.assertTrue(b.try_acquire().allowed)  # pressure eased → episode ends
+        b.release()
+        b.try_acquire()  # back to ceiling
+        self.assertTrue(b.try_acquire().warn)  # a fresh episode warns again
+
+
+class TriggerBackstopExecuteIntegration(unittest.IsolatedAsyncioTestCase):
+    """#611: `_execute` — the single chokepoint for triggered work — consults
+    the backstop before spawning, drops over-limit runs without calling
+    `_execute_inner`, and pairs every allowed spawn with a release."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=None, blueprint_id=None,
+        )
+
+    async def test_execute_dropped_when_backstop_denies(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        inner = AsyncMock()
+        warn = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner), \
+             patch.object(scheduler, "_post_backstop_warning", warn):
+            await scheduler._execute(trigger)
+        inner.assert_not_called()
+        warn.assert_called_once()
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_allowed_then_released(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock()
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)
+        inner.assert_called_once()
+        # Released after completion, so the slot is free again.
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+        self.assertNotIn("t1", scheduler._running)
+
+    async def test_execute_releases_even_when_inner_raises(self):
+        scheduler = self._scheduler()
+        inner = AsyncMock(side_effect=RuntimeError("boom"))
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", inner):
+            await scheduler._execute(trigger)  # error is swallowed + logged
+        self.assertEqual(scheduler._backstop.snapshot()["active"], 0)
+
+    async def test_only_first_drop_posts_a_warning(self):
+        scheduler = self._scheduler()
+        scheduler._backstop = entrypoint.TriggerBackstop(
+            max_concurrent=1, max_per_window=0, window_sec=0)
+        scheduler._backstop.try_acquire()  # fill to ceiling
+        trigger = {"id": "t1", "type": "cron"}
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(scheduler, "_execute_inner", AsyncMock()), \
+             patch.object(scheduler, "_post_backstop_warning", AsyncMock()) as warn:
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+            await scheduler._execute(trigger)
+        warn.assert_called_once()
+
+
+class ResultEventContextTokens(unittest.TestCase):
+    """#509: `result.usage` is a turn-wide aggregate across every internal
+    API round-trip in the agentic tool-call loop (confirmed against a live
+    `claude --output-format stream-json` invocation of this repo's pinned CLI
+    version, matching anthropics/claude-code #6805) — it can be a large
+    multiple of the model's actual context size once a turn makes several
+    tool calls. `result.contextTokens` must instead reflect only the *last*
+    individual assistant-message's usage, threaded via the `usage_sink`
+    argument shared across every line of one `claude` invocation."""
+
+    def _assistant_line(self, usage):
+        import json
+        return json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                        "usage": usage},
+        })
+
+    def _result_line(self, usage):
+        import json
+        return json.dumps({"type": "result", "usage": usage})
+
+    def test_context_tokens_reflects_last_assistant_call_not_the_sum(self):
+        sink = {}
+        # Three internal round-trips within one turn, each reporting a growing
+        # cache-read count (as prompt caching would for a stable, resumed
+        # session) — the turn-wide `result.usage` sums all of them, but
+        # `contextTokens` must land on only the last one.
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 50_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 60_000,
+        }), "corr-1", sink)
+        map_stream_json_line(self._assistant_line({
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 70_000,
+        }), "corr-1", sink)
+        events = map_stream_json_line(self._result_line({
+            # Simulates the CLI's turn-wide aggregate: ~3x a single call.
+            "input_tokens": 30, "output_tokens": 15,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 180_000,
+        }), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertEqual(result["tokens"]["cacheReadInput"], 180_000)  # aggregate, unchanged
+        self.assertEqual(result["contextTokens"], {
+            "input": 10, "output": 5, "cacheCreationInput": 0, "cacheReadInput": 70_000,
+        })
+
+    def test_context_tokens_none_when_no_sink_provided(self):
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1")
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_context_tokens_none_when_no_assistant_message_seen(self):
+        sink = {}
+        events = map_stream_json_line(self._result_line({"input_tokens": 10, "output_tokens": 5}), "corr-1", sink)
+        result = next(e for e in events if e["type"] == "result")
+        self.assertIsNone(result["contextTokens"])
+
+    def test_assistant_message_without_usage_does_not_touch_sink(self):
+        import json
+        sink = {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1}
+        line = json.dumps({"type": "assistant",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}})
+        map_stream_json_line(line, "corr-1", sink)
+        self.assertEqual(sink, {"input": 1, "output": 1, "cacheCreationInput": 0, "cacheReadInput": 1})
+
+
+class BuildMemoryHint(unittest.TestCase):
+    """Variant selection of the two-sided memory-hint contract (unification
+    Phase 2). Byte-identity with buildMemoryHint() in prompt-assembly.js is
+    guarded from the JS side (source-scan on the literals); here we pin the
+    gating behaviour: unified drops the fact/entity write instructions AND the
+    separate harvest hint (absorbed into the text), legacy stays byte-stable."""
+
+    def setUp(self):
+        self._orig_unified = entrypoint._memory_model_unified
+        self._orig_level = entrypoint._knowledge_autonomy_level
+
+    def tearDown(self):
+        entrypoint._memory_model_unified = self._orig_unified
+        entrypoint._knowledge_autonomy_level = self._orig_level
+
+    def test_unified_hint_routes_semantic_learning_to_the_kb(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("episodic memory files: memory/context.md and memory/log.md", hint)
+        self.assertIn("knowledge-digest.md", hint)
+        self.assertIn("knowledge add fact|entity|convention", hint)
+        # No fact/entity write targets, and no duplicated harvest sentence.
+        self.assertNotIn("memory/facts.md", hint)
+        self.assertNotIn("memory/entities.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_legacy_hint_unchanged_with_harvest(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 1
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertIn("In addition to your memory files", hint)  # harvest hint appended
+        self.assertNotIn("knowledge-digest.md", hint)
+
+    def test_legacy_hint_autonomy0_is_todays_text(self):
+        entrypoint._memory_model_unified = lambda: False
+        entrypoint._knowledge_autonomy_level = lambda: 0
+        hint = entrypoint._build_memory_hint(None)
+        self.assertIn("memory/facts.md, memory/entities.md and memory/users.md", hint)
+        self.assertNotIn("In addition to your memory files", hint)
+
+    def test_blueprint_hint_ignores_unified(self):
+        entrypoint._memory_model_unified = lambda: True
+        entrypoint._knowledge_autonomy_level = lambda: 2
+        hint = entrypoint._build_memory_hint("bp-x")
+        self.assertIn("instance of blueprint 'bp-x'", hint)
+        self.assertNotIn("knowledge-digest.md", hint)
+
+
+class BuildKnowledgeDigest(unittest.TestCase):
+    """Two-sided contract with orchestrator/knowledge-digest.js: both test
+    suites assert byte-identical markdown against the SAME golden fixture
+    (orchestrator/knowledge-digest.fixture.json), so the JS builder (post-KB-
+    change fan-out) and this port (pre-invocation rebuild) cannot drift."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "knowledge-digest.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                kwargs = {
+                    "team_id": case["teamId"],
+                    "generated_at": case["generatedAt"],
+                    "entries": self.fixture["entries"] if case["useEntries"] else [],
+                }
+                if case["budgetTokens"] is not None:
+                    kwargs["budget_tokens"] = case["budgetTokens"]
+                res = entrypoint.build_knowledge_digest(**kwargs)
+                self.assertEqual(res["markdown"], case["expectedMarkdown"])
+                self.assertEqual(res["includedCount"], case["expectedIncluded"])
+                self.assertEqual(res["totalCount"], case["expectedTotal"])
+                self.assertEqual(res["omittedCount"], case["expectedOmitted"])
+                self.assertEqual(res["tokensUsed"], case["expectedTokensUsed"])
+
+    def test_fold_last_writer_wins_and_hides_statuses(self):
+        # No injected clock ⇒ nothing expires (#916): 7 distinct ids, merged hidden.
+        folded = entrypoint.fold_visible_entries(self.fixture["entries"])
+        self.assertEqual(
+            [e["id"] for e in folded],
+            ["ddd000000004", "aaa000000001", "bbb000000002", "ccc000000003",
+             "fff000000006", "abc000000007"],
+        )
+        conv = next(e for e in folded if e["id"] == "aaa000000001")
+        self.assertEqual(entrypoint._digest_convergence_count(conv), 3)
+
+    def test_fold_expired_with_injected_clock(self):
+        # #916: fff…6 (validTo 2026-07-10) expires by the fixture generatedAt;
+        # abc…7's future validTo keeps it. Boundary (validTo == now) not expired.
+        folded = entrypoint.fold_visible_entries(
+            self.fixture["entries"], now="2026-07-13T09:00:00Z")
+        ids = [e["id"] for e in folded]
+        self.assertNotIn("fff000000006", ids)
+        self.assertIn("abc000000007", ids)
+        boundary = entrypoint.fold_visible_entries(
+            self.fixture["entries"], now="2026-07-10T00:00:00Z")
+        self.assertIn("fff000000006", [e["id"] for e in boundary])
+
+    def test_included_ids_render_order(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="demo-team", generated_at="2026-07-13T09:00:00Z",
+            entries=self.fixture["entries"],
+        )
+        self.assertEqual(res["includedIds"], [
+            "aaa000000001", "bbb000000002", "abc000000007", "ccc000000003",
+            "ddd000000004",
+        ])
+
+    def test_multiline_text_flattened(self):
+        res = entrypoint.build_knowledge_digest(
+            team_id="t", generated_at="2026-07-13T09:00:00Z",
+            entries=[{"id": "abc000000001", "kind": "fact", "text": "line one\nline two",
+                      "createdAt": "2026-07-01T00:00:00Z", "convergence": ["a"],
+                      "status": "active"}],
+        )
+        self.assertIn("- fact: line one line two (2026-07-01)", res["markdown"])
+
+
+class HarvestBlock(unittest.TestCase):
+    """Two-sided contract with orchestrator/harvest-block.js: both test suites
+    assert identical entries + stripped text against the SAME golden fixture
+    (orchestrator/harvest-block.fixture.json), so the JS anchor and this Python
+    runtime (the only side that harvests at run end) cannot drift (issue #602)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        fixture_path = (Path(__file__).resolve().parents[2]
+                        / "orchestrator" / "harvest-block.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    entrypoint.parse_harvest_block(case["input"]),
+                    case["expectedEntries"],
+                )
+                self.assertEqual(
+                    entrypoint.strip_harvest_block(case["input"]),
+                    case["expectedStripped"],
+                )
+
+    def test_malformed_input_never_raises(self):
+        for bad in (None, 42, {}, [], True):
+            self.assertEqual(entrypoint.parse_harvest_block(bad), [])
+        # strip returns non-str as "" and a plain string unchanged.
+        self.assertEqual(entrypoint.strip_harvest_block(None), "")
+        self.assertEqual(entrypoint.strip_harvest_block(42), "")
+        self.assertEqual(entrypoint.strip_harvest_block("plain text"), "plain text")
+
+    def test_unknown_kind_dropped_valid_sibling_kept(self):
+        text = "\n".join([
+            "ok",
+            "```knowledge",
+            '{"kind":"story","text":"nope"}',
+            '{"kind":"fact","text":"yes"}',
+            "```",
+        ])
+        self.assertEqual(entrypoint.parse_harvest_block(text),
+                         [{"kind": "fact", "text": "yes"}])
+
+
+class BuildHarvestBlockHint(unittest.TestCase):
+    fn = staticmethod(entrypoint.build_harvest_block_hint)
+
+    def test_level_0_is_empty(self):
+        self.assertEqual(self.fn(0), "")
+        self.assertEqual(self.fn(-1), "")
+        self.assertEqual(self.fn("1"), "")
+
+    def test_level_1_plus_asks_for_block(self):
+        for lvl in (1, 2, 3):
+            out = self.fn(lvl)
+            self.assertIn("```knowledge", out)
+            self.assertIn("fact|convention|entity", out)
+            self.assertIn("do NOT run the knowledge CLI", out)
+
+
+class KnowledgeTeamId(unittest.TestCase):
+    """_knowledge_team_id mirrors the `knowledge` CLI / orchestrator precedence so
+    the runtime digest is scoped to the same team even without the spawn-time env
+    var (issue #538): KNOWLEDGE_TEAM_ID → parentTeamId → id (role team) → teamId →
+    default."""
+
+    def test_env_override_wins(self):
+        with patch.dict(entrypoint.os.environ, {"KNOWLEDGE_TEAM_ID": "explicit"}), \
+             patch.object(entrypoint, "_load_dm_agent_config",
+                          return_value={"parentTeamId": "agent-studio"}):
+            self.assertEqual(entrypoint._knowledge_team_id(), "explicit")
+
+    def test_config_fallback_precedence(self):
+        cases = [
+            ({"parentTeamId": "agent-studio", "teamId": "default"}, "agent-studio"),
+            ({"role": "team", "id": "squad-a", "teamId": "default"}, "squad-a"),
+            ({"role": "team-member", "id": "acme-dev-1", "teamId": "acme"}, "acme"),
+            ({"teamId": "acme"}, "acme"),
+            ({}, "default"),
+        ]
+        env = dict(entrypoint.os.environ)
+        env.pop("KNOWLEDGE_TEAM_ID", None)
+        for cfg, expected in cases:
+            with patch.dict(entrypoint.os.environ, env, clear=True), \
+                 patch.object(entrypoint, "_load_dm_agent_config", return_value=cfg):
+                self.assertEqual(entrypoint._knowledge_team_id(), expected)
+
+
+class NewSession(unittest.TestCase):
+    """The running-session descriptor must carry the correlationId so the admin
+    console can scope one session's log even when sessions share a room (#543)."""
+
+    def test_correlation_id_recorded(self):
+        s = entrypoint._new_session("trigger", room_id="!r:local", label="t1",
+                                    trigger_type="github-event", trigger_id="t1",
+                                    correlation_id="trigger:t1:gh:42")
+        self.assertEqual(s["correlationId"], "trigger:t1:gh:42")
+        self.assertEqual(s["type"], "trigger")
+        self.assertEqual(s["roomId"], "!r:local")
+        self.assertIn("id", s)
+        self.assertIn("startedAt", s)
+
+    def test_correlation_id_defaults_to_none(self):
+        s = entrypoint._new_session("dm", room_id="!r:local")
+        self.assertIsNone(s["correlationId"])
+
+
+class SessionPointerResumeFlag(unittest.TestCase):
+    """The one-shot resumeRequested flag (#574) round-trips through the pointer
+    and is cleared by a normal run-end write, so ordinary DM continuity is
+    unaffected."""
+
+    def _run(self, body):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ptr = Path(d) / "!room:local.current.json"
+            with patch.object(entrypoint, "_session_pointer_file", return_value=ptr), \
+                 patch.object(entrypoint, "_get_push_client", return_value=None):
+                return body(ptr)
+
+    def test_normal_write_has_no_flag_and_reads_false(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_resume_write_sets_flag_and_reads_true(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertEqual(sid, "sess-A")
+            self.assertTrue(requested)
+        self._run(body)
+
+    def test_run_end_write_clears_a_prior_resume_flag(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            # A successful resume writes the observed id with the default flag.
+            entrypoint._write_session_pointer("!room:local", "sess-A")
+            _, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_missing_pointer_reads_none_false(self):
+        def body(ptr):
+            sid, requested = entrypoint._read_session_pointer_full("!room:local")
+            self.assertIsNone(sid)
+            self.assertFalse(requested)
+        self._run(body)
+
+    def test_simple_reader_still_returns_session_id(self):
+        def body(ptr):
+            entrypoint._write_session_pointer("!room:local", "sess-A", resume_requested=True)
+            self.assertEqual(entrypoint._read_session_pointer("!room:local"), "sess-A")
+        self._run(body)
+
+
+class FakeClaudeShim(unittest.TestCase):
+    """Two-sided contract for the E2E fake `claude` shim (#666): the shim
+    (agent-image/e2e/claude) is the PRODUCER, _map_stream_json_line is the
+    CONSUMER, and agent-image/e2e/fake-claude.fixture.json is the shared golden.
+    Each case runs the shim as a subprocess, feeds its stdout line-by-line
+    through the real parser (threading one usage_sink like the runtime's
+    handle_line does), and asserts the normalized events. Guarantees the shim's
+    stream-json can never silently drift from what the runtime accepts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        cls.shim = Path(__file__).resolve().parents[1] / "e2e" / "claude"
+        fixture_path = (Path(__file__).resolve().parents[1]
+                        / "e2e" / "fake-claude.fixture.json")
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def _run_shim(self, argv, extra_env=None):
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["AEE_FAKE_CLAUDE_SESSION_ID"] = self.fixture["sessionId"]
+        if extra_env:
+            env.update(extra_env)
+        proc = subprocess.run(
+            ["python3", str(self.shim), *argv],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return proc.stdout
+
+    def _parse(self, stdout):
+        """Mirror the runtime's handle_line: one usage_sink across the whole
+        invocation so the result event's contextTokens is populated."""
+        usage_sink: dict = {}
+        events = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            events.extend(map_stream_json_line(
+                line, self.fixture["correlationId"], usage_sink))
+        return events
+
+    def test_golden_fixture_cases(self):
+        for case in self.fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                stdout = self._run_shim(case["argv"])
+                events = self._parse(stdout)
+                self.assertEqual(events, case["expectedEvents"])
+
+    def test_fixtures_rule_match_overrides_default(self):
+        import json
+        import tempfile
+        rules = [{"match": "COBOL", "reply": "Converted the COBOL program."}]
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False, encoding="utf-8") as fh:
+            json.dump(rules, fh)
+            rules_path = fh.name
+        stdout = self._run_shim(
+            ["-p", "please migrate this COBOL job", "--output-format", "stream-json"],
+            extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path})
+        events = self._parse(stdout)
+        text = next(e for e in events if e["type"] == "assistant_text")["text"]
+        self.assertEqual(text, "Converted the COBOL program.")
+
+    def test_playbook_runs_before_reply_and_keeps_stdout_clean(self):
+        """A fixtures rule may name a `playbook` (#711, §6.2): the shim executes
+        it (with the matched prompt in $AEE_FAKE_CLAUDE_PROMPT) BEFORE emitting,
+        routes the script's stdout to stderr so the stream-json stays clean, and
+        still emits the canned reply."""
+        import json
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pb_dir = os.path.join(d, "playbooks")
+            os.makedirs(pb_dir)
+            sentinel = os.path.join(d, "ran.txt")
+            script = os.path.join(pb_dir, "developer-implement.sh")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write('#!/bin/bash\n'
+                         'echo "noise on stdout"\n'
+                         f'printf "%s" "$AEE_FAKE_CLAUDE_PROMPT" > {sentinel}\n')
+            os.chmod(script, 0o755)
+            rules = [{"match": "labelled `ready`", "reply": "Opened PR #7.",
+                      "playbook": "developer-implement.sh"}]
+            rules_path = os.path.join(d, "fixtures.json")
+            with open(rules_path, "w", encoding="utf-8") as fh:
+                json.dump(rules, fh)
+            prompt = "An issue was labelled `ready` — go build it."
+            stdout = self._run_shim(
+                ["-p", prompt, "--output-format", "stream-json"],
+                extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path,
+                           "AEE_FAKE_CLAUDE_PLAYBOOKS": pb_dir})
+            # stdout is still parseable stream-json carrying the canned reply —
+            # the playbook's own stdout ("noise on stdout") never leaked in.
+            events = self._parse(stdout)
+            text = next(e for e in events if e["type"] == "assistant_text")["text"]
+            self.assertEqual(text, "Opened PR #7.")
+            self.assertNotIn("noise on stdout", stdout)
+            # The playbook actually ran, with the matched prompt handed to it.
+            self.assertTrue(os.path.isfile(sentinel), "playbook did not run")
+            with open(sentinel, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), prompt)
+
+    def test_playbook_named_but_dir_unset_is_safe_noop(self):
+        """With AEE_FAKE_CLAUDE_PLAYBOOKS unset, a rule's `playbook` is ignored —
+        the shim still emits its reply and exits 0 (never fatal)."""
+        import json
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rules = [{"match": "COBOL", "reply": "Done.",
+                      "playbook": "nonexistent.sh"}]
+            rules_path = os.path.join(d, "fixtures.json")
+            with open(rules_path, "w", encoding="utf-8") as fh:
+                json.dump(rules, fh)
+            env = {k: v for k, v in os.environ.items()
+                   if k != "AEE_FAKE_CLAUDE_PLAYBOOKS"}
+            env["AEE_FAKE_CLAUDE_FIXTURES"] = rules_path
+            # _run_shim asserts returncode == 0; a missing playbook dir must not
+            # break that.
+            stdout = self._run_shim(
+                ["-p", "migrate the COBOL job", "--output-format", "stream-json"],
+                extra_env={"AEE_FAKE_CLAUDE_FIXTURES": rules_path})
+            events = self._parse(stdout)
+            text = next(e for e in events if e["type"] == "assistant_text")["text"]
+            self.assertEqual(text, "Done.")
+
+    def test_resume_id_used_as_session_when_no_env_override(self):
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k != "AEE_FAKE_CLAUDE_SESSION_ID"}
+        proc = subprocess.run(
+            ["python3", str(self.shim), "-p", "hi", "--resume", "resumed-sess",
+             "--output-format", "stream-json"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        events = self._parse(proc.stdout)
+        init = next(e for e in events if e["type"] == "system_init")
+        self.assertEqual(init["sessionId"], "resumed-sess")
+
+
+class MaybeEnableFakeClaude(unittest.TestCase):
+    """The PATH seam (#666) must be a strict no-op unless AEE_FAKE_CLAUDE=1, so
+    a production container (flag unset) never resolves `claude` to the shim."""
+
+    def _run(self, env_flag, shim_dir=None):
+        # Point FAKE_CLAUDE_DIR at a caller-supplied dir so the positive path is
+        # exercised deterministically (the baked-in /opt/ace/e2e path doesn't
+        # exist in a repo checkout). Default: the real dir, i.e. the guard path.
+        import os
+        path_before = "/usr/local/bin:/usr/bin"
+        with patch.dict(os.environ, {"PATH": path_before}, clear=False):
+            if env_flag is None:
+                os.environ.pop("AEE_FAKE_CLAUDE", None)
+            else:
+                os.environ["AEE_FAKE_CLAUDE"] = env_flag
+            if shim_dir is not None:
+                with patch.object(entrypoint, "FAKE_CLAUDE_DIR", shim_dir):
+                    entrypoint._maybe_enable_fake_claude()
+            else:
+                entrypoint._maybe_enable_fake_claude()
+            return os.environ["PATH"]
+
+    def test_flag_unset_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run(None))
+
+    def test_flag_not_one_leaves_path_untouched(self):
+        self.assertNotIn(str(entrypoint.FAKE_CLAUDE_DIR), self._run("0"))
+
+    def test_flag_one_prepends_existing_shim_dir(self):
+        # Positive path: flag set AND a shim present -> the dir is prepended.
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)
+            (shim_dir / "claude").write_text("#!/bin/sh\n")
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertTrue(
+                result.startswith(str(shim_dir) + os.pathsep),
+                f"expected {shim_dir} prepended to PATH, got {result!r}",
+            )
+
+    def test_flag_one_missing_shim_is_noop(self):
+        # Flag set but no shim on disk -> log and leave PATH untouched.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim_dir = Path(d)  # empty: no `claude` file
+            result = self._run("1", shim_dir=shim_dir)
+            self.assertNotIn(str(shim_dir), result)
+
+
+class SessionRotation(unittest.TestCase):
+    """Pure session-log rotation helpers (#673) — must stay behaviour-compatible
+    with orchestrator/session-rotation.js."""
+
+    ROOM = "!abc:host.name"
+
+    def test_archive_name(self):
+        self.assertEqual(entrypoint._archive_name(self.ROOM, 1), "!abc:host.name.1.jsonl")
+        self.assertEqual(entrypoint._archive_name("!r:local", 42), "!r:local.42.jsonl")
+
+    def test_parse_archive_seq_matches_only_real_archives(self):
+        p = entrypoint._parse_archive_seq
+        self.assertEqual(p("!abc:host.name.1.jsonl", self.ROOM), 1)
+        self.assertEqual(p("!abc:host.name.12.jsonl", self.ROOM), 12)
+        self.assertIsNone(p("!abc:host.name.jsonl", self.ROOM))         # live file
+        self.assertIsNone(p("!abc:host.name.current.json", self.ROOM))  # pointer
+        self.assertIsNone(p("!other:host.name.1.jsonl", self.ROOM))     # other room
+        self.assertIsNone(p("!abc:host.name.0.jsonl", self.ROOM))       # seq 0
+        self.assertIsNone(p("!abc:host.name.01.jsonl", self.ROOM))      # leading zero
+
+    def test_parse_archive_seq_numeric_homeserver_tail(self):
+        room = "!r:1.2.3"
+        self.assertEqual(entrypoint._parse_archive_seq("!r:1.2.3.5.jsonl", room), 5)
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:1.2.3.jsonl", room))
+        self.assertIsNone(entrypoint._parse_archive_seq("!r:9.9.9.5.jsonl", room))
+
+    def test_list_and_next_archive_seq(self):
+        names = [
+            "!abc:host.name.jsonl", "!abc:host.name.3.jsonl",
+            "!abc:host.name.1.jsonl", "!abc:host.name.10.jsonl",
+            "unrelated.jsonl", "!abc:host.name.current.json",
+        ]
+        self.assertEqual([s for s, _ in entrypoint._list_archives(names, self.ROOM)],
+                         [1, 3, 10])
+        self.assertEqual(entrypoint._next_archive_seq(names, self.ROOM), 11)
+        self.assertEqual(entrypoint._next_archive_seq([], self.ROOM), 1)
+        self.assertEqual(entrypoint._next_archive_seq(["!abc:host.name.jsonl"], self.ROOM), 1)
+
+    def test_should_rotate(self):
+        self.assertFalse(entrypoint._should_rotate(7_999_999, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(8_000_000, 8_000_000))
+        self.assertTrue(entrypoint._should_rotate(9_000_000, 8_000_000))
+        self.assertFalse(entrypoint._should_rotate(9_000_000, 0))
+
+    def test_plan_prune_by_count(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1000 + s) for s in range(1, 7)]
+        doomed = entrypoint._plan_prune(archives, 3, 0, 10_000)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, s) for s in (1, 2, 3)])
+
+    def test_plan_prune_by_age(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 10 * day),
+        ]
+        doomed = entrypoint._plan_prune(archives, 0, 30 * day, now)
+        self.assertEqual(doomed, [entrypoint._archive_name(self.ROOM, 1)])
+
+    def test_plan_prune_union_no_duplicates(self):
+        now = 1_000_000
+        day = 24 * 60 * 60 * 1000
+        archives = [
+            (1, entrypoint._archive_name(self.ROOM, 1), now - 40 * day),  # old + overflow
+            (2, entrypoint._archive_name(self.ROOM, 2), now - 1 * day),   # overflow
+            (3, entrypoint._archive_name(self.ROOM, 3), now - 1 * day),   # kept
+        ]
+        doomed = sorted(entrypoint._plan_prune(archives, 1, 30 * day, now))
+        self.assertEqual(doomed, sorted([entrypoint._archive_name(self.ROOM, 1),
+                                         entrypoint._archive_name(self.ROOM, 2)]))
+
+    def test_plan_prune_both_axes_disabled_keeps_all(self):
+        archives = [(s, entrypoint._archive_name(self.ROOM, s), 1) for s in (1, 2, 3)]
+        self.assertEqual(entrypoint._plan_prune(archives, 0, 0, 9), [])
+
+    def test_rotation_config_defaults_and_overrides(self):
+        with patch.dict("os.environ", {}, clear=False):
+            for k in ("AEE_SESSION_ROTATE_BYTES", "AEE_SESSION_ROTATE_KEEP",
+                      "AEE_SESSION_ROTATE_MAX_AGE_DAYS"):
+                entrypoint.os.environ.pop(k, None)
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 8_000_000, "maxCount": 5, "maxAgeDays": 30})
+        with patch.dict("os.environ", {
+            "AEE_SESSION_ROTATE_BYTES": "16000000",
+            "AEE_SESSION_ROTATE_KEEP": "3",
+            "AEE_SESSION_ROTATE_MAX_AGE_DAYS": "7",
+        }):
+            self.assertEqual(entrypoint._session_rotation_config(),
+                             {"maxBytes": 16_000_000, "maxCount": 3, "maxAgeDays": 7})
+
+    def test_rotation_config_refuses_nonpositive_size(self):
+        for bad in ("0", "-5", "nonsense"):
+            with patch.dict("os.environ", {"AEE_SESSION_ROTATE_BYTES": bad}):
+                self.assertEqual(entrypoint._session_rotation_config()["maxBytes"], 8_000_000)
+
+
+class ThinkingTokenThrottleTests(unittest.TestCase):
+    """The #870 write-layer coalescing of thinking_tokens ticks."""
+
+    class _FakeClock:
+        def __init__(self):
+            self.t = 0.0
+        def __call__(self):
+            return self.t
+
+    @staticmethod
+    def _tick(n):
+        return {"type": "system_event", "subtype": "thinking_tokens",
+                "raw": {"type": "system", "subtype": "thinking_tokens",
+                        "estimated_tokens": n, "estimated_tokens_delta": 1}}
+
+    def _throttle(self, clock, **kw):
+        return entrypoint._ThinkingTokenThrottle(clock=clock, **kw)
+
+    def test_first_tick_emits_immediately(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk)
+        self.assertIsNotNone(thr.offer(self._tick(10)))
+
+    def test_suppresses_within_interval_and_below_delta(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=200)
+        self.assertIsNotNone(thr.offer(self._tick(10)))   # first → emit
+        clk.t = 0.5
+        self.assertIsNone(thr.offer(self._tick(11)))       # too soon, tiny delta
+
+    def test_emits_after_interval_elapses(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))
+        clk.t = 2.5
+        self.assertIsNotNone(thr.offer(self._tick(12)))    # interval crossed
+
+    def test_emits_when_token_delta_exceeds_threshold(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=1000.0, min_delta=200)
+        thr.offer(self._tick(10))
+        clk.t = 0.1
+        self.assertIsNotNone(thr.offer(self._tick(250)))   # +240 ≥ 200
+
+    def test_flush_returns_last_suppressed_final_total(self):
+        """AC2: the run's final total is recorded even after a burst is dropped."""
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))                          # emitted
+        clk.t = 0.2
+        self.assertIsNone(thr.offer(self._tick(50)))
+        clk.t = 0.3
+        self.assertIsNone(thr.offer(self._tick(90)))       # latest suppressed
+        tail = thr.flush()
+        self.assertIsNotNone(tail)
+        self.assertEqual(tail["raw"]["estimated_tokens"], 90)
+
+    def test_flush_none_when_nothing_pending(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk)
+        thr.offer(self._tick(10))                          # emitted, nothing pending
+        self.assertIsNone(thr.flush())
+
+    def test_flush_is_idempotent(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=2.0, min_delta=1000)
+        thr.offer(self._tick(10))
+        clk.t = 0.1
+        thr.offer(self._tick(20))                          # suppressed
+        self.assertIsNotNone(thr.flush())
+        self.assertIsNone(thr.flush())                     # second call → None
+
+    def test_non_numeric_tokens_do_not_crash(self):
+        clk = self._FakeClock()
+        thr = self._throttle(clk, min_interval_s=1000.0, min_delta=200)
+        thr.offer({"type": "system_event", "subtype": "thinking_tokens",
+                   "raw": {"estimated_tokens": None}})
+        clk.t = 0.1
+        # No usable delta and interval not crossed → suppressed, no exception.
+        self.assertIsNone(thr.offer({"type": "system_event",
+                                     "subtype": "thinking_tokens", "raw": {}}))
+        self.assertIsNotNone(thr.flush())
+
+
+class TriggerClaudeFailureRetry(unittest.IsolatedAsyncioTestCase):
+    """A triggered run whose claude invocation fails transiently is retried
+    exactly once; a second failure posts a plain failure notice to the room
+    (the firing event is consumed and will never re-fire — silence would stall
+    the delivery chain); a user-requested stop is never retried."""
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _run(self, scheduler, call_mock, trigger=None):
+        trigger = trigger or {"id": "t1", "type": "github-event"}
+        patches = [
+            patch.object(entrypoint, "_load_dm_room_id",
+                         return_value="!room:local"),
+            patch.object(entrypoint, "_load_dm_agent_config",
+                         return_value={"sessionPolicy": "per-invocation"}),
+            patch.object(entrypoint, "_base_run_context",
+                         return_value={"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session",
+                         return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event"),
+            patch.object(entrypoint, "_knowledge_autonomy_level",
+                         return_value=0),
+            patch.object(entrypoint, "_harvest_shared_lessons",
+                         side_effect=lambda text, cid: text),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
+            patch.object(entrypoint, "_call_claude_once", call_mock),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+        async def go():
+            for p in patches:
+                p.start()
+            try:
+                return await scheduler._execute_inner(trigger, None)
+            finally:
+                for p in patches:
+                    p.stop()
+        return go()
+
+    async def test_transient_failure_retried_once_then_posts_result(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 2)
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertEqual(scheduler._send_formatted.await_args.args[1], "done")
+        scheduler._client.room_send.assert_not_awaited()  # no failure notice
+
+    async def test_double_failure_posts_notice_and_raises(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 2)
+        scheduler._send_formatted.assert_not_awaited()
+        scheduler._client.room_send.assert_awaited_once()
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertIn("io.aee.triggerFailure", content)
+        self.assertEqual(content["io.aee.triggerFailure"]["triggerId"], "t1")
+
+    async def test_user_abort_is_not_retried_and_stays_silent(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.user_aborted = True
+        call_mock = unittest.mock.Mock(side_effect=[err])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 1)
+        scheduler._client.room_send.assert_not_awaited()
+
+    async def test_permanent_failure_not_retried_but_notice_posted(self):
+        # A config/4xx/stale-session failure fails identically on the retry, so
+        # it must fail immediately (call_count == 1) — but the event is still
+        # consumed, so the room notice still fires, flagged as permanent.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.claude_cause = "Error: No conversation found with session ID: abc"
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock)
+        self.assertEqual(call_mock.call_count, 1)  # NOT retried
+        scheduler._send_formatted.assert_not_awaited()
+        scheduler._client.room_send.assert_awaited_once()
+        body = scheduler._client.room_send.await_args.kwargs["content"]["body"]
+        self.assertIn("permanent error", body)
+        self.assertIn("No conversation found", body)
+
+
+class ClaudeFailureCause(unittest.TestCase):
+    """The concise cause helpers that stop the session log from saying only
+    'exit status 1' and gate the trigger retry."""
+
+    def test_summarize_prefers_result_errors_and_status(self):
+        cause = entrypoint._summarize_claude_failure(
+            {"subtype": "error_during_execution",
+             "errors": ["Error: invalid model"], "apiErrorStatus": 400},
+            None, "noise")
+        self.assertIn("invalid model", cause)
+        self.assertIn("api_error_status=400", cause)
+
+    def test_summarize_falls_back_to_last_api_status_then_stderr(self):
+        self.assertIn("last_api_retry_status=500",
+                      entrypoint._summarize_claude_failure(None, 500, ""))
+        self.assertEqual(
+            "boom", entrypoint._summarize_claude_failure(None, None, "a\nboom\n"))
+        self.assertEqual("", entrypoint._summarize_claude_failure(None, None, ""))
+
+    def test_permanent_classifier(self):
+        def perm(cause):
+            e = subprocess.CalledProcessError(1, "claude")
+            e.claude_cause = cause
+            return entrypoint._claude_error_is_permanent(e)
+        self.assertTrue(perm("Error: No conversation found with session ID: x"))
+        self.assertTrue(perm("invalid model"))
+        self.assertTrue(perm("api_error_status=401"))
+        self.assertTrue(perm("prompt is too long"))
+        # A sustained upstream 5xx is transient — must stay retryable.
+        self.assertFalse(perm("last_api_retry_status=500"))
+        self.assertFalse(perm(""))  # unknown cause stays retryable (#902 intent)
+        self.assertFalse(entrypoint._claude_error_is_permanent(
+            subprocess.CalledProcessError(1, "claude")))  # no cause attr
+
+    def test_error_detail_appends_cause_when_present(self):
+        e = subprocess.CalledProcessError(1, "claude")
+        self.assertEqual(str(e), entrypoint._claude_error_detail(e))
+        e.claude_cause = "api_error_status=500"
+        self.assertIn("api_error_status=500", entrypoint._claude_error_detail(e))
+
+
+class ClaimPlanResolution(unittest.TestCase):
+    """`_claim_plan` turns the declarative `claim` trigger field into a concrete
+    label swap — and only for a `github-event` trigger woken by an event that
+    actually carries an issue or PR to label."""
+
+    GH = {"repo": "acme/repo", "payload": {"issue": {"number": 957}}}
+    CLAIM = {"remove": "ready", "add": "ready:wip"}
+
+    def test_github_event_with_issue_resolves(self):
+        plan = entrypoint._claim_plan(
+            {"id": "t1", "type": "github-event", "claim": self.CLAIM}, self.GH)
+        self.assertEqual(plan, {"repo": "acme/repo", "number": 957,
+                                "remove": "ready", "add": "ready:wip"})
+
+    def test_pull_request_payload_resolves(self):
+        plan = entrypoint._claim_plan(
+            {"type": "github-event", "claim": self.CLAIM},
+            {"repo": "acme/repo", "payload": {"pull_request": {"number": 42}}})
+        self.assertEqual(plan["number"], 42)
+
+    def test_label_names_are_stripped(self):
+        plan = entrypoint._claim_plan(
+            {"type": "github-event",
+             "claim": {"remove": " ready ", "add": "\tready:wip\n"}}, self.GH)
+        self.assertEqual((plan["remove"], plan["add"]), ("ready", "ready:wip"))
+
+    def test_no_claim_for_non_github_event_triggers(self):
+        # cron/once/http/loop have no wake label to swap or restore.
+        for ttype in ("cron", "once", "http", "loop"):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": ttype, "claim": self.CLAIM}, self.GH), msg=ttype)
+
+    def test_missing_or_malformed_claim_field(self):
+        for claim in ({}, "ready", ["ready"], {"remove": "ready"},
+                      {"add": "ready:wip"}, {"remove": "", "add": "x"},
+                      {"remove": "r", "add": "   "},
+                      {"remove": 1, "add": 2}):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": "github-event", "claim": claim}, self.GH),
+                msg=repr(claim))
+        self.assertIsNone(entrypoint._claim_plan(
+            {"type": "github-event"}, self.GH))
+
+    def test_event_without_a_labelable_issue_or_repo(self):
+        for gh in (None, {}, {"repo": "acme/repo", "payload": {}},
+                   {"repo": "acme/repo", "payload": {"ref": "refs/heads/main"}},
+                   {"payload": {"issue": {"number": 1}}},
+                   {"repo": "no-slash", "payload": {"issue": {"number": 1}}},
+                   {"repo": "acme/repo", "payload": {"issue": {"number": 0}}},
+                   {"repo": "acme/repo", "payload": {"issue": {"number": "7"}}}):
+            self.assertIsNone(entrypoint._claim_plan(
+                {"type": "github-event", "claim": self.CLAIM}, gh), msg=repr(gh))
+
+
+class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
+    """The claim swap (#957) is executed mechanically by the runner before the
+    claude invoke, and rolled back exactly when the run failed both attempts —
+    so a run that dies leaves the wake label back on the issue and the poller
+    restarts the chain event-natively. A failed swap never blocks the run."""
+
+    def _trigger(self, claim=True):
+        t = {"id": "t1", "type": "github-event"}
+        if claim:
+            t["claim"] = {"remove": "ready", "add": "ready:wip"}
+        return t
+
+    def _ctx(self):
+        return {"github": {"repo": "acme/repo", "eventId": "42",
+                           "payload": {"issue": {"number": 957}}}}
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _run(self, scheduler, call_mock, swap_mock, append_mock, trigger, ctx):
+        patches = [
+            patch.object(entrypoint, "_load_dm_room_id",
+                         return_value="!room:local"),
+            patch.object(entrypoint, "_load_dm_agent_config",
+                         return_value={"sessionPolicy": "per-invocation"}),
+            patch.object(entrypoint, "_base_run_context",
+                         return_value={"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session", return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event", append_mock),
+            patch.object(entrypoint, "_knowledge_autonomy_level",
+                         return_value=0),
+            patch.object(entrypoint, "_harvest_shared_lessons",
+                         side_effect=lambda text, cid: text),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "TRIGGER_RETRY_DELAY_SEC", 0),
+            patch.object(entrypoint, "_call_claude_once", call_mock),
+            patch.object(entrypoint, "_gh_swap_labels", swap_mock),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+
+        async def go():
+            for p in patches:
+                p.start()
+            try:
+                return await scheduler._execute_inner(trigger, ctx)
+            finally:
+                for p in patches:
+                    p.stop()
+        return go()
+
+    @staticmethod
+    def _rows(append_mock, row_type):
+        return [c.args[1] for c in append_mock.call_args_list
+                if c.args[1].get("type") == row_type]
+
+    async def test_claim_executed_before_invoke_and_logged(self):
+        scheduler = self._scheduler()
+        order = []
+        swap_mock = unittest.mock.Mock(
+            side_effect=lambda *a: order.append(("swap",) + a) or True)
+        call_mock = unittest.mock.Mock(
+            side_effect=lambda *a, **k: order.append(("claude",)) or ("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        # The swap precedes the LLM call, and is the only one (no rollback).
+        self.assertEqual([e[0] for e in order], ["swap", "claude"])
+        self.assertEqual(order[0][1:], ("acme/repo", 957, "ready", "ready:wip"))
+        rows = self._rows(append_mock, "trigger.claimed")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            (rows[0]["ok"], rows[0]["removed"], rows[0]["added"],
+             rows[0]["repo"], rows[0]["number"], rows[0]["triggerId"]),
+            (True, "ready", "ready:wip", "acme/repo", 957, "t1"))
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        scheduler._send_formatted.assert_awaited_once()
+
+    async def test_claim_runs_after_the_precheck_gate(self):
+        # A preCheck that fails skips the LLM — and must skip the claim too,
+        # otherwise a gated-out run silently eats the wake label.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        trigger = self._trigger()
+        trigger["preCheckScript"] = "exit 1"
+        with patch.object(entrypoint, "_run_pre_check", return_value=(1, "")):
+            await self._run(scheduler, call_mock, swap_mock,
+                            unittest.mock.Mock(), trigger, self._ctx())
+        swap_mock.assert_not_called()
+        call_mock.assert_not_called()
+
+    async def test_trigger_without_claim_field_never_swaps(self):
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(claim=False), self._ctx())
+        swap_mock.assert_not_called()
+        self.assertEqual(self._rows(append_mock, "trigger.claimed"), [])
+
+    async def test_swap_failure_does_not_block_the_run(self):
+        # Claiming is observability, never a start gate.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=False)
+        call_mock = unittest.mock.Mock(return_value=("ok", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        call_mock.assert_called_once()
+        scheduler._send_formatted.assert_awaited_once()
+        self.assertFalse(self._rows(append_mock, "trigger.claimed")[0]["ok"])
+
+    async def test_rollback_on_double_failure_restores_the_wake_label(self):
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        self.assertEqual(call_mock.call_count, 2)
+        # Claim, then exactly one rollback with the two labels reversed.
+        self.assertEqual(swap_mock.call_count, 2)
+        self.assertEqual(swap_mock.call_args_list[0].args,
+                         ("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(swap_mock.call_args_list[1].args,
+                         ("acme/repo", 957, "ready:wip", "ready"))
+        rows = self._rows(append_mock, "trigger.claim-rolled-back")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["ok"], rows[0]["removed"], rows[0]["added"]),
+                         (True, "ready:wip", "ready"))
+        # The failure DM must not ask for a manual re-issue any more — the
+        # restored label re-fires the chain by itself.
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertEqual(
+            content["io.aee.triggerFailure"]["claimRolledBack"], "ready")
+        self.assertIn("rolled back", content["body"])
+        self.assertNotIn("will NOT re-fire", content["body"])
+
+    async def test_no_rollback_when_the_claim_swap_itself_failed(self):
+        # The wake label was never removed, so there is nothing to restore —
+        # re-adding it would be a spurious second event.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=False)
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        swap_mock.assert_called_once()  # the claim attempt only
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        content = scheduler._client.room_send.await_args.kwargs["content"]
+        self.assertNotIn("claimRolledBack", content["io.aee.triggerFailure"])
+
+    async def test_no_rollback_on_single_transient_failure(self):
+        # The retry succeeded, so the claim legitimately stays on the issue.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err, ("done", None)])
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        swap_mock.assert_called_once()
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+
+    async def test_no_rollback_on_user_abort(self):
+        # A human stopped the run and is present — restoring the wake label
+        # would immediately re-fire the work they just cancelled.
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        err.user_aborted = True
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err])
+        append_mock = unittest.mock.Mock()
+        with self.assertRaises(subprocess.CalledProcessError):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        swap_mock.assert_called_once()
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        scheduler._client.room_send.assert_not_awaited()
+
+
+class GhSwapLabels(unittest.TestCase):
+    """`_gh_swap_labels` shells out to `gh` once and never raises."""
+
+    ENV = {"GH_TOKEN": "t"}
+
+    def test_single_gh_issue_edit_call(self):
+        proc = unittest.mock.Mock(returncode=0, stderr="")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             return_value=proc) as run:
+            self.assertTrue(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(run.call_args.args[0], [
+            "gh", "issue", "edit", "957", "--repo", "acme/repo",
+            "--remove-label", "ready", "--add-label", "ready:wip"])
+
+    def test_non_zero_exit_returns_false(self):
+        proc = unittest.mock.Mock(returncode=1, stderr="label not found")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run", return_value=proc):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_subprocess_error_returns_false(self):
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=subprocess.TimeoutExpired("gh", 30)):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_unexpected_exception_returns_false(self):
+        # Anything escaping would abort the run before the invoke (claim site)
+        # or mask the CalledProcessError (rollback site).
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=RuntimeError("boom")):
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_no_token_skips_without_shelling_out(self):
+        env = {k: v for k, v in entrypoint.os.environ.items()
+               if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        with patch.dict(entrypoint.os.environ, env, clear=True), \
+                patch.object(entrypoint.subprocess, "run") as run:
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        run.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class NonconformantTriggerReasonTest(unittest.TestCase):
+    """#1006 — the raw-layer wiring guard (mirror of rawTriggerError in
+    admin-console/api/process-template.js)."""
+
+    def test_multi_event_flagged(self):
+        t = {"type": "github-event",
+             "events": ["issues.labeled", "pull_request.labeled"],
+             "labelFilter": "go"}
+        reason = entrypoint._nonconformant_trigger_reason(t)
+        self.assertIn("exactly ONE event", reason)
+
+    def test_single_event_and_valid_claim_pass(self):
+        t = {"type": "github-event", "events": ["issues.labeled"],
+             "labelFilter": "go", "claim": {"remove": "go", "add": "go:wip"}}
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason(t))
+
+    def test_claim_shape_violations_flagged(self):
+        base = {"type": "github-event", "events": ["issues.labeled"]}
+        self.assertIn("labelFilter", entrypoint._nonconformant_trigger_reason(
+            {**base, "claim": {"remove": "x", "add": "x:wip"}}))
+        self.assertIn("claim.remove", entrypoint._nonconformant_trigger_reason(
+            {**base, "labelFilter": "go", "claim": {"remove": "other", "add": "go:wip"}}))
+        self.assertIn(":wip", entrypoint._nonconformant_trigger_reason(
+            {**base, "labelFilter": "go", "claim": {"remove": "go", "add": "done"}}))
+
+    def test_non_github_types_never_checked(self):
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason(
+            {"type": "cron", "events": ["a", "b"]}))
+        self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))

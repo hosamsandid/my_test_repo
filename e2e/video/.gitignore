@@ -1,0 +1,12 @@
+# Revideo sub-project build/output — never committed
+node_modules/
+out/
+.video-work/
+
+# Generated/served assets (TTS MP3s + clips copied from fixtures/ by prep:clips).
+# The manifest under data/ IS tracked (seeded {}); public/ is all generated.
+public/
+scripts/narration.json
+# Journey-driven narration extracted from journeys/*.yaml `voiceover:` fields
+# (T4/#744, `npm run journeys:narration`). Regenerated from the YAML each render.
+scripts/generated/

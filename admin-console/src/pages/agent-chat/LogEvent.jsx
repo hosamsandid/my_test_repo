@@ -4,6 +4,8 @@ import {
   Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
+import { systemEventSummary, systemEventHasDetail } from './system-event.js';
+import { buildSystemInitView } from './system-init.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -174,6 +176,13 @@ function hasExpansion(ev) {
     case 'unknown':
     case 'parse_error':
       return true;
+    case 'system_event':
+      // Expandable only when `raw` carries content beyond the subtype label.
+      return systemEventHasDetail(ev);
+    case 'system_init':
+      // Expandable only when #980 provenance was captured (legacy rows have no
+      // extra detail to reveal).
+      return !!(ev.provenance);
     default:
       return false;
   }
@@ -313,18 +322,48 @@ function Body({ event, expanded }) {
           }}>{event.triggerId || event.id || 'unknown'}</code>
         </div>
       );
-    case 'system_init':
+    case 'system_init': {
+      // #980: model + Model-Provider provenance in one compact opening row;
+      // full detail (provider, auth, endpoint, requested vs effective model,
+      // session id) on expand. Legacy rows (no provenance) render as before.
+      const view = buildSystemInitView(event);
       return (
         <div style={baseStyle}>
           Session init: <code style={{
             fontFamily: 'var(--eb-font-mono)',
             color: 'var(--eb-text-primary)',
-          }}>{event.model || 'unknown'}</code>
-          {event.sessionId && (
-            <span style={{ color: 'var(--eb-text-muted)' }}> ({event.sessionId})</span>
+          }}>{view.model}</code>
+          {view.requestedModel && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> (requested: {view.requestedModel})</span>
+          )}
+          {view.providerText && (
+            <span style={{ color: 'var(--eb-text-secondary)' }}> · {view.providerText}</span>
+          )}
+          {view.sessionId && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> ({view.sessionId})</span>
+          )}
+          {expanded && view.detail && (
+            <div style={{
+              marginTop: 4,
+              paddingLeft: 8,
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              columnGap: 8,
+              rowGap: 1,
+              fontSize: 'var(--eb-text-xs)',
+              fontFamily: 'var(--eb-font-mono)',
+            }}>
+              {view.detail.map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <span style={{ color: 'var(--eb-text-muted)' }}>{k}</span>
+                  <span style={{ color: 'var(--eb-text-secondary)', overflowWrap: 'anywhere' }}>{v}</span>
+                </React.Fragment>
+              ))}
+            </div>
           )}
         </div>
       );
+    }
     case 'error': {
       const msg = event.message || '';
       const display = expanded ? msg : truncate(msg, COMPACT);
@@ -346,12 +385,25 @@ function Body({ event, expanded }) {
           Parse error: {truncate(event.raw || '', 200)}
         </div>
       );
-    case 'system_event':
+    case 'system_event': {
+      // Surface the informative content the CLI reported (captured in `raw`,
+      // e.g. a thinking-token count) inline, and offer the full raw JSON on
+      // expand — mirroring the default/unknown case below. Degrades to the
+      // bare `system / <subtype>` label when `raw` carries nothing extra.
+      const summary = systemEventSummary(event.raw);
+      const detail = expanded ? JSON.stringify(event.raw, null, 2) : null;
       return (
         <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
           system / <span style={{ color: 'var(--eb-text-secondary)' }}>{event.subtype || 'unknown'}</span>
+          {summary && <span style={{ color: 'var(--eb-text-secondary)' }}> — {summary}</span>}
+          {detail && (
+            <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
+              {detail}
+            </pre>
+          )}
         </div>
       );
+    }
     default: {
       const rawObj = event.raw ?? event;
       const summary = [rawObj?.type, rawObj?.subtype].filter(Boolean).join(' / ') || event.type || 'unknown';

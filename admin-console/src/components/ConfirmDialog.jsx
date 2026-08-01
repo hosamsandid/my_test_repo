@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, Info, Loader2 } from 'lucide-react';
 
 /**
  * ConfirmDialog -- Modal confirmation dialog replacing window.confirm/alert.
@@ -15,6 +15,8 @@ import { AlertTriangle, Info } from 'lucide-react';
  *   onConfirm  - function, called when user confirms
  *   onCancel   - function, called when user cancels or presses Escape
  *   alertOnly  - boolean, if true shows only an OK button (replaces window.alert)
+ *   busy       - boolean (default: false), shows a spinner on the confirm button and
+ *                disables both buttons while a caller's async action is in flight
  */
 export default function ConfirmDialog({
   open,
@@ -27,6 +29,7 @@ export default function ConfirmDialog({
   onCancel,
   alertOnly = false,
   maxWidth = 440,
+  busy = false,
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
@@ -92,19 +95,32 @@ export default function ConfirmDialog({
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
           {!alertOnly && (
-            <button onClick={onCancel} style={cancelBtnStyle}>
+            <button
+              onClick={onCancel}
+              disabled={busy}
+              style={{ ...cancelBtnStyle, ...(busy ? disabledStyle : null) }}
+            >
               {cancelLabel}
             </button>
           )}
           <button
             ref={confirmRef}
             onClick={onConfirm}
-            style={{ ...confirmBtnStyle, background: confirmBtnBg }}
+            disabled={busy}
+            style={{ ...confirmBtnStyle, background: confirmBtnBg, ...(busy ? disabledStyle : null) }}
           >
-            {alertOnly ? 'OK' : confirmLabel}
+            {busy ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                {alertOnly ? 'OK' : confirmLabel}
+              </span>
+            ) : (
+              alertOnly ? 'OK' : confirmLabel
+            )}
           </button>
         </div>
       </div>
+      {busy && <style>{'@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>}
     </div>
   );
 }
@@ -149,4 +165,9 @@ const confirmBtnStyle = {
   fontWeight: 'var(--eb-font-medium)',
   cursor: 'pointer',
   fontFamily: 'inherit',
+};
+
+const disabledStyle = {
+  opacity: 0.6,
+  cursor: 'not-allowed',
 };

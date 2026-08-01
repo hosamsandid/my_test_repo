@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight } from 'lucide-react';
+import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
 
 const COLLAPSED_KEY = 'agentChat.collapsedGroups';
+const ORDER_KEY = 'agentChat.sidebarOrder';
 
 /**
  * Per-group collapse-state defaults — matches the Agents overview page so the
@@ -23,6 +24,34 @@ function loadCollapsed() {
 }
 function saveCollapsed(map) {
   try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify(map)); } catch { /* ignore */ }
+}
+
+function loadOrder() {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return {
+      groups: Array.isArray(parsed.groups) ? parsed.groups : [],
+      singles: Array.isArray(parsed.singles) ? parsed.singles : [],
+    };
+  } catch {
+    return { groups: [], singles: [] };
+  }
+}
+function saveOrder(order) {
+  try { localStorage.setItem(ORDER_KEY, JSON.stringify(order)); } catch {}
+}
+
+/**
+ * Apply a stored key order to an items array. Items matching stored keys come
+ * first (in stored order); items not yet in the stored order are appended.
+ */
+function applyStoredOrder(items, storedKeys, getKey) {
+  if (!storedKeys.length) return items;
+  const keyed = new Map(items.map(item => [getKey(item), item]));
+  const ordered = storedKeys.map(k => keyed.get(k)).filter(Boolean);
+  const rest = items.filter(item => !storedKeys.includes(getKey(item)));
+  return [...ordered, ...rest];
 }
 
 /**
@@ -145,9 +174,43 @@ export default function AgentList({
   statuses = {},
   filter = { kind: 'all' },
 }) {
-  const { groups, singles } = buildGroups(agents);
+  const { groups: rawGroups, singles: rawSingles } = buildGroups(agents);
 
-  const visibleGroups = groups
+  const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
+  useEffect(() => { saveOrder(sidebarOrder); }, [sidebarOrder]);
+
+  const groupKey = g => `${g.kind}:${g.id}`;
+
+  const orderedGroups  = applyStoredOrder(rawGroups,  sidebarOrder.groups,  groupKey);
+  const orderedSingles = applyStoredOrder(rawSingles, sidebarOrder.singles, a => a.id);
+
+  // Arrows are only shown when the full unfiltered list is visible so that
+  // the visual position matches the stored order.
+  const canReorder = filter.kind === 'all';
+
+  function moveGroup(group, direction) {
+    const keys = orderedGroups.map(groupKey);
+    const idx = keys.indexOf(groupKey(group));
+    if (idx === -1) return;
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= keys.length) return;
+    const newKeys = [...keys];
+    [newKeys[idx], newKeys[newIdx]] = [newKeys[newIdx], newKeys[idx]];
+    setSidebarOrder(prev => ({ ...prev, groups: newKeys }));
+  }
+
+  function moveSingle(agent, direction) {
+    const keys = orderedSingles.map(a => a.id);
+    const idx = keys.indexOf(agent.id);
+    if (idx === -1) return;
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= keys.length) return;
+    const newKeys = [...keys];
+    [newKeys[idx], newKeys[newIdx]] = [newKeys[newIdx], newKeys[idx]];
+    setSidebarOrder(prev => ({ ...prev, singles: newKeys }));
+  }
+
+  const visibleGroups = orderedGroups
     .map(group => {
       const header   = group.header   && matchesFilter(group.header,   filter) ? group.header   : null;
       const children = group.children.filter(c => matchesFilter(c, filter));
@@ -155,7 +218,7 @@ export default function AgentList({
     })
     .filter(group => group.header || group.children.length > 0);
 
-  const visibleSingles = singles.filter(a => matchesFilter(a, filter));
+  const visibleSingles = orderedSingles.filter(a => matchesFilter(a, filter));
 
   const empty = visibleGroups.length === 0 && visibleSingles.length === 0;
 
@@ -176,7 +239,7 @@ export default function AgentList({
 
   return (
     <div role="listbox" style={{ display: 'flex', flexDirection: 'column' }}>
-      {visibleGroups.map(group => (
+      {visibleGroups.map((group, i) => (
         <GroupSection
           key={`${group.kind}:${group.id}`}
           group={group}
@@ -186,13 +249,15 @@ export default function AgentList({
           onSelect={onSelect}
           onMarkAsUnread={onMarkAsUnread}
           statuses={statuses}
+          onMoveUp={canReorder && i > 0 ? () => moveGroup(group, -1) : null}
+          onMoveDown={canReorder && i < visibleGroups.length - 1 ? () => moveGroup(group, 1) : null}
         />
       ))}
 
       {visibleSingles.length > 0 && (
         <>
           <SectionHeader label="Single agents" icon={MessageCircle} />
-          {visibleSingles.map(agent => (
+          {visibleSingles.map((agent, i) => (
             <AgentRow
               key={agent.id}
               agent={agent}
@@ -200,6 +265,8 @@ export default function AgentList({
               onSelect={() => onSelect(agent.id)}
               onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(agent.id) : null}
               activityState={statuses[agent.id] || 'idle'}
+              onMoveUp={canReorder && i > 0 ? () => moveSingle(agent, -1) : null}
+              onMoveDown={canReorder && i < visibleSingles.length - 1 ? () => moveSingle(agent, 1) : null}
             />
           ))}
         </>
@@ -228,6 +295,8 @@ function GroupSection({
   onSelect,
   onMarkAsUnread,
   statuses,
+  onMoveUp,
+  onMoveDown,
 }) {
   const Icon = group.kind === 'team' ? Users : Layers;
   const count = group.children.length + (group.header ? 1 : 0);
@@ -240,6 +309,8 @@ function GroupSection({
         count={count}
         collapsed={collapsed}
         onToggle={onToggle}
+        onMoveUp={onMoveUp}
+        onMoveDown={onMoveDown}
       />
       {!collapsed && group.header && (
         <AgentRow
@@ -265,14 +336,20 @@ function GroupSection({
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onToggle }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onToggle, onMoveUp, onMoveDown }) {
   const [hovered, setHovered] = useState(false);
+  const canMove = onMoveUp || onMoveDown;
   return (
     <button
       type="button"
       onClick={onToggle}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onKeyDown={e => {
+        if (!e.altKey) return;
+        if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
+        if (e.key === 'ArrowDown' && onMoveDown)  { e.preventDefault(); onMoveDown(); }
+      }}
       aria-expanded={!collapsed}
       style={{
         display: 'flex',
@@ -301,6 +378,24 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {label}
       </span>
+      {hovered && canMove && (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+          {onMoveUp && (
+            <MoveButton
+              icon={ArrowUp}
+              title="Move up (Alt+↑)"
+              onClick={e => { e.stopPropagation(); onMoveUp(); }}
+            />
+          )}
+          {onMoveDown && (
+            <MoveButton
+              icon={ArrowDown}
+              title="Move down (Alt+↓)"
+              onClick={e => { e.stopPropagation(); onMoveDown(); }}
+            />
+          )}
+        </span>
+      )}
       <span style={{
         flexShrink: 0,
         fontSize: 'var(--eb-text-xs)',
@@ -355,7 +450,7 @@ const STATUS_DOT = {
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
 
-function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', indent = false }) {
+function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', indent = false, onMoveUp, onMoveDown }) {
   const Icon = iconForRole(agent.role);
   const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
   const [hovered, setHovered] = useState(false);
@@ -363,12 +458,18 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
   // The "mark as unread" button is shown on hover when the agent is not
   // already unread and not in an error/offline state.
   const canMarkUnread = onMarkAsUnread && activityState !== 'unread' && activityState !== 'problem';
+  const canMove = !indent && (onMoveUp || onMoveDown);
 
   return (
     <button
       role="option"
       aria-selected={selected}
       onClick={onSelect}
+      onKeyDown={e => {
+        if (!e.altKey) return;
+        if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
+        if (e.key === 'ArrowDown' && onMoveDown)  { e.preventDefault(); onMoveDown(); }
+      }}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -453,6 +554,24 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
             <MailOpen size={12} />
           </span>
         )}
+        {hovered && canMove && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {onMoveUp && (
+              <MoveButton
+                icon={ArrowUp}
+                title="Move up (Alt+↑)"
+                onClick={e => { e.stopPropagation(); onMoveUp(); }}
+              />
+            )}
+            {onMoveDown && (
+              <MoveButton
+                icon={ArrowDown}
+                title="Move down (Alt+↓)"
+                onClick={e => { e.stopPropagation(); onMoveDown(); }}
+              />
+            )}
+          </span>
+        )}
         <span
           title={dot.label}
           className={dot.pulse ? 'eb-status-pulse' : undefined}
@@ -466,5 +585,32 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         />
       </span>
     </button>
+  );
+}
+
+function MoveButton({ icon: Icon, title, onClick }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <span
+      role="button"
+      aria-label={title}
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 14,
+        height: 14,
+        borderRadius: 'var(--eb-radius-sm)',
+        color: hovered ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+        cursor: 'pointer',
+        transition: 'color var(--eb-transition-fast)',
+      }}
+    >
+      <Icon size={10} />
+    </span>
   );
 }

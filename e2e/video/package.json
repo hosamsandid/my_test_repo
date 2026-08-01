@@ -1,0 +1,37 @@
+{
+  "name": "aee-walkthrough-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Revideo-based walkthrough video lane for Agent Studio journeys (audio-driven, Variant C). Self-contained sub-project so the heavy @revideo deps only install for the video CI job, not the normal e2e run.",
+  "scripts": {
+    "postinstall": "patch-package",
+    "test:unit": "node --test scripts/*.test.mjs",
+    "render:walkthrough": "node scripts/render-walkthrough.mjs",
+    "tts:extract": "node scripts/extract-narration.mjs",
+    "tts": "npm run tts:extract && python3 scripts/generate-tts.py",
+    "prep:clips": "node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of fs.readdirSync('fixtures').filter(f=>f.endsWith('.mp4')))fs.copyFileSync('fixtures/'+f,'public/'+f)\"",
+    "render:example": "npm run prep:clips && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-variant-c example-variant-c.mp4",
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "prep:shots": "node -e \"const fs=require('fs');fs.mkdirSync('public/shots',{recursive:true});for(const f of fs.readdirSync('fixtures/shots'))fs.copyFileSync('fixtures/shots/'+f,'public/shots/'+f)\"",
+    "render:team-setup": "npm run prep:shots && npm run prep:audio && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-team-setup team-setup-walkthrough.mp4 && node scripts/mux-narration.mjs out/final/team-setup-walkthrough.mp4 out/final/team-setup-walkthrough.mp4 scripts/team-setup.narration.json",
+    "prep:audio": "node -e \"const fs=require('fs');fs.mkdirSync('public/audio',{recursive:true});for(const f of fs.readdirSync('fixtures/audio').filter(f=>f.endsWith('.mp3')))fs.copyFileSync('fixtures/audio/'+f,'public/audio/'+f);fs.copyFileSync('fixtures/audio/audio-manifest.json','data/audio-manifest.json')\"",
+    "render:iban-story": "npm run prep:shots && npm run prep:audio && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-iban-story iban-story-walkthrough.mp4 && node scripts/mux-narration.mjs out/final/iban-story-walkthrough.mp4 out/final/iban-story-walkthrough.mp4 scripts/iban-story.narration.json"
+  },
+  "dependencies": {
+    "@revideo/2d": "0.10.4",
+    "@revideo/core": "0.10.4",
+    "@revideo/ffmpeg": "0.10.4",
+    "@revideo/renderer": "0.11.0",
+    "@revideo/vite-plugin": "0.10.4"
+  },
+  "devDependencies": {
+    "@revideo/cli": "0.11.0",
+    "@revideo/ui": "^0.10.4",
+    "@types/node": "^22.0.0",
+    "cross-env": "^7.0.3",
+    "patch-package": "^8.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "5.4.5"
+  }
+}

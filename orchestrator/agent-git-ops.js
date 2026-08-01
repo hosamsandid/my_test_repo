@@ -188,6 +188,47 @@ function buildRepoGitEnv({
   return gitEnv;
 }
 
+// Report whether a usable GitHub token is resolvable for a `gh`-based action
+// (i.e. `gh pr create`). Pure and injectable so the PR route can pre-check the
+// credential and fail with a distinct, actionable error instead of letting `gh`
+// emit an opaque auth failure that looks identical to a non-fast-forward reject.
+//
+// Returns { resolvable, tokenId, reason }. `reason` is a stable machine code
+// (null when resolvable) so callers can branch without string-matching:
+//   no-token-configured  – neither the request nor the env names a token
+//   no-token-store        – token id present but no token store path given
+//   token-path-invalid    – id would escape the token store dir
+//   token-file-missing     – token file does not exist on disk
+//   token-file-empty       – token file exists but is blank
+//   token-file-unreadable  – token file could not be read
+function githubTokenStatus({
+  env,
+  githubTokenId,
+  ghTokensDir,
+  fs = nodeFs,
+  path = nodePath,
+} = {}) {
+  const tokenId = githubTokenId || (env && env.githubTokenId) || null;
+  if (!tokenId) return { resolvable: false, tokenId: null, reason: "no-token-configured" };
+  if (!ghTokensDir) return { resolvable: false, tokenId, reason: "no-token-store" };
+
+  const tokenPath = path.join(ghTokensDir, tokenId);
+  const resolved = path.resolve(tokenPath);
+  if (!resolved.startsWith(path.resolve(ghTokensDir) + path.sep)) {
+    return { resolvable: false, tokenId, reason: "token-path-invalid" };
+  }
+  if (!fs.existsSync(tokenPath)) {
+    return { resolvable: false, tokenId, reason: "token-file-missing" };
+  }
+  try {
+    const token = fs.readFileSync(tokenPath, "utf8").trim();
+    if (!token) return { resolvable: false, tokenId, reason: "token-file-empty" };
+  } catch {
+    return { resolvable: false, tokenId, reason: "token-file-unreadable" };
+  }
+  return { resolvable: true, tokenId, reason: null };
+}
+
 // Strip any Authorization header value that git/gh may echo into an error
 // stream before it is returned to the caller or logged.
 function sanitizeGitOutput(text) {
@@ -229,6 +270,7 @@ module.exports = {
   PROTECTED_BRANCHES,
   resolveAgentRepo,
   buildRepoGitEnv,
+  githubTokenStatus,
   sanitizeGitOutput,
   normalizePushRequest,
 };

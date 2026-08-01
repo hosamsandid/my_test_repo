@@ -23,9 +23,8 @@
 | `.env` / `.env.example` | Secrets: Matrix admin token, LLM proxy URL and auth token, port overrides |
 | `Makefile` | Convenience targets: `make up`, `make down`, `make logs`, `make build`, `make ps` |
 | `orchestrator/orchestrator.js` | Agent lifecycle management, child-process spawning, environment seeding, internal HTTP API |
-| `orchestrator/agent-runner.js` | Per-agent process: Matrix client, Claude CLI invocations, trigger scheduler |
+| `agent-image/scripts/agent-entrypoint.py` | Per-agent runtime: Matrix client, Claude CLI invocations, trigger scheduler |
 | `orchestrator/github-poller.js` | GitHub Events API poller; fan-out to agents via pending-triggers |
-| `orchestrator/session-log.js` | Append-only JSONL event logger; maps Claude stream output to normalized events |
 | `orchestrator/setup.sh` | First-time setup: registers the admin Matrix user, prints the access token |
 | `orchestrator/CLAUDE-template.md` | Base `CLAUDE.md` template baked into the image as a fallback |
 | `admin-console/api/api.js` | Express API covering all admin operations (~60 endpoints) |

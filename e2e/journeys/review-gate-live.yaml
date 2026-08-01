@@ -1,0 +1,68 @@
+journeyVersion: 1
+id: review-gate-live
+title: The review gate on a live team
+order: 50
+# Live-team variant of the S3 review gate (#1010, concept §8 — draft and live
+# adapters differ, so the triangle is exercised in BOTH modes). The fixture
+# materialises a minimal two-role team from an inline bundle (credential-less
+# env, in-stack git remote, no GitHub polling); the journey wires the gate in
+# the Flow editor's live scope and asserts the MEMBER's persisted triggers via
+# the API — the same D1/D3 contract as the draft journey, on real agent
+# configs.
+lanes: [ci]
+timeoutMs: 240000
+
+fixtures:
+  - fixture: liveWiringTeam
+    params:
+      teamId: wiring-demo
+      teamName: Wiring Demo
+      envId: wiring-demo-env
+      envName: Wiring Demo
+      repoUrl: "http://git-remote/e2e/fixture.git"
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      Draft mode edits a document; live mode edits running agents through the
+      same dialogs. The review gate must behave identically in both — this
+      journey wires it on a real, materialised team.
+
+  - action:
+      do: flows.openTeamFlow
+      team: Wiring Demo
+  - action:
+      do: flows.addHuman
+      name: Product Owner
+  - assert:
+      do: flows.expectHumanNode
+      name: Product Owner
+
+  - id: live-triangle
+    narrative: |
+      Same gesture as in the draft: Business Analyst onto Developer, issue
+      channel, gate label `ready`, approved by the Product Owner. The live
+      adapter writes the members' configs instead of a draft document.
+    action:
+      do: flows.wireIssueChannelWithApproval
+      from: Business Analyst
+      to: Developer
+      label: ready
+      approver: Product Owner
+    screenshot: review-gate-live-triangle
+
+  # D1/D3 on the LIVE member: the persisted triggers.json carries exactly one
+  # single-event, claimed listener.
+  - assert:
+      do: flows.expectAgentTriggerApi
+      agentId: wiring-demo-developer
+      event: issues.labeled
+      labelFilter: ready
+  # D4 on the live producer.
+  - assert:
+      do: flows.expectOutcomeReviewer
+      name: Business Analyst
+      reviewer: Product Owner
+  - assert:
+      do: flows.expectNoLints

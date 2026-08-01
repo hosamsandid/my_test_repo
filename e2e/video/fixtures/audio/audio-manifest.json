@@ -1,0 +1,66 @@
+{
+  "ts-intro": {
+    "durationSec": 10.211,
+    "mediaFile": "ts-intro.mp3"
+  },
+  "ts-process": {
+    "durationSec": 10.934,
+    "mediaFile": "ts-process.mp3"
+  },
+  "ts-process-sdlc": {
+    "durationSec": 18.158,
+    "mediaFile": "ts-process-sdlc.mp3"
+  },
+  "ts-env": {
+    "durationSec": 11.579,
+    "mediaFile": "ts-env.mp3"
+  },
+  "ts-team": {
+    "durationSec": 14.013,
+    "mediaFile": "ts-team.mp3"
+  },
+  "ts-knowledge": {
+    "durationSec": 11.329,
+    "mediaFile": "ts-knowledge.mp3"
+  },
+  "ts-review": {
+    "durationSec": 13.645,
+    "mediaFile": "ts-review.mp3"
+  },
+  "ib-intro": {
+    "durationSec": 21.171,
+    "mediaFile": "ib-intro.mp3"
+  },
+  "ib-chat": {
+    "durationSec": 18.224,
+    "mediaFile": "ib-chat.mp3"
+  },
+  "ib-questions": {
+    "durationSec": 21.461,
+    "mediaFile": "ib-questions.mp3"
+  },
+  "ib-answers": {
+    "durationSec": 19.053,
+    "mediaFile": "ib-answers.mp3"
+  },
+  "ib-issue": {
+    "durationSec": 18.289,
+    "mediaFile": "ib-issue.mp3"
+  },
+  "ib-ready": {
+    "durationSec": 18.079,
+    "mediaFile": "ib-ready.mp3"
+  },
+  "ib-dev": {
+    "durationSec": 21.789,
+    "mediaFile": "ib-dev.mp3"
+  },
+  "ib-review": {
+    "durationSec": 21.092,
+    "mediaFile": "ib-review.mp3"
+  },
+  "ib-merge": {
+    "durationSec": 27.118,
+    "mediaFile": "ib-merge.mp3"
+  }
+}

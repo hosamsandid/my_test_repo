@@ -1,0 +1,169 @@
+journeyVersion: 1
+id: flows-draft
+title: Flows
+order: 40
+# CI lane only. This journey authors a process DRAFT and stops before
+# materialising, so it has no team/Matrix side effects — only the draft document.
+# The one canvas action is the port drag that wires the issue channel
+# (flows.wireIssueChannel); every other step is a plain button/dialog/inspector
+# interaction.
+lanes: [ci]
+# The two "Generate agent prompt" round-trips (mock LLM) plus the canvas drag run
+# a little past the default budget on a cold stack.
+timeoutMs: 120000
+
+# Precondition: none but a clean slate. The journey renames its draft to a fixed
+# name; the fixture pre-/post-cleans any draft with that name so re-runs on the
+# same stack stay isolated (drafts get server-generated ids, so name is the
+# deterministic handle).
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Simple SDLC
+
+steps:
+  # ── Slide 22: chapter intro — what Flows is (narrative-only) ─────────────────
+  - kind: narrative-only
+    id: intro
+    voiceover: |
+      Flows is the visual design surface — a canvas where you lay out the agents, decide who hands work to whom, and wire the orchestration by hand. Let's build one from scratch: a draft, an agent, a connection.
+    narrative: |
+      We've now seen two ways to get a team of agents: the guided Team-Setup wizard, and working with a team that already exists. But sometimes you don't want a wizard to make the decisions for you — you want to draw the process yourself, agent by agent, connection by connection. That's what Flows is for.
+
+      Flows is the visual design surface of the Agent Studio — a canvas where you lay out the agents, decide who hands work to whom, and wire the whole orchestration by hand. In the next few slides I'll show you just how simple it is to build a flow from scratch: create a draft, add an agent, and let the platform help you write it.
+
+  # Create the draft and give it the storyline name (plumbing).
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Simple SDLC
+
+  # ── Slide 23: the empty draft ───────────────────────────────────────────────
+  - id: empty-draft
+    voiceover: |
+      A draft is an editable process that exists before any team is created — nothing is live, nothing spawned. Here's a fresh, empty one called Simple SDLC. Let's add our first agent.
+    narrative: |
+      This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams, a Drafts section, and the BriefingPack flows. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
+
+      I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you materialise. Along the top are the actions I'll use: Add agent, Stages, Materialize, Export. Let's add our first agent.
+    assert:
+      do: flows.expectEmptyDraft
+    screenshot: flow-empty-draft
+
+  # ── Slide 24: Add agent from scratch (BA) ───────────────────────────────────
+  - id: add-agent
+    voiceover: |
+      I click Add agent and choose "From scratch". Instead of writing a system prompt by hand, I give the agent a name and jot down one line of intent: take requirements and create a GitHub issue.
+    narrative: |
+      I click Add agent, and this panel slides in. I have two choices: start from a template — one of the catalog roles like Developer or Code Reviewer — or, as here, from scratch.
+
+      Building from scratch is remarkably low-effort. I give the agent a name — "Business Analyst" — and then, instead of writing a full system prompt by hand, I just jot down a short note describing what it should do: "Take requirements and create a GitHub issue." That one line of intent is enough for the platform to do the heavy lifting. The large field below is where the actual agent prompt will go — but I don't have to type it myself.
+    action:
+      do: flows.openAddAgent
+      name: Business Analyst
+      notes: Take requirements and create a GitHub issue.
+    screenshot: flow-add-agent
+
+  # ── Slide 25: Generate the agent prompt ─────────────────────────────────────
+  - id: generated-prompt
+    voiceover: |
+      I press Generate agent prompt, and the Studio turns that one line into a complete, well-structured persona — drafted in seconds, landing in an editable field so I can review it before committing.
+    narrative: |
+      I press Generate agent prompt, and the Studio turns my one-line note into a complete, well-structured system prompt for the role. It lays out the Business Analyst's core responsibilities — engage the human to clarify requirements before writing anything, ask focused questions about acceptance criteria and edge cases, convert confirmed requirements into a structured GitHub issue, and only post it once the human approves.
+
+      That's a genuinely usable persona, drafted in seconds. And nothing is applied silently — it lands in an editable field, so I can review and adjust it before committing. I click Add agent, and the Business Analyst becomes the first node on my canvas.
+    # No screenshot here: the generated prompt lands in the SAME "Add agent"
+    # panel as flow-add-agent (only the prompt textarea differs), so a capture
+    # would be a near-duplicate. The generation is described in the notes of the
+    # add-agent slide instead.
+    action:
+      do: flows.generateAgentPrompt
+
+  - action:
+      do: flows.confirmAddAgent
+      name: Business Analyst
+
+  # ── Slides 26–27: second agent (Developer) — composite add ──────────────────
+  - id: second-agent
+    voiceover: |
+      I repeat the pattern for the Developer — one line of intent, "take an issue and implement it, create a PR at the end" — and generate its prompt too. Two fully-specified agents from two short sentences.
+    narrative: |
+      With the Business Analyst placed, I repeat the process for the second role. I add a new agent, name it "Developer", and again describe it in one line: "Take an issue and implement it. Create a PR at the end." Same pattern as before — a short note is enough to seed a full prompt.
+
+      And again, Generate agent prompt produces a complete role definition — this time for the Developer: turn GitHub issues into working, reviewed-ready code; read the issue thoroughly and clarify ambiguity before writing a line; follow the project's existing conventions; keep commits small and focused; write tests; and open a pull request that references the originating issue. I review it, and add the agent.
+    action:
+      do: flows.addAgentFromScratch
+      name: Developer
+      notes: Take an issue and implement it. Create a PR at the end.
+      generate: true
+
+  # ── Slide 28: two unconnected agents ────────────────────────────────────────
+  - id: two-agents
+    voiceover: |
+      Here's where we are: two agents on the canvas, each with its generated prompt — but standing side by side, unconnected. Two agents that don't hand work to each other aren't a process yet. The next step makes it a flow.
+    narrative: |
+      Here's where we are: two agents on the canvas — Business Analyst and Developer — each with its generated prompt, plus the GitHub and External-system sources up top.
+
+      But they're still standing side by side, unconnected. Two agents that don't hand work to each other aren't a process yet — they're just two agents. The next step is the one that actually makes this a flow: wiring them together.
+    assert:
+      do: flows.expectAgentCount
+      count: 2
+    screenshot: flow-two-agents
+
+  # ── Slides 29–31: wire an Issue channel with a human gate ───────────────────
+  - id: issue-channel
+    voiceover: |
+      I drag from the Business Analyst's port onto the Developer and choose an Issue channel: the BA opens an issue that wakes the Developer. I add a routing label, "ready", and tick the human approval gate — so the Developer only starts once a person applies that label. And there it is: a working, human-gated flow.
+    narrative: |
+      To connect them, I drag from the Business Analyst's port onto the Developer, and the Studio asks how these two should be connected. The options map exactly to the ways agents really hand work off: a pull-request channel, an issue channel, a label hand-off, a data flow, or a parent/child grouping. For our Business Analyst handing work to the Developer, the natural choice is the Issue channel — the BA opens an issue, and that issue wakes the Developer.
+
+      Choosing it opens its configuration. I make two decisions. First, a routing label — I enter ready. Without a label, the Developer would wake on every issue the BA opens; with the ready label, it only wakes when that label is present. Second — and this is the important one — I tick Human approval gate: a person applies the label. That single checkbox turns this hand-off into a human control point. The Developer won't start until a human has looked at the issue and applied ready.
+
+      And there it is — a working flow. The Business Analyst now carries an Issue output badge, and a connection runs down to the Developer, labelled with the ready hand-off and the little gate marker showing it's human-approved. Read top to bottom, this is a complete micro-process — but here I designed it myself, in a couple of minutes, on a blank canvas.
+    action:
+      do: flows.wireIssueChannel
+      from: Business Analyst
+      to: Developer
+      label: ready
+      humanGate: true
+    assert:
+      do: flows.expectIssueChannel
+      from: Business Analyst
+      to: Developer
+      label: ready
+    screenshot: flow-issue-channel
+
+  # ── Slide 32: stages, materialise, export ───────────────────────────────────
+  - action:
+      do: flows.addStage
+      name: Requirements
+  - action:
+      do: flows.addStage
+      name: Build
+  - action:
+      do: flows.closeStages
+  - action:
+      do: flows.assignStage
+      name: Business Analyst
+      stage: Requirements
+  - action:
+      do: flows.assignStage
+      name: Developer
+      stage: Build
+  - id: stages
+    voiceover: |
+      As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.
+    narrative: |
+      As a final touch, I turn on Stages, and the flow organises itself into labelled bands: Requirements, containing the Business Analyst, and Build, containing the Developer. Stages are purely an organising layer — they group the agents into the phases of your process and make a larger flow readable at a glance, while the hand-off between them, our human-gated ready issue, stays exactly as we drew it.
+
+      This is the finished draft. From here, one click on Materialize would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.
+    # Turn the stage-band view ON so the capture actually shows the Requirements/
+    # Build bands the narrative describes — without this the canvas is identical
+    # to flow-issue-channel (the stages are assigned but not rendered as bands).
+    action:
+      do: flows.showStages
+      stage: Requirements
+    assert:
+      do: flows.expectMaterializeAvailable
+    screenshot: flow-stages

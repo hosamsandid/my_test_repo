@@ -1,0 +1,76 @@
+journeyVersion: 1
+id: wiring-sources
+title: Sources — GitHub events, schedules, webhooks
+order: 47
+# CI lane only. Draft-only, no team/Matrix side effects. Covers the scenario
+# catalog's source wirings (#1010, concept §3): S1 (a GitHub event wakes an
+# agent), S8 (a schedule wakes it), S13 (an external webhook wakes it) — each
+# authored through its own dialog, asserted on the persisted draft.
+lanes: [ci]
+timeoutMs: 120000
+
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Source Wiring
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      Not every wake comes from another agent. The outside world reaches a
+      flow three ways: a repository event, a schedule, and an external system
+      calling a webhook. This journey wires all three onto one Triage agent.
+
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Source Wiring
+  - action:
+      do: flows.addAgentFromScratch
+      name: Triage
+      notes: First responder for externally filed issues.
+
+  # ── S1: a raw GitHub event ──────────────────────────────────────────────────
+  - id: github-source
+    narrative: |
+      Dragging from the GitHub source onto the Triage agent opens the GitHub
+      trigger dialog; "Issue opened" makes Triage the first responder for
+      every externally filed issue.
+    action:
+      do: flows.wireGithubSource
+      to: Triage
+      event: Issue opened
+    screenshot: wiring-source-github
+
+  # ── S8: a schedule ──────────────────────────────────────────────────────────
+  - id: schedule
+    narrative: |
+      Schedules are authored from the agent's Routing tab — "Add input" →
+      Schedule. A daily 07:00 sweep, with its wake instruction spelled out.
+    action:
+      do: flows.addScheduleInput
+      name: Triage
+      time: "07:00"
+      prompt: Daily backlog sweep — triage anything new.
+    screenshot: wiring-source-schedule
+
+  # ── S13: an external webhook ───────────────────────────────────────────────
+  - id: webhook
+    narrative: |
+      The External-system source wires a webhook the same way: an HTTP call
+      with a secret wakes the agent — CI pipelines, tooling, anything outside
+      GitHub.
+    action:
+      do: flows.wireWebhookSource
+      to: Triage
+      description: CI pipeline finished
+    screenshot: wiring-source-webhook
+
+  # All three inputs persisted; a source-driven agent is not a wiring smell.
+  - assert:
+      do: flows.expectDraftSourceInputs
+      role: Triage
+  - assert:
+      do: flows.expectNoLints

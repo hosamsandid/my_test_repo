@@ -1,27 +1,46 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Wifi, WifiOff, Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import { TriggerForm } from './TriggersPanel';
+import { isLaunchedLoop } from './trigger-summary.js';
+import LearningBadge from '../../components/LearningBadge';
+import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import { maintenanceBannerText } from './maintenance-banner';
+import { RESUME_MESSAGE } from './resume-session';
 
-// Default prompt sent when the user clicks "Reset & learn". The agent
+// Default prompt sent when the user clicks "Full Learn". The agent
 // continues in its current Claude session (so it has full conversational
-// context), is asked to consolidate that context into the memory files,
-// and replies with a short summary. After the reply lands, the UI clears
-// the session pointer so the next message starts fresh.
+// context), is asked to consolidate that context into the memory files
+// AND to share durable, team-useful lessons via the knowledge CLI, then
+// replies with a short summary. The knowledge paragraph's wording is kept
+// aligned with build_harvest_hint() in agent-image/scripts/agent-entrypoint.py
+// so the two instructions can't drift apart; "skip if the team knowledge
+// base is not available" covers autonomy-0 agents without a KB checkout.
 const LEARN_PROMPT =
   'Before we end this conversation: please summarize the key insights, ' +
   'decisions and open points from our discussion so far ' +
   'and update your memory/ files accordingly, routing each piece to the right file:\n' +
   '- memory/context.md — current session state (keep slim)\n' +
   '- memory/log.md — one summary entry for this conversation\n' +
-  '- memory/facts.md — atomic, deduplicated facts (one per line, with date)\n' +
-  '- memory/entities.md — rich knowledge about projects, systems, frameworks\n' +
   '- memory/users.md — per-user interaction profiles\n' +
-  'Then briefly reply with what you have saved.';
+  '- memory/facts.md / memory/entities.md — only if your Memory System instructions still use ' +
+  'these files (legacy model); on the unified model semantic knowledge goes to the team ' +
+  'knowledge base instead, never to these files\n' +
+  'In addition to your memory files, share durable lessons with your teammates ' +
+  'through the team knowledge base: for each insight that would help ANY teammate ' +
+  'on this repo (a project convention, an environment fact, a key entity) run: ' +
+  'knowledge add fact|entity|convention "<one-line statement>". ' +
+  'First run knowledge search "<topic>" to avoid restating something already recorded; ' +
+  'record only lessons that hold beyond this one conversation. ' +
+  'Skip this step if the team knowledge base is not available.\n' +
+  'Then briefly reply with what you have saved and what you shared with the team.';
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -48,10 +67,20 @@ const LEARN_PROMPT =
  * @param {(id:string|null)=>void} onHoverCorrelation
  * @param {()=>void} [onWorkspaceChanged]  Notify parent after a chat upload lands
  *        in the workspace, so the Workspace tab can refresh its tree.
+ * @param {()=>void} [onTodoBoundary]  Notify parent (AgentChat.jsx) that a
+ *        session boundary just occurred — sending a message, resetting the
+ *        session, or a trigger-started run's first message arriving — so the
+ *        pinned To-Do panel from a previous session gets dismissed (#273).
+ * @param {()=>void} [onOpenKnowledge] Open the right rail on its Knowledge tab
+ *        (wired to the "N learned" badge in the header).
+ * @param {()=>void} [onKnowledgeChanged] Notify parent after the agent replied
+ *        to the Full-Learn prompt (which may have added KB entries), so the
+ *        right rail's Knowledge tab refreshes and the user sees the button
+ *        feeding the pipeline.
  */
 export default function ChatPanel({
-  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost,
-  onWorkspaceChanged,
+  agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -80,10 +109,20 @@ export default function ChatPanel({
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
+  const [resuming, setResuming]       = useState(false);
   const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
+
+  // Chat-launched loops (#1020): a loop is started from the composer, runs as
+  // a launched run visible here, and can be stopped. `activeLoop` is the
+  // running launched-loop trigger (or null); we poll the agent's triggers to
+  // reflect its lifecycle (it self-removes on any terminal outcome).
+  const [loopDialogOpen, setLoopDialogOpen] = useState(false);
+  const [activeLoop, setActiveLoop] = useState(null);
+  const [loopBusy, setLoopBusy] = useState(false);
+  const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -91,6 +130,34 @@ export default function ChatPanel({
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
+  // Provider (LLM endpoint) switching lives in the same `modelOptions` snapshot
+  // (`endpoints` = curated set, `endpointOverride`, `canSwitch`). Switching the
+  // provider requires an agent respawn, so it blocks briefly.
+  const [providerSwitching, setProviderSwitching] = useState(false);
+  // Context-window fill for the last completed request (#471, cache-tokens
+  // fix #490, overcounting fix #509). `contextFill` (from the parent, fed by
+  // SessionLogPanel) carries a plausible estimate of the tokens actually held
+  // in context — input + cache-creation + cache-read of the turn's *last
+  // individual* API call (`result.contextTokens`, #509), since a `--resume`d
+  // session runs on prompt caching and most of its held context lives in the
+  // cache fields, not `input`, and a turn's own `result.tokens` aggregate
+  // sums/duplicates across every internal tool-call round-trip rather than
+  // reflecting a single context snapshot — plus the model actually used.
+  // Resolve that model's window size against the agent's catalog (falling
+  // back to the known-Claude-family table) and derive the warning level from
+  // the (corrected) ratio; the toolbar renders it as a rounded
+  // "<used>K / <limit>K" token count rather than a percentage. Hidden
+  // entirely when the window size can't be determined (AC 7) rather than
+  // showing a misleading value.
+  const contextWindowTokens = useMemo(() => {
+    if (!contextFill?.model) return null;
+    const modelEntry = (modelOptions?.models || []).find(m => m.id === contextFill.model);
+    return resolveContextWindowTokens(modelEntry || { id: contextFill.model });
+  }, [contextFill, modelOptions]);
+  const contextFillLevel = useMemo(() => {
+    if (!contextFill || contextWindowTokens == null) return null;
+    return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
+  }, [contextFill, contextWindowTokens]);
   // Wall-clock at the moment the user clicked "Full Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
@@ -246,14 +313,21 @@ export default function ChatPanel({
   /* ─── 3. Live stream ─────────────────────────────────────────────── */
   const handleEvent = useCallback((ev) => {
     if (!ev?.event_id) return;
+    const triggerMeta = ev.content?.['io.aee.trigger'] || null;
     const incoming = {
       event_id: ev.event_id,
       sender:   ev.sender,
       ts:       ev.origin_server_ts,
       body:     ev.content?.body || '',
       msgtype:  ev.content?.msgtype || 'm.text',
-      'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+      'io.aee.trigger':  triggerMeta,
     };
+
+    // A trigger-started run always posts this notice before invoking Claude
+    // (agent-entrypoint.py's `_post_trigger_notice`), so its arrival is the
+    // earliest observable signal that a new, unrelated session has begun in
+    // this room — close any stale To-Do window from the previous run (#273).
+    if (triggerMeta) onTodoBoundary?.();
 
     setMessages(prev => {
       // Already have the canonical event — skip.
@@ -280,10 +354,10 @@ export default function ChatPanel({
       }
       return [...prev, incoming];
     });
-  }, []);
+  }, [onTodoBoundary]);
 
   const sseUrl = roomId ? `/api/matrix/rooms/${encodeURIComponent(roomId)}/stream` : null;
-  const { status: sseStatus } = useSSE(sseUrl, {
+  useSSE(sseUrl, {
     onEvent: handleEvent,
     enabled: !!roomId,
   });
@@ -421,6 +495,7 @@ export default function ChatPanel({
 
   async function handleResetSession() {
     if (!sessionApiBase || resetting) return;
+    onTodoBoundary?.();
     setResetting(true);
     setError(null);
     try {
@@ -438,6 +513,42 @@ export default function ChatPanel({
       setResetting(false);
     }
   }
+
+  // Resume a finished session (#574): re-point the room at the chosen Claude
+  // session-ID (PUT the pointer with `resumeRequested`), then send the fixed
+  // predefined message down the normal DM path so the agent runs with --resume
+  // and the message is visible in history (AC2/AC3/AC5). The message-send is
+  // what makes the resumed session show as active (AC4). The `resuming` guard
+  // + ts dedup below stop rapid double-activation from spawning duplicate runs.
+  const handleResumeSession = useCallback(async (resumeSessionId) => {
+    if (!sessionApiBase || !resumeSessionId || resuming) return;
+    onTodoBoundary?.();
+    setResuming(true);
+    setError(null);
+    try {
+      await apiCall('POST', sessionApiBase, { sessionId: resumeSessionId });
+      // Optimistically reflect the re-pointed session so the badge updates
+      // without waiting for the post-run refetch.
+      setSessionId(resumeSessionId);
+      setSessionUpdatedAt(new Date().toISOString());
+      await handleSend(RESUME_MESSAGE);
+    } catch (err) {
+      setError(`Resume failed: ${err.message}`);
+    } finally {
+      setResuming(false);
+    }
+  }, [sessionApiBase, resuming, onTodoBoundary]);
+
+  // Fire when the parent (AgentChat) signals a resume from the Sessions tab.
+  // `ts` disambiguates repeat activations; the ref guards against re-firing on
+  // unrelated re-renders.
+  const lastResumeTsRef = useRef(0);
+  useEffect(() => {
+    if (!resumeRequest || !resumeRequest.ts) return;
+    if (resumeRequest.ts === lastResumeTsRef.current) return;
+    lastResumeTsRef.current = resumeRequest.ts;
+    handleResumeSession(resumeRequest.sessionId);
+  }, [resumeRequest, handleResumeSession]);
 
   async function handleClearHistory() {
     if (!roomId || clearingHistory) return;
@@ -485,6 +596,25 @@ export default function ChatPanel({
     }
   }
 
+  async function handleProviderChange(newEndpointId) {
+    if (!agent?.id || providerSwitching) return;
+    setProviderSwitching(true);
+    setError(null);
+    try {
+      // Empty string means "back to the environment default" → send null.
+      const payload = { endpointId: newEndpointId ? newEndpointId : null };
+      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, payload);
+      // The provider change may have cleared the model override and swapped the
+      // whole catalog — refetch the full snapshot rather than patching locally.
+      const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
+      setModelOptions(fresh);
+    } catch (err) {
+      setError(`Provider switch failed: ${err.message}`);
+    } finally {
+      setProviderSwitching(false);
+    }
+  }
+
   async function handleFullLearn() {
     if (!sessionApiBase || learnPending) return;
     setError(null);
@@ -498,7 +628,9 @@ export default function ChatPanel({
     }
   }
 
-  // Clear learnPending once the agent has replied to the learn prompt.
+  // Clear learnPending once the agent has replied to the learn prompt, and
+  // let the parent refresh the Knowledge tab — the learn run may have added
+  // entries to the team KB.
   useEffect(() => {
     if (!learnPending) return;
     if (!messages.length || !agent?.userId) return;
@@ -507,13 +639,90 @@ export default function ChatPanel({
     if (last?.isOptimistic) return;
     if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
     setLearnPending(false);
-  }, [messages, learnPending, agent?.userId]);
+    onKnowledgeChanged?.();
+  }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
+  /* ─── Loop launch (#1020) ────────────────────────────────────────────
+   * A loop is launched from the composer, runs as a launched run visible
+   * here, and self-removes on any terminal outcome. Poll the agent's triggers
+   * so the composer reflects whether a launched loop is currently running —
+   * at most one per agent (the control then offers Stop instead of Start).
+   */
+  const refreshActiveLoop = useCallback(async () => {
+    if (!agent?.id) { setActiveLoop(null); return; }
+    try {
+      const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
+      const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
+      setActiveLoop(running || null);
+    } catch {
+      /* best-effort — a transient error just keeps the last known state */
+    }
+  }, [agent?.id]);
+
+  useEffect(() => {
+    if (!agent?.id) return undefined;
+    refreshActiveLoop();
+    const timer = setInterval(refreshActiveLoop, 15000);
+    return () => clearInterval(timer);
+  }, [agent?.id, refreshActiveLoop]);
+
+  function handleLoopClick() {
+    if (activeLoop) setShowStopLoopConfirm(true);
+    else setLoopDialogOpen(true);
+  }
+
+  async function handleLaunchLoop(body) {
+    if (!agent?.id) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // A chat-launched loop is a loop trigger tagged `launched: true`; the
+      // runtime runs it once and removes it on completion. Post the room id so
+      // the terminal outcome DM lands in this chat.
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/triggers`, {
+        ...body,
+        launched: true,
+        enabled: true,
+        ...(roomId ? { roomId } : {}),
+      });
+      setLoopDialogOpen(false);
+      await refreshActiveLoop();
+    } catch (err) {
+      setError(`Could not start loop: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+    }
+  }
+
+  async function handleStopLoop() {
+    setShowStopLoopConfirm(false);
+    if (!agent?.id || !activeLoop) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // Deleting the trigger cancels the loop's re-arm cycle (the runtime
+      // cancels the runner on the next sync); stopping the session kills the
+      // in-flight iteration immediately. Both best-effort.
+      await apiCall('DELETE', `/api/agents/${encodeURIComponent(agent.id)}/triggers/${encodeURIComponent(activeLoop.id)}`);
+      if (roomId) {
+        try {
+          await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
+        } catch { /* the loop is already stopping — ignore */ }
+      }
+    } catch (err) {
+      setError(`Stop loop failed: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+      await refreshActiveLoop();
+    }
+  }
+
   async function handleSend(text) {
     if (!roomId) return;
     const body = text.trim();
     if (!body) return;
+    onTodoBoundary?.();
     const optimisticId = `pending-${crypto.randomUUID()}`;
     const ts = Date.now();
     // We don't know the admin user id yet, so use a sentinel that won't match
@@ -621,6 +830,8 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  const maintenance = useMaintenanceMode();
+  const maintenanceBanner = maintenanceBannerText(maintenance);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -670,6 +881,12 @@ export default function ChatPanel({
                 </span>
               </div>
             )}
+            <LearningBadge
+              scope={`agent:${agent.id}`}
+              refreshKey={sessionUpdatedAt}
+              onClick={onOpenKnowledge}
+              title="Show what this agent has learned (Knowledge tab)"
+            />
           </div>
           {gitInfo && gitInfo.length > 0 && (
             <div
@@ -707,7 +924,6 @@ export default function ChatPanel({
             </div>
           )}
         </div>
-        <ConnectionDot status={sseStatus} />
       </div>
 
       {/* Session-control toolbar. flexWrap lets the controls flow onto a
@@ -730,9 +946,9 @@ export default function ChatPanel({
         <button
           type="button"
           onClick={handleFullLearn}
-          disabled={!sessionId || learnPending || disabled}
-          title="Agent summarizes this conversation and saves key insights to its memory files — the session stays open afterwards"
-          style={sessionBtnStyle(!sessionId || learnPending || disabled)}
+          disabled={!sessionId || learnPending || disabled || maintenance.active}
+          title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
+          style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
@@ -779,6 +995,12 @@ export default function ChatPanel({
             Hand-off
           </button>
         )}
+        <ProviderChip
+          options={modelOptions}
+          switching={providerSwitching}
+          disabled={disabled}
+          onChange={handleProviderChange}
+        />
         <ModelPicker
           options={modelOptions}
           switching={modelSwitching}
@@ -801,6 +1023,25 @@ export default function ChatPanel({
           >
             <DollarSign size={10} />
             {sessionCost.usd.toFixed(4)}
+          </span>
+        )}
+        {contextFillLevel && (
+          <span
+            title={`${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: contextFillLevel.level === 'critical' ? 'var(--eb-status-error)'
+                : contextFillLevel.level === 'warning' ? 'var(--eb-status-warning)'
+                : 'var(--eb-text-muted)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <Gauge size={10} />
+            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
           </span>
         )}
         {sessionId && (
@@ -831,6 +1072,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           This agent is disabled. Enable it in Agent Manager to chat.
+        </div>
+      )}
+
+      {maintenanceBanner && (
+        <div style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {maintenanceBanner}
         </div>
       )}
 
@@ -931,7 +1185,7 @@ export default function ChatPanel({
             gap: 'var(--eb-space-2)',
           }}>
             <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
-            <div>{creating ? 'Opening DM with agent…' : 'Loading conversation…'}</div>
+            <div>{creating ? 'Opening conversation with agent…' : 'Loading conversation…'}</div>
           </div>
         )}
 
@@ -1012,10 +1266,13 @@ export default function ChatPanel({
       {/* Input */}
       <MessageInput
         onSend={handleSend}
-        disabled={disabled || !roomId || sending}
+        disabled={disabled || !roomId || sending || maintenance.active}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}
+        onLoopClick={handleLoopClick}
+        loopRunning={!!activeLoop}
+        loopBusy={loopBusy}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}
@@ -1038,6 +1295,30 @@ export default function ChatPanel({
         open={showHandoff}
         agent={agent}
         onClose={() => setShowHandoff(false)}
+      />
+
+      {/* Loop launcher (#1020): reuse the shared loop configuration form,
+          pinned to a loop and started in one step ("Start loop"). */}
+      <SidePanel open={loopDialogOpen} onClose={() => setLoopDialogOpen(false)} title="Start a loop">
+        <TriggerForm
+          agentId={agent.id}
+          saving={loopBusy}
+          lockType="loop"
+          allowLoopType
+          submitLabel="Start loop"
+          onSave={handleLaunchLoop}
+          onCancel={() => setLoopDialogOpen(false)}
+        />
+      </SidePanel>
+
+      <ConfirmDialog
+        open={showStopLoopConfirm}
+        title="Stop loop"
+        message="Stop the running loop for this agent? The current iteration is interrupted and no further iterations run."
+        variant="danger"
+        confirmLabel="Stop loop"
+        onConfirm={handleStopLoop}
+        onCancel={() => setShowStopLoopConfirm(false)}
       />
     </div>
   );
@@ -1080,18 +1361,185 @@ function SessionBadge({ active }) {
       alignItems: 'center',
       gap: 'var(--eb-space-1)',
       fontSize: 'var(--eb-text-xs)',
-      color: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+      color: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
       fontWeight: 'var(--eb-font-medium)',
     }}>
       <span style={{
         width: 7,
         height: 7,
         borderRadius: 'var(--eb-radius-full)',
-        background: active ? 'var(--eb-status-success)' : 'var(--eb-text-muted)',
+        background: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
         display: 'inline-block',
       }} />
       {active ? 'Session active' : 'New session'}
     </span>
+  );
+}
+
+// Human label for an auth type. `null` (no endpoint) → the .env fallback.
+function authTypeLabel(authType) {
+  if (!authType) return 'Default (.env)';
+  return authType === 'oauth-token' ? 'Subscription' : 'API key';
+}
+
+// Compact, always-visible Model-Provider indicator next to the model picker.
+// Shows which LLM endpoint + auth type the agent actually runs on (transparency)
+// and, on click, a popover with the full binding plus a per-agent provider
+// switcher restricted to the agent team's curated, usable providers.
+function ProviderChip({ options, switching, disabled, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return undefined;
+    function onDocClick(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  if (!options) return null;
+
+  const endpoints = options.endpoints || [];
+  const overridden = !!options.endpointOverride;
+  const hasEndpoint = !!options.endpointId;
+  const effectiveModel = options.override || options.defaultModelId || null;
+  // Any-role team members may switch, but only within the curated team set.
+  const canSwitch = !!options.canSwitch && endpoints.length > 0 && !disabled;
+  // The <select> reflects the current binding: the override if set, else the
+  // env endpoint (empty string = "use the environment default").
+  const selectValue = options.endpointOverride || '';
+
+  const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
+  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Default (.env)';
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        title="This agent's Model Provider — click for details & switch"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: '3px 8px',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'inherit',
+          color: chipColor,
+          background: 'transparent',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          cursor: 'pointer',
+          maxWidth: 240,
+        }}
+      >
+        {switching
+          ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+          : <Zap size={11} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {hasEndpoint ? `${label} · ${authTypeLabel(options.authType)}` : label}
+        </span>
+        {overridden && <span style={{ fontSize: '0.9em' }}>•</span>}
+        <ChevronDown size={11} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            right: 0,
+            zIndex: 50,
+            minWidth: 280,
+            padding: 12,
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            boxShadow: 'var(--eb-shadow-lg)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-primary)',
+            cursor: 'default',
+          }}
+        >
+          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env fallback —')} />
+          <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
+          {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
+          <ProviderInfoRow label="Model" value={effectiveModel || '(provider default)'} mono />
+          {overridden && (
+            <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
+              Override active — environment default:{' '}
+              {options.envEndpointId || '(none)'}
+            </div>
+          )}
+
+          <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
+
+          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Switch provider</div>
+          {canSwitch ? (
+            <select
+              value={selectValue}
+              disabled={switching}
+              onChange={(e) => onChange(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '4px 6px',
+                fontSize: 'var(--eb-text-xs)',
+                fontFamily: 'inherit',
+                color: 'inherit',
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-sm)',
+                cursor: switching ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <option value="">
+                {options.envEndpointId ? 'Environment default' : '— Environment default (no provider) —'}
+              </option>
+              {endpoints.map(ep => (
+                <option key={ep.id} value={ep.id}>
+                  {ep.name} · {authTypeLabel(ep.authType)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div style={{ color: 'var(--eb-text-muted)' }}>
+              {endpoints.length === 0
+                ? 'No providers are available for this team.'
+                : 'You are not allowed to switch the provider.'}
+            </div>
+          )}
+          {canSwitch && (
+            <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              Switching briefly restarts the agent container; the chat session
+              is preserved.
+              {switching && ' Restarting…'}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderInfoRow({ label, value, mono }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+      <span style={{ color: 'var(--eb-text-muted)', minWidth: 68 }}>{label}</span>
+      <span style={{
+        flex: 1,
+        wordBreak: 'break-all',
+        fontFamily: mono ? 'var(--eb-font-mono, monospace)' : 'inherit',
+        color: 'var(--eb-text-primary)',
+      }}>{value}</span>
+    </div>
   );
 }
 
@@ -1203,22 +1651,3 @@ function sessionBtnStyle(isDisabled) {
   };
 }
 
-function ConnectionDot({ status }) {
-  let color = 'var(--eb-text-muted)';
-  let label = 'Idle';
-  let Icon  = WifiOff;
-  if (status === 'open')         { color = 'var(--eb-status-success)'; label = 'Live';         Icon = Wifi; }
-  else if (status === 'connecting')   { color = 'var(--eb-status-warning)'; label = 'Connecting…'; Icon = Loader2; }
-  else if (status === 'reconnecting') { color = 'var(--eb-status-warning)'; label = 'Reconnecting…'; Icon = Loader2; }
-
-  const animate = status === 'connecting' || status === 'reconnecting';
-  return (
-    <div title={label} style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-      color, fontSize: 'var(--eb-text-xs)',
-    }}>
-      <Icon size={12} style={animate ? { animation: 'spin 1s linear infinite' } : undefined} />
-      <span>{label}</span>
-    </div>
-  );
-}

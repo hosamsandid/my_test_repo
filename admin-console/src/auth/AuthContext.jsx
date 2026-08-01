@@ -5,6 +5,12 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 // GET /api/auth/session rather than re-prompting. This context is intentionally
 // provider-agnostic: when SSO replaces the password check server-side, only the
 // login() call's transport changes — `authenticated`/`user`/`logout` stay.
+//
+// `user` carries the server's authorization descriptor (#584): besides
+// `username` it has `admin` (env admin OR System-Admin → full visibility),
+// `envAdmin`, `systemAdmin`, `userId`, and `teams: [{teamId, role}]`. The UI
+// reads `user.admin` to hide System-Admin-only pages and `user.teams` roles to
+// gate per-team management actions.
 
 const AuthContext = createContext(null);
 

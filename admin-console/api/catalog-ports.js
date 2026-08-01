@@ -1,5 +1,7 @@
 'use strict';
 
+const { outcomesToGithub, isAuthoredOutcomes } = require('./outcomes');
+
 // ─── Catalog v2 — typed integration ports on role templates (#420) ──────────
 //
 // Agent templates historically hard-wire concrete triggers (e.g. the dispatcher
@@ -56,12 +58,15 @@ function normalizeTemplatePorts(t) {
   const tpl = t && typeof t === 'object' ? t : {};
   const rawPorts = tpl.ports && typeof tpl.ports === 'object' ? tpl.ports : {};
   const rawProduces = rawPorts.produces && typeof rawPorts.produces === 'object' ? rawPorts.produces : null;
-  // produces defaults from the existing `github` flags so already-tagged
-  // producers (developer, documentation-sync, business-analyst) need no
-  // duplicate declaration.
+  // produces defaults from: explicit ports.produces > github flags > outcomes
+  // openPr/openIssue actions (#831) — so templates that migrated from github.*
+  // to outcomes need no duplicate declaration.
+  const ocGh = isAuthoredOutcomes(tpl.outcomes) ? outcomesToGithub(tpl.outcomes) : {};
   const produces = {
-    pr: rawProduces ? !!rawProduces.pr : !!(tpl.github && tpl.github.producesPr),
-    issue: rawProduces ? !!rawProduces.issue : !!(tpl.github && tpl.github.producesIssue),
+    pr: rawProduces ? !!rawProduces.pr
+      : !!(tpl.github && tpl.github.producesPr) || !!ocGh.producesPr,
+    issue: rawProduces ? !!rawProduces.issue
+      : !!(tpl.github && tpl.github.producesIssue) || !!ocGh.producesIssue,
   };
   return {
     patternRole: normalizePatternRole(tpl.patternRole),

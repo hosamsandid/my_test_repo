@@ -1,12 +1,16 @@
 import React, { useState, useMemo } from 'react';
 import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck, KeyRound } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import LearningBadge from '../components/LearningBadge';
+import { groupAgentsForOwnership } from './teams-ownership';
 
 const DEFAULT_TEAM_ID = 'default';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
@@ -105,7 +109,11 @@ function CreateTeamForm({ onSave, onCancel, saving, error }) {
 }
 
 /* ── Manage-team panel (details + members) ────────────────────────────── */
-function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
+// `readOnly` (a Team Member viewing a team they don't administer, #584 AC9)
+// renders details + members as a read-only view: no editing, adding, role
+// changes or removals. The backend gates these mutations independently
+// (canManageTeam → 403), so this only trims the UI to what's permitted.
+function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnly = false }) {
   const [name, setName] = useState(team.name || '');
   const [description, setDescription] = useState(team.description || '');
   const [savingDetails, setSavingDetails] = useState(false);
@@ -158,14 +166,16 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
-      <Section title="Team details">
-        <FormInput label="Name" value={name} onChange={setName} />
-        <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} />
-        <div>
-          <button onClick={saveDetails} disabled={savingDetails || !name.trim()} style={{ ...primaryBtn, opacity: (savingDetails || !name.trim()) ? 0.6 : 1 }}>
-            {savingDetails ? 'Saving…' : 'Save details'}
-          </button>
-        </div>
+      <Section title="Team details" right={<LearningBadge scope={`team:${team.id}`} showZero title="Team knowledge learned" />}>
+        <FormInput label="Name" value={name} onChange={setName} disabled={readOnly} />
+        <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} disabled={readOnly} />
+        {!readOnly && (
+          <div>
+            <button onClick={saveDetails} disabled={savingDetails || !name.trim()} style={{ ...primaryBtn, opacity: (savingDetails || !name.trim()) ? 0.6 : 1 }}>
+              {savingDetails ? 'Saving…' : 'Save details'}
+            </button>
+          </div>
+        )}
       </Section>
 
       <Section title={`Members (${teamMembers.length})`}>
@@ -175,7 +185,7 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
         {teamMembers.map(m => {
           const u = userById[m.userId];
           return (
-            <div key={m.id || m.userId} style={{
+            <div key={m.id || m.userId} className="eb-wrap-md" style={{
               display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
               padding: 'var(--eb-space-2) var(--eb-space-3)',
               background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
@@ -191,30 +201,38 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError }) {
                 </div>
                 {u?.email && <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email}</div>}
               </div>
-              <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
-                {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-              </select>
-              <button onClick={() => removeMember(m.userId)} disabled={busy} title="Remove from team" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
-                <Trash2 size={13} />
-              </button>
+              {readOnly ? (
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{ROLE_LABELS[m.role] || m.role}</span>
+              ) : (
+                <>
+                  <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
+                    {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                  </select>
+                  <IconButton icon={Trash2} label="Remove from team" danger onClick={() => removeMember(m.userId)} disabled={busy} />
+                </>
+              )}
             </div>
           );
         })}
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', paddingTop: 'var(--eb-space-2)' }}>
-          <select value={addUserId} onChange={e => setAddUserId(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
-            <option value="">{candidateUsers.length ? 'Select a user to add…' : 'No more users — create one first'}</option>
-            {candidateUsers.map(u => <option key={u.id} value={u.id}>{(u.displayName || u.subject)}{u.email ? ` — ${u.email}` : ''}</option>)}
-          </select>
-          <select value={addRole} onChange={e => setAddRole(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
-            {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-          </select>
-          <button onClick={addMember} disabled={busy || !addUserId} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (busy || !addUserId) ? 0.6 : 1 }}>
-            <UserPlus size={14} /> Add
-          </button>
-        </div>
+        {!readOnly && (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', paddingTop: 'var(--eb-space-2)' }}>
+            <select value={addUserId} onChange={e => setAddUserId(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+              <option value="">{candidateUsers.length ? 'Select a user to add…' : 'No more users — create one first'}</option>
+              {candidateUsers.map(u => <option key={u.id} value={u.id}>{(u.displayName || u.subject)}{u.email ? ` — ${u.email}` : ''}</option>)}
+            </select>
+            <select value={addRole} onChange={e => setAddRole(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
+              {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+            </select>
+            <button onClick={addMember} disabled={busy || !addUserId} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (busy || !addUserId) ? 0.6 : 1 }}>
+              <UserPlus size={14} /> Add
+            </button>
+          </div>
+        )}
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Users are created under <strong>Manage Users</strong>. System Admins have global access regardless of team membership.
+          {readOnly
+            ? 'You have read-only access to this team. Team Admins can manage members.'
+            : <>Users are created under <strong>Manage Users</strong>. System Admins have global access regardless of team membership.</>}
         </div>
       </Section>
     </div>
@@ -306,7 +324,7 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 'var(--eb-text-sm)' }}>{u.displayName || u.subject}</div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email || u.subject}</div>
@@ -315,12 +333,8 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
               <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                 <input type="checkbox" checked={!!u.systemAdmin} onChange={() => toggleSysadmin(u)} /> sysadmin
               </label>
-              <button onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} title="Set login password" style={ghostBtn}>
-                <KeyRound size={13} />
-              </button>
-              <button onClick={() => setDeleteTarget(u)} title="Delete user" style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)' }}>
-                <Trash2 size={13} />
-              </button>
+              <IconButton icon={KeyRound} label="Set login password" onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} />
+              <IconButton icon={Trash2} label="Delete user" danger onClick={() => setDeleteTarget(u)} />
             </div>
             {pwUserId === u.id && (
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
@@ -363,13 +377,23 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
   const teamName = id => teams.find(t => t.id === id)?.name || id;
   const teamOptions = teams.map(t => t.id);
 
+  // An Agent Team moves between tenants as one unit (#568): reassigning the
+  // parent `team` agent cascades to all its members server-side, so the UI
+  // fires a single call against the team agent and re-fetches.
   async function reassign(kind, id, teamId) {
     try {
       if (kind === 'agent') await apiCall('PUT', `/api/agents/${encodeURIComponent(id)}`, { teamId });
       else await apiCall('PUT', `/api/environments/${encodeURIComponent(id)}`, { teamId });
-      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
     } catch (e) { onError(e.message); }
+    finally {
+      if (kind === 'agent') onRefreshAgents(); else onRefreshEnvs();
+    }
   }
+
+  const { agentTeams, standaloneAgents } = useMemo(
+    () => groupAgentsForOwnership(agents),
+    [agents],
+  );
 
   const TeamSelect = ({ value, onChange }) => (
     <select value={value || DEFAULT_TEAM_ID} onChange={e => onChange(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
@@ -377,12 +401,15 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     </select>
   );
 
+  const cardStyle = {
+    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+    padding: 'var(--eb-space-2) var(--eb-space-3)',
+    background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  };
+
+  // A standalone agent / environment: its own assignment control.
   const row = (kind, item, label, sub) => (
-    <div key={`${kind}:${item.id}`} style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-      padding: 'var(--eb-space-2) var(--eb-space-3)',
-      background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-    }}>
+    <div key={`${kind}:${item.id}`} style={cardStyle}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 'var(--eb-text-sm)' }}>{label}</div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{sub}</div>
@@ -391,11 +418,38 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
     </div>
   );
 
+  // An Agent Team: one assignment control for the whole squad; members are
+  // listed read-only beneath it (no individual dropdown — they inherit).
+  const teamGroup = ({ team, members }) => (
+    <div key={`team:${team.id}`} style={{ ...cardStyle, flexDirection: 'column', alignItems: 'stretch', gap: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 'var(--eb-text-sm)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+            <Users2 size={13} /> {team.displayName || team.id}
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Agent Team · {members.length} member{members.length === 1 ? '' : 's'}</span>
+          </div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{team.id}</div>
+        </div>
+        <TeamSelect value={team.teamId} onChange={tid => reassign('agent', team.id, tid)} />
+      </div>
+      {members.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', paddingLeft: 'var(--eb-space-3)', borderLeft: '2px solid var(--eb-border-default)' }}>
+          {members.map(m => (
+            <div key={m.id} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', display: 'flex', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
+              <span>{m.displayName || m.id}</span>
+              <span style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{m.id}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--eb-space-6)' }}>
-      <Section title={`Agents (${agents.length})`}>
-        {agents.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
-        {agents.map(a => row('agent', a, a.displayName || a.id, `${a.id} · ${a.role || 'agent'}`))}
+      <Section title={`Agents (${agentTeams.length})`}>
+        {agentTeams.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No agents.</div>}
+        {agentTeams.map(teamGroup)}
       </Section>
       <Section title={`Working Environments (${environments.length})`}>
         {environments.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No environments.</div>}
@@ -407,6 +461,14 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
 
 /* ── Page ─────────────────────────────────────────────────────────────── */
 export default function Teams() {
+  const { user } = useAuth();
+  // Full admins (env admin + System Admin) manage everything; a non-admin may
+  // only manage a team they are the Team Admin of (#584 AC9). Mirrors the
+  // backend's canManageTeam — the UI trims controls, the API enforces.
+  const isAdmin = !!user?.admin;
+  const canManage = (teamId) =>
+    isAdmin || (user?.teams || []).some(t => t.teamId === teamId && t.role === 'team-admin');
+
   const { data: teams, loading: lt, error: et, refetch: refetchTeams } = useApi('/api/admin/teams');
   const { data: users, loading: lu, error: eu, refetch: refetchUsers } = useApi('/api/admin/users');
   const { data: memberships, refetch: refetchMemberships } = useApi('/api/admin/memberships');
@@ -438,19 +500,28 @@ export default function Teams() {
     { key: '_members', label: 'Members', sortable: false, render: (_, row) => memberCount[row.id] || 0 },
     {
       key: '_actions', label: '', sortable: false,
-      render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <button onClick={() => setManageTeam(row)} title="Manage" style={ghostBtn}><Settings2 size={13} /> Manage</button>
-          <button
-            onClick={() => setDeleteTarget(row)}
-            disabled={row.id === DEFAULT_TEAM_ID}
-            title={row.id === DEFAULT_TEAM_ID ? 'The default team cannot be deleted' : 'Delete'}
-            style={{ ...ghostBtn, borderColor: 'var(--eb-status-error)', color: 'var(--eb-status-error)', opacity: row.id === DEFAULT_TEAM_ID ? 0.4 : 1, cursor: row.id === DEFAULT_TEAM_ID ? 'not-allowed' : 'pointer' }}
-          >
-            <Trash2 size={13} />
-          </button>
-        </div>
-      ),
+      render: (_, row) => {
+        const manageable = canManage(row.id);
+        return (
+          <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            <button onClick={() => setManageTeam(row)} title={manageable ? 'Manage' : 'View'} style={ghostBtn}>
+              <Settings2 size={13} /> {manageable ? 'Manage' : 'View'}
+            </button>
+            {/* Delete is a management action: only shown to a full admin or the
+                team's Team Admin (never for the default team). #584 AC9. */}
+            {manageable && (
+              <IconButton
+                icon={Trash2}
+                label="Delete"
+                danger
+                onClick={() => setDeleteTarget(row)}
+                disabled={row.id === DEFAULT_TEAM_ID}
+                title={row.id === DEFAULT_TEAM_ID ? 'The default team cannot be deleted' : 'Delete'}
+              />
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -494,14 +565,19 @@ export default function Teams() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Teams</h1>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <button onClick={() => setManagingUsers(true)} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
-            <Users2 size={15} /> Manage Users
-          </button>
-          <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
-            <Plus size={15} /> New Team
-          </button>
-        </div>
+        {/* Creating teams and managing global user records are System-Admin
+            actions (#584); a Team Admin manages memberships within their own
+            team via the per-team Manage panel, not here. */}
+        {isAdmin && (
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button onClick={() => setManagingUsers(true)} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
+              <Users2 size={15} /> Manage Users
+            </button>
+            <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
+              <Plus size={15} /> New Team
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={{
@@ -519,14 +595,18 @@ export default function Teams() {
 
       <DataTable columns={COLUMNS} data={teamList} emptyText="No teams yet. Click 'New Team' to add one." getRowKey={r => r.id} onRowClick={r => setManageTeam(r)} />
 
-      <ResourceOwnership
-        teams={teamList}
-        agents={agents ?? []}
-        environments={environments ?? []}
-        onError={setActionError}
-        onRefreshAgents={refetchAgents}
-        onRefreshEnvs={refetchEnvs}
-      />
+      {/* Reassigning agents/environments across teams is a global operation —
+          System-Admin-only (#584). Non-admins never see this section. */}
+      {isAdmin && (
+        <ResourceOwnership
+          teams={teamList}
+          agents={agents ?? []}
+          environments={environments ?? []}
+          onError={setActionError}
+          onRefreshAgents={refetchAgents}
+          onRefreshEnvs={refetchEnvs}
+        />
+      )}
 
       <SidePanel open={creating} onClose={() => setCreating(false)} title="New team" width="520px">
         {creating && <CreateTeamForm onSave={handleCreate} onCancel={() => setCreating(false)} saving={savingCreate} error={createError} />}
@@ -540,6 +620,7 @@ export default function Teams() {
             memberships={membershipList}
             onRefresh={refreshAll}
             onError={setActionError}
+            readOnly={!canManage(liveManageTeam.id)}
           />
         )}
       </SidePanel>

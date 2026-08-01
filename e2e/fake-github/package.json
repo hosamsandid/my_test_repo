@@ -1,0 +1,11 @@
+{
+  "name": "fake-github",
+  "version": "1.0.0",
+  "private": true,
+  "description": "E2E-only fake GitHub REST + mock /v1/messages server (#710, journey-spec §6.1/§6.3).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

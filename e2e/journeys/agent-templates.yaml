@@ -1,0 +1,31 @@
+journeyVersion: 1
+id: agent-templates
+title: Agent Templates
+order: 20
+# CI lane only: reads the seeded, built-in template catalog — no team, no
+# environment, no fixtures. The e2e storageState is a System Admin, which is the
+# only precondition the /role-templates page needs.
+lanes: [ci]
+
+steps:
+  # ── Slide 33: chapter intro (narrative-only) ────────────────────────────────
+  - kind: narrative-only
+    narrative: |
+      Building agents from scratch, one generated prompt at a time, is powerful — but you don't want to reinvent the same Business Analyst or Code Reviewer every time you design a new flow. That's where Agent Templates come in.
+
+      An Agent Template is a ready-made, reusable agent definition — its persona prompt, its session behaviour, its triggers — packaged so you can drop it straight into a flow. Think of them as the building blocks the platform ships with, plus any you create yourself.
+
+  # ── Slide 35: the template library ──────────────────────────────────────────
+  - id: template-library
+    narrative: |
+      This is where those templates live: the Agent Templates management page. It's the single catalog of every predefined agent the platform offers — the same ones the Team-Setup wizard and the Flow editor draw from.
+
+      Each row is one template, with its ID, its category — chat or reactive — its session policy, and its source. You get the whole library out of the box: Architect, Backlog Hygiene, Business Analyst, Code Reviewer, Developer, Dispatcher, Documentation Sync, Issue Triage, and more — each a mature, ready-to-use role. The built-in ones ship as read-only defaults, but the important part is up here: New template. You can author your own reusable agents — capture a role you've refined, or a persona specific to your organisation — and from then on it appears in this catalog and in every flow's template picker.
+
+      One note worth making: editing a template only affects future agents created from it; agents you've already spawned keep running independently. So Agent Templates are really about reuse at scale — define a good agent once, and reuse it across every team and every flow you build.
+    action:
+      do: templates.openTemplatesPage
+    assert:
+      do: templates.expectTemplateCatalog
+      templateNames: [Business Analyst, Developer, Code Reviewer]
+    screenshot: template-library

@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Check, ChevronRight, PlugZap, RefreshCw, Plus, X, ArrowRight, SkipForward,
-  Copy, KeyRound, ClipboardPaste, ExternalLink,
+  Check, PlugZap, RefreshCw, Plus, X, ArrowRight, SkipForward,
+  Copy, KeyRound, ClipboardPaste, ExternalLink, LogIn, ShieldAlert,
 } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
+import OAuthLoginWizard from '../components/OAuthLoginWizard';
+import { buildLlmProviderPayload, canSaveLlmProvider } from './setup-wizard-payload';
 
 /* ─── Shared button styles ─────────────────────────────────────── */
 
@@ -44,11 +47,9 @@ const inputStyle = {
 /* ─── Progress Stepper ─────────────────────────────────────────── */
 
 const STEPS = [
-  { id: 'llm',         label: 'Model Provider',      required: true },
-  { id: 'ssh-key',     label: 'SSH Key',             required: false },
-  { id: 'gh-token',    label: 'GitHub Token',        required: false },
-  { id: 'environment', label: 'Working Environment', required: false },
-  { id: 'agent',       label: 'First Agent',         required: false },
+  { id: 'llm',      label: 'Model Provider', required: true },
+  { id: 'ssh-key',  label: 'SSH Key',        required: false },
+  { id: 'gh-token', label: 'GitHub Token',   required: false },
 ];
 
 function Stepper({ current, done }) {
@@ -160,8 +161,11 @@ function ModelEditor({ models, onChange }) {
   );
 }
 
-function StepLlm({ onNext, onSkip }) {
+function StepLlm({ onNext }) {
   const [name, setName]         = useState('Default');
+  // Auth type: classic api-key/proxy vs Claude subscription OAuth token.
+  const [authType, setAuthType] = useState('api-key');
+  const isOauth = authType === 'oauth-token';
   const [baseUrl, setBaseUrl]   = useState('');
   const [authToken, setAuthToken] = useState('');
   const [models, setModels]     = useState([]);
@@ -170,20 +174,22 @@ function StepLlm({ onNext, onSkip }) {
   const [probeMsg, setProbeMsg] = useState(null);
   const [error, setError]       = useState(null);
   const [savedId, setSavedId]   = useState(null);
+  // OAuth (subscription) auth — the single-user compliance ack plus a token
+  // source: a completed login flow (claimed server-side on save) or a manually
+  // pasted setup-token value.
+  const [complianceOk, setComplianceOk] = useState(false);
+  const [oauthFlowId, setOauthFlowId]   = useState(null);
+  const [wizardOpen, setWizardOpen]     = useState(false);
 
-  const canSave = name.trim() && baseUrl.trim();
+  const canSave = canSaveLlmProvider({ name, authType, baseUrl, authToken, complianceAck: complianceOk, oauthFlowId });
 
   async function handleSave() {
     setSaving(true); setError(null);
     try {
-      const payload = {
-        name: name.trim(), baseUrl: baseUrl.trim(),
-        models: models.filter(m => m.id?.trim()).map(m => ({
-          id: m.id.trim(), displayName: (m.displayName || m.id).trim(),
-          ...(m.kind ? { kind: m.kind } : {}),
-        })),
-      };
-      if (authToken.trim()) payload.authToken = authToken.trim();
+      const payload = buildLlmProviderPayload({
+        name, authType, baseUrl, authToken, models,
+        complianceAck: complianceOk, oauthFlowId,
+      });
       const ep = await apiCall('POST', '/api/llm-endpoints', payload);
       setSavedId(ep.id);
     } catch (e) {
@@ -200,9 +206,9 @@ function StepLlm({ onNext, onSkip }) {
       const r = await apiCall('POST', `/api/llm-endpoints/${savedId}/discover-models`);
       setModels(r.models || []);
       setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s)` });
-      // persist discovered models
+      // persist discovered models (keep the saved auth type + baseUrl intact)
       await apiCall('PUT', `/api/llm-endpoints/${savedId}`, {
-        name, baseUrl,
+        name, authType, baseUrl: isOauth ? '' : baseUrl,
         models: (r.models || []).filter(m => m.id?.trim()),
       });
     } catch (e) {
@@ -232,7 +238,8 @@ function StepLlm({ onNext, onSkip }) {
           Model Provider
         </h2>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          Tell Agent Studio where to send model traffic — the Anthropic API directly, a LiteLLM proxy, or any internal gateway that speaks the Anthropic Messages API.
+          Tell Agent Studio where to send model traffic — an API key against the Anthropic API, a LiteLLM proxy or an
+          internal gateway, or an Anthropic subscription (Max / Enterprise seat) via <code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code>.
           This is the only required step; everything else can be configured later.
         </p>
       </div>
@@ -240,26 +247,136 @@ function StepLlm({ onNext, onSkip }) {
       <ErrorBanner msg={error} />
 
       <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. LiteLLM Prod" />
+
+      {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
-        <FormInput label="Base URL" required type="url" value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Must speak the Anthropic Messages API — e.g. the Anthropic API, a LiteLLM proxy, or an internal gateway that exposes it.
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+          Authentication
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+          {[
+            { value: 'api-key', label: 'API key / proxy', hint: 'Bearer token against a Base URL (Anthropic API, LiteLLM, gateway)' },
+            { value: 'oauth-token', label: 'Anthropic subscription (OAuth)', hint: 'Claude Max / Enterprise seat via claude setup-token' },
+          ].map(opt => (
+            <label key={opt.value} title={opt.hint} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: authType === opt.value ? 'var(--eb-bg-elevated)' : 'transparent',
+              border: `1px solid ${authType === opt.value ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+              borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)', cursor: savedId ? 'default' : 'pointer',
+            }}>
+              <input
+                type="radio"
+                name="setup-llm-auth-type"
+                value={opt.value}
+                checked={authType === opt.value}
+                disabled={!!savedId}
+                onChange={() => { setAuthType(opt.value); setProbeMsg(null); }}
+              />
+              {opt.label}
+            </label>
+          ))}
         </div>
       </div>
 
-      <div>
-        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
-          Auth token <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(optional)</span>
+      {!isOauth && (
+        <div>
+          <FormInput label="Base URL" required type="url" value={baseUrl} onChange={setBaseUrl} placeholder="https://api.anthropic.com" />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Must speak the Anthropic Messages API — e.g. the Anthropic API, a LiteLLM proxy, or an internal gateway that exposes it.
+          </div>
         </div>
-        <textarea
-          value={authToken} onChange={e => setAuthToken(e.target.value)} rows={2}
-          placeholder="sk-… (sent as Bearer token)"
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }}
-        />
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Stored in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>/workspace/llm-endpoints/_keys/</code> (chmod 600). Never returned by the API.
+      )}
+
+      {isOauth && !savedId && (
+        <>
+          <div style={{
+            padding: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-sm)',
+            color: 'var(--eb-text-secondary)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+          }}>
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start' }}>
+              <ShieldAlert size={15} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-status-warning)' }} />
+              <span>
+                <strong>Single-user operation only.</strong> Anthropic's Consumer Terms permit OAuth tokens from
+                Free/Pro/Max subscriptions solely for the subscription owner's own use — they must not serve
+                other users or third parties. For team setups use per-seat Enterprise tokens (one provider per seat)
+                or an API key. Agents bound to this provider talk directly to <code style={{ fontFamily: 'var(--eb-font-mono)' }}>api.anthropic.com</code> and
+                share the subscription's rate limits with your interactive Claude sessions.
+              </span>
+            </div>
+            <label style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={complianceOk}
+                onChange={e => setComplianceOk(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                I confirm that every agent using this provider runs exclusively for me, the owner of this
+                Claude subscription (single-user operation). <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+              </span>
+            </label>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+              Subscription login
+            </div>
+            {oauthFlowId ? (
+              <div style={{
+                fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)',
+                display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)',
+              }}>
+                <Check size={14} /> Login completed — the token is stored when you save.
+                <button type="button" onClick={() => { setOauthFlowId(null); setWizardOpen(false); }} style={btnGhost}>
+                  Discard
+                </button>
+              </div>
+            ) : wizardOpen ? (
+              <OAuthLoginWizard
+                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); }}
+                onClose={() => setWizardOpen(false)}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setWizardOpen(true)}
+                style={{ ...btnPrimary, alignSelf: 'flex-start' }}
+              >
+                <LogIn size={14} /> Sign in with Anthropic…
+              </button>
+            )}
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-2)' }}>
+              Runs <code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code> on the orchestrator and issues a long-lived (~1 year) token.
+              Alternatively, run it on any machine yourself and paste the resulting <code style={{ fontFamily: 'var(--eb-font-mono)' }}>sk-ant-oat…</code> token below.
+            </div>
+          </div>
+        </>
+      )}
+
+      {!savedId && (
+        <div>
+          <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
+            {isOauth
+              ? <>Setup token <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(manual alternative to the login above)</span></>
+              : <>Auth token <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(optional)</span></>}
+          </div>
+          <textarea
+            value={authToken} onChange={e => setAuthToken(e.target.value)} rows={2}
+            placeholder={isOauth ? 'sk-ant-oat… (output of `claude setup-token`)' : 'sk-… (sent as Bearer token)'}
+            style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }}
+          />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+            Stored in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>/workspace/llm-endpoints/_keys/</code> (chmod 600). Never returned by the API.
+          </div>
         </div>
-      </div>
+      )}
 
       {!savedId ? (
         <button onClick={handleSave} disabled={saving || !canSave}
@@ -530,7 +647,7 @@ function StepSshKey({ onNext, onSkip }) {
 
 /* ─── Step 3: GitHub Token ─────────────────────────────────────── */
 
-function StepGhToken({ onNext, onSkip }) {
+function StepGhToken({ onNext, onSkip, isLast }) {
   const [name, setName]   = useState('');
   const [token, setToken] = useState('');
   const [saving, setSaving] = useState(false);
@@ -617,216 +734,11 @@ function StepGhToken({ onNext, onSkip }) {
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button onClick={onNext} disabled={!saved}
           style={{ ...btnPrimary, opacity: saved ? 1 : 0.5, cursor: saved ? 'pointer' : 'not-allowed' }}>
-          Continue <ArrowRight size={15} />
+          {isLast ? <><Check size={15} /> Finish setup</> : <>Continue <ArrowRight size={15} /></>}
         </button>
         <button onClick={onSkip} style={btnSecondary}>
-          <SkipForward size={14} /> Skip for now
+          <SkipForward size={14} /> {isLast ? 'Skip & finish' : 'Skip for now'}
         </button>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Step 4: Working Environment ─────────────────────────────── */
-
-function StepEnvironment({ onNext, onSkip, onCreated }) {
-  const [name, setName]   = useState('');
-  const [desc, setDesc]   = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState(null);
-  const [saved, setSaved]   = useState(false);
-
-  const canSave = name.trim();
-
-  async function handleSave() {
-    setSaving(true); setError(null);
-    try {
-      const id = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      await apiCall('POST', '/api/environments', {
-        id, name: name.trim(), description: desc.trim(),
-        skills: [], repositories: [],
-      });
-      setSaved(true);
-      onCreated?.(id);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div>
-        <h2 style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)' }}>
-          Working Environment
-        </h2>
-        <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          A Working Environment is a workspace recipe that agents are assigned to — it defines which skills, repositories, and model provider they use.
-          You can fully configure it later in <strong>Workspaces → Working Environments</strong>.
-        </p>
-      </div>
-
-      <ErrorBanner msg={error} />
-
-      {!saved ? (
-        <>
-          <FormInput label="Name" required value={name} onChange={setName} placeholder="e.g. Default Environment" />
-          <FormInput label="Description" value={desc} onChange={setDesc} placeholder="Optional short description" />
-
-          <button onClick={handleSave} disabled={saving || !canSave}
-            style={{ ...btnPrimary, opacity: (saving || !canSave) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
-            {saving ? 'Saving…' : 'Create environment'}
-          </button>
-        </>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
-          <Check size={15} /> Environment created — add skills and repositories any time via Working Environments.
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <button onClick={onNext} disabled={!saved}
-          style={{ ...btnPrimary, opacity: saved ? 1 : 0.5, cursor: saved ? 'pointer' : 'not-allowed' }}>
-          Continue <ArrowRight size={15} />
-        </button>
-        <button onClick={onSkip} style={btnSecondary}>
-          <SkipForward size={14} /> Skip for now
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Step 5: First Agent ──────────────────────────────────────── */
-
-function StepAgent({ onFinish, onSkip, environmentIdHint }) {
-  const [displayName, setDisplayName] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('');
-  const [environmentId, setEnvironmentId] = useState(environmentIdHint || '');
-  const [environments, setEnvironments] = useState([]);
-  const [loadingEnvs, setLoadingEnvs] = useState(true);
-  const [saving, setSaving]   = useState(false);
-  const [error, setError]     = useState(null);
-  const [saved, setSaved]     = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    apiCall('GET', '/api/environments')
-      .then(list => {
-        if (cancelled) return;
-        const envs = Array.isArray(list) ? list : [];
-        setEnvironments(envs);
-        setEnvironmentId(prev => {
-          if (prev && envs.some(e => e.id === prev)) return prev;
-          if (environmentIdHint && envs.some(e => e.id === environmentIdHint)) return environmentIdHint;
-          return envs[0]?.id || '';
-        });
-      })
-      .catch(e => { if (!cancelled) setError(e.message); })
-      .finally(() => { if (!cancelled) setLoadingEnvs(false); });
-    return () => { cancelled = true; };
-  }, [environmentIdHint]);
-
-  const canSave = displayName.trim() && environmentId && systemPrompt.trim();
-
-  async function handleSave() {
-    setSaving(true); setError(null);
-    try {
-      const id = displayName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      await apiCall('POST', '/api/agents', {
-        id, displayName: displayName.trim(), role: 'agent',
-        systemPrompt: systemPrompt.trim(), environmentId, enabled: false,
-      });
-      setSaved(true);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const noEnvs = !loadingEnvs && environments.length === 0;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div>
-        <h2 style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)' }}>
-          First Agent
-        </h2>
-        <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-          Create your first agent. It will be created as <strong>disabled</strong> — you can configure its prompt and enable it via <strong>Agents</strong>.
-        </p>
-      </div>
-
-      <ErrorBanner msg={error} />
-
-      {!saved ? (
-        <>
-          <FormInput label="Agent name" required value={displayName} onChange={setDisplayName} placeholder="e.g. My First Agent" />
-
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
-              Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span>
-            </div>
-            {noEnvs ? (
-              <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-                No Working Environment exists yet. Go back to the previous step to create one — every agent must be bound to an environment.
-              </div>
-            ) : (
-              <select
-                value={environmentId}
-                onChange={e => setEnvironmentId(e.target.value)}
-                disabled={loadingEnvs}
-                style={inputStyle}
-              >
-                {loadingEnvs && <option value="">Loading…</option>}
-                {!loadingEnvs && !environmentId && <option value="">Select an environment…</option>}
-                {environments.map(env => (
-                  <option key={env.id} value={env.id}>
-                    {env.name || env.id}{env.id === environmentIdHint ? ' (just created)' : ''}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-1)' }}>
-              System prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span>
-            </div>
-            <textarea
-              value={systemPrompt}
-              onChange={e => setSystemPrompt(e.target.value)}
-              rows={6}
-              placeholder="You are an experienced COBOL developer…"
-              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
-            />
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-              Stored as <code style={{ fontFamily: 'var(--eb-font-mono)' }}>AGENT-PROMPT.md</code> — you can refine it later in <strong>Agents</strong>.
-            </div>
-          </div>
-
-          <button onClick={handleSave} disabled={saving || !canSave}
-            style={{ ...btnPrimary, opacity: (saving || !canSave) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer', alignSelf: 'flex-start' }}>
-            {saving ? 'Creating…' : 'Create agent'}
-          </button>
-        </>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-success)', fontSize: 'var(--eb-text-sm)' }}>
-          <Check size={15} /> Agent created (disabled) — configure it in Agents when ready.
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <button onClick={onFinish} style={btnPrimary}>
-          <Check size={15} /> Go to Dashboard
-        </button>
-        {!saved && (
-          <button onClick={onSkip} style={btnSecondary}>
-            <SkipForward size={14} /> Skip for now
-          </button>
-        )}
       </div>
     </div>
   );
@@ -835,9 +747,17 @@ function StepAgent({ onFinish, onSkip, environmentIdHint }) {
 /* ─── Main Wizard ──────────────────────────────────────────────── */
 
 export default function SetupWizard({ onComplete }) {
+  const navigate = useNavigate();
   const [current, setCurrent] = useState(0);
   const [done, setDone]       = useState([]);
-  const [createdEnvironmentId, setCreatedEnvironmentId] = useState(null);
+
+  // Leaving the wizard: dismiss it and route to Team Setup, the natural next
+  // step once the infrastructure credentials exist (the wizard no longer
+  // creates a standalone agent).
+  function finishWizard() {
+    onComplete();
+    navigate('/team-setup');
+  }
 
   function markDone(id) {
     setDone(prev => prev.includes(id) ? prev : [...prev, id]);
@@ -846,12 +766,12 @@ export default function SetupWizard({ onComplete }) {
   function advance(id) {
     markDone(id);
     if (current < STEPS.length - 1) setCurrent(current + 1);
-    else onComplete();
+    else finishWizard();
   }
 
   function skip() {
     if (current < STEPS.length - 1) setCurrent(current + 1);
-    else onComplete();
+    else finishWizard();
   }
 
   const stepId = STEPS[current].id;
@@ -894,11 +814,9 @@ export default function SetupWizard({ onComplete }) {
           borderRadius: 'var(--eb-radius-lg)',
           padding: 'var(--eb-space-6)',
         }}>
-          {stepId === 'llm'         && <StepLlm         onNext={() => advance('llm')}         onSkip={skip} />}
-          {stepId === 'ssh-key'     && <StepSshKey       onNext={() => advance('ssh-key')}     onSkip={skip} />}
-          {stepId === 'gh-token'    && <StepGhToken      onNext={() => advance('gh-token')}    onSkip={skip} />}
-          {stepId === 'environment' && <StepEnvironment  onNext={() => advance('environment')} onSkip={skip} onCreated={setCreatedEnvironmentId} />}
-          {stepId === 'agent'       && <StepAgent        onFinish={() => { markDone('agent'); onComplete(); }} onSkip={onComplete} environmentIdHint={createdEnvironmentId} />}
+          {stepId === 'llm'      && <StepLlm     onNext={() => advance('llm')} />}
+          {stepId === 'ssh-key'  && <StepSshKey  onNext={() => advance('ssh-key')}  onSkip={skip} />}
+          {stepId === 'gh-token' && <StepGhToken onNext={() => advance('gh-token')} onSkip={skip} isLast />}
         </div>
       </div>
     </div>

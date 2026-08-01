@@ -5,14 +5,33 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, GitMerge, Download, Upload,
+  User, Users, Workflow, Info, Download, Upload, Copy,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
-import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import IconButton from '../components/IconButton';
+import SkillPicker from '../components/SkillPicker';
+import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
+import { summarizeTeamAction } from './team-action-summary.js';
+
+// Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
+// feedback before the server round-trip; the server remains the source of
+// truth for validity.
+const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+
+// Suggests a unique clone id derived from the source id, avoiding any id
+// already present in the agents list (server-side uniqueness is still
+// enforced — this is just a friendlier starting point).
+function suggestCloneId(sourceId, existingIds) {
+  const base = `${sourceId}-copy`;
+  if (!existingIds.has(base)) return base;
+  let n = 2;
+  while (existingIds.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -277,9 +296,8 @@ function stripYamlFrontmatter(text) {
   return text.replace(/^\s*---\n[\s\S]*?\n---\s*\n?/, '');
 }
 
-// Compact, dashboard-aligned typography for the brief.md body. Without
-// these the browser's default heading sizes look oversized inside a
-// 640px side panel.
+// Compact typography for the brief.md body. Without these the browser's
+// default heading sizes look oversized inside a 640px side panel.
 const BRIEF_MD_COMPONENTS = {
   h1: (props) => <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
   h2: (props) => <h3 style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', margin: '1em 0 0.4em' }} {...props} />,
@@ -595,29 +613,6 @@ function SecondaryBtn({ children, onClick, style = {} }) {
   );
 }
 
-function IconBtn({ icon: Icon, label, onClick, danger, title, disabled }) {
-  return (
-    <button
-      aria-label={label}
-      title={title || label}
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        background: 'none',
-        border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        color: danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
-        padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4,
-        fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-        opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      <Icon size={13} />
-    </button>
-  );
-}
-
 /* ── Enable/Disable toggle ──────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label, disabled }) {
   return (
@@ -748,7 +743,7 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
-    briefingsPath: '',
+    briefingsPath: '', skills: [],
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
@@ -758,6 +753,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
   });
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
+  // Create form has no team context yet, so only the global pool is offered
+  // (grant-aware picker, #633 — team skills appear once the agent belongs to a
+  // team and is edited).
+  const { data: skillsData } = useApi('/api/skills');
+  const poolSkills = (skillsData || []).filter(s => s.source === 'pool');
 
   const repoDirs = useMemo(() => {
     const env = envs.find(e => e.id === form.environmentId);
@@ -819,12 +819,11 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             <option key={env.id} value={env.id}>
               {env.name} ({env.id})
               {hasRepos(env) ? ' · Git' : ''}
-              {Array.isArray(env.skills) && env.skills.length > 0 ? ` · ${env.skills.length} Skills` : ''}
             </option>
           ))}
         </select>
         <div style={helpTextStyle}>
-          Defines the skills, repositories, GitHub token and model provider the agent receives at creation time.
+          Defines the repositories, GitHub token and model provider the agent receives at creation time.
           Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
           but the recipe is shared.
         </div>
@@ -903,6 +902,18 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           repoDirs={repoDirs}
         />
       )}
+
+      <div>
+        <div style={labelStyle}>Skills</div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+          The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+        </div>
+        <SkillPicker
+          skills={poolSkills}
+          selected={form.skills}
+          onChange={v => update('skills', v)}
+        />
+      </div>
 
       {form.role !== 'orchestrator' && (
       <div>
@@ -1034,6 +1045,105 @@ function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
   );
 }
 
+/* ── Clone Agent Form ───────────────────────────────────────────────── */
+// Direct "duplicate this agent" dialog — a one-step alternative to the
+// Export → Import round trip. Only offered for `agent` and `team-member`
+// source cards (see LeafAgentCard / AgentRow); the backend clone endpoint
+// also rejects any other role defensively.
+function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
+  const [newId, setNewId] = useState(() => suggestCloneId(agent.id, existingIds));
+  const [newDisplayName, setNewDisplayName] = useState(`${agent.displayName || agent.id} (Copy)`);
+  const [parentTeamId, setParentTeamId] = useState(agent.parentTeamId || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const trimmedId = newId.trim();
+  const idError = trimmedId && !AGENT_ID_RE.test(trimmedId)
+    ? 'Only letters, digits, underscores, hyphens and dots are allowed.'
+    : null;
+  const canSubmit = trimmedId && !idError && newDisplayName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        newId: trimmedId,
+        newDisplayName: newDisplayName.trim(),
+        parentTeamId: parentTeamId || undefined,
+      });
+      if (!ok) {
+        if (data?.code === 'id-conflict') {
+          setNewId(suggestCloneId(trimmedId, existingIds));
+        }
+        setError(data?.error || 'Clone failed.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Cloning <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id}).
+        The clone gets its own workspace, prompt and chat identity — a fully independent
+        copy, not a reference. Deleting one later never affects the other.
+      </div>
+
+      <FormInput
+        label="New Agent ID"
+        required
+        value={newId}
+        onChange={v => setNewId(sanitizeId(v))}
+        error={idError}
+        placeholder="e.g. cobol-agent-copy"
+      />
+
+      <FormInput
+        label="New Display Name"
+        required
+        value={newDisplayName}
+        onChange={setNewDisplayName}
+        placeholder="COBOL Agent (Copy)"
+      />
+
+      <div>
+        <div style={labelStyle}>Target Team</div>
+        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
+          Defaults to the source's own team (if any). Choose a different team or
+          <em> Standalone</em> to place the clone elsewhere.
+        </div>
+        <select
+          value={parentTeamId}
+          onChange={e => setParentTeamId(e.target.value)}
+          style={inputStyle}
+        >
+          <option value="">Standalone agent (no team)</option>
+          {(teams || []).map(t => (
+            <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Cloning…' : 'Clone Agent'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
@@ -1047,8 +1157,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
   // MCP overrides are stored as [{serverId, credentialId|null}, ...]. We
   // serialize them for editing as one entry per line — `serverId:credentialId`,
-  // or just `serverId` when no credential is bound. Same idea as the
-  // skillsOverrideText field above; trades polish for less form scaffolding.
+  // or just `serverId` when no credential is bound; trades polish for less form
+  // scaffolding.
   const initialMcpText = Array.isArray(agent.mcpServersOverride)
     ? agent.mcpServersOverride.map(m => m.credentialId ? `${m.serverId}:${m.credentialId}` : m.serverId).join('\n')
     : '';
@@ -1056,20 +1166,33 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     displayName: agent.displayName || '',
     briefingsPath: agent.briefingsPath || '',
+    // non-member roles: the agent's own skill grant
+    skills: Array.isArray(agent.skills) ? agent.skills : [],
     // team-only field
     systemPromptTemplate: agent.systemPromptTemplate || '',
     // team-member override fields
     inheritPrompt: initialInheritPrompt,
     promptOverride: agent.systemPrompt || '',
     inheritSkills: initialInheritSkills,
-    skillsOverrideText: Array.isArray(agent.skillsOverride)
-      ? agent.skillsOverride.join(', ')
-      : '',
+    skillsOverride: Array.isArray(agent.skillsOverride)
+      ? agent.skillsOverride
+      : [],
     inheritMcp: initialInheritMcp,
     mcpOverrideText: initialMcpText,
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = !!form.displayName;
+
+  // Skills live on the agent construct itself for non-member roles.
+  const hasOwnSkills = agent.role === 'team' || agent.role === 'agent' || agent.role === 'orchestrator';
+  // Grant-aware picker (#633): scope the pool to the agent's own team so its
+  // team-tier skills are grantable, not just the global pool. Team-first
+  // resolution and shadowing markers are rendered by the picker.
+  const skillsUrl = agent.teamId
+    ? `/api/skills?teamId=${encodeURIComponent(agent.teamId)}`
+    : '/api/skills';
+  const { data: skillsData } = useApi(skillsUrl);
+  const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 
   const { data: environments } = useApi('/api/environments');
   const repoDirs = useMemo(() => {
@@ -1097,6 +1220,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       displayName: form.displayName,
       briefingsPath: form.briefingsPath,
     };
+    if (hasOwnSkills) {
+      submit.skills = form.skills;
+    }
     if (agent.role === 'team') {
       submit.systemPromptTemplate = form.systemPromptTemplate;
     }
@@ -1105,10 +1231,7 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
       submit.skillsOverride = form.inheritSkills
         ? null
-        : form.skillsOverrideText
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
+        : form.skillsOverride;
       // MCP override: parse "serverId[:credentialId]" lines into the
       // {serverId, credentialId} array shape the API expects. Empty / bare
       // server lines are kept (credentialId null) so the API can return a
@@ -1158,6 +1281,20 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
 
+      {hasOwnSkills && (
+        <div>
+          <div style={labelStyle}>Skills</div>
+          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          </div>
+          <SkillPicker
+            skills={grantSkills}
+            selected={form.skills}
+            onChange={v => update('skills', v)}
+          />
+        </div>
+      )}
+
       {agent.role === 'orchestrator' && (
         <MissionDirectoryField
           value={form.briefingsPath}
@@ -1179,6 +1316,9 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onChange={e => update('systemPromptTemplate', e.target.value)}
             style={{ ...inputStyle, minHeight: 160, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
           />
+          <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from each member's next session.
+          </div>
         </div>
       )}
 
@@ -1227,20 +1367,27 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             onCustomChange={v => update('promptOverride', v)}
             customMultiline
           />
+          <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Prompt changes take effect from this agent's next session.
+          </div>
 
           <InheritOrCustom
             label="Skills"
             inherit={form.inheritSkills}
             onToggle={v => update('inheritSkills', v)}
             inheritedPreview={
-              parentTeam && parentTeam.environmentId
-                ? `(team env: ${parentTeam.environmentId})`
-                : ''
+              parentTeam && Array.isArray(parentTeam.skills) && parentTeam.skills.length
+                ? `(team skills: ${parentTeam.skills.join(', ')})`
+                : '(team has no skills yet)'
             }
-            inheritedLabel="Inherited from team's environment"
-            customValue={form.skillsOverrideText}
-            onCustomChange={v => update('skillsOverrideText', v)}
-            customPlaceholder="comma-separated skill names, e.g. cobol-analysis, jcl-converter"
+            inheritedLabel="Inherited from the team"
+            renderCustom={() => (
+              <SkillPicker
+                skills={grantSkills}
+                selected={form.skillsOverride}
+                onChange={v => update('skillsOverride', v)}
+              />
+            )}
           />
 
           <InheritOrCustom
@@ -1278,6 +1425,7 @@ function InheritOrCustom({
   label, inherit, onToggle,
   inheritedPreview, inheritedLabel,
   customValue, onCustomChange, customMultiline, customPlaceholder,
+  renderCustom,
 }) {
   return (
     <div>
@@ -1302,6 +1450,8 @@ function InheritOrCustom({
         }}>
           {inheritedPreview ? inheritedPreview : <em>({inheritedLabel || 'inheriting'})</em>}
         </div>
+      ) : renderCustom ? (
+        renderCustom()
       ) : customMultiline ? (
         <textarea
           value={customValue}
@@ -1332,7 +1482,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1340,6 +1490,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
   };
   return (
     <div
+      className="eb-wrap-md"
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -1374,7 +1525,7 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         </span>
         <StateBadge state={state} />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+      <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
         {isStub ? (
           <PrimaryBtn
             onClick={() => onActivate(agent)}
@@ -1390,10 +1541,10 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             <ToggleSwitch
               checked={state === 'active'}
               onChange={() => onToggleEnabled(agent)}
-              label={state === 'active' ? 'Disable' : 'Enable'}
-              disabled={busy}
+              label={locked ? 'Team is disabled — enable the team first' : (state === 'active' ? 'Disable' : 'Enable')}
+              disabled={busy || locked}
             />
-            <IconBtn
+            <IconButton
               icon={PowerOff}
               label="Deactivate"
               title="Deactivate — reset to stub state"
@@ -1403,15 +1554,15 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
           </>
         )}
         {onOpenBrief && (
-          <IconBtn
+          <IconButton
             icon={FileText}
             label="View mission"
             title="View mission spec"
             onClick={() => onOpenBrief(agent)}
           />
         )}
-        <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-        <IconBtn
+        <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+        <IconButton
           icon={MessageCircle}
           label="Open chat"
           title={isStub ? 'Stub — activate first' : 'Open chat'}
@@ -1419,9 +1570,12 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
           disabled={isStub}
         />
         {onExport && !isStub && (
-          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
         )}
-        <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+        {onClone && (
+          <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+        )}
+        <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
     </div>
   );
@@ -1506,7 +1660,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
       overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1532,7 +1686,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <span style={{
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
             background: 'var(--eb-bg-app)', padding: '2px 8px',
@@ -1572,7 +1726,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
                 label={state === 'active' ? 'Disable' : 'Enable'}
                 disabled={busyIds.has(agent.id)}
               />
-              <IconBtn
+              <IconButton
                 icon={PowerOff}
                 label="Deactivate"
                 title="Deactivate — reset to stub state"
@@ -1581,12 +1735,12 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               />
             </>
           )}
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={MessageCircle} label="Open chat" onClick={() => !isStub && navigate(`/chats/${agent.id}`)} disabled={isStub} />
           {onExport && !isStub && (
-            <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+            <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           )}
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
@@ -1639,7 +1793,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1660,7 +1814,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
       overflow: 'hidden',
     }}>
       {/* Header */}
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1683,13 +1837,18 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               background: 'var(--eb-bg-app)', padding: '2px 8px',
               borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
             }}>Team</span>
+            <ToggleSwitch
+              checked={agent.enabled !== false}
+              onChange={() => onToggleTeam(agent)}
+              label={agent.enabled !== false ? 'Disable team' : 'Enable team'}
+            />
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {agent.id} · env: {agent.environmentId}
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <span style={{
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
             background: 'var(--eb-bg-app)', padding: '2px 8px',
@@ -1698,7 +1857,8 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
             {children.length} member{children.length !== 1 ? 's' : ''}
           </span>
           <button
-            onClick={() => navigate(`/team-setup?team=${encodeURIComponent(agent.id)}&mode=extend`)}
+            onClick={() => navigate(`/flows?proc=${encodeURIComponent(agent.id)}`)}
+            title="Grow this team by adding agents in the Flow Editor"
             style={{
               background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
@@ -1706,7 +1866,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
             }}
           >
-            <GitMerge size={13} /> Extend team
+            <Workflow size={13} /> Open in Flow Editor
           </button>
           <button
             onClick={() => onAddMember(agent)}
@@ -1721,11 +1881,11 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
           >
             <Plus size={13} /> {addingMember ? 'Adding…' : 'Add Member'}
           </button>
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
           {onExport && (
-            <IconBtn icon={Download} label="Export" title="Export team as ZIP" onClick={() => onExport(agent.id)} />
+            <IconButton icon={Download} label="Export" title="Export team as ZIP" onClick={() => onExport(agent.id)} />
           )}
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
 
@@ -1743,12 +1903,14 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               tree={{ depth: 1, ancestorMore: [], isLast: idx === children.length - 1, hasChildren: false, isCollapsed: false }}
               navigate={navigate}
               busy={busyIds.has(child.id)}
+              locked={agent.enabled === false}
               onActivate={onActivate}
               onDeactivate={onDeactivate}
               onToggleEnabled={onToggleEnabled}
               onEdit={onEditChild}
               onDelete={onDeleteChild}
               onExport={onExport}
+              onClone={onCloneChild}
             />
           ))
         )
@@ -1758,7 +1920,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -1768,7 +1930,7 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
       borderRadius: 'var(--eb-radius-lg)',
       overflow: 'hidden',
     }}>
-      <div style={{
+      <div className="eb-wrap-md" style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-4)',
         background: 'var(--eb-bg-elevated)',
@@ -1783,24 +1945,27 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
             {agent.id} · {agent.role} · env: {agent.environmentId}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
           <ToggleSwitch
             checked={state === 'active'}
             onChange={() => onToggleEnabled(agent)}
             label={state === 'active' ? 'Disable' : 'Enable'}
             disabled={busy}
           />
-          <IconBtn
+          <IconButton
             icon={PowerOff}
             label="Deactivate"
             title="Deactivate — reset to stub state"
             onClick={() => onDeactivate(agent)}
             disabled={busy}
           />
-          <IconBtn icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
-          <IconBtn icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
-          <IconBtn icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
-          <IconBtn icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
+          <IconButton icon={Edit} label="Edit" onClick={() => onEdit(agent)} />
+          <IconButton icon={MessageCircle} label="Open chat" onClick={() => navigate(`/chats/${agent.id}`)} />
+          <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
+          {onClone && (
+            <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          )}
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
       </div>
     </div>
@@ -1816,7 +1981,7 @@ function OrphanCard({ agent, onDelete }) {
       : 'parent agent is gone';
 
   return (
-    <div style={{
+    <div className="eb-wrap-md" style={{
       display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
       padding: 'var(--eb-space-3) var(--eb-space-4)',
       background: 'var(--eb-bg-surface)',
@@ -1831,7 +1996,7 @@ function OrphanCard({ agent, onDelete }) {
           {agent.id} · {agent.role} · {reason}
         </div>
       </div>
-      <IconBtn icon={Trash2} label="Delete orphan" danger onClick={() => onDelete(agent)} />
+      <IconButton icon={Trash2} label="Delete orphan" danger onClick={() => onDelete(agent)} />
     </div>
   );
 }
@@ -1844,9 +2009,16 @@ export default function Agents() {
   const [panelMode, setPanelMode] = useState(null); // null | 'create' | 'edit'
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null); // { agent, busy, activeTriggers }
   const [disableWarning, setDisableWarning] = useState(null); // { agent, busy, activeTriggers }
+  // Team-wide disable/enable: preview + confirm + result, mirroring the
+  // per-agent disableWarning flow but operating on every member at once.
+  const [teamActionPrompt, setTeamActionPrompt] = useState(null); // { team, action: 'disable'|'enable', members }
+  const [teamActionBusy, setTeamActionBusy] = useState(false);
+  const [teamActionError, setTeamActionError] = useState(null);
+  const [teamActionResult, setTeamActionResult] = useState(null); // { action, successIds, failedMembers }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -1859,6 +2031,7 @@ export default function Agents() {
   const importFileRef = useRef(null);
 
   const agents = rawAgents || [];
+  const existingAgentIds = useMemo(() => new Set(agents.map(a => a.id)), [agents]);
   const byName = (a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id);
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
   const teamMembers = agents.filter(a => a.role === 'team-member');
@@ -1936,6 +2109,22 @@ export default function Agents() {
         `and started — open it in Agent Chat.`,
       );
       setImportFile(null);
+      closePanel();
+      refetch();
+    }
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // Clone dialog submitted. Returns the parsed response so the form can react
+  // to a 409 id-conflict (re-suggest an id) without closing.
+  async function handleCloneSubmit({ newId, newDisplayName, parentTeamId }) {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(selectedAgent.id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newId, newDisplayName, parentTeamId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
       closePanel();
       refetch();
     }
@@ -2028,6 +2217,55 @@ export default function Agents() {
     }
   }
 
+  async function handleToggleTeam(team) {
+    const action = team.enabled === false ? 'enable' : 'disable';
+    setTeamActionError(null);
+    try {
+      const { members } = await apiCall('GET', `/api/teams/${team.id}/members`);
+      setTeamActionPrompt({ team, action, members });
+    } catch (e) {
+      setActionError(e.message);
+    }
+  }
+
+  async function handleTeamDisableConfirmed(mode) {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/disable`, { mode });
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'disable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
+    }
+  }
+
+  async function handleTeamEnableConfirmed() {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/enable`, {});
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'enable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
+    }
+  }
+
   async function handleSyncBps(agent) {
     setSyncingId(agent.id);
     try {
@@ -2053,6 +2291,7 @@ export default function Agents() {
   }
 
   async function handleDelete() {
+    setDeleteBusy(true);
     try {
       await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
       setDeleteTarget(null);
@@ -2060,6 +2299,8 @@ export default function Agents() {
     } catch (e) {
       setActionError(e.message);
       setDeleteTarget(null);
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -2260,9 +2501,11 @@ export default function Agents() {
               onActivate={handleActivate}
               onDeactivate={a => setDeactivateTarget(a)}
               onToggleEnabled={handleToggleEnabled}
+              onToggleTeam={handleToggleTeam}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
+              onCloneChild={a => openPanel('clone', a)}
             />
           ))}
           {leaves.map(a => (
@@ -2276,6 +2519,7 @@ export default function Agents() {
               onDeactivate={ag => setDeactivateTarget(ag)}
               onToggleEnabled={handleToggleEnabled}
               onExport={handleExport}
+              onClone={ag => openPanel('clone', ag)}
             />
           ))}
           {orphans.length > 0 && (
@@ -2291,7 +2535,7 @@ export default function Agents() {
                   Orphaned agents ({orphans.length})
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 2 }}>
-                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and Matrix user.
+                  These agents reference a parent that no longer exists. Delete each one to remove its workspace and chat account.
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -2320,6 +2564,23 @@ export default function Agents() {
             teams={teams}
             onSubmit={handleImportSubmit}
             onCancel={() => { setImportFile(null); closePanel(); }}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'clone' && !!selectedAgent}
+        onClose={closePanel}
+        title={`Clone Agent — ${selectedAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {selectedAgent && panelMode === 'clone' && (
+          <CloneAgentForm
+            agent={selectedAgent}
+            teams={teams}
+            existingIds={existingAgentIds}
+            onSubmit={handleCloneSubmit}
+            onCancel={closePanel}
           />
         )}
       </SidePanel>
@@ -2361,6 +2622,7 @@ export default function Agents() {
         }
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+        busy={deleteBusy}
       />
 
       <ConfirmDialog
@@ -2396,6 +2658,63 @@ export default function Agents() {
         onDrain={() => handleDeactivateMode('drain')}
         onHardStop={() => handleDeactivateMode('hard-stop')}
         onCancel={() => setDeactivateWarning(null)}
+      />
+
+      <ConfirmDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
+        title={`Enable team "${teamActionPrompt?.team?.displayName ?? ''}"?`}
+        message={teamActionPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
+            </p>
+            <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
+                <li key={m.id}>{m.displayName}</li>
+              ))}
+            </ul>
+            {teamActionError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{teamActionError}</p>
+            )}
+          </div>
+        )}
+        variant="info"
+        confirmLabel="Enable team"
+        busy={teamActionBusy}
+        onConfirm={handleTeamEnableConfirmed}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <TeamDisableDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'disable'}
+        team={teamActionPrompt?.team}
+        members={teamActionPrompt?.members || []}
+        error={teamActionError}
+        busy={teamActionBusy}
+        onDrain={() => handleTeamDisableConfirmed('drain')}
+        onAbort={() => handleTeamDisableConfirmed('abort')}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <ConfirmDialog
+        open={!!teamActionResult}
+        variant="danger"
+        alertOnly
+        title={teamActionResult?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
+        message={teamActionResult && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {teamActionResult.failedMembers.length} member(s) could not be {teamActionResult.action === 'disable' ? 'disabled' : 'enabled'}:
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {teamActionResult.failedMembers.map(m => (
+                <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        onConfirm={() => setTeamActionResult(null)}
+        onCancel={() => setTeamActionResult(null)}
       />
     </div>
   );
@@ -2454,6 +2773,79 @@ function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAb
             color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Hard stop</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TeamDisableDialog({ open, team, members, error, busy, onDrain, onAbort, onCancel }) {
+  if (!open) return null;
+  const name = team?.displayName ?? team?.id ?? 'this team';
+  const toDisable = members.filter(m => m.enabled);
+  const busyCount = toDisable.filter(m => m.busy || (m.activeTriggers?.length ?? 0) > 0).length;
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Disable team" style={{
+      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 520,
+        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+              Disable team "{name}"
+            </h3>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              {toDisable.length === 0
+                ? 'Every member is already disabled — this only marks the team itself as disabled.'
+                : `${toDisable.length} member${toDisable.length !== 1 ? 's' : ''} will be disabled${busyCount > 0 ? ` (${busyCount} currently busy or with active triggers)` : ''}. Choose how to proceed:`}
+            </p>
+            {toDisable.length > 0 && (
+              <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxHeight: 200, overflowY: 'auto' }}>
+                {toDisable.map(m => (
+                  <li key={m.id}>
+                    {m.displayName}
+                    {(m.busy || (m.activeTriggers?.length ?? 0) > 0) && (
+                      <span style={{ color: 'var(--eb-status-warning)' }}> — {m.busy ? 'busy' : `${m.activeTriggers.length} active trigger(s)`}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {members.some(m => !m.enabled) && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                {members.filter(m => !m.enabled).length} member(s) already disabled are left untouched.
+              </p>
+            )}
+            {error && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-2)' }}>{error}</p>
+            )}
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onCancel} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Let running work finish</button>
+          <button onClick={onAbort} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
           }}>Hard stop</button>
         </div>
       </div>
@@ -2530,13 +2922,26 @@ function renderDeleteMessage(target) {
     const childNounPlural = target.role === 'team' ? 'members' : 'missions';
     const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
 
+    // Deleting a team purges its locally cached / curated knowledge on this
+    // stack (#532) — the honest counterpart to actually purging the data on the
+    // backend. Knowledge shared via the team's repository is NOT touched (that
+    // is the sanctioned sharing channel), so the note must say so explicitly.
+    const knowledgeNote = target.role === 'team' ? (
+      <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-primary)' }}>
+        <strong>This team's locally cached and curated knowledge will be permanently removed</strong> —
+        its local Knowledge Base copy, promotion suggestions, archive, review decisions and team skill pool.
+        Knowledge shared via the team's repository is <strong>not affected</strong>.
+      </p>
+    ) : null;
+
     if (children.length === 0) {
       return (
         <>
           <p style={{ margin: 0 }}>
             Delete this {parentNoun}? It currently has no {childNounPlural} attached.
-            The workspace, configuration and Matrix user will be removed permanently.
+            The workspace, configuration and chat account will be removed permanently.
           </p>
+          {knowledgeNote}
         </>
       );
     }
@@ -2553,7 +2958,7 @@ function renderDeleteMessage(target) {
           fontSize: 'var(--eb-text-sm)',
         }}>
           ⚠ This will permanently delete the {parentNoun} <strong>and all {children.length} {children.length === 1 ? childNoun : childNounPlural}</strong> below.
-          Workspaces, session histories and Matrix users for every listed agent will be removed. This cannot be undone.
+          Workspaces, session histories and chat accounts for every listed agent will be removed. This cannot be undone.
         </div>
         <p style={{ margin: 'var(--eb-space-3) 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
           {childNounPlural[0].toUpperCase() + childNounPlural.slice(1)} that will be deleted:
@@ -2597,6 +3002,7 @@ function renderDeleteMessage(target) {
             </li>
           ))}
         </ul>
+        {knowledgeNote}
       </>
     );
   }

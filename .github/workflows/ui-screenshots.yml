@@ -1,0 +1,183 @@
+name: UI Screenshots (before/after)
+
+# PR visual evidence — docs/journey-spec-concept.md §3.4 + §10.4, issue #709.
+#
+# On a UI pull request this runs the journey screenshot pass on the PR branch,
+# downloads the latest GREEN main baseline (published by e2e.yml's
+# journey-baseline-main artifact), pixel-compares the two, and posts a sticky
+# before/after/diff comment. It is EVIDENCE, NOT A GATE: the job fails only if a
+# journey itself fails — never on pixel differences alone (that judgement is
+# #262's future call). Runs on podman, like e2e.yml.
+#
+# Opt-in is either signal (see the `decide` gate below):
+#   • a diff that touches admin-console/src/**, or
+#   • the `ui` label applied to the PR (manual opt-in for changes the path
+#     filter misses, e.g. a shared CSS token or an API-only tweak).
+# An unrelated PR with neither matches nothing heavy — the gate short-circuits.
+on:
+  pull_request:
+    # No top-level `paths:` filter: a label-only opt-in must still start the
+    # workflow (a `paths:` filter would suppress it on a PR that changes no
+    # admin-console/src file). The `decide` job does the real path/label gating.
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: ui-screenshots-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read        # checkout
+  pull-requests: write  # sticky comment
+  actions: read         # download the baseline artifact from the main e2e run
+
+jobs:
+  # ── Gate: run the heavy job only for a UI change or an explicit opt-in ──────
+  # Kept as a tiny separate job so an unrelated PR spends seconds here and never
+  # spins up podman / the stack. Emits `run=true|false` for the screenshots job.
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need base..head to diff paths
+      - id: gate
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          if printf '%s' "$LABELS" | grep -q '"ui"'; then
+            echo "opt-in: 'ui' label present"
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Fall back to the path filter. fetch-depth:0 gives us both commits.
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -qE '^admin-console/src/'; then
+            echo "opt-in: admin-console/src/** changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "no 'ui' label and no admin-console/src change — skipping visual evidence"
+          echo "run=false" >> "$GITHUB_OUTPUT"
+
+  # ── Journey screenshot pass + compare + sticky comment ─────────────────────
+  screenshots:
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install jq (setup.sh prerequisite)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Ensure ~/.gitconfig is a file (podman bind-mount guard)
+        # docker-compose.yml bind-mounts ~/.gitconfig into the orchestrator (:ro).
+        # On CI the file doesn't exist, so podman auto-creates the bind source as
+        # a DIRECTORY when the stack comes up (during the journey pass below).
+        # After that every `gh`/`git` invocation fails with "unable to access
+        # '/home/runner/.gitconfig': Is a directory" — which is what breaks the
+        # sticky-comment step. Pre-create it as a real file so podman mounts the
+        # file; the identity is harmless and matches the dev-mount intent.
+        run: |
+          set -euo pipefail
+          [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: Download latest green main baseline
+        # The baseline is e2e.yml's journey-baseline-main artifact from the most
+        # recent SUCCESSFUL scheduled/dispatch run on main. Tolerant of a missing
+        # baseline (first-ever run) — compare then treats every capture as new.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p baseline
+          run_id=$(gh run list --workflow=e2e.yml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+          if [ -n "${run_id:-}" ] && [ "$run_id" != "null" ]; then
+            echo "baseline from e2e.yml run ${run_id}"
+            gh run download "$run_id" -n journey-baseline-main -D baseline \
+              || echo "run ${run_id} has no journey-baseline-main artifact (retention lapsed?)"
+          else
+            echo "no successful main e2e run found — proceeding with an empty baseline"
+          fi
+
+      - name: Run journey screenshot pass (PR branch)
+        # ONLY the journeys Playwright project — its exit code reflects journey
+        # health, so a red F2 (expected until #253) can't fail this evidence job.
+        # global-setup.js brings the aee-e2e stack up; global-teardown tears down.
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test --project=journeys
+
+      - name: Compare against baseline + build sticky comment
+        # Pure Node (pixelmatch/pngjs), unit-tested in visual-diff/*.test.js.
+        # Emits visual-diff-out/{comment.md,summary.json,*.png}. Inline images
+        # light up when a repo var VISUAL_DIFF_IMAGE_BASE_URL points at a host
+        # serving the uploaded bundle (e.g. Pages); otherwise the grid links to
+        # the run artifact. Never fails the job on a diff.
+        env:
+          BASE_URL: ${{ vars.VISUAL_DIFF_IMAGE_BASE_URL }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          node e2e/visual-diff/bin/compare-and-comment.js \
+            --baseline baseline --current e2e/artifacts --out visual-diff-out \
+            --run-url "$run_url" \
+            --artifact-url "${run_url}#artifacts" \
+            --commit "${{ github.event.pull_request.head.sha }}" \
+            --baseline-ref main \
+            ${BASE_URL:+--base-url "${BASE_URL}/pr-${{ github.event.pull_request.number }}/${GITHUB_RUN_ID}"}
+
+      - name: Upload before/after/diff bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-visual-diff-pr-${{ github.event.pull_request.number }}
+          path: visual-diff-out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Post / update sticky PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          body_file="visual-diff-out/comment.md"
+          [ -f "$body_file" ] || { echo "no comment body produced — nothing to post"; exit 0; }
+          marker='<!-- journey-visual-diff -->'
+          pr='${{ github.event.pull_request.number }}'
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" --paginate \
+            --jq "map(select(.body | contains(\"${marker}\"))) | .[0].id" 2>/dev/null || true)
+          if [ -n "${existing:-}" ] && [ "$existing" != "null" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              -F body=@"$body_file" >/dev/null
+            echo "updated sticky comment ${existing}"
+          else
+            gh pr comment "$pr" --body-file "$body_file"
+            echo "created sticky comment"
+          fi
+
+      - name: Force teardown (safety net)
+        if: always()
+        run: ./e2e/scripts/stack-down.sh || true

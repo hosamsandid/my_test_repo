@@ -1,0 +1,118 @@
+# E2E overlay (#666, docs/e2e-testing-concept.md §4.1). Layered on top of
+# docker-compose.yml to bring up a parallel, disposable stack under the
+# `aee-e2e` project. Everything runs real except the LLM, which is stubbed at
+# the `claude`-binary seam inside agent containers (AEE_FAKE_CLAUDE=1).
+#
+# Usage (see the Makefile e2e* targets):
+#   podman compose -f docker-compose.yml -f docker-compose.e2e.yml \
+#     -p aee-e2e --env-file .env.e2e up -d
+#
+# Isolation comes from COMPOSE_PROJECT_NAME=aee-e2e (in .env.e2e): every named
+# volume and container is project-prefixed, so this stack can never touch the
+# developer's normal `agent-studio` stack. Teardown is `-p aee-e2e down -v` plus
+# label-scoped agent-container/volume cleanup (make e2e-down).
+
+services:
+  conduwuit:
+    # Pin the Matrix server tag — the base file floats `:latest`, which lets an
+    # upstream change break E2E unrelated to our code (concept §9). Override via
+    # CONDUWUIT_IMAGE in .env.e2e if a newer pin is needed.
+    image: ${CONDUWUIT_IMAGE:-ghcr.io/continuwuity/continuwuity:v0.5.5}
+
+  orchestrator:
+    environment:
+      # THE one product-behaviour flag for E2E. The orchestrator spreads its own
+      # process.env into every agent container's env (orchestrator.js
+      # startAgentProcess → spawnContainer), so setting it here once turns on the
+      # fake `claude` shim stack-wide. The agent entrypoint prepends the shim dir
+      # to PATH only when this equals "1"; unset ⇒ production-identical.
+      AEE_FAKE_CLAUDE: "${AEE_FAKE_CLAUDE:-1}"
+      # #710: point the GitHub poller at the in-stack fake-github service instead
+      # of api.github.com. Unset ⇒ byte-identical production behaviour. Because
+      # the orchestrator spreads its env into agent containers, agents inherit it
+      # too — pair with GH_HOST for the `gh` CLI (concept §6.1).
+      GITHUB_API_BASE: "${GITHUB_API_BASE:-http://fake-github}"
+      # Belt-and-suspenders: even with the shim on PATH the CLI never dials out,
+      # but point the proxy vars at a dead address so a regression that bypassed
+      # the shim fails fast/offline instead of reaching a real endpoint.
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+      # #711: point the fake-claude shim at the IBAN-story reply fixtures +
+      # playbooks baked into the agent image (Dockerfile COPY e2e/ →
+      # /opt/ace/e2e/). Spread into every agent container alongside
+      # AEE_FAKE_CLAUDE, so the BA/Developer/Reviewer run their scripted role
+      # behaviour. Rules are prompt-specific, so non-IBAN agents fall through to
+      # the default reply — F2's chat round-trip is unaffected.
+      AEE_FAKE_CLAUDE_FIXTURES: "${AEE_FAKE_CLAUDE_FIXTURES:-/opt/ace/e2e/fixtures/iban-story.fixtures.json}"
+      AEE_FAKE_CLAUDE_PLAYBOOKS: "${AEE_FAKE_CLAUDE_PLAYBOOKS:-/opt/ace/e2e/fixtures/playbooks}"
+      # #711: tighten the GitHub poll cadence so the label-chain journey (which
+      # crosses two poll boundaries) completes inside the Playwright per-test
+      # budget. Read by orchestrator/github-poller.js; production default is 30s.
+      AEE_GITHUB_POLL_INTERVAL_MS: "${AEE_GITHUB_POLL_INTERVAL_MS:-2000}"
+      # #711: agents run on per-agent ISOLATED podman networks; spawn-container.js
+      # only auto-connects the orchestrator + conduwuit service containers to each
+      # (SERVICE_CONTAINERS default), so an agent can reach Matrix but NOT
+      # fake-github. The role playbooks (ba-create-issue.sh etc.) curl
+      # $GITHUB_API_BASE=http://fake-github directly, so the fake-github container
+      # must also be connected — otherwise the BA's issue-create POST fails DNS,
+      # no issue is created, and the journey's first hop (expectIssueExists) times
+      # out. Override the service list to add it (the value REPLACES the default,
+      # so orchestrator + conduwuit must be re-listed); the short `fake-github`
+      # alias is registered automatically by stripping the compose-project prefix.
+      # git-remote is deliberately NOT added — the agent-side push is best-effort/
+      # skipped (repo mounted ro) and no asserted hop depends on it.
+      AEE_PER_AGENT_NETWORK_SERVICES: "${AEE_PER_AGENT_NETWORK_SERVICES:-${COMPOSE_PROJECT_NAME}-orchestrator,${COMPOSE_PROJECT_NAME}-conduwuit,${COMPOSE_PROJECT_NAME}-fake-github}"
+
+  admin-console:
+    environment:
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://127.0.0.1:1}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-e2e-dead-token}"
+      # #710: the wizard repo-probe / coordinator-workflow endpoints hit the
+      # fake-github REST surface. Unset ⇒ api.github.com (production-identical).
+      GITHUB_API_BASE: "${GITHUB_API_BASE:-http://fake-github}"
+
+  # In-stack git remote (#667, docs/e2e-testing-concept.md §2 v1.1 — option B).
+  # Serves a bare fixture repository over anonymous, read-only HTTP so the
+  # Team-Setup wizard (F1) can create a team with ZERO external dependencies:
+  # no github.com, no credentials, no poller noise. The orchestrator's clone
+  # path special-cases only SSH and `https://github.com/` URLs, so a plain
+  # `http://git-remote/e2e/fixture.git` clones credential-less as-is; the
+  # GitHub poller ignores the fixture env because it carries no githubTokenId.
+  #
+  # The repo is seeded onto the host bind-mount by e2e/scripts/seed-fixture-repo.sh
+  # (invoked from stack-up.sh BEFORE `up`), so this service is a dependency-free
+  # static file server — git's dumb-HTTP transport fetches the served files
+  # directly. Reusing the agent image base (python:3.12-slim) means no extra
+  # image pull. Read-only: F1 only needs the orchestrator-side clone; write
+  # access (agent pushes) is a later journey/fake-GitHub phase.
+  git-remote:
+    image: python:3.12-slim
+    container_name: ${COMPOSE_PROJECT_NAME}-git-remote
+    restart: unless-stopped
+    # `:z` relabels the bind mount for SELinux-enforcing hosts (Fedora CoreOS /
+    # the CI runner); harmless elsewhere. Contents are generated + gitignored.
+    volumes:
+      - ./e2e/git-remote/srv:/srv:ro,z
+    command: ["python", "-m", "http.server", "80", "--directory", "/srv"]
+
+  # Fake GitHub (#710, docs/journey-spec-concept.md §6.1/§6.3). A dependency-free
+  # Node HTTP server implementing the minimal GitHub REST surface the stack
+  # touches — Events API (ETag/304), issues/PRs/labels CRUD, label→event
+  # emission — plus a mock Anthropic /v1/messages so the "generate agent prompt"
+  # flow works offline. State is in memory, reset per run via POST /_reset, with
+  # an inspection endpoint (GET /_state) for test assertions. The orchestrator
+  # and admin-console reach it via GITHUB_API_BASE=http://fake-github; git I/O
+  # never touches it (that is the real git-remote container above). e2e-only.
+  fake-github:
+    build:
+      context: ./e2e/fake-github
+    container_name: ${COMPOSE_PROJECT_NAME}-fake-github
+    restart: unless-stopped
+    environment:
+      PORT: "80"
+    # Publish a host port so the Playwright runner (on the host) can act as
+    # "the human on GitHub" and assert against fake-github's inspection endpoint
+    # (e2e/steps/gh.js → E2E_FAKE_GITHUB_URL). In-network, the orchestrator and
+    # admin-console reach it as http://fake-github (GITHUB_API_BASE) regardless.
+    ports:
+      - "${FAKE_GITHUB_PORT:-4014}:80"

@@ -34,6 +34,7 @@ export function knowledgeLearningValue(form, knowledgeMeta) {
 export function buildReviewFields({ form, env, sshKey, ghToken, knowledgeMeta }) {
   return [
     { key: 'team', label: 'Team', value: `${form.teamName} (${form.teamId})` },
+    ...(form.labelSuffix ? [{ key: 'labelSuffix', label: 'Label suffix', value: form.labelSuffix }] : []),
     {
       key: 'environment',
       label: 'Working Environment',

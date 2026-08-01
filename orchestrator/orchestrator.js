@@ -6239,6 +6239,10 @@ class Orchestrator {
         ...(Array.isArray(extra.humans) && extra.humans.length
           ? { humans: extra.humans.filter(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id.trim()) }
           : {}),
+        // Label suffix (#902): stored for extend-mode consistency checks and
+        // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
+        // stamped in the member configs.
+        ...(typeof extra.labelSuffix === 'string' && extra.labelSuffix ? { labelSuffix: extra.labelSuffix } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -10099,6 +10103,96 @@ async function main() {
       return;
     }
 
+    // ── Create GitHub labels for a team (label-suffix provisioning, #902) ─────
+    // Called best-effort after materialisation: creates any missing labels in the
+    // target repo via the env's PAT. 422 (already-exists) is silently ignored.
+    // Failures are warnings, never errors — the team is already created.
+    const githubLabelsMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/github-labels$/);
+    if (githubLabelsMatch) {
+      const envId = decodeURIComponent(githubLabelsMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const labels = Array.isArray(parsed.labels) ? parsed.labels.filter(s => typeof s === 'string') : [];
+        const color = typeof parsed.color === 'string' && /^[0-9a-fA-F]{6}$/.test(parsed.color)
+          ? parsed.color : null;
+        if (!labels.length || !color) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'labels (string[]) and color (6-hex) required' }));
+          return;
+        }
+        try {
+          const env = loadEnvironment(envId);
+          if (!env) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
+            return;
+          }
+          if (!env.githubTokenId) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['No GitHub token on environment — skipping label provisioning'] }));
+            return;
+          }
+          let ghToken;
+          try {
+            ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
+          } catch (err) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [`Cannot read GitHub token: ${err.message}`] }));
+            return;
+          }
+          // Derive owner/repo from the environment's primary repo URL.
+          const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
+          const primaryUrl = repos[0]?.url || '';
+          const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
+          if (!repoMatch) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['Cannot parse GitHub owner/repo from environment URL — skipping label provisioning'] }));
+            return;
+          }
+          const [, owner, repo] = repoMatch;
+          const created = [];
+          const skipped = [];
+          const warnings = [];
+          for (const labelName of labels) {
+            try {
+              const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/labels`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${ghToken}`,
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                },
+                body: JSON.stringify({ name: labelName, color }),
+              });
+              if (resp.status === 201) {
+                created.push(labelName);
+              } else if (resp.status === 422) {
+                skipped.push(labelName);
+              } else {
+                const errBody = await resp.text().catch(() => '');
+                warnings.push(`Label '${labelName}': GitHub returned ${resp.status} — ${errBody.slice(0, 200)}`);
+                skipped.push(labelName);
+              }
+            } catch (err) {
+              warnings.push(`Label '${labelName}': ${err.message}`);
+              skipped.push(labelName);
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, created, skipped, warnings }));
+        } catch (err) {
+          console.error(`[Orchestrator] github-labels error for env ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Respawn a single running agent ──────────────────────────────────
     // Fired by the admin-console after a per-agent spawn-time change (e.g. the
     // Model-Provider override) so the running container is recreated with the
@@ -11593,6 +11687,9 @@ async function main() {
           // team's active set / the standalone agent's own list. The
           // environment no longer contributes skills.
           skills,
+          // For role: 'team' — label suffix (#902): stored for extend-mode
+          // consistency and Flow-Editor dialog pre-fill.
+          labelSuffix,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -11630,6 +11727,7 @@ async function main() {
         if (Array.isArray(labels)) extra.labels = labels;
         if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
+        if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

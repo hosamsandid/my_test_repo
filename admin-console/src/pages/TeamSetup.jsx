@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
   Loader2, Circle, XCircle,
-  Layers,
+  Layers, RefreshCw,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SkillPicker from '../components/SkillPicker';
@@ -171,6 +171,36 @@ function suggestTeamNaming(envName, agents) {
   return { teamName: baseName, teamId: baseSlug };
 }
 
+function SuggestSuffixButton({ onSuggest }) {
+  const [busy, setBusy] = useState(false);
+  async function suggest() {
+    setBusy(true);
+    try {
+      const r = await fetch('/api/teams/suggest-suffix');
+      if (r.ok) { const { suffix } = await r.json(); onSuggest(suffix); }
+    } catch { /* ignore */ } finally { setBusy(false); }
+  }
+  return (
+    <button
+      type="button"
+      title="Suggest a random 4-char suffix"
+      onClick={suggest}
+      disabled={busy}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 4,
+        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)', padding: '0 var(--eb-space-3)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
+        cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+        fontFamily: 'inherit', height: '100%',
+      }}
+    >
+      <RefreshCw size={13} style={busy ? { animation: 'team-setup-spin 0.9s linear infinite' } : {}} />
+      Suggest
+    </button>
+  );
+}
+
 // ─── Step 3 — Team basics (name + id only) ────────────────────────────
 // Comes after the Working-Environment pick so both fields can be pre-filled
 // from the environment's name (with a uniqueness-resolving suggestion). The
@@ -223,6 +253,27 @@ function StepProject({ form, setForm, environments, takenAgentIds, error }) {
               <AlertCircle size={12} /> This ID is already used by an existing agent or team — pick a different one.
             </div>
           )}
+        </div>
+
+        <div>
+          <label htmlFor="ts-label-suffix" style={labelStyle}>
+            Label suffix <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(optional)</span>
+          </label>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', height: 38 }}>
+            <input
+              id="ts-label-suffix"
+              type="text"
+              placeholder="e.g. k3f9"
+              value={form.labelSuffix}
+              maxLength={8}
+              onChange={e => setForm(f => ({ ...f, labelSuffix: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, '') }))}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <SuggestSuffixButton onSuggest={suffix => setForm(f => ({ ...f, labelSuffix: suffix }))} />
+          </div>
+          <div style={hintStyle}>
+            Appended to every label in this team — prevents cross-triggering between parallel stacks materialised from the same template on one repo. Leave blank to use the template&apos;s default label names.
+          </div>
         </div>
 
         <ErrorBox message={error} />
@@ -679,6 +730,7 @@ export default function TeamSetup() {
   const [result, setResult] = useState(null);
   const [progressSteps, setProgressSteps] = useState(null);
   const [progressError, setProgressError] = useState(null);
+  const [matWarnings, setMatWarnings] = useState([]);
 
   const [form, setForm] = useState({
     teamName: '',
@@ -691,6 +743,7 @@ export default function TeamSetup() {
     readyLabel: 'ready',
     dispatchLabel: 'dispatch',
     maxParallel: 1,
+    labelSuffix: '',
     sshKeyId: '',
     githubTokenId: '',
     mcpSelections: [],
@@ -785,6 +838,7 @@ export default function TeamSetup() {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
       if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add agents to an existing team, open it in the Flow Editor)`;
+      if (form.labelSuffix && !/^[a-z0-9]{1,8}$/.test(form.labelSuffix)) return 'Label suffix must be 1–8 lowercase base36 chars [a-z0-9]';
       return null;
     }
     // Step 3 — Knowledge sources are inherited from the environment and
@@ -818,6 +872,7 @@ export default function TeamSetup() {
     setCollisionInfo(null);
     setProgressError(null);
     setProgressSteps(null);
+    setMatWarnings([]);
     setSubmitting(true);
 
     const body = {
@@ -837,6 +892,7 @@ export default function TeamSetup() {
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
+      ...(form.labelSuffix ? { labelSuffix: form.labelSuffix } : {}),
       mode,
       // Initial team skill set — placed on the team agent.
       skills: form.skills || [],
@@ -896,6 +952,8 @@ export default function TeamSetup() {
           if (land) navigate(`/chats/${land}`);
           else navigate('/agents');
         }, 1500);
+      } else if (ev.type === 'warning') {
+        setMatWarnings(prev => [...prev, ev.message]);
       } else if (ev.type === 'error') {
         // Backend already marked any in-flight step as `error`; surface the
         // top-level message in the progress card and as the form-level error
@@ -1044,6 +1102,16 @@ export default function TeamSetup() {
               </div>
             </div>
           </div>
+        </Card>
+      )}
+      {matWarnings.length > 0 && (
+        <Card accent="var(--eb-status-warning)">
+          <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-2)' }}>
+            Label suffix — coverage warnings
+          </div>
+          <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+            {matWarnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
         </Card>
       )}
 

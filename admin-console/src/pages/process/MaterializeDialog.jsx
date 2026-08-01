@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
 
@@ -31,6 +31,9 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   // and materializing each one clones the repo. Create them as stubs (shown in
   // the UI) and materialize on demand by enabling. Opt in to clone-now here.
   const [materializeNow, setMaterializeNow] = useState(false);
+  const [labelSuffix, setLabelSuffix] = useState('');
+  const [suffixWarnings, setSuffixWarnings] = useState([]);
+  const [suggestingLabel, setSuggestingLabel] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -66,15 +69,18 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
     if (!/^[a-z0-9-]{1,40}$/.test(teamId)) { setError('teamId must be a lowercase slug [a-z0-9-], 1–40 chars.'); return; }
     if (!teamName.trim()) { setError('Team name required.'); return; }
     if (!environmentId) { setError('Pick a working environment.'); return; }
-    setSaving(true); setError(null);
+    if (labelSuffix && !/^[a-z0-9]{1,8}$/.test(labelSuffix)) { setError('Label suffix must be 1–8 lowercase base36 chars [a-z0-9].'); return; }
+    setSaving(true); setError(null); setSuffixWarnings([]);
     try {
-      await apiCall('POST', '/api/teams', {
+      const result = await apiCall('POST', '/api/teams', {
         teamId, teamName,
         mode: extend ? 'extend' : 'create',
         environmentId,
         processTemplate: bundle,
         materializeMembers: materializeNow,
+        ...(labelSuffix ? { labelSuffix } : {}),
       });
+      if (result?.warnings?.length) setSuffixWarnings(result.warnings);
       onDone?.();
       navigate(`/process/${encodeURIComponent(teamId)}`);
     } catch (e) {
@@ -109,6 +115,40 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
             onChange={e => { setTeamId(slugify(e.target.value)); setTeamIdManuallyEdited(true); }}
             style={input}
           />
+        </Field>
+        <Field
+          label={<>Label suffix <span style={{ fontWeight: 'normal', opacity: 0.7 }}>(optional)</span></>}
+          hint="Appended to every label — isolates parallel stacks on one repo. Leave blank for the template's default names."
+        >
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={labelSuffix}
+              maxLength={8}
+              placeholder="e.g. k3f9"
+              onChange={e => setLabelSuffix(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+              style={{ ...input, flex: 1 }}
+            />
+            <button
+              type="button"
+              disabled={suggestingLabel}
+              onClick={async () => {
+                setSuggestingLabel(true);
+                try {
+                  const r = await fetch('/api/teams/suggest-suffix');
+                  if (r.ok) { const { suffix } = await r.json(); setLabelSuffix(suffix); }
+                } catch { /* ignore */ } finally { setSuggestingLabel(false); }
+              }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                ...input, width: 'auto', padding: '0 10px',
+                cursor: suggestingLabel ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+              }}
+              title="Suggest a random 4-char suffix"
+            >
+              <RefreshCw size={12} style={suggestingLabel ? { animation: 'spin 0.9s linear infinite' } : {}} />
+              Suggest
+            </button>
+          </div>
         </Field>
 
         {noEnvs ? (
@@ -165,6 +205,14 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
         </label>
 
         {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
+        {suffixWarnings.length > 0 && (
+          <div style={{ background: 'var(--eb-bg-app)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+            <strong style={{ color: 'var(--eb-text-primary)' }}>Label suffix warnings</strong>
+            <ul style={{ margin: '4px 0 0', padding: '0 0 0 16px' }}>
+              {suffixWarnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
           <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>

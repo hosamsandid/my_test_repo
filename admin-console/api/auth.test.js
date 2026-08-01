@@ -54,14 +54,14 @@ test('getSession reads the session cookie from the request', () => {
   assert.equal(auth.getSession({ headers: { cookie: `${auth.COOKIE_NAME}=garbage` } }), null);
 });
 
-test('requireAuth blocks without a session and passes with one', () => {
+test('requireAuth blocks without a session and passes with one', async () => {
   let statusCode, jsonBody;
   const res = {
     status(c) { statusCode = c; return this; },
     json(b) { jsonBody = b; return this; },
   };
   let nextCalled = false;
-  auth.requireAuth({ headers: {} }, res, () => { nextCalled = true; });
+  await auth.requireAuth({ headers: {} }, res, () => { nextCalled = true; });
   assert.equal(nextCalled, false);
   assert.equal(statusCode, 401);
   assert.equal(jsonBody.code, 'unauthenticated');
@@ -69,9 +69,68 @@ test('requireAuth blocks without a session and passes with one', () => {
   const token = auth.issueToken('tester');
   const req = { headers: { cookie: `${auth.COOKIE_NAME}=${token}` } };
   let okNext = false;
-  auth.requireAuth(req, { status() { throw new Error('should not be called'); } }, () => { okNext = true; });
+  await auth.requireAuth(req, { status() { throw new Error('should not be called'); } }, () => { okNext = true; });
   assert.equal(okNext, true);
   assert.equal(req.user.username, 'tester');
+});
+
+test('requireAuth accepts a verified IAP assertion and issues a session', async (t) => {
+  auth._setIapVerifierForTests(async (token) => (token === 'valid-iap-jwt' ? { sub: 'k.z@accenture.com' } : null));
+  t.after(() => auth._setIapVerifierForTests(null));
+
+  const cookies = [];
+  const res = {
+    append: (k, v) => cookies.push(v),
+    status() { throw new Error('should not be called'); },
+  };
+  const req = { headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } };
+  let nextCalled = false;
+  await auth.requireAuth(req, res, () => { nextCalled = true; });
+  assert.equal(nextCalled, true);
+  assert.equal(req.user.username, 'k.z@accenture.com');
+  // A regular session cookie is issued so follow-up requests skip the JWT path.
+  assert.match(cookies[0], new RegExp(`^${auth.COOKIE_NAME}=`));
+  const session = auth.verifyToken(cookies[0].split(';')[0].split('=')[1]);
+  assert.equal(session.sub, 'k.z@accenture.com');
+});
+
+test('requireAuth still 401s on a bad IAP assertion', async (t) => {
+  auth._setIapVerifierForTests(async () => null);
+  t.after(() => auth._setIapVerifierForTests(null));
+
+  let statusCode;
+  const res = {
+    append() {},
+    status(c) { statusCode = c; return this; },
+    json() { return this; },
+  };
+  await auth.requireAuth({ headers: { 'x-goog-iap-jwt-assertion': 'forged' } }, res, () => {
+    throw new Error('must not pass');
+  });
+  assert.equal(statusCode, 401);
+});
+
+test('session endpoint authenticates via IAP on first contact', async (t) => {
+  auth._setIapVerifierForTests(async (token) => (token === 'valid-iap-jwt' ? { sub: 'k.z@accenture.com' } : null));
+  t.after(() => auth._setIapVerifierForTests(null));
+
+  // Capture the /api/auth/session handler off a minimal app stub.
+  const routes = {};
+  const app = {
+    get: (path, handler) => { routes[path] = handler; },
+    post: () => {},
+  };
+  auth.registerAuthRoutes(app);
+
+  let body;
+  const res = { append() {}, json(b) { body = b; } };
+  await routes['/api/auth/session']({ headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } }, res);
+  assert.equal(body.authenticated, true);
+  assert.equal(body.user.username, 'k.z@accenture.com');
+
+  // Without the header (and no cookie) it stays unauthenticated.
+  await routes['/api/auth/session']({ headers: {} }, res);
+  assert.equal(body.authenticated, false);
 });
 
 test('setSessionCookie / clearSessionCookie emit the expected Set-Cookie', () => {

@@ -27,8 +27,9 @@
 //
 // Schedules are no longer wired from an actor — they live inside the agent
 // card and the inspector's Triggers tab. Human approvals are authored on the
-// edges themselves: a `gate: 'human'` on a GitHub channel, or a `human:*`
-// label listener via the label / GitHub-trigger forms.
+// edges themselves: a `gate: 'human'` on a GitHub channel, or a listener on a
+// label the registry flags `humanGate` (#928 — configuration, not a naming
+// convention) via the label / GitHub-trigger forms.
 //
 // Modes:
 //   live      — a materialised team; ops write through to running agents
@@ -44,6 +45,8 @@ const PROCESS_CREATE_TYPES = {
 };
 
 // Actor pseudo-node id → source kind (#411). Everything else is an agent.
+// The generic @human hub is gone (#987) — human roles are named nodes, wired via
+// the human-aware CreateEdgeDialog (which branches on the node's `kind`).
 const ACTOR_SOURCE_KINDS = {
   '@github': 'github',
   '@external': 'external',

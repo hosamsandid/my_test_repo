@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
+import { resolveRailWidths } from './agent-chat/rail-layout';
 
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
@@ -21,18 +22,22 @@ function loadPanelWidth(key, fallback) {
   } catch { return fallback; }
 }
 
-function ResizeDivider({ onMouseDown }) {
+// `disabled` keeps the divider in the layout (so the flanking panes don't jump
+// by 12 px) while making it inert — used for the right divider while the rail
+// is collapsed to its icon strip, which has no width to drag.
+function ResizeDivider({ onMouseDown, disabled = false }) {
   const [hovered, setHovered] = React.useState(false);
+  const showGrab = hovered && !disabled;
   return (
     <div
-      onMouseDown={onMouseDown}
+      onMouseDown={disabled ? undefined : onMouseDown}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      title="Ziehen zum Anpassen der Breite"
+      title={disabled ? undefined : 'Ziehen zum Anpassen der Breite'}
       style={{
         width: 12,
         flexShrink: 0,
-        cursor: 'col-resize',
+        cursor: disabled ? 'default' : 'col-resize',
         position: 'relative',
         zIndex: 5,
         userSelect: 'none',
@@ -43,9 +48,9 @@ function ResizeDivider({ onMouseDown }) {
         left: '50%',
         top: 0,
         bottom: 0,
-        width: hovered ? 3 : 1,
+        width: showGrab ? 3 : 1,
         transform: 'translateX(-50%)',
-        background: hovered ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+        background: showGrab ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
         transition: 'background 0.15s, width 0.15s',
         pointerEvents: 'none',
       }} />
@@ -97,6 +102,7 @@ function saveLastViewed(map) {
 export default function AgentChat() {
   const { agentId } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { data: agents, loading, error, refetch } = useApi('/api/matrix/agents');
 
   // Local map agentId -> roomId, for rooms we created during this session
@@ -223,25 +229,25 @@ export default function AgentChat() {
   }, []);
 
   // Effective (rendered) widths: the stored preference, clamped so that
-  // left + right + dividers + CHAT_MIN never exceeds the container. The
-  // right rail gives way first, then the left one; the stored values stay
-  // untouched so the layout springs back when space returns.
-  const dividersW = logOpen ? 24 : 12;
-  let effLeftWidth  = leftWidth;
-  let effRightWidth = rightWidth;
-  if (containerW != null) {
-    const available = Math.max(0, containerW - dividersW - CHAT_MIN);
-    const rightUsed = logOpen ? effRightWidth : 0;
-    if (effLeftWidth + rightUsed > available) {
-      if (logOpen) {
-        effRightWidth = Math.max(RIGHT_MIN, available - effLeftWidth);
-      }
-      const rightNow = logOpen ? effRightWidth : 0;
-      if (effLeftWidth + rightNow > available) {
-        effLeftWidth = Math.max(LEFT_MIN, available - rightNow);
-      }
-    }
-  }
+  // left + rail + dividers + CHAT_MIN never exceeds the container. Both
+  // dividers are always in the layout now that the rail collapses to an icon
+  // strip rather than unmounting. See rail-layout.js for the give-way order.
+  const dividersW = 24;
+  const { left: effLeftWidth, right: effRightWidth } = resolveRailWidths({
+    containerW,
+    leftWidth,
+    rightWidth,
+    collapsed: !logOpen,
+    chatMin: CHAT_MIN,
+    leftMin: LEFT_MIN,
+    rightMin: RIGHT_MIN,
+    dividersW,
+  });
+
+  // True while a divider is being dragged. The rail carries a width transition
+  // for the collapse/expand animation, which would otherwise make the drag lag
+  // ~200 ms behind the pointer — so the transition is suspended mid-drag.
+  const [resizing, setResizing] = useState(false);
 
   const startDrag = useCallback((panel) => (e) => {
     e.preventDefault();
@@ -249,8 +255,8 @@ export default function AgentChat() {
     const startWidth = panel === 'left' ? effLeftWidth : effRightWidth;
     const otherWidth = panel === 'left' ? effRightWidth : effLeftWidth;
     const containerNow = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
-    // Both dividers (12 px each) when right rail is open; only one otherwise.
-    const dividers   = logOpen ? 24 : 12;
+    // Both dividers (12 px each) are always in the layout.
+    const dividers   = 24;
     const railMin    = panel === 'left' ? LEFT_MIN : RIGHT_MIN;
     const railMax    = panel === 'left' ? LEFT_MAX : RIGHT_MAX;
     // Dynamic upper bound: the rail can grow until the chat panel hits CHAT_MIN.
@@ -259,6 +265,7 @@ export default function AgentChat() {
     const lowerCap   = railMin;
     dragRef.current  = { panel, startX, startWidth, lowerCap, upperCap };
 
+    setResizing(true);
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
 
@@ -275,6 +282,7 @@ export default function AgentChat() {
     };
     const onUp = () => {
       dragRef.current = null;
+      setResizing(false);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMove);
@@ -282,7 +290,7 @@ export default function AgentChat() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
-  }, [effLeftWidth, effRightWidth, logOpen]);
+  }, [effLeftWidth, effRightWidth]);
 
   // Cross-panel hover correlation: ChatPanel sets this when the user hovers
   // a bubble; SessionLogPanel sets it on row hover. The other side dims rows
@@ -297,11 +305,76 @@ export default function AgentChat() {
     setWorkspaceRefreshKey(k => k + 1);
   }, []);
 
+  // Bumped by ChatPanel after the agent replied to a Full-Learn prompt (which
+  // may have added entries to the team KB), so the right rail's Knowledge tab
+  // refreshes without a manual reload.
+  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
+  const handleKnowledgeChanged = useCallback(() => {
+    setKnowledgeRefreshKey(k => k + 1);
+  }, []);
+
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
   const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
     setSessionCost({ usd, tokIn, tokOut });
   }, []);
+
+  // Last completed request's input tokens + model, fed by SessionLogPanel via
+  // onContextUpdate — drives the context-window fill indicator (#471). Unlike
+  // sessionCost this is NOT cumulative.
+  const [contextFill, setContextFill] = useState(null); // null = no data yet
+  const handleContextUpdate = useCallback((ctx) => {
+    setContextFill(ctx);
+  }, []);
+
+  // Bumped by ChatPanel whenever a session boundary occurs — a new message
+  // sent, "Reset Session" clicked, or a trigger-started run's first message
+  // arriving — so SessionLogPanel can dismiss a stale pinned To-Do window
+  // from a previous session even before any new TodoWrite call lands (#273).
+  const [todoCloseSignal, setTodoCloseSignal] = useState(0);
+  const handleTodoBoundary = useCallback(() => setTodoCloseSignal(s => s + 1), []);
+
+  // Clicking the "N learned" badge in the chat header opens the right rail on
+  // its Knowledge tab. `ts` makes repeat clicks re-fire the effect in RightRail.
+  const [railTabRequest, setRailTabRequest] = useState(null);
+  const handleOpenKnowledge = useCallback(() => {
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
+  }, []);
+
+  // Resuming a finished session (#574) lives in the Sessions tab (RightRail) but
+  // must set the room pointer + send the predefined message from ChatPanel — so
+  // route it through here, mirroring railTabRequest. `ts` re-fires the effect on
+  // repeat activations. ChatPanel owns the pointer PUT + message send.
+  const [resumeRequest, setResumeRequest] = useState(null);
+  const handleResumeSession = useCallback((sessionId) => {
+    if (!sessionId) return;
+    setResumeRequest({ sessionId, ts: Date.now() });
+  }, []);
+
+  // Deep-link from the GitHub Event Log (#642): a `?session=<correlationId>`
+  // query param means "open the Sessions tab and preselect the session this
+  // delivered event triggered". Consumed once agents have loaded and the target
+  // agent exists, then the param is cleared so a reload doesn't re-fire it.
+  // Cold-nav safe (AC7): the effect waits for the async agent list. SessionsPanel
+  // owns the active-vs-finished match + the graceful "not found" notice (AC6).
+  const [sessionSelectRequest, setSessionSelectRequest] = useState(null);
+  const consumedSessionRef = useRef(null);
+  const requestedSession = searchParams.get('session');
+  useEffect(() => {
+    if (!requestedSession || loading || !agents) return;
+    // Unknown agent → the redirect effect below handles it; don't consume here.
+    if (!agents.find(a => a.id === agentId)) return;
+    if (consumedSessionRef.current === requestedSession) return;
+    consumedSessionRef.current = requestedSession;
+    setLogOpen(true);
+    setRailTabRequest({ tab: 'sessions', ts: Date.now() });
+    setSessionSelectRequest({ correlationId: requestedSession, ts: Date.now() });
+    // Strip the param (keep any others) so the deep-link doesn't persist.
+    const next = new URLSearchParams(searchParams);
+    next.delete('session');
+    setSearchParams(next, { replace: true });
+  }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
   const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
   const effectiveRoomId =
@@ -523,89 +596,80 @@ export default function AgentChat() {
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={setHoveredCorrelationId}
             sessionCost={sessionCost}
+            contextFill={contextFill}
             onWorkspaceChanged={handleWorkspaceChanged}
+            onTodoBoundary={handleTodoBoundary}
+            onOpenKnowledge={handleOpenKnowledge}
+            onKnowledgeChanged={handleKnowledgeChanged}
+            resumeRequest={resumeRequest}
           />
         ) : (
           <EmptyState />
         )}
       </div>
 
-      {/* Right rail: tabbed Session Log / Workspace browser */}
-      {logOpen && (
-        <>
-          <ResizeDivider onMouseDown={startDrag('right')} />
-          <div style={{
-            width: effRightWidth,
-            minWidth: effRightWidth,
-            height: '100%',
-            background: 'var(--eb-bg-app)',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            flexShrink: 0,
-          }}>
-          <RightRail
-            agentId={selectedAgent?.id || null}
-            roomId={effectiveRoomId}
-            hoveredCorrelationId={hoveredCorrelationId}
-            onHoverCorrelation={setHoveredCorrelationId}
-            onClose={() => setLogOpen(false)}
-            onCostUpdate={handleCostUpdate}
-            workspaceRefreshKey={workspaceRefreshKey}
-          />
-        </div>
-        </>
-      )}
-
-      {/* Floating "Show log" button when the panel is hidden */}
-      {!logOpen && (
-        <button
-          onClick={() => setLogOpen(true)}
-          title="Show log panel (Cmd+Shift+L)"
-          aria-label="Show log panel"
-          style={{
-            position: 'fixed',
-            right: 'var(--eb-space-4)',
-            bottom: 'var(--eb-space-4)',
-            width: 36,
-            height: 36,
-            borderRadius: 'var(--eb-radius-full)',
-            background: 'var(--eb-bg-surface)',
-            color: 'var(--eb-text-secondary)',
-            border: '1px solid var(--eb-border-default)',
-            boxShadow: 'var(--eb-shadow-md)',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
-        >
-          <PanelRightOpen size={18} />
-        </button>
-      )}
+      {/* Right rail: tabbed Session Log / Workspace browser.
+          Always mounted — collapsing animates its width down to the same slim
+          icon rail the left navigation sidebar uses (#905) instead of
+          unmounting it behind a floating re-open button, so the chat panel
+          reflows smoothly and the active tab survives the cycle. */}
+      <ResizeDivider onMouseDown={startDrag('right')} disabled={!logOpen} />
+      <div style={{
+        width: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+        minWidth: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+        height: '100%',
+        background: 'var(--eb-bg-app)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        flexShrink: 0,
+        transition: resizing
+          ? 'none'
+          : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
+      }}>
+        <RightRail
+          agentId={selectedAgent?.id || null}
+          // Outcomes are team hand-offs, so that tab only applies to a team
+          // member (#963 AC1). `/api/matrix/agents` already carries the
+          // membership, so the rail needs no extra fetch to decide.
+          agentTeamId={selectedAgent?.parentTeamId || null}
+          roomId={effectiveRoomId}
+          hoveredCorrelationId={hoveredCorrelationId}
+          onHoverCorrelation={setHoveredCorrelationId}
+          collapsed={!logOpen}
+          onClose={() => setLogOpen(false)}
+          onOpen={() => setLogOpen(true)}
+          onCostUpdate={handleCostUpdate}
+          onContextUpdate={handleContextUpdate}
+          todoCloseSignal={todoCloseSignal}
+          workspaceRefreshKey={workspaceRefreshKey}
+          knowledgeRefreshKey={knowledgeRefreshKey}
+          openTabRequest={railTabRequest}
+          onResumeSession={handleResumeSession}
+          sessionSelectRequest={sessionSelectRequest}
+        />
+      </div>
     </div>
   );
 }
 
 /**
  * Native <select> bound to the agent-list filter spec. Lists every visible
- * team (with member count) followed by every individual agent, so the user
- * can narrow down to either a whole team or a single chat.
+ * team (with member count), every orchestrator, then every agent that
+ * belongs to neither ("Individual agents" — team/orchestrator members are
+ * already reachable via their group entry), so the user can narrow down to
+ * a whole team, an orchestrator, or a single standalone chat.
  */
 function FilterSelect({ agents, filter, onChange }) {
   const { groups, singles } = buildGroups(agents);
   const teams         = groups.filter(g => g.kind === 'team');
   const orchestrators = groups.filter(g => g.kind === 'orchestrator');
 
-  const byName = (a, b) =>
-    (a.displayName || a.id).localeCompare(b.displayName || b.id);
-  const everyAgent = [
-    ...groups.flatMap(g => [g.header, ...g.children].filter(Boolean)),
-    ...singles,
-  ].sort(byName);
+  // "Individual agents" = agents with no team/orchestrator membership at
+  // all — `singles` already excludes anyone captured by a `groups` entry
+  // (see `buildGroups` in AgentList.jsx), so team/orchestrator members must
+  // not be re-added here.
+  const individualAgents = singles;
 
   const value =
     filter.kind === 'team'         ? `team:${filter.id}`         :
@@ -663,9 +727,9 @@ function FilterSelect({ agents, filter, onChange }) {
         </optgroup>
       )}
 
-      {everyAgent.length > 0 && (
+      {individualAgents.length > 0 && (
         <optgroup label="Individual agents">
-          {everyAgent.map(a => (
+          {individualAgents.map(a => (
             <option key={a.id} value={`agent:${a.id}`}>
               {a.displayName || a.id}
             </option>

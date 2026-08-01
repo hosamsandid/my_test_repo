@@ -1,12 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock, LogIn, Copy, ShieldAlert, ExternalLink } from 'lucide-react';
+import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock, LogIn, ShieldAlert } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
+import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import CredentialOwnership from '../components/CredentialOwnership';
+import { useAuth } from '../auth/AuthContext';
+import {
+  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  normalizeCredential,
+} from './credential-scope-view';
+import {
+  resolveProbeState,
+  probeBlockedMessage,
+  probeNote,
+  probeTitle,
+  probeRequest,
+} from './llm-probe-state';
+import { groupAgentsByTeam } from './group-agents-by-team.js';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 
@@ -202,201 +219,30 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
   );
 }
 
-/* ────────────── Sub: subscription OAuth login wizard ────────────── */
-//
-// Walks the operator through `claude setup-token`, executed by the
-// orchestrator: start → open the authorize URL in the browser → paste the
-// confirmation code → the orchestrator captures the long-lived token. The
-// token itself never reaches the browser — on success we only hand the
-// flowId back to the form, and the server claims the token while saving.
-function OAuthLoginWizard({ onToken, onClose }) {
-  const [flow, setFlow] = useState(null);   // { flowId, status, authUrl, error }
-  const [code, setCode] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-  const [copied, setCopied] = useState(false);
-  const doneNotified = useRef(false);
-
-  function absorb(view) {
-    setFlow(view);
-    // Mirror the server's error verbatim (and clear it once the server does —
-    // e.g. after a successful code re-submission).
-    setErr(view?.error || null);
-    if (view?.status === 'done' && !doneNotified.current) {
-      doneNotified.current = true;
-      onToken(view.flowId);
-    }
-  }
-
-  // Kick off the flow on mount.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setBusy(true);
-      try {
-        const r = await apiCall('POST', '/api/llm-auth/flows');
-        if (!cancelled) absorb(r);
-      } catch (e) {
-        if (!cancelled) setErr(e.message);
-      } finally {
-        if (!cancelled) setBusy(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Poll while the orchestrator is working (waiting for the URL, or
-  // exchanging the pasted code for the token).
-  useEffect(() => {
-    if (!flow?.flowId) return;
-    const polling = flow.status === 'starting' || flow.status === 'exchanging';
-    if (!polling) return;
-    const t = setInterval(async () => {
-      try {
-        const r = await apiCall('GET', `/api/llm-auth/flows/${flow.flowId}`);
-        absorb(r);
-      } catch (e) {
-        setErr(e.message);
-      }
-    }, 1500);
-    return () => clearInterval(t);
-  }, [flow?.flowId, flow?.status]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function sendCode() {
-    if (!code.trim()) return;
-    setBusy(true); setErr(null);
-    try {
-      const r = await apiCall('POST', `/api/llm-auth/flows/${flow.flowId}/code`, { code: code.trim() });
-      absorb(r);
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function cancel() {
-    if (flow?.flowId && flow.status !== 'done') {
-      try { await apiCall('DELETE', `/api/llm-auth/flows/${flow.flowId}`); } catch { /* best effort */ }
-    }
-    onClose();
-  }
-
-  async function copyUrl() {
-    try {
-      await navigator.clipboard.writeText(flow.authUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch { /* clipboard unavailable — the link is still clickable */ }
-  }
-
-  const status = flow?.status;
-  // An error while the flow still awaits a code (e.g. "OAuth error: Invalid
-  // code") is recoverable — keep the paste form visible instead of failing.
-  const failed = ['error', 'expired', 'cancelled'].includes(status)
-    || (!!err && !['done', 'awaiting-code'].includes(status));
-
-  return (
-    <div style={{
-      padding: 'var(--eb-space-3)',
-      background: 'var(--eb-bg-elevated)',
-      border: '1px solid var(--eb-accent-primary)',
-      borderRadius: 'var(--eb-radius-md)',
-      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
-      fontSize: 'var(--eb-text-sm)',
-    }}>
-      {(!flow || status === 'starting') && !failed && (
-        <div>Starting the login flow (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code>)…</div>
-      )}
-
-      {status === 'awaiting-code' && flow.authUrl && (
-        <>
-          {err && (
-            <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
-              {err}
-            </div>
-          )}
-          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>1. Open this link, sign in with your Claude subscription and approve:</div>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
-            <a
-              href={flow.authUrl}
-              target="_blank"
-              rel="noreferrer"
-              style={{
-                fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
-                wordBreak: 'break-all', color: 'var(--eb-accent-primary)',
-                display: 'inline-flex', alignItems: 'flex-start', gap: 4,
-              }}
-            >
-              <ExternalLink size={12} style={{ flexShrink: 0, marginTop: 2 }} />
-              {flow.authUrl}
-            </a>
-            <button type="button" onClick={copyUrl} style={{ ...buttonGhost, flexShrink: 0 }}>
-              <Copy size={12} /> {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
-          <div style={{ fontWeight: 'var(--eb-font-medium)' }}>2. Paste the confirmation code shown after approval (copy it completely, including any <code style={{ fontFamily: 'var(--eb-font-mono)' }}>#…</code> suffix):</div>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <input
-              value={code}
-              onChange={e => setCode(e.target.value)}
-              placeholder="Paste code…"
-              style={{
-                flex: 1,
-                padding: 'var(--eb-space-2) var(--eb-space-3)',
-                background: 'var(--eb-bg-surface)',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-md)',
-                color: 'var(--eb-text-primary)',
-                fontFamily: 'var(--eb-font-mono)',
-                fontSize: 'var(--eb-text-xs)',
-                outline: 'none',
-              }}
-            />
-            <button
-              type="button"
-              onClick={sendCode}
-              disabled={busy || !code.trim()}
-              style={{ ...buttonPrimary, opacity: busy || !code.trim() ? 0.6 : 1 }}
-            >
-              {busy ? 'Submitting…' : 'Submit code'}
-            </button>
-          </div>
-        </>
-      )}
-
-      {status === 'exchanging' && (
-        <div>Exchanging the code for a token…</div>
-      )}
-
-      {status === 'done' && (
-        <div style={{ color: 'var(--eb-status-success)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <Check size={14} /> Login successful — the token will be stored when you save this provider.
-        </div>
-      )}
-
-      {failed && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)' }}>
-          {err || flow?.error || 'The login flow failed.'} You can retry, or paste a token generated with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>claude setup-token</code> manually.
-        </div>
-      )}
-
-      {status !== 'done' && (
-        <button type="button" onClick={cancel} style={{ ...buttonSecondary, alignSelf: 'flex-start' }}>
-          Cancel login
-        </button>
-      )}
-    </div>
-  );
-}
-
 /* ─────────────────── Sub: endpoint form (create + edit) ─────────────────── */
 
-function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
+function EndpointForm({ endpoint, onSave, onCancel, saving, error,
+                        teams = [], isSysAdmin = false, adminTeamIds = [] }) {
   const isEdit = Boolean(endpoint?.id);
   const [name, setName] = useState(endpoint?.name ?? '');
   const [id, setId] = useState(endpoint?.id ?? '');
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? '');
+
+  // Team-scope ownership (#800), mirroring the SSH Keys / GitHub Tokens forms.
+  // A System Admin picks system-scoped (assign to teams) vs team-scoped; a Team
+  // Admin only ever creates team-scoped providers for a team they administer.
+  // On edit only a System Admin may reassign — for everyone else the selector is
+  // shown read-only and the ownership fields are omitted from the payload.
+  const canReassign = canReassignCredentialClient({ isSysAdmin });
+  const [ownership, setOwnership] = useState(() => {
+    if (isEdit) {
+      const n = normalizeCredential(endpoint);
+      return { scope: n.scope, teamId: n.teamId || '', assignedTeamIds: n.assignedTeamIds || [] };
+    }
+    return defaultOwnership({ isSysAdmin, adminTeamIds });
+  });
+  const sendOwnership = !isEdit || canReassign;
+  const ownershipReady = !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -440,47 +286,36 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
   const oauthTokenReady = (isEdit && wasOauth && endpoint.hasToken && !clearToken)
     || !!oauthFlowId
     || !!authToken.trim();
-  const canSubmit = name.trim() && (isOauth
+  const canSubmit = name.trim() && ownershipReady && (isOauth
     ? ((!requireCompliance || complianceOk) && oauthTokenReady)
     : !!baseUrl.trim());
-  // Probing an oauth provider needs a token the server can reach: the stored
-  // one, or a pasted value. A wizard-obtained token is only claimable on save,
-  // so it can't be probed pre-save.
-  const canProbe = isOauth
-    ? ((isEdit && wasOauth && endpoint.hasToken && !authToken.trim()) || !!authToken.trim())
-    : !!baseUrl.trim();
-
-  // Pick the probe target: when the user is editing an existing endpoint and
-  // hasn't typed a new token, hit the stored-id route so the server's persisted
-  // token is used (we never round-trip the raw token through the UI). In every
-  // other case — create mode, or edit with an unsaved token change — call the
-  // stateless probe route with the form's auth type, baseUrl + typed token.
-  function probeRequest(kind) {
-    const sameAuthType = authType === (endpoint?.authType ?? 'api-key');
-    const useStored = isEdit && !authToken.trim() && !clearToken && sameAuthType;
-    if (useStored) {
-      const suffix = kind === 'test' ? 'test' : 'discover-models';
-      return { path: `/api/llm-endpoints/${endpoint.id}/${suffix}`, body: undefined };
-    }
-    const suffix = kind === 'test' ? 'probe-test' : 'probe-discover-models';
-    return {
-      path: `/api/llm-endpoints/${suffix}`,
-      body: {
-        authType,
-        baseUrl: isOauth ? '' : baseUrl.trim(),
-        authToken: clearToken ? '' : authToken.trim(),
-      },
-    };
-  }
+  // Which credential a probe would use, and whether it may run at all —
+  // resolved in one pure place (llm-probe-state.js) so the button state and the
+  // request target cannot disagree. Notably, a completed-but-unsaved
+  // subscription login blocks the probe instead of silently testing the old
+  // stored token (#912): the fresh token is only claimed on save.
+  const probeForm = {
+    authType,
+    endpointAuthType: endpoint?.authType ?? 'api-key',
+    endpointId: endpoint?.id,
+    isEdit,
+    hasStoredToken: !!endpoint?.hasToken,
+    pastedToken: authToken,
+    clearToken,
+    oauthFlowId,
+    baseUrl,
+  };
+  const probe = resolveProbeState(probeForm);
+  const canProbe = probe.canProbe;
 
   async function runTest() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: isOauth ? 'No token available to test — paste one, or save and test afterwards.' : 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: probeBlockedMessage(probe, 'test') });
       return;
     }
     setProbing('test'); setProbeMsg(null);
     try {
-      const { path, body } = probeRequest('test');
+      const { path, body } = probeRequest(probeForm, 'test');
       const r = await apiCall('POST', path, body);
       setProbeMsg({
         ok: r.ok,
@@ -497,12 +332,12 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
 
   async function runDiscover() {
     if (!canProbe) {
-      setProbeMsg({ ok: false, text: isOauth ? 'No token available — paste one, or save and discover afterwards.' : 'Enter a Base URL first.' });
+      setProbeMsg({ ok: false, text: probeBlockedMessage(probe, 'discover') });
       return;
     }
     setProbing('discover'); setProbeMsg(null);
     try {
-      const { path, body } = probeRequest('discover');
+      const { path, body } = probeRequest(probeForm, 'discover');
       const r = await apiCall('POST', path, body);
       setDiscovered(r.models || []);
       setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
@@ -547,6 +382,10 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
         : '',
     };
     if (!isEdit && id.trim()) payload.id = id.trim();
+    // Ownership: sent on create, and on edit only when the caller may reassign
+    // (System Admin). Omitting it on a Team Admin edit leaves the scope/team
+    // untouched (and the server would 403 a reassignment anyway).
+    if (sendOwnership) Object.assign(payload, ownershipPayload(ownership));
     if (isOauth && complianceOk) payload.complianceAck = true;
     // Token sources, in precedence order: manual paste > completed login flow
     // (claimed server-side) > keep/clear existing.
@@ -586,6 +425,21 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           ? <>Cannot be changed after creation.</>
           : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
       />
+
+      {/* Ownership / team scope (#800) */}
+      {isEdit && !canReassign ? (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Only a System Admin can change which team owns a provider or reassign a system-scoped one.
+        </div>
+      ) : (
+        <CredentialOwnership
+          value={ownership}
+          onChange={setOwnership}
+          teams={teams}
+          isSysAdmin={isSysAdmin}
+          adminTeamIds={adminTeamIds}
+        />
+      )}
 
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
@@ -708,7 +562,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
                 <Check size={14} /> Login completed — the token is stored when you save.
                 <button
                   type="button"
-                  onClick={() => { setOauthFlowId(null); setWizardOpen(false); }}
+                  onClick={() => { setOauthFlowId(null); setWizardOpen(false); setProbeMsg(null); }}
                   style={buttonGhost}
                 >
                   Discard
@@ -716,7 +570,10 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
               </div>
             ) : wizardOpen ? (
               <OAuthLoginWizard
-                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); }}
+                // Drop any earlier probe result: it describes the token the
+                // fresh login is about to replace, and a lingering red 401
+                // reads as "this login failed" (#912).
+                onToken={(flowId) => { setOauthFlowId(flowId); setWizardOpen(false); setProbeMsg(null); }}
                 onClose={() => setWizardOpen(false)}
               />
             ) : (
@@ -829,7 +686,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           onClick={runTest}
           disabled={!canProbe || probing === 'test'}
           style={{ ...buttonGhost, opacity: !canProbe || probing === 'test' ? 0.6 : 1 }}
-          title={canProbe ? 'Send GET /v1/models to verify connectivity' : 'Enter a Base URL first'}
+          title={probeTitle(probe, 'test')}
         >
           <PlugZap size={13} /> {probing === 'test' ? 'Testing…' : 'Test connection'}
         </button>
@@ -838,7 +695,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
           onClick={runDiscover}
           disabled={!canProbe || probing === 'discover'}
           style={{ ...buttonGhost, opacity: !canProbe || probing === 'discover' ? 0.6 : 1 }}
-          title={canProbe ? 'Fetch /v1/models from the proxy' : 'Enter a Base URL first'}
+          title={probeTitle(probe, 'discover')}
         >
           <RefreshCw size={13} /> {probing === 'discover' ? 'Loading…' : 'Discover models'}
         </button>
@@ -848,6 +705,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error }) {
             color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
           }}>{probeMsg.text}</span>
         )}
+        {/* Always name the credential a probe would use, so a 401 can never be
+            mistaken for a failed login (#912). */}
+        <span style={{
+          flexBasis: '100%',
+          fontSize: 'var(--eb-text-xs)',
+          color: canProbe ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)',
+        }}>{probeNote(probe)}</span>
       </div>
 
       {discovered && (
@@ -1039,12 +903,27 @@ function EnvProviderPanel({ provider, onClose }) {
 export default function ModelRegistry() {
   const { data: endpoints, loading, error, refetch } = useApi('/api/llm-endpoints');
   const { data: envFallback } = useApi('/api/llm-env-fallback');
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  const names = teamsById(teams);
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const caller = { isSysAdmin, adminTeamIds };
   const [creating, setCreating] = useState(false);
   const [editing, setEditing]   = useState(null);    // endpoint object
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents } | null
+  const [respawning, setRespawning]       = useState(false);
+  const [respawnError, setRespawnError]   = useState(null);
+  // Set when respawn-agents reports agents it failed to restart (still on the
+  // old credentials) — surfaced as a follow-up alert so the operator can't
+  // mistake "dialog closed" for "rotation fully applied" (only console.info'd
+  // previously, which nobody watching the UI would ever see).
+  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedAgents: Array<{id, displayName, role, teamId, teamName}> } | null
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1081,6 +960,23 @@ export default function ModelRegistry() {
             }}>read-only</span>
           </span>
         : v,
+    },
+    {
+      key: '_scope', label: 'Scope / Teams', sortable: false,
+      render: (_, row) => {
+        if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+        const s = credentialScopeLabel(row, names);
+        return (
+          <span style={{ fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{
+              display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+            }}>{s.label}</span>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+          </span>
+        );
+      },
     },
     {
       key: 'baseUrl',
@@ -1130,46 +1026,26 @@ export default function ModelRegistry() {
       key: '_actions',
       label: '',
       sortable: false,
-      render: (_, row) => row.readOnly ? (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="Edit .env and restart to change">
-          <Lock size={13} />
-        </div>
-      ) : (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <button
-            aria-label="Edit"
-            title="Edit"
-            onClick={() => { setEditing(row); setFormError(null); }}
-            style={{
-              display: 'flex', alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-text-secondary)',
-              cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-            }}
-          >
-            <Pencil size={13} />
-          </button>
-          <button
-            aria-label="Delete"
-            title="Delete"
-            onClick={() => setDeleteTarget(row)}
-            style={{
-              display: 'flex', alignItems: 'center',
-              padding: 'var(--eb-space-1) var(--eb-space-2)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-status-error)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-status-error)',
-              cursor: 'pointer', fontSize: 'var(--eb-text-xs)',
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
-        </div>
-      ),
+      render: (_, row) => {
+        if (row.readOnly) return (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="Edit .env and restart to change">
+            <Lock size={13} />
+          </div>
+        );
+        // A Team Admin may see a system provider assigned to their team but not
+        // manage it (#800) — show a lock, no edit/delete, matching the API gate.
+        if (!canManageCredentialClient(row, caller)) return (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="System-scoped provider — only a System Admin can manage it. You may use it.">
+            <Lock size={13} />
+          </div>
+        );
+        return (
+          <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+            <IconButton icon={Pencil} label="Edit" onClick={() => { setEditing(row); setFormError(null); }} />
+            <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
+          </div>
+        );
+      },
     },
   ];
 
@@ -1191,6 +1067,25 @@ export default function ModelRegistry() {
     setSaving(true); setFormError(null);
     try {
       await apiCall('PUT', `/api/llm-endpoints/${editing.id}`, payload);
+      // Detect whether a spawn-time credential changed: new/cleared token, new
+      // OAuth flow, or changed baseUrl — all are baked into the container env.
+      const credentialChanged = 'authToken' in payload
+        || 'oauthFlowId' in payload
+        || payload.baseUrl !== (editing.baseUrl ?? '');
+      if (credentialChanged) {
+        try {
+          const { agents } = await apiCall('GET', `/api/llm-endpoints/${editing.id}/bound-agents`);
+          if (agents && agents.length > 0) {
+            setRespawnPrompt({ endpointId: editing.id, agents });
+            // Don't close the panel yet — dialog handles that on confirm/cancel.
+            return;
+          }
+        } catch (e) {
+          // bound-agents failure is non-blocking toward the user; the PUT
+          // already succeeded — but leave a breadcrumb for developers.
+          console.warn('[ModelRegistry] failed to fetch bound-agents for', editing.id, e);
+        }
+      }
       setEditing(null);
       refetch();
     } catch (e) {
@@ -1209,6 +1104,49 @@ export default function ModelRegistry() {
       setActionError(e.message);
       setDeleteTarget(null);
     }
+  }
+
+  async function handleRespawnConfirm() {
+    if (!respawnPrompt) return;
+    setRespawning(true); setRespawnError(null);
+    try {
+      const { respawned, skipped } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
+      const agents = respawnPrompt.agents;
+      setRespawnPrompt(null);
+      refetch();
+      if (skipped && skipped.length > 0) {
+        // `skipped` means the orchestrator's respawn call returned
+        // respawned:false for that agent id. That covers two different cases
+        // it can't distinguish from here: the agent wasn't actually running
+        // at the moment of the call (nothing to fix — it'll get the new
+        // credential on its next start), or it WAS running and the restart
+        // attempt itself failed (still on stale credentials — the exact
+        // problem this feature exists to prevent). Since we can't tell which
+        // occurred, don't close the panel silently; surface it as a
+        // follow-up alert the operator must see and dismiss.
+        const failedAgents = skipped.map(id => agents.find(a => a.id === id) || { id, displayName: id, role: 'agent', teamId: null, teamName: null });
+        setRespawnFailureNotice({ failedAgents });
+      } else {
+        setEditing(null);
+      }
+    } catch (e) {
+      setRespawnError(e.message);
+    } finally {
+      setRespawning(false);
+    }
+  }
+
+  function handleRespawnCancel() {
+    setRespawnPrompt(null);
+    setRespawnError(null);
+    setEditing(null);
+    refetch();
+  }
+
+  function handleRespawnFailureAck() {
+    setRespawnFailureNotice(null);
+    setEditing(null);
+    refetch();
   }
 
   if (loading) {
@@ -1260,7 +1198,13 @@ export default function ModelRegistry() {
         columns={COLUMNS}
         data={envFallback ? [envFallback, ...(endpoints ?? [])] : (endpoints ?? [])}
         emptyText="No model providers registered yet."
-        onRowClick={row => { setEditing(row); setFormError(null); }}
+        onRowClick={row => {
+          // The .env row opens its read-only panel; a manageable provider opens
+          // the editor. A visible-but-unmanageable system provider (Team Admin)
+          // is not clickable — its lock already explains why (#800).
+          if (!row.readOnly && !canManageCredentialClient(row, caller)) return;
+          setEditing(row); setFormError(null);
+        }}
       />
 
       <SidePanel
@@ -1276,6 +1220,9 @@ export default function ModelRegistry() {
             onCancel={() => setCreating(false)}
             saving={saving}
             error={formError}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
           />
         )}
       </SidePanel>
@@ -1296,6 +1243,9 @@ export default function ModelRegistry() {
             onCancel={() => setEditing(null)}
             saving={saving}
             error={formError}
+            teams={teams}
+            isSysAdmin={isSysAdmin}
+            adminTeamIds={adminTeamIds}
           />
         )}
       </SidePanel>
@@ -1308,6 +1258,111 @@ export default function ModelRegistry() {
         confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={!!respawnPrompt}
+        variant="info"
+        title="Restart agents to apply new credentials?"
+        message={respawnPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} enabled and bound to this provider, and will be restarted:
+            </p>
+            <div style={{
+              margin: '0 0 var(--eb-space-3)',
+              maxHeight: 240,
+              overflowY: 'auto',
+              fontSize: 'var(--eb-text-sm)',
+            }}>
+              {groupAgentsByTeam(respawnPrompt.agents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            {respawnError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>
+                {respawnError} — you can retry or skip.
+              </p>
+            )}
+            <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              If you skip this, agents will keep using the old credentials until you manually disable and re-enable them.
+            </p>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Restarting will interrupt any agent currently mid-task — you may need to manually restart or re-trigger interrupted work afterward.
+            </p>
+          </div>
+        )}
+        confirmLabel="Restart agents"
+        cancelLabel="Skip for now"
+        busy={respawning}
+        onConfirm={handleRespawnConfirm}
+        onCancel={handleRespawnCancel}
+      />
+
+      <ConfirmDialog
+        open={!!respawnFailureNotice}
+        variant="danger"
+        alertOnly
+        title="Some agents failed to restart"
+        message={respawnFailureNotice && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {respawnFailureNotice.failedAgents.length} agent(s) could not be restarted — if currently running, they may still be using the old credentials:
+            </p>
+            <div style={{ maxHeight: 240, overflowY: 'auto', fontSize: 'var(--eb-text-sm)' }}>
+              {groupAgentsByTeam(respawnFailureNotice.failedAgents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)' }}>
+              Reopen this provider and confirm the restart prompt again to retry.
+            </p>
+          </div>
+        )}
+        onConfirm={handleRespawnFailureAck}
+        onCancel={handleRespawnFailureAck}
       />
     </div>
   );

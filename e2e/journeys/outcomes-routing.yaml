@@ -1,0 +1,154 @@
+journeyVersion: 1
+id: outcomes-routing
+title: Routing & outcomes
+order: 45
+# CI lane only. Authors a process DRAFT and stops before materialising, so it has
+# no team/Matrix side effects — only the draft document. It builds the dispatcher
+# reference case from the agent-outcomes concept (#784 §11): one switch agent with
+# three outcomes, two wired to developers, one a dead-end-by-design. Canvas actions
+# are the outcome-port drags (flows.wireOutcome); everything else is button /
+# dialog / Routing-tab interaction.
+lanes: [ci]
+# Three "Generate agent prompt" round-trips (mock LLM) plus two outcome-port drags
+# run past the default budget on a cold stack.
+timeoutMs: 120000
+
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Dispatch Routing
+
+steps:
+  - kind: narrative-only
+    id: intro
+    voiceover: |
+      Some agents don't just hand work onward — they decide which of several paths a task takes. A dispatcher routes each task to one developer or another; a reviewer accepts or asks for changes. The Routing tab is where you configure that whole decision in one place, and the canvas draws it as a real switch.
+    narrative: |
+      We've seen how agents hand work to each other over labels and channels. But some agents make a *branching* decision — a dispatcher sends each task to one developer or another, a reviewer either accepts a change or sends it back. Until now that logic lived only in prompt prose, invisible on the canvas. The Routing tab makes it a first-class, editable model: a set of named outcomes, a switch or a multi-emit mode, and a real branch drawn on the graph. Let's build the dispatcher reference case from scratch.
+
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Dispatch Routing
+
+  # Three agents: the Dispatcher and the two developers it routes between.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Dispatcher
+      notes: Receive dispatch-labelled issues and route each task to a developer.
+      generate: true
+  - action:
+      do: flows.addAgentFromScratch
+      name: Developer
+      notes: Implement frontend and UI tasks. Open a PR at the end.
+      generate: true
+  - action:
+      do: flows.addAgentFromScratch
+      name: Developer 2
+      notes: Implement backend and database tasks. Open a PR at the end.
+      generate: true
+
+  # ── The Routing tab: author the switch ──────────────────────────────────────
+  - id: routing-tab
+    voiceover: |
+      I open the Dispatcher and switch to its new Routing tab. At the top are its inputs — what wakes it. Below is the Outcomes section: I set the mode to "exactly one", because a dispatcher picks a single path per task.
+    narrative: |
+      I click the Dispatcher and open its Routing tab — sitting right next to Details, Triggers and Connections. The tab shows both directions of the agent's decision in one view. At the top, Inputs lists what wakes the agent, with the producers feeding each listener and an inline warning if two listeners collide. Below is Outcomes — the part we're here for. I set the mode to "exactly one": a dispatcher chooses a single route per run, so the outcomes are a switch, not a multi-emit set.
+    action:
+      do: flows.openRouting
+      name: Dispatcher
+    screenshot: routing-tab-empty
+  - action:
+      do: flows.setOutcomeMode
+      name: Dispatcher
+      mode: exactlyOne
+
+  - id: author-outcomes
+    voiceover: |
+      I add three outcomes: route to Developer on the "ready" label, route to Developer 2 on "ready-2", and hold for clarification with no label at all — a terminal, human-only branch. I save, and the switch is stored.
+    narrative: |
+      I add the three outcomes the dispatcher can take. First, "Route to Developer" — its condition is a frontend or UI task, and it sets the label `ready`. Second, "Route to Developer 2" — a backend or database task, setting `ready-2`. Third, "Hold for clarification" — for an ambiguous task that needs human input; it sets no label at all, so it's a terminal outcome by design, not a dead-end bug. Each row shows its derived consumers read-only, computed from the graph, so I can see at a glance whether anything actually listens for the signal. I press Save, and the structured switch is persisted on the Dispatcher.
+    action:
+      do: flows.addOutcome
+      name: Dispatcher
+      title: Route to Developer
+      when: Frontend or UI task
+      label: ready
+    screenshot: routing-outcomes-authored
+  - action:
+      do: flows.addOutcome
+      name: Dispatcher
+      title: Route to Developer 2
+      when: Backend or database task
+      label: ready-2
+  - action:
+      do: flows.addOutcome
+      name: Dispatcher
+      title: Hold for clarification
+      when: Task is ambiguous — human input needed
+      label: ""
+  - action:
+      do: flows.saveOutcomes
+      name: Dispatcher
+  - assert:
+      do: flows.expectOutcome
+      name: Dispatcher
+      outcomeId: route-to-developer
+      mode: exactlyOne
+
+  # ── The switch on the canvas ────────────────────────────────────────────────
+  - id: switch-badge
+    voiceover: |
+      Back on the canvas, the Dispatcher now wears a diamond switch badge and sprouts one output port per outcome. I drag the "Route to Developer" port onto the Developer — and the hand-off dialog opens already filled with the "ready" label. One confirm, and the branch is wired.
+    narrative: |
+      Back on the canvas the Dispatcher has changed. It now carries a ◇ switch badge, and down its right edge is one labelled output port per outcome — Route to Developer, Route to Developer 2, Hold for clarification. These are draggable. I grab the "Route to Developer" port and drop it on the Developer node: the label hand-off dialog opens already pre-filled with `ready`, the label that outcome sets, so I just confirm it. I do the same from "Route to Developer 2" to Developer 2. Two branches wired straight from the switch; the Hold outcome stays a deliberate dead-end.
+    action:
+      do: flows.expectSwitchNode
+      name: Dispatcher
+    screenshot: routing-switch-canvas
+  - action:
+      do: flows.wireOutcome
+      from: Dispatcher
+      to: Developer
+      outcome: Route to Developer
+  - action:
+      do: flows.wireOutcome
+      from: Dispatcher
+      to: Developer 2
+      outcome: Route to Developer 2
+
+  # #1010 (S12): the fan-out listeners follow the wiring conventions — one
+  # single-event listener per lane, each claiming its wake label (#958).
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Developer
+      event: issues.labeled
+      labelFilter: ready
+      claimed: true
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Developer 2
+      event: issues.labeled
+      labelFilter: ready-2
+      claimed: true
+
+  # ── Suggest, then decline — nothing persists ────────────────────────────────
+  # Open the Developer's Routing tab first — every flows.* outcome step operates
+  # on an already-open inspector (cf. the Dispatcher above), and the last
+  # wireOutcome closed the Dispatcher panel via closeSidePanel.
+  - action:
+      do: flows.openRouting
+      name: Developer
+  - id: suggest-decline
+    voiceover: |
+      The Routing tab can also propose outcomes for me. On the Developer I press "suggest outcomes" — the assistant drafts a set, highlighted as unconfirmed. I decide not to keep them and close the panel without saving. Nothing is persisted: suggestions never write until I confirm.
+    narrative: |
+      Authoring outcomes by hand is fine, but the tab can also propose them. I open the Developer's Routing tab and press "suggest outcomes…". The assistant reads the role and drafts a candidate set, which lands highlighted as unconfirmed — a proposal, not a commitment. This time I decide they're not what I want, and I simply close the panel without saving. Because nothing is written until I press Save, the Developer keeps no outcomes at all. Suggestions are always human-confirmed.
+    action:
+      do: flows.suggestOutcomes
+      name: Developer
+    screenshot: routing-suggest
+  - assert:
+      do: flows.expectNoOutcomes
+      name: Developer

@@ -1,0 +1,135 @@
+journeyVersion: 1
+id: wiring-handoffs
+title: Hand-offs — labels, artifacts, declared open ends
+order: 48
+# CI lane only. Draft-only, no team/Matrix side effects. Covers S2 (label
+# hand-off incl. the claim), S11 (file-artifact hand-off) and the open-end
+# declaration of concept §4.7: an unconsumed produced artifact raises a
+# call-to-action, and marking it terminal resolves it into a proper endpoint.
+lanes: [ci]
+timeoutMs: 120000
+
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Hand-offs
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      Agent-to-agent hand-offs ride on labels and artifacts. This journey
+      wires a claimed label hand-off, a file-artifact hand-off, and then
+      declares a deliberate open end — the difference between "forgotten"
+      and "the end product".
+
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Hand-offs
+  - action:
+      do: flows.addAgentFromScratch
+      name: Analyst
+      notes: Analyse the request and write an analysis report.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Builder
+      notes: Implement the analysed work and open a pull request.
+
+  # ── S2: label hand-off with the derived claim ──────────────────────────────
+  - id: label-handoff
+    narrative: |
+      The Analyst sets `analysis-done`; the Builder waits on it. The engine
+      stamps the claim automatically — when the Builder wakes, the label flips
+      to `analysis-done:wip`, so a stalled run is visibly different from a
+      wake that never arrived.
+    action:
+      do: flows.wireLabelHandoff
+      from: Analyst
+      to: Builder
+      label: analysis-done
+    screenshot: wiring-handoff-label
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Builder
+      event: issues.labeled
+      labelFilter: analysis-done
+      claimed: true
+  - kind: narrative-only
+    id: claim-readout
+    narrative: |
+      The persisted listener claims its wake label — when the Builder wakes,
+      `analysis-done` flips to `analysis-done:wip` on the issue (asserted on
+      the draft document above; the gate variant of the claim chip is asserted
+      in the review-gate journey).
+    # No screenshot: this is a read-out of the state the label hand-off slide
+    # already shows — a capture here is pixel-identical to wiring-handoff-label.
+    # The claim detail rides in that slide's notes.
+
+  # ── S11: file-artifact hand-off ────────────────────────────────────────────
+  - id: artifact
+    narrative: |
+      Files hand off by logical name, not path: the Builder consumes the
+      Analyst's "Analysis report", resolved at runtime from the artifact
+      manifest.
+    # No screenshot: the file-artifact hand-off adds only tiny "Out(1)/In(1)"
+    # chips to the same Analyst→Builder edge as the label hand-off, so a canvas
+    # capture is a near-duplicate of wiring-handoff-label. The artifact input is
+    # shown instead in the open-end slide's Routing panel ("Consumes artifact
+    # Analysis report"), and described in that slide's notes.
+    action:
+      do: flows.addArtifactInput
+      name: Builder
+      from: Analyst
+      artifact: Analysis report
+
+  # ── §4.7: the open-end declaration ─────────────────────────────────────────
+  - action:
+      do: flows.openRouting
+      name: Builder
+  - action:
+      do: flows.addOutcome
+      name: Builder
+      title: Opens PR
+      when: Implementation is complete and tests are green
+      action: openPr
+  - action:
+      do: flows.saveOutcomes
+      name: Builder
+  - action:
+      do: flows.closeInspector
+      name: Builder
+  - id: open-end-cta
+    narrative: |
+      The Builder's pull request has no consumer in this flow — the editor
+      flags it, not as a dead error but as an open question with three
+      answers: wire a consumer, mark it terminal, or mark it external. Here the
+      merged PR IS the product, so we declare it terminal — the row then reads
+      "⏹ Terminal by design — the end product" and the wiring hint disappears:
+      an intentional open end is not a smell.
+    # Capture the Builder's Routing tab OPEN so the "no consumer yet" open-end
+    # call-to-action (wire / terminal / external) is actually visible — an
+    # assert-only capture would show the bare canvas.
+    action:
+      do: flows.openRouting
+      name: Builder
+    screenshot: wiring-open-end-cta
+  # Close the Routing panel before the lint assert — an open side panel overlays
+  # and intercepts the canvas lint button click.
+  - action:
+      do: flows.closeInspector
+      name: Builder
+  - assert:
+      do: flows.expectLint
+      code: producer-unconsumed
+  - action:
+      do: flows.markOutcomeTerminal
+      name: Builder
+    # No screenshot: markOutcomeTerminal reloads the canvas (it re-fetches the
+    # lint state), so a capture here shows the bare graph. The terminal resolution
+    # is described in the open-end slide's notes; the assertion below proves it.
+  - assert:
+      do: flows.expectLint
+      code: producer-unconsumed
+      absent: true

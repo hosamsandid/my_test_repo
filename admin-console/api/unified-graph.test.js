@@ -18,13 +18,46 @@ const lintCodes = (g) => g.lints.map(l => l.code);
 
 test('label edge: emitter → listener via emits ↔ labelFilter', () => {
   const g = buildUnifiedGraph([
-    { id: 'dev', triggers: [{ id: 't1', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self', emits: ['ready-for-review'] }] },
-    { id: 'rev', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'ready-for-review', from: 'any-except-self', emits: [] }] },
+    { id: 'dev', emits: ['ready-for-review'], triggers: [{ id: 't1', type: 'github-event', events: ['issues.labeled'], from: 'any-except-self' }] },
+    { id: 'rev', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'ready-for-review', from: 'any-except-self' }] },
   ]);
   const e = findEdge(g, x => x.on === 'label' && x.from === 'dev' && x.to === 'rev');
   assert.ok(e, 'expected a label hand-off dev → rev');
   assert.equal(e.label, 'ready-for-review');
   assert.ok(e.id, 'edge carries a stable id');
+});
+
+test('outcome-keyed label edge carries the outcome id (\#827/\#828)', () => {
+  // A reviewer with an authored exactlyOne outcomes port setting `ready-to-merge`
+  // → the merger's listener. The unified on:'label' edge must forward the outcome
+  // option id so the canvas can title the edge + focus the Routing tab on it.
+  const g = buildUnifiedGraph([
+    { id: 'rev', outcomes: { mode: 'exactlyOne', options: [
+      { id: 'accepted', title: 'Accepted', actions: [{ type: 'setLabel', label: 'ready-to-merge' }] },
+      { id: 'revisions-required', title: 'Revisions', actions: [{ type: 'setLabel', label: 'revisions-required' }] },
+    ] } },
+    { id: 'merger', triggers: [{ id: 'm1', type: 'github-event', labelFilter: 'ready-to-merge', from: 'any-except-self' }] },
+    { id: 'reworker', triggers: [{ id: 'r1', type: 'github-event', labelFilter: 'revisions-required', from: 'any-except-self' }] },
+  ]);
+  const toMerger = findEdge(g, x => x.on === 'label' && x.from === 'rev' && x.to === 'merger');
+  assert.ok(toMerger, 'expected rev → merger label edge');
+  assert.equal(toMerger.outcome, 'accepted');
+  const toReworker = findEdge(g, x => x.on === 'label' && x.from === 'rev' && x.to === 'reworker');
+  assert.ok(toReworker, 'expected rev → reworker label edge');
+  assert.equal(toReworker.outcome, 'revisions-required');
+  // The node carries the authored port through for the Routing tab.
+  const rev = g.nodes.find(n => n.id === 'rev');
+  assert.equal(rev.outcomes.mode, 'exactlyOne');
+});
+
+test('duplicate-listener lint surfaces through the unified /flows/graph builder (\#826)', () => {
+  const g = buildUnifiedGraph([
+    { id: 'rev', triggers: [
+      { id: 'rev-on-pr', type: 'github-event', channel: true, events: ['pull_request.opened'] },
+      { id: 'rev-manual', type: 'github-event', events: ['pull_request.opened'] },
+    ] },
+  ]);
+  assert.ok(lintCodes(g).includes('duplicate-listener'));
 });
 
 test('timer edge (#410): cron trigger runs from the @timer actor', () => {
@@ -39,6 +72,39 @@ test('timer edge (#410): cron trigger runs from the @timer actor', () => {
   const actor = g.nodes.find(n => n.id === '@timer');
   assert.equal(actor.kind, 'actor');
   assert.equal(actor.actor, 'timer');
+});
+
+test('loop edge (#936): a loop trigger stays a self-edge (on:loop) carrying its stop-contract summary', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 25, maxTokens: 2000000,
+      until: { command: 'npm test' }, verify: { agentId: 'dev-reviewer' }, emits: [],
+    }] },
+  ]);
+  const e = findEdge(g, x => x.on === 'loop');
+  assert.ok(e, 'a loop self-edge is emitted');
+  // Unlike the cron timer (rerouted from @timer), the loop is the agent
+  // re-arming itself — from === to and no @timer/@github actor is introduced.
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'dev');
+  assert.equal(e.triggerId, 'l');
+  assert.deepEqual(e.loop, {
+    maxIterations: 25, maxTokens: 2000000,
+    until: { command: 'npm test' }, verify: { mode: 'agent', agentId: 'dev-reviewer' },
+  });
+  assert.ok(!g.nodes.some(n => n.id === '@timer'), 'no @timer actor for a loop');
+});
+
+test('loop edges (#936): two loops on one agent stay two independently-keyed edges', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [
+      { id: 'a', type: 'loop', maxIterations: 5, emits: [] },
+      { id: 'b', type: 'loop', maxIterations: 9, emits: [] },
+    ] },
+  ]);
+  const loops = (g.edges || []).filter(x => x.on === 'loop');
+  assert.equal(loops.length, 2);
+  assert.deepEqual(loops.map(l => l.triggerId).sort(), ['a', 'b']);
 });
 
 test('event edge (#410): raw github-event runs from the @github actor', () => {
@@ -87,16 +153,34 @@ test('webhook edge (#410): http trigger runs from the @external actor', () => {
   assert.ok(g.nodes.some(n => n.id === '@external' && n.kind === 'actor'));
 });
 
-test('gate flag: human:* listener edge is a gate from the @github actor (a human acts via a GitHub label)', () => {
+// #928 — the gate comes from the label registry's `humanGate` flag threaded in as
+// options.labels; the label itself is named as a plain action. #987 removed the
+// generic @human hub: an unbound gate (no named human role emits it) stays
+// `from: null` — dropped by the renderer + an `unbound-gate` advisory lint.
+test('gate flag: a FLAGGED unbound listener edge is a gate from null (no @human hub, #987)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy', emits: [] }] }],
+    undefined,
+    { labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }] },
+  );
+  const e = findEdge(g, x => x.label === 'approved-for-deploy');
+  assert.ok(e);
+  assert.equal(e.on, 'label');
+  assert.equal(e.gate, 'human');
+  assert.equal(e.from, null);
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-gate'));
+});
+
+test('gate flag: an UNFLAGGED `human:`-named listener is a plain orphan label (#928 AC8)', () => {
   const g = buildUnifiedGraph([
     { id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'human:approved', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.label === 'human:approved');
   assert.ok(e);
-  assert.equal(e.on, 'label');
-  assert.equal(e.gate, 'human');
-  assert.equal(e.from, '@github');
-  assert.ok(g.nodes.some(n => n.id === '@github' && n.kind === 'actor'));
+  assert.ok(!e.gate, 'the name convention no longer implies a gate');
+  assert.equal(e.from, null);
+  assert.ok(e.orphan);
 });
 
 test('label edges carry the trigger events so the UI can show Issue/PR × added/removed', () => {
@@ -125,14 +209,20 @@ test('two triggers on the SAME label (added vs removed) stay two independent edg
   assert.notEqual(edges[0].id, edges[1].id, 'edge ids are distinct per trigger');
 });
 
-test('human-set label listener: from:humans wires @github → agent (no @human actor any more)', () => {
+test('plain label listener with no emitter is an orphan (origin filters removed)', () => {
+  // Without a `from` origin filter we can no longer infer that a human sets a
+  // plain (non-gate) label, so it renders as an orphan — not a @github edge.
+  // Genuine human-approval GATES (labels flagged `humanGate`, #928) still wire
+  // from @github via the config flag (see the gate test above); this is only
+  // about arbitrary non-gate labels nobody emits.
   const g = buildUnifiedGraph([
-    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', from: 'humans', emits: [] }] },
+    { id: 'dev', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'priorisiert', emits: [] }] },
   ]);
   const e = findEdge(g, x => x.on === 'label' && x.label === 'priorisiert');
   assert.ok(e);
-  assert.equal(e.from, '@github');
-  assert.ok(!e.gate, 'a plain human-set label is not an approval gate');
+  assert.equal(e.from, null, 'no @github inference for a plain human-set label');
+  assert.ok(e.orphan, 'rendered as an orphan listener');
+  assert.ok(!e.gate, 'a plain label is not an approval gate');
   assert.ok(!g.nodes.some(n => n.id === '@human'), 'the @human actor is gone');
 });
 
@@ -175,6 +265,28 @@ test('github channel edges: PR and issue channels between the same pair are dist
     { id: 'dev', triggers: [], channels: [{ artifact: 'pr', from: 'ba' }, { artifact: 'issue', from: 'ba' }] },
   ]);
   assert.equal(g.edges.filter(e => e.on === 'github' && e.to === 'dev').length, 2);
+});
+
+test('label hand-off + same-label PR channel: exactly one label edge, github edge intact (#537)', () => {
+  // Core-SDLC repro: reworker emits `ready-for-review`; code-reviewer both
+  // consumes developer's PR on that label AND has an explicit labelFilter
+  // trigger. Previously this drew TWO reworker→code-reviewer label edges (the
+  // trigger-backed one + a trigger-less channel duplicate) that survived dedup
+  // because only the former carries a #<triggerId> in its edge id.
+  const g = buildUnifiedGraph([
+    { id: 'developer', triggers: [], github: { producesPr: true } },
+    { id: 'reworker', triggers: [], emits: ['ready-for-review'] },
+    { id: 'code-reviewer', channels: [{ artifact: 'pr', from: 'developer', label: 'ready-for-review' }], triggers: [
+      { id: 't1783952055673966', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', emits: [] },
+    ] },
+  ]);
+  const labelEdges = g.edges.filter(e => e.on === 'label' && e.from === 'reworker' && e.to === 'code-reviewer');
+  assert.equal(labelEdges.length, 1, 'exactly one reworker → code-reviewer label edge');
+  assert.equal(labelEdges[0].triggerId, 't1783952055673966');
+  // The developer → code-reviewer PR-channel edge is untouched.
+  const ghEdges = g.edges.filter(e => e.on === 'github' && e.from === 'developer' && e.to === 'code-reviewer');
+  assert.equal(ghEdges.length, 1);
+  assert.equal(ghEdges[0].artifact, 'pr');
 });
 
 // ── dependency / artifact edges (BP mechanism) ───────────────────────────────
@@ -244,11 +356,28 @@ test('dependency-cycle lint fires on a cyclic depends_on', () => {
   assert.ok(cycle.nodes.length >= 2);
 });
 
-test('process lints carried through (gate-violation when an agent emits a gate)', () => {
-  const g = buildUnifiedGraph([
-    { id: 'rogue', triggers: [{ id: 't', type: 'github-event', events: ['x'], from: 'any-except-self', emits: ['human:approved'] }] },
-  ]);
+test('process lints carried through (gate-violation when an agent emits a flagged gate)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'rogue', emits: ['approved-for-deploy'], triggers: [{ id: 't', type: 'github-event', events: ['x'] }] }],
+    undefined,
+    { labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }] },
+  );
   assert.ok(lintCodes(g).includes('gate-violation'));
+});
+
+// #928 AC6 — the draft path (POST /api/flows/graph) forwards the bundle's own
+// registry, so a gate authored in a draft renders as a gate end-to-end.
+test('processTemplateToUnified carries labels[] so a bundle gate renders as a gate', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'd', level: 'template',
+    roles: [{ id: 'deployer', triggers: [{ id: 't', type: 'github-event', labelFilter: 'approved-for-deploy' }] }],
+    gates: [], labels: [{ name: 'approved-for-deploy', humanGate: true, brake: false }],
+  };
+  const flow = processTemplateToUnified(bundle);
+  const g = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels });
+  const e = findEdge(g, x => x.label === 'approved-for-deploy');
+  assert.equal(e.gate, 'human');
+  assert.equal(e.from, null); // #987 — unbound gate; no generic @human hub
 });
 
 // ── adapters ─────────────────────────────────────────────────────────────────
@@ -259,8 +388,8 @@ test('processTemplateToUnified maps roles → nodes and preserves wiring', () =>
     name: 'demo',
     level: 'template',
     roles: [
-      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'build', triggers: [{ id: 't1', type: 'github-event', labelFilter: 'assigned:dev', emits: ['pr-open'] }] },
-      { id: 'rev', displayName: 'Reviewer', role: 'team-member', systemPrompt: 'review', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'pr-open', emits: [] }] },
+      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'build', emits: ['pr-open'], triggers: [{ id: 't1', type: 'github-event', labelFilter: 'assigned:dev' }] },
+      { id: 'rev', displayName: 'Reviewer', role: 'team-member', systemPrompt: 'review', triggers: [{ id: 't2', type: 'github-event', labelFilter: 'pr-open' }] },
     ],
     gates: [], labels: [],
   };
@@ -291,7 +420,7 @@ test('round-trip: process bundle → unified → process bundle preserves roles/
     name: 'rt',
     level: 'template',
     roles: [
-      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'p', triggers: [{ id: 't1', type: 'github-event', labelFilter: 'go', emits: ['done'] }] },
+      { id: 'dev', displayName: 'Developer', role: 'team-member', sessionPolicy: 'per-invocation', systemPrompt: 'p', emits: ['done'], triggers: [{ id: 't1', type: 'github-event', labelFilter: 'go' }] },
     ],
     gates: [], labels: [{ name: 'go', humanGate: false, brake: false }],
   };
@@ -300,7 +429,9 @@ test('round-trip: process bundle → unified → process bundle preserves roles/
   assert.equal(back.roles.length, 1);
   assert.equal(back.roles[0].id, 'dev');
   assert.equal(back.roles[0].sessionPolicy, 'per-invocation');
-  assert.deepEqual(back.roles[0].triggers[0].emits, ['done']);
+  // Label hand-off round-trips at the role level (#783).
+  assert.deepEqual(back.roles[0].emits, ['done']);
+  assert.ok(!('emits' in back.roles[0].triggers[0]));
 });
 
 test('processTemplateToUnified reads inputs/outputs/dependsOn from roles (#367)', () => {
@@ -460,4 +591,193 @@ test('explicit manual hand-off edge passes through', () => {
   assert.ok(e);
   assert.equal(e.from, 'a');
   assert.equal(e.to, 'b');
+});
+
+// ── #987: no generic @human hub — unbound touchpoints draw nothing + lint ─────
+
+test('#987: an unbound brake emit terminates on null (no @human actor) + unbound-brake lint', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['human-decision-needed'], triggers: [] }],
+    undefined,
+    { labels: [{ name: 'human-decision-needed', brake: true }] },
+  );
+  const e = findEdge(g, x => x.label === 'human-decision-needed');
+  assert.ok(e);
+  assert.equal(e.from, 'reworker');
+  assert.equal(e.to, null);
+  assert.equal(e.handoff, 'human');
+  assert.ok(!e.gate, 'a hand-off is not an approval gate');
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-brake'));
+});
+
+test('#987: an unbound human-audience PR clears producer-unconsumed, draws no @human, lints unbound-delivery', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', github: { producesPr: true, prAudience: 'human' }, triggers: [] }],
+  );
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+  assert.ok(g.lints.some(l => l.code === 'unbound-delivery' && l.nodeId === 'dev'));
+});
+
+test('#981: humanTouchpoints pass through the unified graph', () => {
+  const g = buildUnifiedGraph(
+    [
+      { id: 'dev3', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready-3' }] },
+      { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    ],
+    undefined,
+    { labels: [{ name: 'ready-3', humanGate: true }, { name: 'human-decision-needed', brake: true }] },
+  );
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'injection', label: 'ready-3', agentId: 'dev3' },
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+  ]);
+});
+
+// ── #987 follow-up: data-flow artifacts for a person (no @human hub) ──────────
+
+test('#987: an unbound human-audience output clears unconsumed-output, draws no @human, lints unbound-delivery', () => {
+  const before = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md' }], triggers: [] },
+  ]);
+  assert.ok(lintCodes(before).includes('unconsumed-output'));
+
+  const after = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'analysis-report', hint: 'reports/analysis.md', audience: 'human' }], triggers: [] },
+  ]);
+  assert.ok(!lintCodes(after).includes('unconsumed-output'));
+  assert.ok(!after.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(after.lints.some(l => l.code === 'unbound-delivery' && l.nodeId === 'analyst'));
+  // Still surfaced as a touchpoint (unassigned — no role) for the panel.
+  assert.ok(after.humanTouchpoints.some(t => t.type === 'delivery' && t.name === 'analysis-report' && !t.role));
+});
+
+test('#987: a human-audience output that an agent ALSO consumes keeps the agent edge; no @human', () => {
+  const g = buildUnifiedGraph([
+    { id: 'analyst', outputs: [{ name: 'report', audience: 'human' }], triggers: [] },
+    { id: 'writer', inputs: [{ name: 'report' }], triggers: [] },
+  ]);
+  assert.ok(findEdge(g, x => x.on === 'artifact' && x.from === 'analyst' && x.to === 'writer'));
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(!lintCodes(g).includes('unconsumed-output'));
+});
+
+test('#981: artifact deliveries appear as file touchpoints, merged in order', () => {
+  const g = buildUnifiedGraph(
+    [
+      { id: 'analyst', outputs: [{ name: 'analysis-report', audience: 'human' }], triggers: [] },
+      { id: 'reworker', emits: ['human-decision-needed'], triggers: [] },
+    ],
+    undefined,
+    { labels: [{ name: 'human-decision-needed', brake: true }] },
+  );
+  assert.deepEqual(g.humanTouchpoints, [
+    { type: 'decision', label: 'human-decision-needed', agentId: 'reworker' },
+    { type: 'delivery', artifact: 'file', name: 'analysis-report', agentId: 'analyst' },
+  ]);
+});
+
+// ── #987: named human roles routed onto first-class nodes ────────────────────
+
+test('#987: a human node joins the unified node set with its stage, not the actor column', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', triggers: [] }],
+    undefined,
+    { humans: [{ id: 'reviewer', name: 'Issue Reviewer', stage: 'triage' }] },
+  );
+  const hn = g.nodes.find(n => n.id === 'reviewer');
+  assert.ok(hn);
+  assert.equal(hn.kind, 'human');
+  assert.equal(hn.effectiveStage, 'triage');
+  // Not an actor node.
+  assert.notEqual(hn.role, 'actor');
+});
+
+test('#987: a gate emitted by a human routes reviewer → listener, and NO @human actor appears', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dispatcher', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch' }] }],
+    undefined,
+    { humans: [{ id: 'reviewer', name: 'Issue Reviewer', emits: ['dispatch'] }] },
+  );
+  const e = findEdge(g, x => x.on === 'label' && x.label === 'dispatch');
+  assert.equal(e.from, 'reviewer');
+  assert.equal(e.to, 'dispatcher');
+  assert.equal(e.gate, 'human');
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor when the gate is bound');
+});
+
+test('#987: a brake consumed by a human terminates on the named node, not @human', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['needs-decision'], triggers: [] }],
+    undefined,
+    {
+      labels: [{ name: 'needs-decision', brake: true }],
+      humans: [{ id: 'lead', name: 'Lead', consumes: [{ label: 'needs-decision' }] }],
+    },
+  );
+  const e = findEdge(g, x => x.handoff === 'human' && x.from === 'reworker');
+  assert.equal(e.to, 'lead');
+  assert.ok(!g.nodes.some(n => n.id === '@human'));
+});
+
+test('#987: a PR/issue delivery bound to a human routes to the named node (on:github)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'dev', github: { producesPr: true }, triggers: [] }],
+    undefined,
+    { humans: [{ id: 'maintainer', name: 'Maintainer', consumes: [{ artifact: 'pr', from: 'dev' }] }] },
+  );
+  const e = findEdge(g, x => x.on === 'github' && x.audience === 'human' && x.from === 'dev');
+  assert.equal(e.to, 'maintainer');
+  assert.ok(!lintCodes(g).includes('producer-unconsumed'));
+});
+
+test('#987: a file output consumed by a human routes to the named node and clears unconsumed-output', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'analyst', outputs: [{ name: 'analysis-report' }], triggers: [] }],
+    undefined,
+    { humans: [{ id: 'stakeholder', name: 'Stakeholder', consumes: [{ artifact: 'file', name: 'analysis-report' }] }] },
+  );
+  const e = findEdge(g, x => x.on === 'artifact' && x.audience === 'human' && x.from === 'analyst');
+  assert.equal(e.to, 'stakeholder');
+  assert.ok(!lintCodes(g).includes('unconsumed-output'));
+  const tp = g.humanTouchpoints.find(t => t.type === 'delivery' && t.name === 'analysis-report');
+  assert.equal(tp.role, 'stakeholder');
+});
+
+test('#987: an unbound touchpoint draws no @human hub, just terminates on null + lints', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['needs-decision'], triggers: [] }],
+    undefined,
+    {
+      labels: [{ name: 'needs-decision', brake: true }],
+      humans: [{ id: 'reviewer', name: 'R', emits: ['other'] }], // does not consume the brake
+    },
+  );
+  const e = findEdge(g, x => x.handoff === 'human' && x.from === 'reworker');
+  assert.equal(e.to, null);
+  assert.ok(!g.nodes.some(n => n.id === '@human'), 'no generic @human actor');
+  assert.ok(lintCodes(g).includes('unbound-brake'));
+  // But the reviewer role itself is still a node on the canvas.
+  assert.ok(g.nodes.some(n => n.id === 'reviewer' && n.kind === 'human'));
+});
+
+test('#987: no humans[] is byte-identical to omitting the option', () => {
+  const nodes = [
+    { id: 'analyst', outputs: [{ name: 'r', audience: 'human' }], triggers: [] },
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ];
+  const opts = { labels: [{ name: 'needs-decision', brake: true }] };
+  const withEmpty = buildUnifiedGraph(nodes, undefined, { ...opts, humans: [] });
+  const without = buildUnifiedGraph(nodes, undefined, opts);
+  assert.deepEqual(withEmpty, without);
+});
+
+test('#1004: a marked output artifact is an endpoint — no unconsumed-output lint', () => {
+  const mk = (out) => buildUnifiedGraph([
+    { id: 'analyst', outputs: [out], triggers: [] },
+  ], undefined, {});
+  assert.ok(lintCodes(mk({ name: 'report' })).includes('unconsumed-output'), 'unmarked output still lints');
+  assert.ok(!lintCodes(mk({ name: 'report', terminal: true })).includes('unconsumed-output'));
+  assert.ok(!lintCodes(mk({ name: 'report', external: { note: 'org dashboard' } })).includes('unconsumed-output'));
 });

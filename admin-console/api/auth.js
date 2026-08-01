@@ -13,9 +13,18 @@
 // `issueToken()` + `setSessionCookie()`). The session format, cookie handling,
 // middleware and the entire login UI/routing stay unchanged — they only ever
 // deal with an opaque "session" carrying a subject. See docs/multi-user-concept.md.
+//
+// ── IAP bridge (SSO, hosted stacks) ─────────────────────────────────────────
+// When IAP_AUDIENCE is set, a request without a session cookie may instead
+// authenticate via the Google-IAP-signed JWT it carries (see iap-auth.js): a
+// normal session is issued for the JWT's email and the login form never
+// appears. The password login stays as break-glass; behind IAP, "logout" is
+// cosmetic — the next request re-authenticates via the proxy (true sign-out
+// is the Google account's, or /?gcp-iap-mode=CLEAR_LOGIN_COOKIE).
 
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { makeIapVerifier, IAP_JWT_HEADER } = require('./iap-auth');
 
 const COOKIE_NAME = 'aee_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -60,6 +69,30 @@ async function verifyViaUserStore(username, password) {
     return user && typeof user.subject === 'string' ? { sub: user.subject } : null;
   } catch {
     return null; // orchestrator down → fall through to the env admin credential
+  }
+}
+
+// IAP identity bridge — inert unless IAP_AUDIENCE is set (only the GKE stack
+// sets it; format `/projects/<project-number>/global/backendServices/<id>`).
+const IAP_AUDIENCE = process.env.IAP_AUDIENCE || '';
+let iapVerify = IAP_AUDIENCE ? makeIapVerifier({ audience: IAP_AUDIENCE }) : null;
+
+// Test seam: swap the verifier without touching the network/env.
+function _setIapVerifierForTests(fn) {
+  iapVerify = fn;
+}
+
+// Resolves the request's IAP identity, or null (bridge disabled, no header,
+// or an invalid/forged assertion). Never throws.
+async function getIapPrincipal(req) {
+  if (!iapVerify) return null;
+  const raw = req && req.headers && req.headers[IAP_JWT_HEADER];
+  const token = Array.isArray(raw) ? raw[0] : raw;
+  if (!token) return null;
+  try {
+    return await iapVerify(token);
+  } catch {
+    return null;
   }
 }
 
@@ -165,18 +198,44 @@ function clearSessionCookie(res) {
 }
 
 // ── Express integration ─────────────────────────────────────────────────────
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const session = getSession(req);
-  if (!session) {
-    return res.status(401).json({ error: 'Authentication required', code: 'unauthenticated' });
+  if (session) {
+    req.user = { username: session.sub };
+    return next();
   }
-  req.user = { username: session.sub };
-  next();
+  // No cookie session — behind IAP the request may still carry a verified
+  // identity. Issue a regular session for it so subsequent requests take the
+  // cheap cookie path.
+  const iap = await getIapPrincipal(req);
+  if (iap) {
+    setSessionCookie(res, issueToken(iap.sub));
+    req.user = { username: iap.sub };
+    return next();
+  }
+  return res.status(401).json({ error: 'Authentication required', code: 'unauthenticated' });
 }
 
 // Registers the public auth endpoints. Must be called BEFORE the gate so these
 // routes stay reachable without a session.
-function registerAuthRoutes(app) {
+//
+// `describeAuthz(subject)` is an optional injected resolver that returns the
+// caller's authorization descriptor (admin/System-Admin indicator + per-team
+// roles, #584) to merge onto the session `user`. It is injected rather than
+// imported so this module stays free of the users/memberships file IO (which
+// lives in api.js) and provider-agnostic. Best-effort: a throw degrades to the
+// bare `{ username }` shape rather than failing the request.
+function registerAuthRoutes(app, { describeAuthz } = {}) {
+  const buildUser = (subject) => {
+    const base = { username: subject };
+    if (typeof describeAuthz !== 'function') return base;
+    try {
+      return { ...base, ...(describeAuthz(subject) || {}) };
+    } catch {
+      return base;
+    }
+  };
+
   app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body || {};
     // 1) Per-user local password (#374), best-effort. 2) the env single-admin
@@ -186,13 +245,20 @@ function registerAuthRoutes(app) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
     setSessionCookie(res, issueToken(principal.sub));
-    res.json({ authenticated: true, user: { username: principal.sub } });
+    res.json({ authenticated: true, user: buildUser(principal.sub) });
   });
 
-  app.get('/api/auth/session', (req, res) => {
+  app.get('/api/auth/session', async (req, res) => {
     const session = getSession(req);
-    if (!session) return res.json({ authenticated: false });
-    res.json({ authenticated: true, user: { username: session.sub } });
+    if (session) return res.json({ authenticated: true, user: buildUser(session.sub) });
+    // Behind IAP the very first session probe already authenticates — the SPA
+    // never shows the login form.
+    const iap = await getIapPrincipal(req);
+    if (iap) {
+      setSessionCookie(res, issueToken(iap.sub));
+      return res.json({ authenticated: true, user: buildUser(iap.sub) });
+    }
+    res.json({ authenticated: false });
   });
 
   app.post('/api/auth/logout', (req, res) => {
@@ -222,4 +288,5 @@ module.exports = {
   requireAuth,
   registerAuthRoutes,
   gate,
+  _setIapVerifierForTests,
 };

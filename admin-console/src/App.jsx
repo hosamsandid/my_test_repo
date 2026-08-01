@@ -1,9 +1,10 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
+import { canAccessCredentialPages } from './pages/credential-scope-view';
 
 // The Process Canvas now lives inside Flows; preserve old deep links.
 function ProcessTeamRedirect() {
@@ -11,7 +12,42 @@ function ProcessTeamRedirect() {
   return <Navigate to={`/flows?proc=${encodeURIComponent(teamId)}`} replace />;
 }
 
-const Dashboard           = lazy(() => import('./pages/Dashboard'));
+// The Extend-team wizard flow was removed (#588) — growing a team now happens in
+// the Flow Editor. Old `?mode=extend` deep links redirect there; every other
+// entry into the wizard is create-mode and renders normally.
+function TeamSetupRoute() {
+  const [params] = useSearchParams();
+  if (params.get('mode') === 'extend') {
+    const team = params.get('team');
+    const target = team ? `/flows?proc=${encodeURIComponent(team)}` : '/flows';
+    return <Navigate to={target} replace />;
+  }
+  return <TeamSetup />;
+}
+
+// Route guard for System-Admin-only pages (#584 AC8): Skills, MCP, Maintenance
+// Mode, Agent Templates. A non-admin who navigates directly to one of these
+// URLs is bounced to /chats — the nav entries are already hidden (Shell.jsx),
+// so this only catches hand-typed / bookmarked links. The API is independently
+// scoped, so this is UX, not the security boundary.
+function AdminRoute({ children }) {
+  const { user } = useAuth();
+  if (!user?.admin) return <Navigate to="/chats" replace />;
+  return children;
+}
+
+// Route guard for the credential pages (SSH Keys, GitHub Tokens, #798; Model
+// Providers, #800). Unlike AdminRoute these are open to any Team Admin (of ≥1
+// team) as well as System Admins, so a team can self-serve its own credentials
+// / model providers. A plain Team Member (or a user in no team) is bounced to
+// /chats. The API is independently scoped, so this is UX, not the security
+// boundary.
+function CredentialRoute({ children }) {
+  const { user } = useAuth();
+  if (!canAccessCredentialPages(user)) return <Navigate to="/chats" replace />;
+  return children;
+}
+
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
@@ -20,15 +56,21 @@ const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
+const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
+const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
+const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
+const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
+const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
 const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
 const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
+const About = lazy(() => import('./pages/About'));
 
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
@@ -82,23 +124,28 @@ export default function App() {
     <Shell>
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
-          <Route path="/"             element={<Dashboard />} />
+          <Route path="/"             element={<Navigate to="/chats" replace />} />
           <Route path="/agents"       element={<Agents />} />
           <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/quickstart"   element={<QuickStart />} />
-          <Route path="/team-setup"   element={<TeamSetup />} />
-          <Route path="/wizard/team"  element={<TeamSetup />} />
+          <Route path="/team-setup"   element={<TeamSetupRoute />} />
+          <Route path="/wizard/team"  element={<TeamSetupRoute />} />
           <Route path="/environments" element={<WorkingEnvironments />} />
-          <Route path="/ssh-keys"     element={<SshKeys />} />
-          <Route path="/github-tokens" element={<GithubTokens />} />
+          <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
+          <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
           <Route path="/skills"       element={<SkillsRegistry />} />
+          <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
-          <Route path="/models"       element={<ModelRegistry />} />
-          <Route path="/mcp"          element={<McpServers />} />
+          <Route path="/github-events" element={<GithubEventLog />} />
+          <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
+          <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
+          <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
+          <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />
+          <Route path="/knowledge"     element={<KnowledgeFlow />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
@@ -106,6 +153,7 @@ export default function App() {
           <Route path="/patterns"           element={<PatternsCatalog />} />
           <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
           <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
+          <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>
     </Shell>

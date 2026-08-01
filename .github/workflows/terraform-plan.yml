@@ -1,0 +1,76 @@
+# Terraform plan for infra/gcp — plan-only, never applies.
+#
+# Runs on every PR that touches the module and shows the resulting plan in the
+# job log, so infra changes get reviewed as plans, not just as HCL diffs.
+# Applies deliberately stay on operator machines: auto-apply-on-merge (the
+# accessio tf-gcp.yml pattern) would require widening the deployer SA from
+# read-only to admin over everything the module manages.
+#
+# Auth is keyless via Workload Identity Federation, same identity as
+# deploy-gke.yml; the plan runs with -lock=false because the deployer SA only
+# has objectViewer on the shared state bucket (see infra/gcp/deployer.tf).
+
+name: terraform-plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/gcp/**"
+      - ".github/workflows/terraform-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for Workload Identity Federation
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.15.8 # keep in sync with accessio's tf-gcp.yml pin
+  WIF_PROVIDER: projects/594390336049/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER_SA: agent-studio-deployer@acn-projectroots.iam.gserviceaccount.com
+
+defaults:
+  run:
+    working-directory: infra/gcp
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: terraform fmt
+        run: terraform fmt -check -diff
+      - name: terraform validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  plan:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (WIF, keyless)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan
+        run: terraform plan -input=false -lock=false -no-color

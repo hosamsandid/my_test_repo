@@ -11,30 +11,102 @@
 // Edge model: a trigger *listens* on a key (a label via `labelFilter`, or an
 // event name when it has none). A trigger *emits* labels (its `emits` array).
 // An edge S→T with label L exists when some trigger of S emits L and some
-// trigger of T listens on L. Labels only a human can set (`human:*`) and the
-// universal brakes (`hold`, `needs:human`) have no agent emitter — their edges
-// originate from `null` and are tagged so the renderer can colour them.
+// trigger of T listens on L. Labels only a human can set (human gates) and
+// brake labels have no agent-wired listener edge — their edges originate from
+// `null` and are tagged so the renderer can colour them.
 
-const BRAKES = new Set(['hold', 'needs:human']);
+// Structured OUTCOMES port (#827): the successor to flat `emits`. Legacy agents
+// (flat `emits`, no `outcomes`) are untouched below and yield byte-identical
+// edges; an authored `outcomes` port projects its `setLabel` labels into the
+// same emit index (now keyed by outcome) and its `openPr`/`openIssue` actions
+// into the github produce flags. `require`d at top is safe — outcomes.js only
+// requires this module lazily (inside function bodies), so there is no
+// load-time cycle.
+const {
+  isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
+} = require('./outcomes');
+// Claim-label convention (#958) — the suffix is defined once, in process-template,
+// so the lint below can never drift from what the expanders derive. Acyclic:
+// process-template requires only ./outcomes, never this module.
+const { CLAIM_SUFFIX, rawTriggerError } = require('./process-template');
 
-function isHumanGate(label) {
-  return typeof label === 'string' && label.startsWith('human:');
-}
-function isBrake(label) {
-  return BRAKES.has(label);
-}
+// ─── gate/brake classification (#928) ────────────────────────────────────────
+//
+// Gate-ness and brake-ness are CONFIGURATION, not a naming convention. The
+// authoritative sources are the persisted flags:
+//
+//   labels:   [ { name, humanGate: true } ]      → the label is a human gate
+//             [ { name, brake: true } ]          → the label pauses the loop
+//   channels: [ { label, gate: 'human' } ]       → that routing label is a gate
+//
+// The former `human:*` prefix match and the hardcoded `hold`/`needs:human`
+// brake set are GONE as a classification source (#901 decision D3): a label
+// carrying neither a registry flag nor a channel gate flag is a plain agent
+// label, whatever it is called. That is what lets the vocabulary rename (#927)
+// give human-applied labels ordinary action-style names (`approved-for-dispatch`).
+//
+// A human gate may not be set by an agent (`gate-violation` / the outcomes
+// validator). A brake MAY be agent-applied — e.g. the reworker setting
+// `human-decision-required` to pause the loop pending a human decision — so it
+// is deliberately NOT forbidden as an emit/outcome.
 
-// Whether a trigger's origin filter (Layer-2 `from` spec) lets a *human* fire
-// it. Mirrors the github-poller's applyFromFilter semantics: absent /
-// any-except-self / humans include humans; agents / team exclude them; an
-// allowlist includes humans only via the "humans" token; an exclude-list
-// blocks them only when it names "humans". Unknown specs fail closed.
-function fromIncludesHumans(from) {
-  if (from == null || from === 'any-except-self' || from === 'humans') return true;
-  if (from === 'agents' || from === 'team') return false;
-  if (Array.isArray(from)) return from.includes('humans');
-  if (typeof from === 'object' && Array.isArray(from.exclude)) return !from.exclude.includes('humans');
-  return false;
+/**
+ * Build the authoritative gate/brake classifier from the config flags.
+ *
+ * @param {object} [sources]
+ * @param {Array}  [sources.labels] - the bundle/team label registry:
+ *   [{ name, humanGate?, brake? }]. Absent = no flags known.
+ * @param {Array}  [sources.agents] - nodes/roles whose `channels[]` ports may
+ *   carry `gate: 'human'` on a routing label. Read straight off the agents, so
+ *   a channel gate classifies even when no `labels[]` registry is threaded in
+ *   (imported drafts, the flow-weaver's `<prefix>:approved` boundaries).
+ * @param {Array}  [sources.humans] - named human roles (#987). A label a human
+ *   role `emits` is IMPLICITLY a gate (only a human may set it), even without a
+ *   registry flag. The registry flag stays authoritative when present; on
+ *   conflict the stricter gate wins — a human-emitted brake still classifies as
+ *   a gate (a human decision, not an agent-appliable pause).
+ * @returns {{ isHumanGate, isBrake, classifyKind, registryNames }}
+ */
+function makeLabelClassifier(sources) {
+  const { labels, agents, humans } = sources || {};
+  const gates = new Set();
+  const brakes = new Set();
+  const registryNames = [];
+  for (const l of (Array.isArray(labels) ? labels : [])) {
+    const name = (l && typeof l.name === 'string') ? l.name.trim() : '';
+    if (!name) continue;
+    registryNames.push(name);
+    if (l.humanGate) gates.add(name);
+    if (l.brake) brakes.add(name);
+  }
+  for (const a of (Array.isArray(agents) ? agents : [])) {
+    for (const ch of (a && Array.isArray(a.channels) ? a.channels : [])) {
+      if (!ch || ch.gate !== 'human') continue;
+      const label = (typeof ch.label === 'string') ? ch.label.trim() : '';
+      if (label) gates.add(label);
+    }
+  }
+  // Human-role emits (#987) classify as gates — a person applies the label,
+  // so no agent may. Added after brakes so the gate wins the classifyKind
+  // precedence below even for a label the registry also flagged `brake`.
+  for (const h of (Array.isArray(humans) ? humans : [])) {
+    for (const e of (h && Array.isArray(h.emits) ? h.emits : [])) {
+      const label = typeof e === 'string' ? e.trim() : '';
+      if (label) gates.add(label);
+    }
+  }
+
+  const isHumanGate = label => typeof label === 'string' && gates.has(label);
+  const isBrake = label => typeof label === 'string' && brakes.has(label);
+  // Gate wins over brake when a label carries both flags (a gate is the stricter
+  // claim: no agent may set it), matching the old name-match precedence.
+  const classifyKind = (key) => {
+    if (isHumanGate(key)) return 'gate';
+    if (isBrake(key)) return 'brake';
+    if (typeof key === 'string' && key.startsWith('pull_request_review')) return 'review';
+    return 'agent';
+  };
+  return { isHumanGate, isBrake, classifyKind, registryNames };
 }
 
 // The keys a trigger reacts to. A github-event trigger with a labelFilter reacts
@@ -69,11 +141,21 @@ function channelLabels(node) {
   return out;
 }
 
-function classifyKind(key) {
-  if (isHumanGate(key)) return 'gate';
-  if (isBrake(key)) return 'brake';
-  if (typeof key === 'string' && key.startsWith('pull_request_review')) return 'review';
-  return 'agent';
+// Convenience wrapper for a one-off classification: `classifyKind(key, sources)`
+// builds a throw-away classifier from the same flag sources. Prefer
+// `makeLabelClassifier(...).classifyKind` in a loop.
+function classifyKind(key, sources) {
+  return makeLabelClassifier(sources).classifyKind(key);
+}
+
+// Normalized `claim` (#958) for the graph, or null. Shared by triggerView and the
+// label-listener edge builder so the node port and its edge never disagree.
+function claimView(t) {
+  const c = t && t.claim;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  if (typeof c.remove !== 'string' || !c.remove) return null;
+  if (typeof c.add !== 'string' || !c.add) return null;
+  return { remove: c.remove, add: c.add };
 }
 
 // Slim, render-ready view of a trigger.
@@ -81,22 +163,111 @@ function triggerView(t) {
   const v = { id: t.id, type: t.type, enabled: t.enabled !== false };
   if (t.type === 'github-event') {
     v.events = Array.isArray(t.events) ? t.events : [];
-    if (t.from) v.from = t.from;
     if (t.labelFilter) v.labelFilter = t.labelFilter;
+    // Claim (#958): what this listener takes over when it wakes. Carried so the
+    // editor can render the claim badge and the read-only claim readout.
+    const c = claimView(t);
+    if (c) v.claim = c;
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
     v.at = t.at || null;
+  } else if (t.type === 'loop') {
+    // Loop trigger (#932): a continuation primitive that re-arms itself until
+    // `until.command` exits 0 or `maxIterations` is hit. Carry the stop-contract
+    // summary so the graph view can render the self-edge + stop-contract badge
+    // (#936).
+    if (t.maxIterations != null) v.maxIterations = t.maxIterations;
+    // Token budget (#934) — carried so the stop-contract badge can show it.
+    if (t.maxTokens != null) v.maxTokens = t.maxTokens;
+    if (t.until && typeof t.until === 'object'
+        && typeof t.until.command === 'string' && t.until.command.trim()) {
+      v.until = { command: t.until.command };
+    }
+    if (t.minGapSeconds != null) v.minGapSeconds = t.minGapSeconds;
+    // Verifier gate summary (#933) so the graph view knows a separate check
+    // exists — the stop-contract badge (#936) renders it. Only the shape is
+    // surfaced (command presence / target agent), never the command string or
+    // its env.
+    if (t.verify && typeof t.verify === 'object') {
+      if (typeof t.verify.command === 'string' && t.verify.command.trim()) {
+        v.verify = { mode: 'command' };
+      } else if (typeof t.verify.agentId === 'string' && t.verify.agentId.trim()) {
+        v.verify = { mode: 'agent', agentId: t.verify.agentId };
+      } else if (t.verify.selfGraded === true) {
+        v.verify = { mode: 'self-graded' };
+      }
+    }
   } else if (t.type === 'http') {
     // Webhook trigger (#410) — fired by an external system via HOOK_PORT. The
     // secret is intentionally not carried into the graph view.
     if (t.description) v.description = t.description;
   }
-  v.emits = Array.isArray(t.emits) ? t.emits.slice() : [];
-  if (t.emitsDerived) v.emitsDerived = true; // heuristic, not operator-confirmed
+  // Trigger-level `emits` was removed (#783): the agent/role level (`n.emits`,
+  // #414) is the canonical, sole source of label hand-off edges. A trigger no
+  // longer carries or contributes emits — a supplied `t.emits` is ignored.
   if (t.channel) v.channel = true; // derived GitHub-channel trigger (#380)
   if (t.dataFlow) v.dataFlow = true; // derived data-flow push trigger (#379)
+  // Consolidated-channel provenance (#826): which producers' channels share this
+  // one derived listener. Informational — the on:'github' edges still come one
+  // per channel port, mapped onto this shared listener.
+  if (Array.isArray(t.sources) && t.sources.length) v.sources = t.sources.slice();
   return v;
+}
+
+// ─── named human roles (#987) ────────────────────────────────────────────────
+//
+// A human role is a first-class, purely declarative flow node: a named box
+// ("Issue Reviewer", type Human) placed and wired on the canvas like an agent,
+// but which never spawns anything — people keep acting through GitHub labels
+// exactly as today. It carries `emits` (labels the person applies — implicitly
+// gates) and `consumes` (what lands with the person: a brake label they decide
+// on, or a PR/issue/file artifact they review). Binding these to the #981
+// `@human`-actor edges reroutes each touchpoint onto the named node instead of
+// the single generic hub; unbound touchpoints keep the generic `@human` actor.
+
+// A consume entry is one of:
+//   { label }                          — a brake label this person decides on
+//   { artifact: 'pr'|'issue', from }    — an artifact they review
+//   { artifact: 'file', name }          — a data-flow output they read
+function normalizeConsumes(consumes) {
+  const out = [];
+  for (const c of (Array.isArray(consumes) ? consumes : [])) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+    if (typeof c.label === 'string' && c.label.trim()) {
+      out.push({ label: c.label.trim() });
+    } else if (c.artifact === 'pr' || c.artifact === 'issue') {
+      if (typeof c.from === 'string' && c.from.trim()) out.push({ artifact: c.artifact, from: c.from.trim() });
+    } else if (c.artifact === 'file') {
+      if (typeof c.name === 'string' && c.name.trim()) out.push({ artifact: 'file', name: c.name.trim() });
+    }
+  }
+  return out;
+}
+
+// Synthesize the render-ready graph node for one human role. No triggers, no
+// session policy — it is model + visualization only. `synthetic: true` keeps it
+// out of every emit/lint loop (a human's `emits` are gates it is ALLOWED to set,
+// so it must not trip gate-violation).
+function humanNode(h) {
+  const id = (h && typeof h.id === 'string') ? h.id.trim() : '';
+  return {
+    id,
+    role: 'human',
+    kind: 'human',
+    displayName: (h && typeof h.name === 'string' && h.name.trim()) ? h.name.trim() : id,
+    ...(h && typeof h.description === 'string' && h.description.trim() ? { description: h.description.trim() } : {}),
+    sessionPolicy: null,
+    environmentId: null,
+    triggers: [],
+    emits: (h && Array.isArray(h.emits)) ? h.emits.filter(e => typeof e === 'string' && e.trim()).map(e => e.trim()) : [],
+    consumes: normalizeConsumes(h && h.consumes),
+    github: null,
+    channels: [],
+    stage: (h && typeof h.stage === 'string') ? h.stage : '',
+    synthetic: true,
+    isEntryPoint: false,
+  };
 }
 
 /**
@@ -105,14 +276,74 @@ function triggerView(t) {
  * @param {Array} agents - [{ id, role, displayName, sessionPolicy,
  *   environmentId, triggers: [{ id, type, events, labelFilter, from, cron, at,
  *   emits, emitsDerived }] }]. `emits` must already be the effective set.
+ * @param {object} [options]
+ * @param {Array}  [options.labels] - the authoritative label registry
+ *   ([{ name, humanGate?, brake? }], #928): the bundle's `labels[]`, or the one
+ *   persisted on the team agent for a live graph. Gate/brake classification
+ *   reads these flags (plus each node's channel `gate: 'human'`) — never the
+ *   label's name.
+ * @param {Array}  [options.humans] - named human roles (#987):
+ *   [{ id, name, description?, stage?, emits?, consumes? }]. Synthesized as
+ *   `kind: 'human'` nodes; their `emits` classify as gates, and their `consumes`
+ *   bind the #981 `@human` gate/brake/delivery edges to the named node.
  * @returns {{ nodes, edges, gates, labels }}
  */
-function buildProcessGraph(agents) {
+function buildProcessGraph(agents, options) {
   const list = Array.isArray(agents) ? agents : [];
+  const humanRoles = (options && Array.isArray(options.humans) ? options.humans : [])
+    .map(humanNode).filter(h => h.id);
+  // Authoritative gate/brake source (#928): the registry flags the caller
+  // threads in, plus every channel port's `gate: 'human'`, plus each human
+  // role's emits (#987 — implicitly gates).
+  const classifierSources = { labels: options && options.labels, agents: list, humans: humanRoles };
+  const classifier = makeLabelClassifier(classifierSources);
+  const { isHumanGate, isBrake, classifyKind: classify } = classifier;
+
+  // Binding indices (#987): which human role is on the far end of each #981
+  // touchpoint. First matching human in `humans[]` order wins; a label emitted
+  // by two humans yields both gate edges (so `humanEmitters` keeps a list).
+  const humanEmitters = new Map();        // label -> [humanId, ...]
+  const humanLabelConsumer = new Map();   // brake label -> humanId
+  const humanArtifactConsumer = new Map();// `${producerId}|${pr|issue}` -> humanId
+  for (const h of humanRoles) {
+    for (const e of h.emits) {
+      if (!humanEmitters.has(e)) humanEmitters.set(e, []);
+      humanEmitters.get(e).push(h.id);
+    }
+    for (const c of h.consumes) {
+      if (c.label) { if (!humanLabelConsumer.has(c.label)) humanLabelConsumer.set(c.label, h.id); }
+      else if (c.artifact === 'pr' || c.artifact === 'issue') {
+        const k = `${c.from}|${c.artifact}`;
+        if (!humanArtifactConsumer.has(k)) humanArtifactConsumer.set(k, h.id);
+      }
+      // `file` consumes bind a data-flow delivery — resolved in unified-graph
+      // (which owns the output-artifact edges), not here.
+    }
+  }
+  const humanIds = new Set(humanRoles.map(h => h.id));
 
   const nodes = list.map(a => {
     const triggers = (a.triggers || []).map(triggerView);
     const hasGithubEvent = triggers.some(t => t.type === 'github-event');
+    // Structured outcomes (#827) supersede flat `emits` when authored: the emit
+    // labels are the `setLabel` action labels, and the github produce flags fold
+    // in the `openPr`/`openIssue` actions. A legacy agent (no authored outcomes)
+    // takes the original code path verbatim, so its node — and every edge below
+    // — is byte-identical to before.
+    const authored = isAuthoredOutcomes(a.outcomes);
+    const emits = authored
+      ? outcomeSetLabels(a.outcomes, classifierSources)
+      : (Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : []);
+    const baseGh = a.github || {};
+    const ocGh = authored ? outcomesToGithub(a.outcomes) : {};
+    const producesPr = baseGh.producesPr || ocGh.producesPr;
+    const producesIssue = baseGh.producesIssue || ocGh.producesIssue;
+    // Artifact audience (#981): the producer declares that a person (not an
+    // agent) consumes the PR/issue — review/merge is a human touchpoint, not a
+    // wiring gap. Only the explicit 'human' value is carried; absent means
+    // unspecified (today's behavior).
+    const prAudience = producesPr && baseGh.prAudience === 'human' ? 'human' : null;
+    const issueAudience = producesIssue && baseGh.issueAudience === 'human' ? 'human' : null;
     return {
       id: a.id,
       role: a.role || 'agent',
@@ -124,15 +355,23 @@ function buildProcessGraph(agents) {
       // Agent-level emitted labels (operator-declared): the labels this agent
       // sets during its work, independent of which trigger run does it. Lets a
       // label hand-off be wired from the edge alone, without attaching the emit
-      // to a pre-existing trigger.
-      emits: Array.isArray(a.emits) ? a.emits.filter(e => typeof e === 'string' && e) : [],
+      // to a pre-existing trigger. Projected from `outcomes` when authored (#827).
+      emits,
       // GitHub artifact ports (#380): produce flags drive the node badge/ports;
       // the consumed channels drive the on:'github' edges (built in unified-graph
       // from these ports, not from the derived triggers).
-      github: (a.github && (a.github.producesPr || a.github.producesIssue))
-        ? { ...(a.github.producesPr ? { producesPr: true } : {}), ...(a.github.producesIssue ? { producesIssue: true } : {}) }
+      github: (producesPr || producesIssue)
+        ? {
+          ...(producesPr ? { producesPr: true } : {}),
+          ...(producesIssue ? { producesIssue: true } : {}),
+          ...(prAudience ? { prAudience } : {}),
+          ...(issueAudience ? { issueAudience } : {}),
+        }
         : null,
       channels: Array.isArray(a.channels) ? a.channels : [],
+      // Structured OUTCOMES port (#827) — surfaced only when authored so a legacy
+      // node stays byte-identical; phase 3 renders the switch/ports from this.
+      ...(authored ? { outcomes: normalizeOutcomes(a.outcomes) } : {}),
       // DM-only front door: nothing wakes it from git, it talks to a human.
       isEntryPoint: !hasGithubEvent,
     };
@@ -150,6 +389,12 @@ function buildProcessGraph(agents) {
       labelMeta.set(name, { humanGate: isHumanGate(name), brake: isBrake(name) });
     }
   };
+  // Seed the registry's own entries (#928) so a flagged label survives the
+  // graph round-trip (live team → `GET /api/process/template` → re-import) even
+  // when no port references it yet — otherwise the flag that makes it a gate or
+  // a brake would be silently dropped on export and the label would come back
+  // as a plain agent label.
+  for (const name of classifier.registryNames) noteLabel(name);
 
   const addEmit = (label, agentId) => {
     if (!emitIndex.has(label)) emitIndex.set(label, new Set());
@@ -157,14 +402,14 @@ function buildProcessGraph(agents) {
     noteLabel(label);
   };
   for (const n of nodes) {
-    // Agent-level emits (operator-declared on the agent, no trigger needed).
+    // Agent-level emits (operator-declared on the agent) are the ONLY emit
+    // source (#414/#783) — trigger-level emits were removed.
     for (const e of n.emits) addEmit(e, n.id);
     for (const t of n.triggers) {
       // Derived GitHub-channel triggers (#380) are represented by the on:'github'
       // edges built from the channel ports (unified-graph) — never as label/event
       // edges here, so their labelFilter must not register as a listen key.
       if (t.channel) continue;
-      for (const e of t.emits) addEmit(e, n.id);
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }
@@ -176,6 +421,21 @@ function buildProcessGraph(agents) {
     // feedback edges never appear.
     for (const ch of channelLabels(n)) { allListenKeys.add(ch); noteLabel(ch); }
   }
+
+  // Outcome-keyed emit index (#827): label -> Map(agentId -> outcomeId), built
+  // from AUTHORED outcomes only (a legacy agent leaves this empty, so its edges
+  // gain no `outcome` field and stay byte-identical). `ocOf` annotates a label
+  // edge with the id of the outcome whose `setLabel` action produced it.
+  const outcomeByEmit = new Map();
+  for (const a of list) {
+    if (!isAuthoredOutcomes(a.outcomes)) continue;
+    for (const { label, outcome } of outcomeEmitPairs(a.outcomes, classifierSources)) {
+      if (!outcomeByEmit.has(label)) outcomeByEmit.set(label, new Map());
+      const m = outcomeByEmit.get(label);
+      if (!m.has(a.id)) m.set(a.id, outcome); // first outcome setting the label wins
+    }
+  }
+  const ocOf = (label, agentId) => (outcomeByEmit.get(label) || new Map()).get(agentId);
 
   const edges = [];
   const gateSet = new Set();
@@ -189,6 +449,21 @@ function buildProcessGraph(agents) {
           label: t.type === 'cron' ? (t.cron || 'cron') : (t.at || 'once'),
           kind: 'timer', triggerId: t.id,
         });
+        continue;
+      }
+      if (t.type === 'loop') {
+        // Loop trigger (#936): an agent re-arming itself until its stop contract
+        // is met — the same self-edge shape as the cron `timer`, but a distinct
+        // `kind: 'loop'` so the canvas draws it with a stop-contract badge
+        // instead of a schedule row. Carry a render-ready summary (budget /
+        // until / verifier) onto the edge; the command string and verifier
+        // internals were already redacted by `triggerView`.
+        const loop = {};
+        if (t.maxIterations != null) loop.maxIterations = t.maxIterations;
+        if (t.maxTokens != null) loop.maxTokens = t.maxTokens;
+        if (t.until) loop.until = t.until;
+        if (t.verify) loop.verify = t.verify;
+        edges.push({ from: n.id, to: n.id, kind: 'loop', triggerId: t.id, loop });
         continue;
       }
       if (t.type === 'http') {
@@ -207,32 +482,37 @@ function buildProcessGraph(agents) {
         // events (issues/pull_request × labeled/unlabeled) ride along so the
         // renderer can show WHICH label change wakes the listener.
         const evs = Array.isArray(t.events) && t.events.length ? { events: t.events.slice() } : {};
-        const kind = classifyKind(key);
+        // Claim (#958) rides on the listener edge so the renderer can badge it.
+        const cv = claimView(t);
+        const clm = cv ? { claim: cv } : {};
+        const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
           // No agent may emit these — the edge comes from outside (a human).
-          edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs });
+          // #987: when a named human role emits this gate label, the edge
+          // originates at that role's node instead of the generic `@human`
+          // actor; one edge per emitting human. Brakes are never human-emitted,
+          // so they always come from `null`.
+          const boundHumans = kind === 'gate' ? (humanEmitters.get(key) || []) : [];
+          if (boundHumans.length) {
+            for (const hid of boundHumans) {
+              edges.push({ from: hid, to: n.id, label: key, kind, triggerId: t.id, ...evs, ...clm });
+            }
+          } else {
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, ...evs, ...clm });
+          }
         } else {
           const emitters = [...(emitIndex.get(key) || [])];
           if (emitters.length === 0) {
-            if (fromIncludesHumans(t.from)) {
-              // No agent emits this label, but the origin filter lets a human
-              // set it — the edge originates at the human actor (#410), e.g. a
-              // human labelling a human-created issue. An *explicit*
-              // `from: humans` is by-design human-triggered (no lint at all);
-              // a human-including default keeps an advisory info lint so a
-              // typo'd label name still surfaces.
-              edges.push({
-                from: null, to: n.id, label: key, kind, triggerId: t.id, humanSet: true, ...evs,
-                ...(t.from === 'humans' ? {} : { humanAssumed: true }),
-              });
-            } else {
-              // Orphan listener: nothing (agent or human) can set this label.
-              edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs });
-            }
+            // No agent emits this label. Without an origin filter we can't infer
+            // whether a human sets it, so it's drawn as an orphan listener
+            // (advisory lint) — a human applying the label still fires it at
+            // runtime; this is only about what the static graph can prove.
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm });
           } else {
             for (const s of emitters) {
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...evs });
+              const oc = ocOf(key, s);
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm });
             }
           }
         }
@@ -240,10 +520,24 @@ function buildProcessGraph(agents) {
         // Raw GitHub events (no label filter) come from external actors, not
         // agent emits — record as external (renderer drops, lints ignore).
         for (const ev of (Array.isArray(t.events) ? t.events : [])) {
-          edges.push({ from: null, to: n.id, label: ev, kind: classifyKind(ev), triggerId: t.id, external: true });
+          edges.push({ from: null, to: n.id, label: ev, kind: classify(ev), triggerId: t.id, external: true });
         }
       }
     }
+  }
+
+  // Labels a node already listens on through an explicit `labelFilter` trigger.
+  // The trigger loop above draws an edge from *every* emitter of such a label, so
+  // the channel-label loop below must not redraw those emitters (#537).
+  const triggerLabelListens = new Map(); // nodeId -> Set(label)
+  for (const n of nodes) {
+    const set = new Set();
+    for (const t of n.triggers) {
+      if (t.channel) continue; // derived channel triggers wire no label edges
+      const lk = labelListenKey(t);
+      if (lk) set.add(lk);
+    }
+    triggerLabelListens.set(n.id, set);
   }
 
   // Channel-label hand-offs (#401). A GitHub channel with a routing label makes
@@ -254,24 +548,93 @@ function buildProcessGraph(agents) {
   // that a single-producer channel cannot express. Without this they collapse to
   // dead-ends and the renderer drops them.
   for (const n of nodes) {
+    const wiredByTrigger = triggerLabelListens.get(n.id) || new Set();
     for (const ch of (n.channels || [])) {
       const label = (ch && typeof ch.label === 'string') ? ch.label.trim() : '';
       if (!label) continue;
-      const kind = classifyKind(label);
+      // The consumer also listens on this label via an explicit `labelFilter`
+      // trigger — the trigger loop already wired every emitter of it, so drawing
+      // them again here yields a spurious duplicate edge (#537). The two survive
+      // de-duplication because edgeId() suffixes the trigger-backed edge with
+      // #<triggerId> while this one has none; skip at the source instead.
+      if (wiredByTrigger.has(label)) continue;
+      const kind = classify(label);
       if (kind === 'gate' || kind === 'brake') continue; // human-set, edge comes from null
       for (const s of (emitIndex.get(label) || [])) {
         if (s === n.id || s === ch.from) continue; // self / already the github edge
-        edges.push({ from: s, to: n.id, label, kind });
+        const oc = ocOf(label, s);
+        edges.push({ from: s, to: n.id, label, kind, ...(oc ? { outcome: oc } : {}) });
       }
     }
   }
 
-  // Dead-end emitters: a label emitted but no trigger listens on it.
+  // Dead-end emitters: a label emitted but no trigger listens on it. Gate
+  // emits stay skipped (an agent emitting a gate label is a `gate-violation`
+  // error, not an edge); brake emits are no longer dropped — they become the
+  // explicit hand-off edges below (#981).
+  //
+  // An outcome MARKED as an open end (#1004, §4.7 — `terminal: true` or
+  // `external: {note?}`) is a declared endpoint, not a dead-end: its edge
+  // carries `endpoint` (+ note) instead of `deadEnd`, so it renders as a
+  // proper terminus and raises no lint.
+  const markerOf = (agentId, outcomeId) => {
+    const n = nodes.find(x => x.id === agentId);
+    const o = (n && n.outcomes && Array.isArray(n.outcomes.options) ? n.outcomes.options : [])
+      .find(x => x && x.id === outcomeId);
+    if (!o) return null;
+    if (o.terminal === true) return { endpoint: 'terminal' };
+    if (o.external) return { endpoint: 'external', ...(o.external.note ? { note: o.external.note } : {}) };
+    return null;
+  };
   for (const [label, emitters] of emitIndex) {
     if (isHumanGate(label) || isBrake(label)) continue;
     if (!allListenKeys.has(label)) {
       for (const s of emitters) {
-        edges.push({ from: s, to: null, label, kind: classifyKind(label), deadEnd: true });
+        const oc = ocOf(label, s);
+        const marker = oc ? markerOf(s, oc) : null;
+        edges.push({
+          from: s, to: null, label, kind: classify(label),
+          ...(oc ? { outcome: oc } : {}),
+          ...(marker || { deadEnd: true }),
+        });
+      }
+    }
+  }
+
+  // Brake hand-offs (#981): an agent applying a brake label pauses the flow
+  // pending a human decision — that is a hand-off TO the human, not a dead end.
+  // Drawn for EVERY brake emitter (listened or not): even when a downstream
+  // agent re-listens on the label, the human sits in between (they decide, then
+  // release), so the emit side always routes through the human. Never a lint.
+  for (const [label, emitters] of emitIndex) {
+    if (!isBrake(label) || isHumanGate(label)) continue;
+    // #987: when a named human role consumes this brake label, the hand-off
+    // terminates on that role's node instead of the generic `@human` actor.
+    const boundHuman = humanLabelConsumer.get(label) || null;
+    for (const s of emitters) {
+      const oc = ocOf(label, s);
+      edges.push({ from: s, to: boundHuman, label, kind: 'brake', handoff: 'human', ...(oc ? { outcome: oc } : {}) });
+    }
+  }
+
+  // Artifact deliveries to a person (#987): a produce port whose PR/issue a
+  // person reviews/merges. The human is a NAMED role when one `consumes` this
+  // producer's artifact (`to: <humanId>`); an `audience: 'human'` flag with no
+  // role wired stays UNBOUND (`to: null`) — it still lists as a touchpoint and
+  // suppresses `producer-unconsumed`, but draws no line (the generic `@human` hub
+  // is gone, #987) and raises the advisory `unbound-delivery` lint. Exempted from
+  // `producer-unconsumed` either way.
+  for (const n of nodes) {
+    const gh = n.github || {};
+    for (const artifact of ['pr', 'issue']) {
+      const produces = artifact === 'pr' ? gh.producesPr : gh.producesIssue;
+      if (!produces) continue;
+      const boundHuman = humanArtifactConsumer.get(`${n.id}|${artifact}`) || null;
+      const audience = artifact === 'pr' ? gh.prAudience : gh.issueAudience;
+      if (boundHuman) {
+        edges.push({ from: n.id, to: boundHuman, kind: 'delivery', artifact, handoff: 'human' });
+      } else if (audience === 'human') {
+        edges.push({ from: n.id, to: null, kind: 'delivery', artifact, handoff: 'human' });
       }
     }
   }
@@ -279,28 +642,146 @@ function buildProcessGraph(agents) {
   const gates = [...gateSet].sort().map(label => ({ label, humanOnly: true }));
   const labels = [...labelMeta.keys()].sort().map(name => ({ name, ...labelMeta.get(name) }));
 
-  return { nodes, edges, gates, labels, lints: computeLints(nodes, edges) };
+  // Named human roles (#987) join the node set as first-class `kind: 'human'`
+  // boxes. Appended last so every agent-side loop above ran over the agent
+  // nodes only (a human's `emits` are gates it MAY set — they must never enter
+  // the emit index or trip an emit-shape lint). `synthetic: true` keeps them out
+  // of computeLints; a graph with no `humans[]` appends nothing, so its output
+  // is byte-identical to before (AC8).
+  const allNodes = humanRoles.length ? [...nodes, ...humanRoles] : nodes;
+
+  return {
+    nodes: allNodes, edges, gates, labels,
+    humanTouchpoints: computeHumanTouchpoints(allNodes, edges, humanIds),
+    lints: computeLints(allNodes, edges, classifier),
+  };
+}
+
+// ─── human touchpoints (#981) ────────────────────────────────────────────────
+//
+// The derived list of every place a PERSON acts in the flow — computed purely
+// from nodes/edges, never hand-maintained. Three types (generic human, no named
+// roles by design):
+//
+//   injection — a human applies a gate label (or approves a gated channel),
+//               waking an agent: work enters / passes a gate.
+//   decision  — an agent applies a brake label: the flow pauses until a human
+//               decides.
+//   delivery  — an agent opens a PR/issue whose declared audience is a human
+//               (review/merge).
+//
+// Sorted deterministically (type, then label/artifact, then agent) and deduped
+// so N triggers on one label yield one touchpoint.
+const TOUCHPOINT_ORDER = { injection: 0, decision: 1, delivery: 2 };
+// Shared comparator so unified-graph can merge its data-flow delivery
+// touchpoints (#981 follow-up) and keep the one deterministic order.
+function compareHumanTouchpoints(a, b) {
+  return (TOUCHPOINT_ORDER[a.type] - TOUCHPOINT_ORDER[b.type])
+    || String(a.label || a.name || a.artifact || '').localeCompare(String(b.label || b.name || b.artifact || ''))
+    || String(a.agentId).localeCompare(String(b.agentId))
+    // Named-role tiebreaker (#987) so two humans injecting the same label sort
+    // deterministically; unbound entries carry no role, so existing order holds.
+    || String(a.role || '').localeCompare(String(b.role || ''));
+}
+function computeHumanTouchpoints(nodes, edges, humanIds) {
+  const humans = humanIds instanceof Set ? humanIds : new Set();
+  const out = [];
+  const seen = new Set();
+  const add = (t) => {
+    // Keyed by label when there is one (a labelled gate channel and an explicit
+    // label listener on the same label are ONE touchpoint), else by artifact.
+    // The bound role (#987) joins the key so one label injected by two named
+    // humans yields two touchpoints (unbound entries carry no role — key ends
+    // in '|', byte-identical to before).
+    const key = `${t.type}|${t.label || t.artifact || ''}|${t.agentId}|${t.role || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+  // #987: a gate/brake/delivery edge bound to a named human role carries that
+  // role's id on the far end; surface it as `role` so the panel groups by it.
+  const roleOf = (id) => (humans.has(id) ? { role: id } : {});
+  for (const e of edges) {
+    // Gate label listeners: a human applies the label — from the generic
+    // `@human` (null) or a named human role (#987).
+    if (e.kind === 'gate' && (e.from == null || humans.has(e.from)) && e.to) {
+      add({ type: 'injection', label: e.label, agentId: e.to, ...roleOf(e.from) });
+    }
+    // Brake hand-offs (from an agent, handoff: 'human'): human decides. The
+    // deciding human is named when the edge terminates on a human role (#987).
+    if (e.kind === 'brake' && e.from && e.handoff === 'human') {
+      add({ type: 'decision', label: e.label, agentId: e.from, ...(e.outcome ? { outcome: e.outcome } : {}), ...roleOf(e.to) });
+    }
+    // Artifact deliveries: human reviews/merges the PR or issue.
+    if (e.kind === 'delivery' && e.from) {
+      add({ type: 'delivery', artifact: e.artifact, agentId: e.from, ...roleOf(e.to) });
+    }
+  }
+  // Gated channels (`gate: 'human'`) never appear as gate listener edges in
+  // this builder (their consumer's derived trigger is `channel: true`, and the
+  // producer→consumer edge is drawn in unified-graph) — read the ports directly.
+  for (const n of nodes) {
+    for (const ch of (Array.isArray(n.channels) ? n.channels : [])) {
+      if (!ch || ch.gate !== 'human') continue;
+      add({
+        type: 'injection', agentId: n.id,
+        ...(typeof ch.label === 'string' && ch.label.trim() ? { label: ch.label.trim() } : {}),
+        ...(ch.artifact === 'issue' ? { artifact: 'issue' } : { artifact: 'pr' }),
+      });
+    }
+  }
+  return out.sort(compareHumanTouchpoints);
 }
 
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
 // block saving. Derived purely from the built nodes/edges.
-function computeLints(nodes, edges) {
+//
+// `classifier` (#928) carries the authoritative gate/brake flags. It is optional
+// so `computeLints(nodes, edges)` keeps working for callers that only have the
+// nodes: the fallback still picks up every channel `gate: 'human'`, it just
+// cannot see a `labels[]` registry that was never threaded in.
+function computeLints(nodes, edges, classifier) {
+  const { isHumanGate } = classifier || makeLabelClassifier({ agents: nodes });
   const lints = [];
   for (const e of edges) {
     if (e.orphan) {
       lints.push({ code: 'orphan-listener', severity: 'warning', label: e.label, nodeId: e.to,
-        message: `\`${e.to}\` listens on \`${e.label}\` but no agent emits it.` });
-    }
-    if (e.humanAssumed) {
-      // Human-reachable listener with no agent emitter (#410): drawn from the
-      // human actor, advisory only — could be intentional, could be a typo.
-      lints.push({ code: 'orphan-listener', severity: 'info', label: e.label, nodeId: e.to,
-        message: `\`${e.to}\` listens on \`${e.label}\` — no agent emits it; only a human can set it.` });
+        message: `\`${e.to}\` waits for \`${e.label}\` but no outcome sets it.` });
     }
     if (e.deadEnd) {
-      lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
-        message: `\`${e.from}\` emits \`${e.label}\` but nothing listens on it.` });
+      // outcome-without-consumer (#830) is the successor of dead-end-emitter for
+      // OUTCOME edges: a dead-end carrying an `outcome` id comes from an authored
+      // outcomes port (a legacy flat-emit dead-end has no outcome field and keeps
+      // firing dead-end-emitter, so AC3 legacy output is byte-identical). `none`
+      // actions set no label → no edge → naturally exempt.
+      if (e.outcome) {
+        lints.push({ code: 'outcome-without-consumer', severity: 'warning', label: e.label, nodeId: e.from, outcome: e.outcome,
+          message: `\`${e.from}\` outcome \`${e.outcome}\` sets \`${e.label}\` but no consumer reacts to it.` });
+      } else {
+        lints.push({ code: 'dead-end-emitter', severity: 'warning', label: e.label, nodeId: e.from,
+          message: `\`${e.from}\` sets \`${e.label}\` but no consumer reacts to it.` });
+      }
     }
+  }
+  // Unbound human touchpoints (#987, advisory). The generic `@human` hub is gone,
+  // so a gate/brake with no NAMED human role wired draws no edge — surface an
+  // `info` hint prompting the operator to add a human role. Deduped by label; a
+  // gate edge bound to a human (`from` set) or a brake bound to one (`to` set) is
+  // NOT unbound. Kept `info` so the shipped-bundle guard (which fails on
+  // error/warning) stays green for curated templates that predate human roles.
+  const unboundGate = new Set();
+  const unboundBrake = new Set();
+  for (const e of edges) {
+    if (e.kind === 'gate' && e.from == null && e.to && e.label) unboundGate.add(e.label);
+    if (e.kind === 'brake' && e.handoff === 'human' && e.to == null && e.from && e.label) unboundBrake.add(e.label);
+  }
+  for (const label of unboundGate) {
+    lints.push({ code: 'unbound-gate', severity: 'info', label,
+      message: `gate label \`${label}\` has no human role — wire a human role that applies it.` });
+  }
+  for (const label of unboundBrake) {
+    lints.push({ code: 'unbound-brake', severity: 'info', label,
+      message: `brake label \`${label}\` pauses for a human but no human role decides it — wire a human role.` });
   }
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
   // consumes, and a channel that points at a role which doesn't produce that
@@ -313,18 +794,46 @@ function computeLints(nodes, edges) {
       consumedArtifactsByProducer.get(ch.from).add(ch.artifact === 'issue' ? 'issue' : 'pr');
     }
   }
+  // Producer→human deliveries (#987): a `kind: 'delivery'` edge means a person
+  // reviews/merges that producer's PR/issue — a consumer, so it clears the
+  // "nobody consumes this" smell. `to` set = a NAMED human role reviews it; `to`
+  // null = an `audience: 'human'` flag with no role wired yet (unbound → the
+  // advisory `unbound-delivery` lint below).
+  const deliveredArtifacts = new Set(); // `${producerId}|${pr|issue}` — any delivery
+  const unboundDelivery = new Set();    // `${producerId}|${pr|issue}` — flag, no role
+  for (const e of edges) {
+    if (e.kind !== 'delivery' || !e.from || !e.artifact) continue;
+    deliveredArtifacts.add(`${e.from}|${e.artifact}`);
+    if (e.to == null) unboundDelivery.add(`${e.from}|${e.artifact}`);
+  }
   const nodeById = new Map(nodes.map(n => [n.id, n]));
   for (const n of nodes) {
     if (n.synthetic) continue;
     const gh = n.github || {};
     const consumed = consumedArtifactsByProducer.get(n.id) || new Set();
-    if (gh.producesPr && !consumed.has('pr')) {
-      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
-        message: `\`${n.id}\` opens pull requests but no agent consumes them.` });
-    }
-    if (gh.producesIssue && !consumed.has('issue')) {
-      lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
-        message: `\`${n.id}\` opens issues but no agent consumes them.` });
+    for (const artifact of ['pr', 'issue']) {
+      const produces = artifact === 'pr' ? gh.producesPr : gh.producesIssue;
+      if (!produces) continue;
+      const key = `${n.id}|${artifact}`;
+      const noun = artifact === 'pr' ? 'pull requests' : 'issues';
+      // A declared open end (#1004, §4.7): the outcome carrying this artifact
+      // action is marked terminal ("the merged PR IS the product") or external
+      // ("consumed outside this flow") — a proper endpoint, not a smell.
+      const action = artifact === 'pr' ? 'openPr' : 'openIssue';
+      const marked = (n.outcomes && Array.isArray(n.outcomes.options) ? n.outcomes.options : [])
+        .some(o => o && (o.terminal === true || o.external)
+          && (o.actions || []).some(a => a && a.type === action));
+      if (marked) continue;
+      // A delivery to a person (named role or unbound audience flag) is a
+      // consumer — it clears the "nobody consumes this" smell. An UNBOUND one
+      // (flag, no role) instead raises the advisory `unbound-delivery` (#987).
+      if (!consumed.has(artifact) && !deliveredArtifacts.has(key)) {
+        lints.push({ code: 'producer-unconsumed', severity: 'info', nodeId: n.id,
+          message: `\`${n.id}\` opens ${noun} but no agent consumes them.` });
+      } else if (unboundDelivery.has(key)) {
+        lints.push({ code: 'unbound-delivery', severity: 'info', nodeId: n.id, artifact,
+          message: `\`${n.id}\` opens ${noun} for a person but no human role reviews them — wire a human role.` });
+      }
     }
     for (const ch of (n.channels || [])) {
       if (!ch || !ch.from) continue;
@@ -336,26 +845,171 @@ function computeLints(nodes, edges) {
           message: `\`${n.id}\` consumes a ${artifact === 'pr' ? 'PR' : 'issue'} from \`${ch.from}\`, which isn't marked as opening ${artifact === 'pr' ? 'PRs' : 'issues'}.` });
       }
     }
+    // Emit-shape lints read the agent-level `emits` (#414/#783) — the only emit
+    // source now that trigger-level emits are gone.
     const stageEmits = new Set();
-    for (const t of n.triggers || []) {
-      if (t.type === 'github-event' && !t.from) {
-        lints.push({ code: 'unguarded-self-trigger', severity: 'warning', nodeId: n.id, triggerId: t.id,
-          message: `Trigger \`${t.id}\` on \`${n.id}\` has no origin filter (\`from\`) — self-loop risk.` });
+    for (const lbl of n.emits || []) {
+      // Flag-based (#928): fires for a `humanGate` label whatever it is named, and
+      // NOT for a `brake` label — a brake is agent-appliable by design.
+      if (isHumanGate(lbl)) {
+        lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl,
+          message: `\`${n.id}\` declares it sets gate label \`${lbl}\` — only a person may apply it.` });
       }
-      for (const lbl of t.emits || []) {
-        if (isHumanGate(lbl)) {
-          lints.push({ code: 'gate-violation', severity: 'error', nodeId: n.id, label: lbl, triggerId: t.id,
-            message: `\`${n.id}\` declares emit of gate label \`${lbl}\` — only humans may set it.` });
-        }
-        if (lbl.startsWith('stage:')) stageEmits.add(lbl);
-      }
+      if (lbl.startsWith('stage:')) stageEmits.add(lbl);
     }
     if (stageEmits.size > 1) {
       lints.push({ code: 'competing-stage', severity: 'warning', nodeId: n.id,
-        message: `\`${n.id}\` emits multiple stage labels: ${[...stageEmits].join(', ')}.` });
+        message: `\`${n.id}\` sets multiple stage labels: ${[...stageEmits].join(', ')}.` });
     }
   }
+
+  // duplicate-listener (#826): two github-event triggers of one agent reacting to
+  // the same (events, labelFilter). The poller has no origin filter, so both fire
+  // on every matching event and wake the agent redundantly. Channel consolidation
+  // (#826) removed the per-producer duplicates the derivation used to emit; this
+  // lint catches what remains — chiefly a hand-authored trigger left standing
+  // beside a derived channel/data-flow listener. A group made up SOLELY of
+  // data-flow push triggers is skipped: those are intentional one-per-upstream
+  // listeners, distinguished by their prompt rather than by (events, labelFilter).
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const bySig = new Map(); // "events|label" -> trigger views
+    for (const t of (n.triggers || [])) {
+      if (!t || t.type !== 'github-event') continue;
+      const events = Array.isArray(t.events) ? t.events.slice().sort() : [];
+      const label = typeof t.labelFilter === 'string' && t.labelFilter.trim() ? t.labelFilter.trim() : '';
+      const sig = `${events.join(',')}|${label}`;
+      if (!bySig.has(sig)) bySig.set(sig, []);
+      bySig.get(sig).push(t);
+    }
+    for (const group of bySig.values()) {
+      if (group.length < 2) continue;
+      if (group.every(t => t.dataFlow)) continue; // intentional per-upstream push listeners
+      const label = group[0].labelFilter;
+      const ids = group.map(t => t.id).filter(Boolean);
+      lints.push({
+        code: 'duplicate-listener', severity: 'warning', nodeId: n.id,
+        ...(label ? { label } : {}),
+        triggerIds: ids,
+        message: `\`${n.id}\` has ${group.length} inputs waiting on the same event`
+          + `${label ? ` + label \`${label}\`` : 's'}${ids.length ? ` (${ids.map(i => `\`${i}\``).join(', ')})` : ''}`
+          + ` — they fire redundantly.`,
+      });
+    }
+  }
+
+  // raw-trigger-nonconformant (#1006, concept §4.8). The raw layers (agent
+  // self-managed triggers.json, direct file/API edits) may deviate from the
+  // wiring rules — but VISIBLY, never silently: a multi-event github-event
+  // trigger or a malformed claim surfaces as this advisory lint. Same rule
+  // helper as the write-side validators, so the rule set cannot drift.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    for (const t of (n.triggers || [])) {
+      // Derived channel/data-flow listeners are ENGINE-written (stripped and
+      // regenerated on every port reconcile) — not a raw layer. Flagging them
+      // would tell the operator to "edit it to conform" on a trigger the next
+      // reconcile rewrites; if the derivation deviates (e.g. the unlabelled
+      // PR-open event pair), the fix belongs in the expander, not per team
+      // (#1008).
+      if (t.channel || t.dataFlow) continue;
+      const te = rawTriggerError(t);
+      if (!te) continue;
+      lints.push({
+        code: 'raw-trigger-nonconformant', severity: 'info', nodeId: n.id,
+        ...(t.id ? { triggerIds: [t.id] } : {}),
+        message: `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
+      });
+    }
+  }
+
+  // unclaimed-listener (#958, concept §3.5). A label listener without a `claim`
+  // never turns its wake label into a visible work-in-progress state, so the
+  // three stall modes (wake never arrived / run died mid-flight / ran but never
+  // emitted) stay indistinguishable on GitHub — a reconciliation blind spot.
+  //
+  // ADVISORY (`info`) on purpose: hand-authored listeners are legitimately
+  // unclaimed (the author may have opted out), and the shipped-bundle guard in
+  // process-template-registry.test.js fails on error/warning lints only. Raising
+  // this to a warning would turn every not-yet-migrated curated template red.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    for (const t of (n.triggers || [])) {
+      if (!t || t.type !== 'github-event') continue;
+      const label = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+      if (!label) continue;                       // raw event listener — nothing to claim
+      if (label.endsWith(CLAIM_SUFFIX)) continue; // a claim-label listener claims nothing
+      if (claimView(t)) continue;                 // already claimed
+      lints.push({
+        code: 'unclaimed-listener', severity: 'info', nodeId: n.id, label,
+        ...(t.id ? { triggerIds: [t.id] } : {}),
+        message: `\`${n.id}\` waits on \`${label}\` without a claim — a stalled run`
+          + ` cannot be told apart from a wake that never arrived.`,
+      });
+    }
+  }
+
+  // Outcome-port lints (#830, concept §8). These read the AUTHORED `outcomes`
+  // port that buildProcessGraph surfaces on a node only when authored — a legacy
+  // flat-`emits` agent has no `n.outcomes`, so none of these fire and its
+  // dead-end-emitter / gate-violation output stays byte-identical (AC3). The
+  // `outcome-without-consumer` case is derived from the dead-end edges above; the
+  // per-node inspection below covers the switch/branch shape checks that have no
+  // edge to hang off.
+  for (const n of nodes) {
+    if (n.synthetic) continue;
+    const oc = n.outcomes;
+    if (!oc || !Array.isArray(oc.options)) continue;
+
+    // switch-with-one-option (info): an `exactlyOne` switch with fewer than two
+    // options isn't a branch at all.
+    if (oc.mode === 'exactlyOne' && oc.options.length < 2) {
+      lints.push({ code: 'switch-with-one-option', severity: 'info', nodeId: n.id,
+        message: `\`${n.id}\` has an exactlyOne switch with ${oc.options.length} option${oc.options.length === 1 ? '' : 's'} — not a branch.` });
+    }
+
+    // human-label-as-outcome (error): an outcome action may not set a human-GATE
+    // label — only a human may. Extends `gate-violation` to the outcomes port (the
+    // label is filtered out of `n.emits` by the projection, so `gate-violation`
+    // cannot catch it — this covers imported/legacy data). Flag-based (#928), and
+    // brake labels are deliberately exempt: a brake is agent-applied (the reworker
+    // setting `human-decision-required` to pause the loop for a human decision).
+    for (const o of oc.options) {
+      for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+        if (a && a.type === 'setLabel' && typeof a.label === 'string'
+            && isHumanGate(a.label.trim())) {
+          lints.push({ code: 'human-label-as-outcome', severity: 'error', nodeId: n.id, label: a.label.trim(), outcome: o.id,
+            message: `\`${n.id}\` outcome \`${o.id}\` sets gate label \`${a.label.trim()}\` — only humans may set it.` });
+        }
+      }
+    }
+
+    // same-label-multiple-outcomes (warning): under `exactlyOne`, two options
+    // that set the same label leave consumers unable to tell the branches apart.
+    // (Gate labels are excluded here — those are the human-label-as-outcome
+    // error above.)
+    if (oc.mode === 'exactlyOne') {
+      const optionsByLabel = new Map(); // label -> Set(optionId)
+      for (const o of oc.options) {
+        for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+          if (!a || a.type !== 'setLabel' || typeof a.label !== 'string') continue;
+          const lbl = a.label.trim();
+          if (!lbl || isHumanGate(lbl)) continue;
+          if (!optionsByLabel.has(lbl)) optionsByLabel.set(lbl, new Set());
+          optionsByLabel.get(lbl).add(o.id);
+        }
+      }
+      for (const [lbl, ids] of optionsByLabel) {
+        if (ids.size > 1) {
+          lints.push({ code: 'same-label-multiple-outcomes', severity: 'warning', nodeId: n.id, label: lbl,
+            message: `\`${n.id}\` sets \`${lbl}\` from ${ids.size} exactlyOne options (${[...ids].map(i => `\`${i}\``).join(', ')})`
+              + ` — consumers can't distinguish the branches.` });
+        }
+      }
+    }
+  }
+
   return lints;
 }
 
-module.exports = { buildProcessGraph, computeLints, listenKeys, classifyKind, isHumanGate, isBrake, fromIncludesHumans };
+module.exports = { buildProcessGraph, computeLints, computeHumanTouchpoints, compareHumanTouchpoints, listenKeys, classifyKind, makeLabelClassifier, humanNode, normalizeConsumes };

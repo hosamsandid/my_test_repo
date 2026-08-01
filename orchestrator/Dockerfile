@@ -35,7 +35,10 @@ RUN install -m 0755 -d /etc/apt/keyrings \
   && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+# Pin Claude Code CLI version for reproducible builds (kept identical to
+# agent-image/Dockerfile's ARG CLAUDE_CODE_VERSION).
+ARG CLAUDE_CODE_VERSION=2.1.212
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Default git identity. Agents can override with GIT_AUTHOR_*/GIT_COMMITTER_*
 # env vars (or per-repo `git config`) — this just makes plain `git commit`

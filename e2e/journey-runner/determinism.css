@@ -1,0 +1,19 @@
+/*
+ * Animation-killing stylesheet injected at screenshot time
+ * (docs/journey-spec-concept.md §7, #705). Combined with the `journeys` project's
+ * pinned viewport / colorScheme:'light' / reducedMotion:'reduce', this removes
+ * the last sources of per-frame jitter so captures are byte-comparable across
+ * runs and machines: no in-flight transitions, no spinner rotation, no blinking
+ * text caret. Applied only for the capture (Playwright's stylePath) — it never
+ * affects the actual test behaviour or assertions.
+ */
+*,
+*::before,
+*::after {
+  transition: none !important;
+  animation: none !important;
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  scroll-behavior: auto !important;
+  caret-color: transparent !important;
+}

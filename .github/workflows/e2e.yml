@@ -1,0 +1,254 @@
+name: E2E (Playwright)
+
+# Phases 1–3 of #651 / #666 / #668 (docs/e2e-testing-concept.md §6, §8).
+# The nightly + manual-dispatch lane runs the FULL suite (F0–F4) via `make e2e`.
+# Deliberately NOT run on pull_request during the burn-in period (§6/§8: "nightly
+# + manual dispatch, non-blocking" first; promote the smoke lane to a required
+# PR check only after a clean streak). When that promotion happens, the PR gate
+# scope STAYS F0+F1 — run `make e2e-gate` there, never the full suite, so the
+# blocking check excludes the slower F3/F4 flows and F2 (which is expected red
+# until #253, the SSE stream-miss bug it exists to catch, is fixed — a red F2 in
+# the nightly full suite is the test doing its job, not a regression).
+# Runs on podman — Docker is NOT a drop-in for the libpod spawn path (§4.3).
+on:
+  schedule:
+    - cron: '17 3 * * *'   # nightly, off the :00 mark
+  workflow_dispatch:
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Go/no-go: rootless podman + libpod spawn on the hosted runner ──────────
+  # The single biggest infrastructure risk (§9). This MUST pass before the E2E
+  # job is worth running: it proves the runner can (a) expose the rootless
+  # libpod REST socket and (b) spawn a nested container over that socket — the
+  # exact seam orchestrator/spawn-container.js drives. If this ever fails, the
+  # fallback (§9) is a self-hosted runner or a stubs-only CI mode.
+  podman-preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Show podman version
+        run: podman version
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          # Give the socket a moment to appear, then confirm it responds.
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: Probe libpod REST API
+        run: |
+          set -euo pipefail
+          curl -sf --unix-socket "${PODMAN_HOST_SOCKET}" \
+            http://d/v4.0.0/libpod/info | head -c 400
+          echo
+
+      - name: Spawn a nested container over the libpod socket
+        run: |
+          set -euo pipefail
+          # `--remote` forces the client through the REST socket (not the local
+          # CLI path), mirroring how the orchestrator spawns agent containers.
+          podman --remote --url "unix://${PODMAN_HOST_SOCKET}" \
+            run --rm docker.io/library/alpine:3.20 echo "libpod spawn OK"
+
+  # ── Full E2E suite (F0–F4) ──────────────────────────────────────────────────
+  e2e:
+    needs: podman-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install jq (setup.sh prerequisite)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: Run E2E (full suite F0–F4 + journeys) — builds images, brings up aee-e2e, tears down
+        run: make e2e
+
+      - name: Upload journey screenshots + manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Captured only by a passing journey run (#705, §2.3) — the doc/deck
+          # and PR before/after evidence source. Ignored when the journey failed
+          # (nothing published) so the step never breaks the job.
+          name: journey-artifacts
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish journey baseline (green main run only)
+        # §3.4 item 1 / #709: every GREEN main run republishes the journey
+        # screenshot set as the BASELINE the PR before/after workflow
+        # (ui-screenshots.yml) diffs against. `success()` gates it to a passing
+        # suite so a red run never overwrites a good baseline; the main-ref guard
+        # keeps PR-branch dispatches from clobbering it. Longer retention than the
+        # per-run artifact so an in-flight PR can always resolve a recent baseline.
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-baseline-main
+          path: e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Generate journey user guide (docgen)
+        if: always()
+        # Turns the journeys + this run's screenshot artifacts into the Markdown
+        # user guide + coverage report (#707, §3.2). Pure Node (no podman); reads
+        # e2e/artifacts (the default), so journeys not captured by a green run
+        # render narrative-only. Committing the guide stays a human step for now —
+        # here we only build it and upload it as a run artifact.
+        run: make docs-journeys
+
+      - name: Upload generated user guide
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journey-user-guide
+          path: docs/user-guide/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Generate journey walkthrough deck (docgen pptx)
+        if: always()
+        # Builds the PPTX walkthrough deck from the journeys + this run's screenshot
+        # artifacts (#708, §3.2 item 2) and structurally validates it (unzip +
+        # OOXML part checks — no PowerPoint needed). Pure Node (pptxgenjs); reads
+        # e2e/artifacts (the default), so journeys not captured by a green run
+        # render as narrative/concept slides. The CLI exits non-zero if the deck
+        # is structurally broken, so this step fails the job on a bad deck; final
+        # visual QA stays a human step.
+        run: make docs-deck
+
+      - name: Upload walkthrough deck
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walkthrough-deck
+          path: artifacts/agent-studio-walkthrough.pptx
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Dump orchestrator container logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          # Capture the orchestrator's logs while the stack is still up (the
+          # teardown step below removes the containers). A missing admin client
+          # or the M_FORBIDDEN provisioning race (#719) shows up here — without
+          # this, diagnosing a red F1 needs a local repro.
+          mkdir -p e2e/test-results
+          for c in $(podman ps -a --filter "name=orchestrator" --format '{{.Names}}'); do
+            echo "=== podman logs ${c} ===" >> e2e/test-results/orchestrator.log
+            podman logs "${c}" >> e2e/test-results/orchestrator.log 2>&1 || true
+          done
+          ls -l e2e/test-results/orchestrator.log || true
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
+      - name: Force teardown (safety net)
+        if: always()
+        run: ./e2e/scripts/stack-down.sh || true
+
+  # NOTE: the walkthrough-video render was extracted into its own MANUAL workflow
+  # (.github/workflows/walkthrough-video.yml, #749) so it can be started on its own
+  # from the Actions UI. It is no longer coupled to this nightly E2E run.
+
+  # ── Makefile smoke test ───────────────────────────────────────────────────
+  # Exercises the operator-facing Makefile targets (help, build, agent-image,
+  # up, ps, logs, down) to catch drift like container-name mismatches.
+  # Runs in parallel with the e2e suite — both gate on podman-preflight.
+  # See PR #772 for design rationale.
+  makefile-smoke:
+    needs: podman-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: make help
+        run: make help
+
+      - name: make up
+        # `up` depends on `agent-image` and runs `--build`, so it
+        # transitively exercises make build + make agent-image.
+        run: make up
+
+      - name: make ps (verify containers)
+        run: |
+          make ps
+          make ps | grep -q orchestrator
+          make ps | grep -q admin-console
+          make ps | grep -q conduwuit
+
+      - name: make logs (verify streaming)
+        run: |
+          timeout 10 make logs > /tmp/logs-out 2>&1 || true
+          if grep -q 'no container with name or ID' /tmp/logs-out; then
+            echo "FAIL: make logs could not find containers"
+            cat /tmp/logs-out
+            exit 1
+          fi
+          test -s /tmp/logs-out
+
+      - name: make down
+        run: make down
+
+      - name: Teardown (safety net)
+        if: always()
+        run: podman compose -f docker-compose.yml down || true

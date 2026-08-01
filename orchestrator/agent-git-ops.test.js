@@ -9,6 +9,7 @@ const {
   isValidBranchName,
   resolveAgentRepo,
   buildRepoGitEnv,
+  githubTokenStatus,
   sanitizeGitOutput,
   normalizePushRequest,
   PROTECTED_BRANCHES,
@@ -191,6 +192,54 @@ test("buildRepoGitEnv never leaks the token when the key file is outside the dir
     fs,
   });
   assert.equal(gitEnv.GIT_SSH_COMMAND, undefined);
+});
+
+// ── githubTokenStatus ────────────────────────────────────────────────────────
+test("githubTokenStatus reports no-token-configured when nothing names a token", () => {
+  const s = githubTokenStatus({ env: {}, ghTokensDir: "/tokens", fs: fakeFs(new Set()) });
+  assert.deepEqual(s, { resolvable: false, tokenId: null, reason: "no-token-configured" });
+});
+
+test("githubTokenStatus reports token-file-missing when the id resolves to no file", () => {
+  const s = githubTokenStatus({
+    env: { githubTokenId: "t1" },
+    ghTokensDir: "/tokens",
+    fs: fakeFs(new Set()),
+  });
+  assert.equal(s.resolvable, false);
+  assert.equal(s.tokenId, "t1");
+  assert.equal(s.reason, "token-file-missing");
+});
+
+test("githubTokenStatus reports token-file-empty for a blank token file", () => {
+  const fs = { existsSync: () => true, readFileSync: () => "   \n" };
+  const s = githubTokenStatus({ githubTokenId: "t1", ghTokensDir: "/tokens", fs });
+  assert.equal(s.resolvable, false);
+  assert.equal(s.reason, "token-file-empty");
+});
+
+test("githubTokenStatus rejects a token id that escapes the store dir", () => {
+  const fs = { existsSync: () => true, readFileSync: () => "ghp_x" };
+  const s = githubTokenStatus({ githubTokenId: "../escape", ghTokensDir: "/tokens", fs });
+  assert.equal(s.resolvable, false);
+  assert.equal(s.reason, "token-path-invalid");
+});
+
+test("githubTokenStatus resolves when the token file has content", () => {
+  const fs = { existsSync: () => true, readFileSync: () => "ghp_secret\n" };
+  const s = githubTokenStatus({ githubTokenId: "t1", ghTokensDir: "/tokens", fs });
+  assert.deepEqual(s, { resolvable: true, tokenId: "t1", reason: null });
+});
+
+test("githubTokenStatus prefers the explicit tokenId over the env's", () => {
+  const fs = { existsSync: () => true, readFileSync: () => "ghp_secret" };
+  const s = githubTokenStatus({
+    env: { githubTokenId: "env-token" },
+    githubTokenId: "req-token",
+    ghTokensDir: "/tokens",
+    fs,
+  });
+  assert.equal(s.tokenId, "req-token");
 });
 
 // ── sanitizeGitOutput ────────────────────────────────────────────────────────

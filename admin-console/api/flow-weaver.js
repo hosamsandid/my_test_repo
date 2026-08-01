@@ -29,7 +29,8 @@
 // wizard (#422) can explain what was auto-compensated.
 
 const { normalizeTemplatePorts, intrinsicTriggers } = require('./catalog-ports');
-const { validateProcessTemplate } = require('./process-template');
+const { validateProcessTemplate, deriveClaim } = require('./process-template');
+const { outcomeSetLabels, isAuthoredOutcomes } = require('./outcomes');
 
 const GENERIC_PATTERN_IDS = { scout: 'scout', 'stage-author': 'author', 'stage-companion': 'companion' };
 
@@ -134,7 +135,36 @@ function normalizeInput({ name, stages, options }) {
     return { name: stageName, prefix, roles: s.roles };
   });
   const humanGates = options && options.humanGates !== undefined ? options.humanGates : true;
-  return { name: name.trim(), stages: out, humanGates };
+  const humans = normalizeInputHumans(options && options.humans, seenStages);
+  return { name: name.trim(), stages: out, humanGates, humans };
+}
+
+// Named human roles offered to the weave (#1008, concept §8.1 A13). Purely
+// declarative — the weaver BINDS them to what it generates: a stage-boundary
+// gate label lands on the matching human's `emits` (+ the hand-over issue on
+// its `consumes` — the reviewer binding), and open-end deliveries land on its
+// `consumes`. A human with a `stage` binds that PRODUCING stage's touchpoints;
+// a stage-less human is the fallback for every stage.
+function normalizeInputHumans(humans, stageNames) {
+  if (humans === undefined || humans === null) return [];
+  if (!Array.isArray(humans)) throw new Error('options.humans must be an array');
+  const seen = new Set();
+  return humans.map((h, i) => {
+    if (!h || typeof h !== 'object') throw new Error(`human ${i}: must be an object`);
+    if (typeof h.id !== 'string' || !h.id.trim()) throw new Error(`human ${i}: id required`);
+    const id = h.id.trim();
+    if (seen.has(id)) throw new Error(`duplicate human id: ${id}`);
+    seen.add(id);
+    if (typeof h.name !== 'string' || !h.name.trim()) throw new Error(`human ${id}: name required`);
+    const stage = typeof h.stage === 'string' && h.stage.trim() ? h.stage.trim() : null;
+    if (stage && !stageNames.has(stage)) throw new Error(`human ${id}: unknown stage "${stage}"`);
+    return {
+      id, name: h.name.trim(),
+      ...(typeof h.description === 'string' && h.description.trim() ? { description: h.description.trim() } : {}),
+      ...(stage ? { stage } : {}),
+      emits: [], consumes: [],
+    };
+  });
 }
 
 function gateEnabled(humanGates, producingStageName) {
@@ -159,7 +189,7 @@ function gateEnabled(humanGates, producingStageName) {
  * @returns {{ bundle: object, notes: Array<{stage, rule, message}> }}
  */
 function weaveProcess(input) {
-  const { name, stages, humanGates } = normalizeInput(input || {});
+  const { name, stages, humanGates, humans } = normalizeInput(input || {});
   const notes = [];
   const note = (stage, rule, message) => notes.push({ stage, rule, message });
 
@@ -185,10 +215,12 @@ function weaveProcess(input) {
         enabled: tr.enabled !== false,
         ...(tr.type === 'github-event' ? {
           events: Array.isArray(tr.events) ? tr.events.slice() : [],
-          // Default the origin filter so a kept trigger can never be an
-          // unguarded self-trigger (lint contract).
-          from: tr.from || 'any-except-self',
           ...(tr.labelFilter ? { labelFilter: renderStageVars(tr.labelFilter, vars) } : {}),
+          // Claim (#958/#1008): re-derived from the RENDERED label filter (the
+          // template's may carry weave-time vars), like buildMemberFromTemplate.
+          // A template without a claim stays without one (opt-out preserved).
+          ...(tr.claim && tr.labelFilter && deriveClaim(renderStageVars(tr.labelFilter, vars))
+            ? { claim: deriveClaim(renderStageVars(tr.labelFilter, vars)) } : {}),
         } : {}),
         ...(tr.type === 'cron' ? { cron: tr.cron } : {}),
         ...(tr.type === 'once' ? { at: tr.at } : {}),
@@ -204,9 +236,15 @@ function weaveProcess(input) {
         stage: stage.name,
         patternRole: v2.patternRole,
         produces: { ...v2.ports.produces },
+        audience: { pr: false, issue: false },
         basePrompt: renderStageVars(stripWeaverBlock(tpl.promptTemplate || tpl.systemPrompt || ''), vars),
         wiring: [],
-        emits: Array.isArray(tpl.emits) ? tpl.emits.map(e => renderStageVars(e, vars)) : [],
+        // Read emitted labels from flat emits OR structured outcomes (#831).
+        emits: Array.isArray(tpl.emits) && tpl.emits.length
+          ? tpl.emits.map(e => renderStageVars(e, vars))
+          : (isAuthoredOutcomes(tpl.outcomes)
+            ? outcomeSetLabels(tpl.outcomes).map(e => renderStageVars(e, vars))
+            : []),
         channels: [],
         triggers: kept,
       };
@@ -221,17 +259,30 @@ function weaveProcess(input) {
     };
   });
 
+  // Every trigger the weaver GENERATES goes through here, so the claim (#958) is
+  // stamped by convention at the one choke point: a generated label listener
+  // claims its wake label as `<wake>:wip`, anything else (raw review/push events)
+  // derives null and is untouched. Triggers merely COPIED from a catalog template
+  // (`kept`/intrinsicTriggers) don't pass through addTrigger — those stay
+  // hand-authored, as the ticket requires.
   const addTrigger = (role, trigger) => {
     let id = trigger.id;
     let n = 2;
     while (role.triggers.some(t => t.id === id)) id = `${trigger.id}-${n++}`;
-    role.triggers.push({ ...trigger, id });
+    const claim = trigger.claim || deriveClaim(trigger.labelFilter);
+    role.triggers.push({ ...trigger, id, ...(claim ? { claim } : {}) });
   };
 
   const labelRegistry = new Map(); // name -> humanGate
   const noteLabel = (label, humanGate = false) => {
     if (!labelRegistry.has(label) || humanGate) labelRegistry.set(label, humanGate);
   };
+
+  // The named human bound to a producing stage's touchpoints: a stage-scoped
+  // human wins, a stage-less one is the fallback, none -> unbound (advisory
+  // unbound-gate/unbound-delivery lints, exactly like the Flow Editor).
+  const humanFor = (stageName) =>
+    humans.find(h => h.stage === stageName) || humans.find(h => !h.stage) || null;
 
   // 2. Intra-stage wiring: Scout → author-go → Author → PR → Companion,
   //    escalation Author → escalate → Companion → author-go.
@@ -258,7 +309,7 @@ function weaveProcess(input) {
       if (scouts.length || companions.length) {
         addTrigger(author, {
           id: 'author-wake', type: 'github-event', enabled: true,
-          events: ['issues.labeled'], labelFilter: authorGo, from: 'any-except-self',
+          events: ['issues.labeled'], labelFilter: authorGo,
           emits: companions.length ? [escalate] : [],
           description: `Start/continue when \`${authorGo}\` is applied`,
           prompt: authorWakePrompt(stage.name, { authorGo, escalate: companions.length ? escalate : null }),
@@ -267,7 +318,7 @@ function weaveProcess(input) {
       if (author.produces.pr) {
         addTrigger(author, {
           id: 'rework-on-review', type: 'github-event', enabled: true,
-          events: ['pull_request_review.submitted'], from: 'any-except-self',
+          events: ['pull_request_review.submitted'],
           description: 'Rework the PR after a review',
           prompt: reworkPrompt(stage.name),
         });
@@ -295,20 +346,29 @@ function weaveProcess(input) {
         companion.emits.push(authorGo);
         addTrigger(companion, {
           id: 'escalate-wake', type: 'github-event', enabled: true,
-          events: ['issues.labeled'], labelFilter: escalate, from: 'any-except-self',
+          events: ['issues.labeled'], labelFilter: escalate,
           description: `Broker a ${stage.name} escalation`,
           prompt: escalateWakePrompt(stage.name, { authorGo, escalate }),
         });
         companion.wiring.push(`To send work back to ${authorNames} (rework from feedback, resolved escalation), re-apply \`${authorGo}\` to the issue.`);
         noteLabel(escalate);
       }
-      addTrigger(companion, {
-        id: 'human-feedback', type: 'github-event', enabled: true,
-        events: ['issue_comment.created', 'pull_request_review.submitted', 'pull_request_review_comment.created', 'issues.edited'],
-        from: 'humans',
-        description: `Route human feedback in the ${stage.name} stage`,
-        prompt: humanFeedbackPrompt(stage.name, { authorGo }),
-      });
+      // One trigger per event (#1008, the 2026-07-05 single-event rule): the
+      // four feedback signals are four listeners sharing one prompt, not one
+      // multi-event listener — `rawTriggerError` rejects the latter on write.
+      for (const [event, noun] of [
+        ['issue_comment.created', 'comment'],
+        ['pull_request_review.submitted', 'review'],
+        ['pull_request_review_comment.created', 'review comment'],
+        ['issues.edited', 'issue edit'],
+      ]) {
+        addTrigger(companion, {
+          id: `human-feedback-${noun.replace(/ /g, '-')}`, type: 'github-event', enabled: true,
+          events: [event],
+          description: `Route human feedback in the ${stage.name} stage (${noun})`,
+          prompt: humanFeedbackPrompt(stage.name, { authorGo }),
+        });
+      }
     }
     if ((scouts.length || companions.length) && authors.length) noteLabel(authorGo);
   }
@@ -330,6 +390,14 @@ function weaveProcess(input) {
       const label = `${producing.stage.prefix}:approved`;
       const gate = gateEnabled(humanGates, producing.stage.name);
       const producer = producing.role;
+      // Reviewer binding (#1008): when a named human exists for the PRODUCING
+      // stage, the gate is bound instead of unbound — the person applies the
+      // gate label (`emits`) and reviews the hand-over issue (`consumes`).
+      const reviewer = gate ? humanFor(producing.stage.name) : null;
+      if (reviewer) {
+        reviewer.emits.push(label);
+        reviewer.consumes.push({ artifact: 'issue', from: producer.id });
+      }
       // The producer must actually open the hand-over issue. Companions/authors
       // gain the duty (+ producesIssue); intake roles already open issues.
       if (!producer.produces.issue) {
@@ -345,7 +413,7 @@ function weaveProcess(input) {
         producer.wiring.push(`Stage exit: open a hand-over issue for the **${stage.name}** stage when the ${producing.stage.name} work is complete.`);
       }
       producer.wiring.push(gate
-        ? `Ask a human to apply \`${label}\` on the hand-over issue — **only a human applies that label**, never you. That releases the ${stage.name} stage.`
+        ? `Ask ${reviewer ? `**${reviewer.name}**` : 'a human'} to apply \`${label}\` on the hand-over issue — **only a human applies that label**, never you. That releases the ${stage.name} stage.`
         : `Apply \`${label}\` on the hand-over issue yourself once everything is in order — that releases the ${stage.name} stage (no human gate configured on this boundary).`);
       if (!gate) {
         note(producing.stage.name, 'gate-disabled',
@@ -364,20 +432,54 @@ function weaveProcess(input) {
     if (p) producing = { stage, role: p };
   }
 
-  // 4. Ensure + stagger weekly self-curation for per-invocation roles.
+  // 3.5 Open-end markers (#1008, concept §4.7): a produced artifact nothing in
+  // the flow consumes is not a wiring gap in weaver output — it is the point
+  // where a person takes over (review + merge of a compensated author's PR, the
+  // final stage's hand-over). Declare it: `prAudience`/`issueAudience: 'human'`
+  // (the #981 delivery declaration), bound to a named human's `consumes` when
+  // one exists — otherwise it stays an advisory unbound delivery, exactly like
+  // the Flow Editor's own open-end call-to-action.
+  const consumedFrom = new Set(); // `${producerId}|${artifact}`
+  for (const stage of woven) {
+    for (const role of stage.roles) {
+      for (const ch of role.channels) consumedFrom.add(`${ch.from}|${ch.artifact}`);
+    }
+  }
+  for (const stage of woven) {
+    for (const role of stage.roles) {
+      for (const artifact of ['pr', 'issue']) {
+        if (!role.produces[artifact]) continue;
+        if (consumedFrom.has(`${role.id}|${artifact}`)) continue;
+        role.audience[artifact] = true;
+        const noun = artifact === 'pr' ? 'PRs' : 'issues';
+        const reviewer = humanFor(stage.name);
+        if (reviewer && !reviewer.consumes.some(c => c.artifact === artifact && c.from === role.id)) {
+          reviewer.consumes.push({ artifact, from: role.id });
+        }
+        note(stage.name, 'open-end-delivery', reviewer
+          ? `"${role.displayName}" opens ${noun} nothing in the flow consumes — bound as a delivery to **${reviewer.name}** (review/merge).`
+          : `"${role.displayName}" opens ${noun} nothing in the flow consumes — declared as delivered to a person (review/merge); add a named human role to bind it.`);
+      }
+    }
+  }
+
+  // 4. Ensure + stagger daily self-curation. Every role that already carries a
+  // self-curation cron (all catalog roles ship one as their intrinsic standard
+  // trigger) gets a unique staggered slot; per-invocation roles without one
+  // (inline roles) get it added.
   let curationIdx = 0;
   for (const stage of woven) {
     for (const role of stage.roles) {
-      if (role.sessionPolicy !== 'per-invocation') continue;
+      const existing = role.triggers.find(t => t.type === 'cron' && t.id === 'self-curation');
+      if (!existing && role.sessionPolicy !== 'per-invocation') continue;
       const minute = (5 + curationIdx * 3) % 60;
       const hour = 3 + Math.floor((5 + curationIdx * 3) / 60);
-      const cron = `${minute} ${hour} * * 1`;
-      const existing = role.triggers.find(t => t.type === 'cron' && t.id === 'self-curation');
+      const cron = `${minute} ${hour} * * *`;
       if (existing) existing.cron = cron;
       else addTrigger(role, {
         id: 'self-curation', type: 'cron', enabled: true, cron,
-        description: 'Weekly memory housekeeping',
-        prompt: 'Weekly memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS].',
+        description: 'Daily memory housekeeping',
+        prompt: 'Daily memory curation of memory/log.md: consolidate contradictions, generalise issue-specifics, merge duplicates, prune stale entries. If nothing to do: [PASS].',
       });
       curationIdx++;
     }
@@ -409,7 +511,12 @@ function weaveProcess(input) {
       systemPrompt: [role.basePrompt, weaverBlock(role.wiring)].filter(Boolean).join('\n\n'),
       ...(role.emits.length ? { emits: [...new Set(role.emits)] } : {}),
       ...(role.produces.pr || role.produces.issue
-        ? { github: { ...(role.produces.pr ? { producesPr: true } : {}), ...(role.produces.issue ? { producesIssue: true } : {}) } }
+        ? { github: {
+          ...(role.produces.pr ? { producesPr: true } : {}),
+          ...(role.produces.issue ? { producesIssue: true } : {}),
+          ...(role.audience.pr ? { prAudience: 'human' } : {}),
+          ...(role.audience.issue ? { issueAudience: 'human' } : {}),
+        } }
         : {}),
       ...(role.channels.length ? { channels: role.channels } : {}),
       triggers: role.triggers,
@@ -417,6 +524,16 @@ function weaveProcess(input) {
     gates: [],
     labels: [...labelRegistry.entries()].sort(([a], [b]) => a.localeCompare(b))
       .map(([name_, humanGate]) => ({ name: name_, humanGate, brake: false })),
+    // Named human roles (#987), bound above: gate labels on `emits`, reviewed
+    // hand-overs and open-end deliveries on `consumes`. Omitted when the weave
+    // was given no humans, so those bundles stay byte-identical.
+    ...(humans.length ? { humans: humans.map(h => ({
+      id: h.id, name: h.name,
+      ...(h.description ? { description: h.description } : {}),
+      ...(h.stage ? { stage: h.stage } : {}),
+      ...(h.emits.length ? { emits: [...new Set(h.emits)] } : {}),
+      ...(h.consumes.length ? { consumes: h.consumes } : {}),
+    })) } : {}),
   };
 
   const v = validateProcessTemplate(bundle);

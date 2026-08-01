@@ -6,8 +6,6 @@
     "test": "node --test"
   },
   "dependencies": {
-    "matrix-bot-sdk": "^0.7.1",
-    "marked": "^15.0.0",
-    "node-cron": "^3.0.3"
+    "matrix-bot-sdk": "^0.7.1"
   }
 }

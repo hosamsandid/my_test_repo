@@ -6,7 +6,7 @@ const { EventEmitter, PassThrough } = require('stream');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
-const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
 
@@ -53,6 +53,15 @@ const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
 // Label stamped on every agent container so the orchestrator can reconcile
 // live container state against its in-memory process map (source of truth).
 const AGENT_LABEL_KEY = 'aee.agent.id';
+// Instance identity — stamped on every agent/helper container (`aee.instance`
+// label) so eviction & reconcile can scope to THIS stack's own containers.
+// Without it, two stacks sharing one Podman store (parallel instances on the
+// same socket) would evict each other's agent containers on boot.
+// Configured via AEE_INSTANCE_ID in .env; defaults to COMPOSE_PROJECT_NAME
+// (which already namespaces the per-agent volumes/networks) so single-instance
+// setups need no config change. The label KEY is a fixed schema constant.
+const INSTANCE_LABEL_KEY = 'aee.instance';
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || COMPOSE_PROJECT;
 // Legacy: the compose stack creates the bridge network as ${project}_default.
 // Used as a fallback when per-agent network isolation is disabled. Override
 // with AGENT_NETWORK if the compose project renames the network.
@@ -295,7 +304,7 @@ async function seedPerAgentVolume(id) {
       { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
       { Name: volName, Dest: '/dst' },
     ],
-    labels: { [AGENT_LABEL_KEY]: `seed-${id}` },
+    labels: { [AGENT_LABEL_KEY]: `seed-${id}`, [INSTANCE_LABEL_KEY]: INSTANCE_ID },
     security_opt: ['label=disable'],
     no_new_privileges: true,
     remove: true,
@@ -480,7 +489,7 @@ async function reseedPerAgentVolume(id, paths) {
       { Name: WORKSPACE_VOLUME, Dest: '/src', SubPath: `agents/${id}` },
       { Name: volName, Dest: '/dst' },
     ],
-    labels: { [AGENT_LABEL_KEY]: `reseed-${id}` },
+    labels: { [AGENT_LABEL_KEY]: `reseed-${id}`, [INSTANCE_LABEL_KEY]: INSTANCE_ID },
     security_opt: ['label=disable'],
     no_new_privileges: true,
     remove: true,
@@ -551,6 +560,16 @@ function spawnContainer({ id, env }) {
     if (envMap.ORCHESTRATOR_INTERNAL_URL) {
       envMap.ORCHESTRATOR_INTERNAL_URL = rewriteHostname(envMap.ORCHESTRATOR_INTERNAL_URL, 'orchestrator');
     }
+    // #711: the e2e stack points agents at the in-stack fake-github via
+    // GITHUB_API_BASE=http://fake-github (spread from the orchestrator env). The
+    // role playbooks curl it directly, so the short alias must resolve on the
+    // isolated per-agent network — rewrite it to the guaranteed-resolvable full
+    // container name, exactly as for conduwuit/orchestrator above. Production is
+    // untouched: GITHUB_API_BASE is unset there (api.github.com), so `://fake-github`
+    // never matches and this is a no-op.
+    if (envMap.GITHUB_API_BASE) {
+      envMap.GITHUB_API_BASE = rewriteHostname(envMap.GITHUB_API_BASE, 'fake-github');
+    }
   }
 
   // Seam #2: provision the per-agent network up-front (with connected
@@ -608,7 +627,7 @@ function spawnContainer({ id, env }) {
         netns: { nsmode: 'bridge' },
         volumes,
         Networks: { [networkName]: {} },
-        labels: { [AGENT_LABEL_KEY]: String(id) },
+        labels: { [AGENT_LABEL_KEY]: String(id), [INSTANCE_LABEL_KEY]: INSTANCE_ID },
         no_new_privileges: true,
         remove: true,
       };

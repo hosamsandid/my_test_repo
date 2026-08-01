@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const labelStyle = {
@@ -34,59 +35,6 @@ const inputStyle = {
   outline: 'none',
   boxSizing: 'border-box',
 };
-
-function SkillPicker({ allSkills, selected, onChange }) {
-  const toggle = (name) => {
-    if (selected.includes(name)) onChange(selected.filter(s => s !== name));
-    else onChange([...selected, name]);
-  };
-
-  if (allSkills.length === 0) {
-    return (
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-        No skills in the central pool. Place skills in the pool volume under <code>skills/&lt;name&gt;/SKILL.md</code>.
-      </div>
-    );
-  }
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 'var(--eb-space-1)',
-      maxHeight: 240,
-      overflowY: 'auto',
-      border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-md)',
-      padding: 'var(--eb-space-2)',
-      background: 'var(--eb-bg-elevated)',
-    }}>
-      {allSkills.map(name => (
-        <label key={name} style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-1) var(--eb-space-2)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: 'pointer',
-          fontSize: 'var(--eb-text-sm)',
-        }}
-        onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
-        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-        >
-          <input
-            type="checkbox"
-            checked={selected.includes(name)}
-            onChange={() => toggle(name)}
-          />
-          <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
-            {name}
-          </span>
-        </label>
-      ))}
-    </div>
-  );
-}
 
 function useRepoCheck(url, sshKeyId, githubTokenId) {
   const [state, setState] = useState({ status: 'idle', error: null });
@@ -162,23 +110,7 @@ function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove 
         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
           Repository #{idx + 1}
         </span>
-        <button
-          type="button"
-          aria-label="Remove repository"
-          title="Remove repository"
-          onClick={onRemove}
-          style={{
-            display: 'flex', alignItems: 'center',
-            padding: 'var(--eb-space-1)',
-            background: 'transparent',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-sm)',
-            color: 'var(--eb-status-error)',
-            cursor: 'pointer',
-          }}
-        >
-          <X size={12} />
-        </button>
+        <IconButton icon={X} label="Remove repository" danger onClick={onRemove} size={12} />
       </div>
 
       <div>
@@ -274,7 +206,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     id: initial?.id || '',
     name: initial?.name || '',
     description: initial?.description || '',
-    skills: initial?.skills || [],
     additionalContext: initial?.additionalContext || '',
     repositories: initialRepositories(initial),
     githubTokenId: initial?.githubTokenId || '',
@@ -282,12 +213,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     defaultModelId: initial?.defaultModelId || '',
   }));
 
-  const { data: skillsData } = useApi('/api/skills');
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
 
-  const poolSkills = (skillsData || []).filter(s => s.source === 'pool').map(s => s.name);
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
@@ -342,7 +271,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       id: form.id,
       name: form.name,
       description: form.description,
-      skills: form.skills,
       additionalContext: form.additionalContext,
       repositories: form.repositories
         .filter(r => r.url.trim())
@@ -394,6 +322,48 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong></>}
       />
 
+      {isEdit && (
+        <div style={{
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+          padding: 'var(--eb-space-3)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <Users size={14} />
+            <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+              Agents using this environment
+            </span>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              ({(initial?.agents || []).length})
+            </span>
+          </div>
+          {(initial?.agents || []).length === 0 ? (
+            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+              No agents use this environment.
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              {initial.agents.map(a => (
+                <li
+                  key={a.id}
+                  style={{
+                    fontSize: 'var(--eb-text-xs)',
+                    fontFamily: 'var(--eb-font-mono)',
+                    color: 'var(--eb-text-secondary)',
+                    padding: 'var(--eb-space-1) var(--eb-space-2)',
+                    background: 'var(--eb-bg-elevated)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                  }}
+                >
+                  {a.displayName && a.displayName !== a.id ? `${a.displayName} (${a.id})` : a.id}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div>
         <div style={labelStyle}>Description</div>
         <textarea
@@ -408,21 +378,9 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
-      <div>
-        <div style={{ ...labelStyle, marginBottom: 'var(--eb-space-1)' }}>
-          Skills
-          <span style={{ fontWeight: 'normal', marginLeft: 'var(--eb-space-2)' }}>
-            — {form.skills.length > 0 ? `${form.skills.length} selected` : 'none selected'}
-          </span>
-        </div>
-        <div style={{ ...helpTextStyle, marginBottom: 'var(--eb-space-2)', marginTop: 0 }}>
-          Skills are pre-built instruction sets (SKILL.md files) from the central pool. The selected skills are copied into the agent's workspace at creation time, giving it domain-specific knowledge and capabilities.
-        </div>
-        <SkillPicker
-          allSkills={poolSkills}
-          selected={form.skills}
-          onChange={v => update('skills', v)}
-        />
+      <div style={{ ...helpTextStyle, marginTop: 0 }}>
+        Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.
+        Working Environments carry only infrastructure: repository, credentials, MCP servers, context.
       </div>
 
       <div style={{
@@ -628,14 +586,6 @@ export default function WorkingEnvironments() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     {
-      key: 'skills',
-      label: 'Skills',
-      sortable: false,
-      render: v => Array.isArray(v) && v.length > 0 ? (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v.length} Skill{v.length === 1 ? '' : 's'}</span>
-      ) : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>,
-    },
-    {
       key: 'repositories',
       label: 'Repositories',
       sortable: false,
@@ -662,13 +612,28 @@ export default function WorkingEnvironments() {
       },
     },
     {
+      key: 'agentCount',
+      label: 'Agents',
+      render: (v, row) => {
+        const count = Array.isArray(row.agents) ? row.agents.length : (v || 0);
+        return (
+          <span
+            title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
+            style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+          >
+            {count}
+          </span>
+        );
+      },
+    },
+    {
       key: '_actions',
       label: '',
       sortable: false,
       render: (_, row) => (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <ActionBtn icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
-          <ActionBtn icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
+        <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
+          <IconButton icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
+          <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },
@@ -741,7 +706,6 @@ export default function WorkingEnvironments() {
           A <strong>Working Environment</strong> is a reusable workspace recipe that defines what every agent created from it receives:
         </p>
         <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-          <li><strong>Skills</strong> — pre-built instruction sets (SKILL.md files) that give the agent domain knowledge, such as COBOL analysis or Java migration patterns.</li>
           <li><strong>Git repositories</strong> — one or more repos that are automatically cloned into the agent's workspace when it is created. Private repos use SSH keys you manage on the SSH Keys page.</li>
           <li><strong>GitHub token</strong> — optional access token for the <code>gh</code> CLI and HTTPS pushes.</li>
           <li><strong>Additional instructions</strong> — custom text appended to the agent's CLAUDE.md, giving it project-specific context or constraints.</li>
@@ -795,23 +759,3 @@ export default function WorkingEnvironments() {
   );
 }
 
-function ActionBtn({ icon: Icon, label, onClick, danger }) {
-  return (
-    <button
-      aria-label={label}
-      onClick={onClick}
-      title={label}
-      style={{
-        display: 'flex', alignItems: 'center',
-        padding: 'var(--eb-space-1) var(--eb-space-2)',
-        background: 'var(--eb-bg-elevated)',
-        border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)',
-        color: danger ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
-        cursor: 'pointer', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-      }}
-    >
-      <Icon size={13} />
-    </button>
-  );
-}

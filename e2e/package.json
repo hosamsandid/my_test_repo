@@ -1,0 +1,31 @@
+{
+  "name": "aee-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end browser tests for the AEE stack (issue #666, phase 1). Playwright drives the real admin console against a disposable `aee-e2e` compose stack whose only stubbed dependency is the LLM (fake `claude` shim).",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:unit": "node --test journey-runner/*.test.js docgen/*.test.js visual-diff/*.test.js",
+    "journeys:catalog": "node journey-runner/bin/gen-catalog.js",
+    "journeys:catalog:check": "node journey-runner/bin/gen-catalog.js --check",
+    "journeys:lint": "node journey-runner/bin/lint.js",
+    "journeys:dryrun": "node journey-runner/bin/dry-run.js",
+    "journeys:narration": "node journey-runner/bin/extract-narration.js",
+    "docs:journeys": "node docgen/bin/docgen.js",
+    "docs:journeys:check": "node docgen/bin/docgen.js --check",
+    "docs:deck": "node docgen/bin/deck.js",
+    "video:journeys": "E2E_VIDEO=1 playwright test --project=journey-video",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  },
+  "dependencies": {
+    "js-yaml": "^4.3.0",
+    "jszip": "^3.10.1",
+    "pixelmatch": "^5.3.0",
+    "pngjs": "^7.0.0",
+    "pptxgenjs": "^4.0.1"
+  }
+}

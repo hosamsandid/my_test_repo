@@ -1,11 +1,20 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import { liveOps } from '../process/edit-adapters';
+import {
+  GITHUB_EVENT_OPTIONS,
+  LABEL_FILTERABLE_EVENTS,
+  summarizeGithubEventTrigger,
+  summarizeLoopTrigger,
+  claimBodyFor,
+  isStandingSubscription,
+} from './trigger-summary.js';
+import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
 // container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
@@ -19,52 +28,18 @@ function scriptNameFromPath(scriptPath) {
 
 const POLL_MS = 30_000;
 
-// A data-flow trigger is an agent dependency: a push by an upstream agent wakes
+// A data-flow trigger is an agent dependency: a push to the team repo wakes
 // this one with a hand-off prompt. Under the hood it's a github-event/push
-// trigger scoped via a `from` allowlist of upstream member ids (#379). The
-// `dataFlow` marker is authoritative; we also detect the shape for robustness.
+// trigger. It fires on any push (source filtering was removed); the woken
+// agent decides whether the change is relevant. Identified solely by the
+// `dataFlow` marker — a plain push trigger (no marker) is just a push trigger.
 function isDataFlowTrigger(t) {
-  if (!t) return false;
-  if (t.dataFlow === true) return true;
-  return t.type === 'github-event'
-    && Array.isArray(t.events) && t.events.length === 1 && t.events[0] === 'push'
-    && Array.isArray(t.from);
+  return !!t && t.dataFlow === true;
 }
-const upstreamsOf = (t) => (Array.isArray(t?.from) ? t.from : []);
 
-// Subset of GitHub Events API event types most useful for agent workflows.
-// (The Events API does not emit every webhook action — e.g. pull_request
-// has opened/closed/reopened but not synchronize. It also splits closed
-// PRs: `closed` for non-merged closes, `merged` for merged ones — so a
-// "react to merge" trigger MUST subscribe to `pull_request.merged` even
-// though webhooks call it `closed` with `merged: true`.)
-const GITHUB_EVENT_OPTIONS = [
-  { value: 'push',                                  label: 'Push' },
-  { value: 'pull_request.opened',                   label: 'PR opened' },
-  { value: 'pull_request.closed',                   label: 'PR closed (without merge)' },
-  { value: 'pull_request.merged',                   label: 'PR merged' },
-  { value: 'pull_request.reopened',                 label: 'PR reopened' },
-  { value: 'pull_request.labeled',                  label: 'PR labeled' },
-  { value: 'pull_request.unlabeled',                label: 'PR unlabeled' },
-  { value: 'pull_request_review.submitted',         label: 'PR review submitted' },
-  { value: 'pull_request_review_comment.created',   label: 'PR review comment' },
-  { value: 'issue_comment.created',                 label: 'Issue / PR comment' },
-  { value: 'issues.opened',                         label: 'Issue opened' },
-  { value: 'issues.closed',                         label: 'Issue closed' },
-  { value: 'issues.labeled',                        label: 'Issue labeled' },
-  { value: 'issues.unlabeled',                      label: 'Issue unlabeled' },
-  { value: 'release.published',                     label: 'Release published' },
-];
-
-// Events that carry a `payload.label.name` GitHub sends — the only ones
-// where a label-name filter makes sense. Used by the form to decide
-// whether to show the label-name input.
-const LABEL_FILTERABLE_EVENTS = new Set([
-  'issues.labeled',
-  'issues.unlabeled',
-  'pull_request.labeled',
-  'pull_request.unlabeled',
-]);
+// `GITHUB_EVENT_OPTIONS` / `LABEL_FILTERABLE_EVENTS` (the friendly event
+// wording + which events carry a label) now live in ./trigger-summary.js so
+// the card summary and the Flow canvas readout share one source of truth (#778).
 
 // Mirrors orchestrator/github-poller.js — extracts owner/repo from the
 // repository URL stored in the working environment.
@@ -111,9 +86,12 @@ function TypeBadge({ type, dataFlow }) {
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
+  const isLoop   = type === 'loop';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isLoop) {
+    bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = 'loop'; Icon = Repeat;
   } else if (isCron) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'cron'; Icon = Clock;
   } else if (isOnce) {
@@ -139,7 +117,9 @@ function TypeBadge({ type, dataFlow }) {
 }
 
 /* ── Cron builder ───────────────────────────────────────────────────── */
-const DOW_LABELS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+// parseCronState / buildCron / describeCron / DOW_LABELS moved to the pure
+// ./cron-format.js module (#866) so the Flow-Editor Inputs list shares the same
+// schedule wording. Imported above.
 
 // Shared input style — defined at module level to avoid per-render allocation
 const FIELD_STYLE = {
@@ -152,53 +132,6 @@ const FIELD_STYLE = {
   fontFamily: 'inherit',
   outline: 'none',
 };
-
-function parseCronState(cron) {
-  const def = { hour: '9', minute: '0', interval: '5', dow: '1', dom: '1', raw: '' };
-  if (!cron) return { mode: 'daily', ...def };
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) return { mode: 'custom', ...def, raw: cron };
-  const [min, hr, dom, month, dow] = parts;
-  const everyMin = min.match(/^\*\/(\d+)$/);
-  if (everyMin && hr === '*' && dom === '*' && month === '*' && dow === '*')
-    return { mode: 'minutely', ...def, interval: everyMin[1] };
-  if (/^\d+$/.test(min) && hr === '*' && dom === '*' && month === '*' && dow === '*')
-    return { mode: 'hourly', ...def, minute: min };
-  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && month === '*' && dow === '*')
-    return { mode: 'daily', ...def, hour: hr, minute: min };
-  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && dom === '*' && month === '*' && /^[0-6]$/.test(dow))
-    return { mode: 'weekly', ...def, hour: hr, minute: min, dow };
-  if (/^\d+$/.test(min) && /^\d+$/.test(hr) && /^\d+$/.test(dom) && month === '*' && dow === '*')
-    return { mode: 'monthly', ...def, hour: hr, minute: min, dom };
-  return { mode: 'custom', ...def, raw: cron };
-}
-
-function buildCron(s) {
-  const m = String(parseInt(s.minute) || 0);
-  const h = String(parseInt(s.hour) || 0);
-  switch (s.mode) {
-    case 'minutely': return `*/${parseInt(s.interval) || 5} * * * *`;
-    case 'hourly':   return `${m} * * * *`;
-    case 'daily':    return `${m} ${h} * * *`;
-    case 'weekly':   return `${m} ${h} * * ${s.dow || 1}`;
-    case 'monthly':  return `${m} ${h} ${parseInt(s.dom) || 1} * *`;
-    case 'custom':   return s.raw || '';
-    default:         return '';
-  }
-}
-
-function describeCron(s) {
-  const pad = n => String(parseInt(n) || 0).padStart(2, '0');
-  const time = `${pad(s.hour)}:${pad(s.minute)}`;
-  switch (s.mode) {
-    case 'minutely': return `Every ${parseInt(s.interval) || 5} minute${(parseInt(s.interval) || 5) === 1 ? '' : 's'}`;
-    case 'hourly':   return `Every hour at :${pad(s.minute)}`;
-    case 'daily':    return `Every day at ${time}`;
-    case 'weekly':   return `Every ${DOW_LABELS[parseInt(s.dow)] ?? 'Monday'} at ${time}`;
-    case 'monthly':  return `Day ${parseInt(s.dom) || 1} of every month at ${time}`;
-    default:         return '';
-  }
-}
 
 function CronBuilder({ value, onChange }) {
   const [s, setS] = useState(() => parseCronState(value));
@@ -348,205 +281,12 @@ function DateTimePicker({ value, onChange }) {
 }
 
 /* ── Trigger row ────────────────────────────────────────────────────── */
-/* ── Emits (Process Canvas #328/#331) ──────────────────────────────────
- * The labels this trigger's run is expected to set — the outbound edges of the
- * orchestration graph. Read view shows the confirmed set; the editor seeds from
- * the heuristic suggestions (GET .../emit-suggestions) and persists the
- * operator-confirmed set (PUT .../emits). */
-function EmitsSection({ trigger, agentId, ops = liveOps, onSaved }) {
-  const [open, setOpen] = useState(false);
-  const emits = Array.isArray(trigger.emits) ? trigger.emits : [];
+// Trigger-level `emits` was removed (#783): label hand-offs are declared at the
+// agent/role level (in the Flow Editor node inspector), not per trigger. The
+// former EmitsSection/EmitsEditor and their emit-suggestions/emits endpoints are
+// gone; the trigger row no longer renders an emits chip or edit button.
 
-  return (
-    <div style={{ marginTop: 2 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>emits</span>
-        {emits.length === 0 && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>none</span>
-        )}
-        {emits.map(label => (
-          <span key={label} style={{
-            fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-            background: 'var(--eb-status-info-bg)', color: 'var(--eb-status-info)',
-            border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-sm)',
-            padding: '0 5px',
-          }}>{label}</span>
-        ))}
-        {!open && (
-          <button
-            onClick={() => setOpen(true)}
-            title="Edit emitted labels"
-            style={{
-              background: 'none', border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-text-muted)',
-              cursor: 'pointer', padding: '0 5px', fontSize: 'var(--eb-text-xs)',
-              display: 'inline-flex', alignItems: 'center', gap: 3,
-            }}
-          >
-            <Pencil size={10} /> edit
-          </button>
-        )}
-      </div>
-      {open && (
-        <EmitsEditor
-          trigger={trigger}
-          agentId={agentId}
-          ops={ops}
-          onClose={() => setOpen(false)}
-          onSaved={() => { setOpen(false); onSaved?.(); }}
-        />
-      )}
-    </div>
-  );
-}
-
-function EmitsEditor({ trigger, agentId, ops = liveOps, onClose, onSaved }) {
-  const isDraft = ops.mode === 'draft';
-  const [selected, setSelected] = useState(() => new Set(Array.isArray(trigger.emits) ? trigger.emits : []));
-  const [suggestions, setSuggestions] = useState([]);
-  const [loading, setLoading] = useState(!isDraft);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-  const [newLabel, setNewLabel] = useState('');
-
-  useEffect(() => {
-    if (isDraft) return undefined; // suggestion heuristics are a live-agent endpoint
-    let alive = true;
-    (async () => {
-      try {
-        const res = await fetch(`/api/agents/${agentId}/triggers/${trigger.id}/emit-suggestions`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!alive) return;
-        setSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
-      } catch (e) {
-        if (alive) setError(e.message);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, [agentId, trigger.id, isDraft]);
-
-  const toggle = (label) => setSelected(prev => {
-    const next = new Set(prev);
-    next.has(label) ? next.delete(label) : next.add(label);
-    return next;
-  });
-
-  const addLabel = () => {
-    const l = newLabel.trim();
-    if (!l) return;
-    setSelected(prev => new Set(prev).add(l));
-    setNewLabel('');
-  };
-
-  async function save() {
-    setSaving(true);
-    setError(null);
-    try {
-      await ops.setEmits(agentId, trigger.id, [...selected]);
-      onSaved?.();
-    } catch (e) {
-      setError(e.message);
-      setSaving(false);
-    }
-  }
-
-  // Suggestions not already selected, ordered high→low confidence by the API.
-  const unpicked = suggestions.filter(s => !selected.has(s.label));
-
-  return (
-    <div style={{
-      marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)',
-      background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-sm)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-    }}>
-      {/* Selected labels (removable) */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {[...selected].length === 0 && (
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            No emitted labels selected.
-          </span>
-        )}
-        {[...selected].map(label => (
-          <button key={label} onClick={() => toggle(label)} title="Remove"
-            style={{
-              fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-              background: 'var(--eb-status-info-bg)', color: 'var(--eb-status-info)',
-              border: '1px solid var(--eb-status-info)', borderRadius: 'var(--eb-radius-sm)',
-              padding: '0 5px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3,
-            }}>
-            {label} <XCircle size={10} />
-          </button>
-        ))}
-      </div>
-
-      {/* Heuristic suggestions */}
-      {loading ? (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Analysing prompt…</span>
-      ) : unpicked.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Suggested from prompt:</span>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {unpicked.map(s => (
-              <button key={s.label} onClick={() => toggle(s.label)} title={s.sourceSnippet || ''}
-                style={{
-                  fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-                  background: 'none', color: 'var(--eb-text-secondary)',
-                  border: '1px dashed var(--eb-border-hover)', borderRadius: 'var(--eb-radius-sm)',
-                  padding: '0 5px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3,
-                }}>
-                <Plus size={10} /> {s.label}
-                <span style={{ opacity: 0.6 }}>{s.confidence === 'high' ? '●' : '○'}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Free-text add */}
-      <div style={{ display: 'flex', gap: 4 }}>
-        <input
-          value={newLabel}
-          onChange={e => setNewLabel(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addLabel(); } }}
-          placeholder="add label…"
-          style={{
-            flex: 1, fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-            background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
-            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
-            padding: '2px 6px', outline: 'none',
-          }}
-        />
-        <button onClick={addLabel} style={ghostBtnStyle}>Add</button>
-      </div>
-
-      {error && (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{error}</span>
-      )}
-
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4 }}>
-        <button onClick={onClose} disabled={saving} style={ghostBtnStyle}>Cancel</button>
-        <button onClick={save} disabled={saving} style={{
-          fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit', fontWeight: 'var(--eb-font-medium)',
-          background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
-          border: 'none', borderRadius: 'var(--eb-radius-sm)', padding: '2px 10px',
-          cursor: saving ? 'wait' : 'pointer',
-        }}>{saving ? 'Saving…' : 'Save emits'}</button>
-      </div>
-    </div>
-  );
-}
-
-const ghostBtnStyle = {
-  fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-  background: 'none', color: 'var(--eb-text-secondary)',
-  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
-  padding: '2px 10px', cursor: 'pointer',
-};
-
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, nameOf = (id) => id }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -554,20 +294,25 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     ? Object.entries(trigger.preCheckEnv)
     : [];
   const isDataFlow = isDataFlowTrigger(trigger);
+  // A plain (non-data-flow) github-event trigger gets a dedicated, wrapping
+  // event/label summary below the header (AC1–AC5); the header `<code>` then
+  // only carries the repo, which may ellipsize without hiding the summary (AC6).
+  const ghSummary = (trigger.type === 'github-event' && !isDataFlow)
+    ? summarizeGithubEventTrigger(trigger)
+    : null;
   let schedule;
   if (isDataFlow) {
-    const ups = upstreamsOf(trigger).map(nameOf);
-    schedule = ups.length
-      ? `wakes on push from ${ups.join(', ')}`
-      : 'push from (no upstream agent set)';
+    schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
+  } else if (trigger.type === 'loop') {
+    schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
-  } else if (trigger.type === 'github-event') {
-    const evs = Array.isArray(trigger.events) ? trigger.events : [];
-    const labelTag = trigger.labelFilter ? ` · label="${trigger.labelFilter}"` : '';
-    schedule = `${trigger.repo || '?'} · ${evs.join(', ') || 'no event'}${labelTag}`;
+  } else if (ghSummary) {
+    schedule = trigger.repo || 'any repo';
+  } else if (trigger.cron) {
+    schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
   } else {
-    schedule = trigger.cron || trigger.at || '—';
+    schedule = trigger.at || '—';
   }
 
   async function handleToggle(val) {
@@ -618,9 +363,25 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
         </button>
       </div>
 
-      {trigger.id && (
-        <div style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>
-          {trigger.id}
+      {ghSummary && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4,
+        }}>
+          <Github size={13} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+              {ghSummary.events.length ? ghSummary.events.join(', ') : 'No event'}
+            </strong>
+            {ghSummary.label && (
+              <>
+                {' · label '}
+                <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                  “{ghSummary.label}”
+                </strong>
+              </>
+            )}
+          </span>
         </div>
       )}
 
@@ -629,8 +390,6 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
           {trigger.description}
         </div>
       )}
-
-      <EmitsSection trigger={trigger} agentId={agentId} ops={ops} onSaved={onToggled} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 2 }}>
         <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
@@ -743,18 +502,58 @@ function generateSecret() {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Derive the loop verifier editor mode from a persisted `verify` value.
+// `{ agentId }` → 'agent', `{ command }` → 'command', anything else → 'none'.
+function deriveVerifyMode(verify) {
+  if (verify && typeof verify === 'object') {
+    if (verify.agentId) return 'agent';
+    if (verify.command) return 'command';
+  }
+  return 'none';
+}
+
+// `maxIterations` is required and must be a positive whole number (concept
+// §4.4). Accepts the raw string the number input emits.
+function isValidMaxIterations(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0;
+}
+
+// Pick a sensible default sibling verifier from a roster (concept §4.2/§4.6:
+// "an agent must not grade its own work"). Prefer a reviewer / quality-gate
+// role, else the first sibling. Returns an agent id or ''.
+function pickDefaultVerifier(siblings) {
+  const list = Array.isArray(siblings) ? siblings : [];
+  const preferred = list.find(a => /review|quality|qa|test/i.test(`${a.id} ${a.displayName || ''}`));
+  return (preferred || list[0])?.id || '';
+}
+
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
-function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, siblings = [], ops = liveOps }) {
+// Shared by the agent-chat Triggers panel and the Flow-Editor schedule edge
+// editor (EdgeDialogs) — one source of truth for editing every trigger type.
+// `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
+// `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
+// turning a schedule into a different trigger kind, re-deriving the edge).
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
   const isEdit = !!initialValues;
+  const typeLocked = isEdit && !allowTypeChange;
+  // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
+  // a single type, hiding the type selector, the id field and the enabled
+  // toggle — a launched loop is a run you start, not a stored, toggleable
+  // subscription. `lockType` forces the type; `submitLabel` relabels the
+  // primary button (e.g. "Start loop").
+  const lockedMode = !!lockType;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
-  const initialType = startedAsDataFlow
-    ? 'data-flow'
-    : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
+  const initialType = lockType
+    ? lockType
+    : startedAsDataFlow
+      ? 'data-flow'
+      : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
@@ -766,21 +565,26 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
-    // `from` preserved verbatim for non-data-flow github triggers (keyword like
-    // 'any-except-self' or an allowlist) so editing never silently drops it.
-    from:        initialValues?.from ?? null,
-    // Data-flow upstreams: agent ids whose push wakes this agent.
-    upstreams:   Array.isArray(initialValues?.from) ? initialValues.from.filter(x => x !== 'humans') : [],
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
+    // ── loop fields (type: 'loop') ───────────────────────────────────────
+    // Kept as strings in the form (number inputs emit strings); parsed on save.
+    maxIterations: initialValues?.maxIterations != null ? String(initialValues.maxIterations) : '',
+    maxTokens:     initialValues?.maxTokens     != null ? String(initialValues.maxTokens)     : '',
+    minGapSeconds: initialValues?.minGapSeconds != null ? String(initialValues.minGapSeconds) : '',
+    untilCommand:  (initialValues?.until && typeof initialValues.until === 'object' && initialValues.until.command) || '',
+    // verify: { command } | { agentId } | absent. Derive the editor mode.
+    verifyMode:    deriveVerifyMode(initialValues?.verify),
+    verifyCommand: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.command) || '',
+    verifyAgentId: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.agentId) || '',
+    // Claim (#1006): a label listener takes its wake label over as `<wake>:wip`
+    // when it fires — ON by default for new listeners (the platform convention
+    // the engine/channel paths follow); an edit reflects the stored state.
+    claimOn:       isEdit ? !!initialValues?.claim : true,
   }));
   const isDataFlow = form.type === 'data-flow';
-  const toggleUpstream = (id) => setForm(f => ({
-    ...f,
-    upstreams: f.upstreams.includes(id) ? f.upstreams.filter(u => u !== id) : [...f.upstreams, id],
-  }));
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
@@ -836,6 +640,50 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     }
   }, [availableRepos, form.repo]);
 
+  // Loop verifier roster — for a team agent, the "separate verifier" default is
+  // enforced by the backend (concept §4.6), so the UI must reflect it: pre-fill
+  // a *sibling* role (never the agent itself) and let the author override. Only
+  // fetched when loop is the active type and there's a live environment (a draft
+  // has no roster — enforcement happens at materialise). `null` = not loaded.
+  const [loopRoster, setLoopRoster] = useState(isDraftMode ? { isTeamAgent: false, siblings: [] } : null);
+  useEffect(() => {
+    if (isDraftMode || form.type !== 'loop' || loopRoster !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agents = await apiCall('GET', '/api/agents');
+        const list = Array.isArray(agents) ? agents : [];
+        const self = list.find(a => a.id === agentId) || null;
+        const parentTeamId = self?.parentTeamId || null;
+        const isTeamAgent = !!parentTeamId;
+        // Siblings = same team, excluding self and the (runtime-less) team agent.
+        const siblings = isTeamAgent
+          ? list.filter(a => a.parentTeamId === parentTeamId && a.id !== agentId && a.role !== 'team')
+              .map(a => ({ id: a.id, displayName: a.displayName || a.id }))
+          : [];
+        if (!cancelled) setLoopRoster({ isTeamAgent, siblings });
+      } catch {
+        if (!cancelled) setLoopRoster({ isTeamAgent: false, siblings: [] });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, loopRoster, isDraftMode]);
+
+  // Enforced separate-verifier default: once the roster is known, a team agent
+  // with no authored verifier gets a sibling pre-filled (not left empty). Runs
+  // once per roster load; the author can still change the mode/target after.
+  const isTeamLoopAgent = !!loopRoster?.isTeamAgent;
+  useEffect(() => {
+    if (form.type !== 'loop' || !isTeamLoopAgent) return;
+    const siblings = loopRoster?.siblings || [];
+    setForm(f => {
+      if (f.verifyMode !== 'none' || f.verifyAgentId) return f; // author already chose
+      const pick = pickDefaultVerifier(siblings);
+      if (!pick) return f; // no sibling to assign — leave the notice to explain
+      return { ...f, verifyMode: 'agent', verifyAgentId: pick };
+    });
+  }, [form.type, isTeamLoopAgent, loopRoster]);
+
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
   function changeType(next) {
@@ -865,9 +713,13 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
-      if (form.upstreams.length === 0) { setFormError('Pick at least one upstream agent.'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
+    if (form.type === 'loop') {
+      if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
+      if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
+      if (form.verifyMode === 'agent' && !form.verifyAgentId.trim()) { setFormError('Select the verifier agent, or choose a different verifier mode.'); return; }
+    }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
       type:        isDataFlow ? 'github-event' : form.type,
@@ -877,13 +729,29 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
     };
     if (!isEdit) body.id = form.id.trim() || undefined;
     if (isDataFlow) {
-      // A data-flow dependency is a push trigger scoped to the upstream agents.
+      // A data-flow dependency is a push trigger. It fires on any push to the
+      // repo (no origin scoping); the woken agent decides relevance.
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = ['push'];
-      body.from = form.upstreams;
       body.dataFlow = true;
     } else if (form.type === 'cron')       body.cron = form.cron.trim();
     else if (form.type === 'once')         body.at   = form.at.trim();
+    else if (form.type === 'loop') {
+      body.maxIterations = Number(form.maxIterations);
+      const untilCmd = form.untilCommand.trim();
+      if (untilCmd) body.until = { command: untilCmd };
+      // verify: command form / agent form / omitted. A team agent's blank
+      // verifier is (re-)enforced to a sibling server-side (concept §4.6).
+      if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
+        body.verify = { command: form.verifyCommand.trim() };
+      } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
+        body.verify = { agentId: form.verifyAgentId.trim() };
+      }
+      const mt = Number(form.maxTokens);
+      if (form.maxTokens.trim() && Number.isFinite(mt) && mt > 0) body.maxTokens = mt;
+      const mg = Number(form.minGapSeconds);
+      if (form.minGapSeconds.trim() && Number.isFinite(mg) && mg >= 0) body.minGapSeconds = mg;
+    }
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
@@ -895,9 +763,13 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
-      // Preserve an existing origin filter (keyword or allowlist) so editing
-      // events/label never silently drops it.
-      if (form.from != null) body.from = form.from;
+      // Claim stamping (#1006): the raw layer follows the same convention as
+      // the engine paths — a `.labeled` label listener claims its wake label
+      // unless the author opted out. On edit, `null` clears a stored claim;
+      // on create the field is simply omitted (undefined drops from JSON).
+      body.claim = claimBodyFor({
+        labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
+      });
     }
     await onSave(body);
   }
@@ -905,37 +777,44 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <FormInput
-        label={isEdit ? 'ID' : 'ID (optional)'}
-        value={form.id}
-        onChange={v => !isEdit && set('id', v)}
-        placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
-        disabled={isEdit}
-      />
-
-      <div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
-          Type
-        </div>
-        <select
-          value={form.type}
-          onChange={e => changeType(e.target.value)}
+      {!lockedMode && (
+        <FormInput
+          label={isEdit ? 'ID' : 'ID (optional)'}
+          value={form.id}
+          onChange={v => !isEdit && set('id', v)}
+          placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
           disabled={isEdit}
-          style={{
-            width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
-            fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
-            opacity: isEdit ? 0.6 : 1,
-          }}
-        >
-          <option value="cron">Cron (recurring)</option>
-          <option value="once">Once (one-shot)</option>
-          <option value="http">HTTP webhook</option>
-          <option value="github-event">GitHub event</option>
-          <option value="data-flow">Data flow (agent dependency)</option>
-        </select>
-      </div>
+        />
+      )}
+
+      {!lockedMode && (
+        <div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
+            Type
+          </div>
+          <select
+            value={form.type}
+            onChange={e => changeType(e.target.value)}
+            disabled={typeLocked}
+            style={{
+              width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
+              fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
+              opacity: typeLocked ? 0.6 : 1,
+            }}
+          >
+            <option value="cron">Cron (recurring)</option>
+            <option value="once">Once (one-shot)</option>
+            {/* Loop is authored from the composer / Flows canvas, not the chat
+                Triggers form (#1020 AC4) — the chat panel passes allowLoopType=false. */}
+            {allowLoopType && <option value="loop">Loop (re-run until done)</option>}
+            <option value="http">HTTP webhook</option>
+            <option value="github-event">GitHub event</option>
+            <option value="data-flow">Data flow (agent dependency)</option>
+          </select>
+        </div>
+      )}
 
       {form.type === 'cron' && (
         <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
@@ -943,6 +822,126 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'loop' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <div style={{
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}>
+            <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
+            A <strong>loop</strong> re-runs this agent with the prompt below, chaining
+            each iteration into the next until a stop condition is met. It stops when
+            <code> until</code> exits <code>0</code> (done), the iteration cap or token
+            budget is reached (exhausted), or the safety backstop trips (paused).
+          </div>
+
+          <FormInput
+            label="Max iterations (required)"
+            type="number"
+            value={form.maxIterations}
+            onChange={v => set('maxIterations', v)}
+            placeholder="e.g. 25"
+            error={formError && !isValidMaxIterations(form.maxIterations) ? 'Required — a positive whole number.' : undefined}
+          />
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Stop condition — <code>until</code> command (optional)
+            </div>
+            <input
+              type="text"
+              value={form.untilCommand}
+              onChange={e => set('untilCommand', e.target.value)}
+              placeholder="e.g. npm test && test ! -s fix_plan.md"
+              style={{ ...FIELD_STYLE, width: '100%', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+            />
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              Runs after each iteration; exit code <code>0</code> means the goal is met and the loop is done.
+            </div>
+          </div>
+
+          {/* Verifier — command form, agent form, or none. For a team agent the
+              separation is enforced (concept §4.6): the picker is pre-filled and
+              cannot be silently emptied. */}
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Verifier (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+            </div>
+            <select
+              value={form.verifyMode}
+              onChange={e => set('verifyMode', e.target.value)}
+              style={{ ...FIELD_STYLE, width: '100%' }}
+            >
+              <option value="none">No verifier{isTeamLoopAgent ? ' (a sibling is enforced server-side)' : ' (self-graded)'}</option>
+              <option value="command">Command — must exit 0 for the iteration to count</option>
+              <option value="agent">Agent — a separate role grades the work</option>
+            </select>
+
+            {form.verifyMode === 'command' && (
+              <input
+                type="text"
+                value={form.verifyCommand}
+                onChange={e => set('verifyCommand', e.target.value)}
+                placeholder="e.g. npm run lint && npm test"
+                style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+              />
+            )}
+
+            {form.verifyMode === 'agent' && (
+              (loopRoster?.siblings?.length > 0) ? (
+                <select
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                >
+                  <option value="">— Select a verifier agent —</option>
+                  {loopRoster.siblings.map(a => (
+                    <option key={a.id} value={a.id}>{a.displayName}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  placeholder="verifier agent id (e.g. team-x-code-reviewer)"
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+                />
+              )
+            )}
+
+            {isTeamLoopAgent && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Team agents must not grade their own work — a separate sibling verifier
+                is assigned automatically and re-enforced on save even if left blank.
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
+            <div style={{ flex: 1 }}>
+              <FormInput
+                label="Token budget (optional)"
+                type="number"
+                value={form.maxTokens}
+                onChange={v => set('maxTokens', v)}
+                placeholder="e.g. 2000000"
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <FormInput
+                label="Min gap seconds (optional)"
+                type="number"
+                value={form.minGapSeconds}
+                onChange={v => set('minGapSeconds', v)}
+                placeholder="0 = chain immediately"
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {isDataFlow && (
@@ -953,40 +952,11 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <GitBranch size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-            This agent is woken when an <strong>upstream agent pushes</strong> to the team repo
-            (its committed work is the hand-off). Pick the upstream agents this one depends on.
-          </div>
-
-          <div>
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-              Upstream agents (their push wakes this agent)
-            </div>
-            {siblings.length === 0 ? (
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
-                No other agents in this team to depend on.
-              </div>
-            ) : (
-              <div style={{
-                display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
-                padding: 'var(--eb-space-2)', background: 'var(--eb-bg-elevated)',
-                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-                maxHeight: 200, overflowY: 'auto',
-              }}>
-                {siblings.map(s => (
-                  <label key={s.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-                    padding: '2px 4px', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
-                  }}>
-                    <input type="checkbox" checked={form.upstreams.includes(s.id)} onChange={() => toggleUpstream(s.id)} />
-                    <span style={{ flex: 1 }}>{s.displayName}</span>
-                    <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)' }}>{s.id}</code>
-                  </label>
-                ))}
-              </div>
-            )}
-            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-              Only pushes by the selected agents wake this one — not every push to the repo.
-            </div>
+            This agent is woken on <strong>any push</strong> to the team repo (a
+            teammate's committed work is the hand-off). It fires regardless of who
+            pushed — including this agent's own pushes — so the woken agent should
+            <code> git pull</code>, check whether the change is relevant, and reply
+            <code> [PASS]</code> if there's nothing to do.
           </div>
 
           {isDraftMode ? (
@@ -1105,6 +1075,15 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Only fire when the {form.events.includes('issues.unlabeled') || form.events.includes('pull_request.unlabeled') ? 'removed' : 'added'} label matches this name exactly. Saves a Claude invocation on every other label change.
               </div>
+              {form.labelFilter.trim() && form.events.some(e => e === 'issues.labeled' || e === 'pull_request.labeled') && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
+                  Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
+                </label>
+              )}
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.
+              </div>
             </div>
           )}
         </div>
@@ -1211,7 +1190,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
       />
 
       <FormInput
-        label="Prompt"
+        label="Wake instruction — what the consumer is told"
         value={form.prompt}
         onChange={v => set('prompt', v)}
         multiline
@@ -1219,12 +1198,14 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
         placeholder="What should the agent do when this trigger fires?"
       />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
-        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Enabled
-        </span>
-      </div>
+      {!lockedMode && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Enabled
+          </span>
+        </div>
+      )}
 
       {formError && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
@@ -1234,6 +1215,21 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
       )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {onRemove && (
+          <button
+            onClick={onRemove}
+            disabled={saving}
+            style={{
+              marginRight: 'auto',
+              padding: 'var(--eb-space-2) var(--eb-space-4)',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-error)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-error)',
+              cursor: saving ? 'not-allowed' : 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+            }}
+          >
+            Remove
+          </button>
+        )}
         <button
           onClick={submit}
           disabled={saving}
@@ -1248,7 +1244,7 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-          {isEdit ? 'Save' : 'Add Trigger'}
+          {submitLabel || (isEdit ? 'Save' : 'Add Trigger')}
         </button>
         <button
           onClick={onCancel}
@@ -1275,10 +1271,9 @@ function TriggerForm({ onSave, onCancel, saving, initialValues, agentId, sibling
  * Write-target abstraction: pass `ops` (edit-adapters surface) to edit a
  * process-draft role's triggers instead of a live agent — the panel then
  * mutates the draft bundle (ops.mode === 'draft'), skips the live-only
- * lookups (env repos, emit suggestions, sibling fetch) and stops polling.
- * Pass `siblings` to supply the upstream candidates explicitly (draft roles).
+ * lookups (env repos, emit suggestions) and stops polling.
  */
-export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null, siblings: siblingsProp = null }) {
+export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp = null }) {
   const ops = opsProp || liveOps;
   const isDraft = ops.mode === 'draft';
   const [triggers, setTriggers]   = useState([]);
@@ -1289,34 +1284,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   const [editTarget, setEditTarget]     = useState(null);
   const [saving, setSaving]             = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
-
-  // Sibling agents (same parent team) — the candidate upstreams a data-flow
-  // dependency can listen to, and the source for resolving member ids to names.
-  const [siblings, setSiblings] = useState(siblingsProp || []); // [{ id, displayName }]
-  useEffect(() => {
-    if (siblingsProp) { setSiblings(siblingsProp); return; }
-    if (!agentId || !active || isDraft) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const [me, all] = await Promise.all([
-          apiCall('GET', `/api/agents/${agentId}`),
-          apiCall('GET', '/api/agents'),
-        ]);
-        const list = Array.isArray(all) ? all : [];
-        const team = me?.parentTeamId;
-        const sibs = (team ? list.filter(a => a.parentTeamId === team) : list)
-          .filter(a => a.id !== agentId)
-          .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
-        if (!cancelled) setSiblings(sibs);
-      } catch { if (!cancelled) setSiblings([]); }
-    })();
-    return () => { cancelled = true; };
-  }, [agentId, active, isDraft, siblingsProp]);
-  const nameOf = useCallback(
-    (id) => siblings.find(s => s.id === id)?.displayName || id,
-    [siblings],
-  );
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1386,6 +1353,12 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     onChanged?.();
   }, [fetchTriggers, agentId, onChanged]);
 
+  // The chat Triggers list holds only standing subscriptions (#1020 AC4): a
+  // loop is a launched run (chat-launched or a declarative Flows self-edge),
+  // not a subscription, so it never appears here. Existing loop entries in
+  // triggers.json keep running — they are just hidden from this list.
+  const listedTriggers = triggers.filter(isStandingSubscription);
+
   /* ── Toolbar ──────────────────────────────────────────────────────── */
   const toolbar = (
     <div style={{
@@ -1397,8 +1370,8 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       <span style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {loading
           ? 'Loading…'
-          : triggers.length > 0
-            ? `${triggers.length} trigger${triggers.length === 1 ? '' : 's'}`
+          : listedTriggers.length > 0
+            ? `${listedTriggers.length} trigger${listedTriggers.length === 1 ? '' : 's'}`
             : agentId ? 'No triggers' : ''}
       </span>
       <button
@@ -1464,19 +1437,18 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           </div>
         )}
 
-        {!loading && !error && triggers.length === 0 && (
+        {!loading && !error && listedTriggers.length === 0 && (
           <div style={{ padding: 'var(--eb-space-6)', textAlign: 'center', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
             No scheduled triggers configured for this agent.
           </div>
         )}
 
-        {triggers.map((t, i) => (
+        {listedTriggers.map((t, i) => (
           <TriggerRow
             key={t.id || i}
             trigger={t}
             agentId={agentId}
             ops={ops}
-            nameOf={nameOf}
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
             onToggled={afterRowMutation}
@@ -1487,9 +1459,9 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       <SidePanel open={addOpen} onClose={() => setAddOpen(false)} title="Add Trigger">
         <TriggerForm
           agentId={agentId}
-          siblings={siblings}
           ops={ops}
           saving={saving}
+          allowLoopType={false}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
         />
@@ -1499,10 +1471,10 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
         {editTarget && (
           <TriggerForm
             agentId={agentId}
-            siblings={siblings}
             ops={ops}
             initialValues={editTarget}
             saving={saving}
+            allowLoopType={false}
             onSave={handleEditSave}
             onCancel={() => setEditTarget(null)}
           />

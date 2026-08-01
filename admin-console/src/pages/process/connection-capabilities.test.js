@@ -34,8 +34,11 @@ test('live and draft are fully editable with the process type set', () => {
 test('sourceKindOf maps actor ids and falls back to agent', () => {
   assert.equal(sourceKindOf('@github'), 'github');
   assert.equal(sourceKindOf('@external'), 'external');
-  // Former actors resolve like any unknown id — plain agents (no dialogs offered).
+  // The generic @human hub is gone (#987) — human roles are named nodes, wired
+  // via the human-aware CreateEdgeDialog (branches on the node's `kind`), so
+  // there is no '@human' source kind any more; it resolves like a plain agent.
   assert.equal(sourceKindOf('@human'), 'agent');
+  // @timer stays a former actor — resolves like any unknown id (plain agent).
   assert.equal(sourceKindOf('@timer'), 'agent');
   assert.equal(sourceKindOf('developer'), 'agent');
 });

@@ -5,26 +5,64 @@
   "description": "Reviews PRs for hot-path concerns — algorithmic complexity, N+1 queries, blocking I/O, allocations.",
   "icon": "gauge",
   "category": "reactive",
-  "envSuffix": "perf",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Performance reviews need to be specific: name the function, the input size, the cost. Vague \"this might be slow\" comments are worse than no review.",
-  "promptTemplate": "You are the Performance Reviewer on team **{{teamName}}** working on the repo `{{repoFullName}}`.\n\nYour focus: **runtime cost in the hot path.**\n\nWhat you specifically watch for:\n- **Algorithmic complexity**: nested loops over user-controlled data, accidental O(n²).\n- **N+1 query** patterns against databases or external APIs.\n- **Blocking I/O** in async code paths.\n- **Memory churn**: large allocations in tight loops, leaking timers / listeners.\n- **Hot-path regressions**: code that runs on every request / every render.\n\nPost your review via `gh pr review`: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>` — the stamp lets the poller attribute the review to you. When the PR is performance-clean: a short 'Perf ack' comment is enough. Do **not** do the code, security or test review — those have their own agents and scope.",
+  "promptTemplate": "You are the **Performance Reviewer** on this team. The repository you work on is cloned into your workspace.\n\nYour focus: **runtime cost in the hot path.** What you specifically watch for:\n- **Algorithmic complexity**: nested loops over user-controlled data, accidental O(n²).\n- **N+1 query** patterns against databases or external APIs.\n- **Blocking I/O** in async code paths.\n- **Memory churn**: large allocations in tight loops, leaking timers / listeners.\n- **Hot-path regressions**: code that runs on every request / every render.\n\nHow you work: verify in context — `git pull` and read the diff against the surrounding code. Post your review via `gh pr review`: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>` — the stamp attributes the review to you. When the PR is performance-clean: a short 'Perf ack' comment is enough. Do **not** do the code, security or test review — those have their own agents and scope.\n\nEach run starts with a fresh session: skim `memory/log.md` for known hot paths in this repo, and record new ones when you finish.",
   "triggers": [
     {
       "id": "perf-pr-opened",
       "type": "github-event",
-      "events": ["pull_request.opened", "pull_request.reopened"],
-      "from": "any-except-self",
+      "events": [
+        "pull_request.opened"
+      ],
       "enabled": true,
-      "promptTemplate": "A pull request was opened in repo `{{repoFullName}}`. Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
+      "description": "Performance review of every opened PR",
+      "promptTemplate": "A pull request was opened in the repository (payload above). Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
+    },
+    {
+      "id": "perf-pr-reopened",
+      "type": "github-event",
+      "events": [
+        "pull_request.reopened"
+      ],
+      "enabled": true,
+      "description": "Performance review of every reopened PR",
+      "promptTemplate": "A pull request was reopened in the repository (payload above). Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
     },
     {
       "id": "self-curation",
       "type": "cron",
-      "cron": "40 3 * * 1",
+      "cron": "24 3 * * *",
       "enabled": true,
-      "promptTemplate": "Weekly memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) PR-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries older than 90 days and never relevant since → consider deleting. If nothing to do: `[PASS]`."
+      "intrinsic": true,
+      "description": "Daily memory housekeeping",
+      "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
-  ]
+  ],
+  "outcomes": {
+    "mode": "exactlyOne",
+    "options": [
+      {
+        "id": "perf-ack",
+        "title": "Perf ack",
+        "when": "The diff is performance-clean — a short perf ack is posted on the PR",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      },
+      {
+        "id": "perf-findings",
+        "title": "Reports performance findings",
+        "when": "The review found hot-path concerns — concrete findings are posted on the PR",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

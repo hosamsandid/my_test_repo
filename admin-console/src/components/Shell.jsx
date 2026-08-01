@@ -1,17 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard, Users, Zap, Clock, Sparkles, Server,
+  Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
+import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import AccentureLogo from './AccentureLogo';
+import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+const VERSION_LABEL = formatVersionLabel(import.meta.env.VITE_GIT_COMMIT, import.meta.env.VITE_GIT_DIRTY);
 
 function loadLastViewed() {
   try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
@@ -42,42 +45,51 @@ function NavBadge({ count, color }) {
 }
 
 const NAV = [
-  { section: 'OVERVIEW', items: [
-    { path: '/',             label: 'Dashboard',           Icon: LayoutDashboard },
+  { items: [
+    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+  ]},
+  { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
     { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
-    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
   { section: 'WORKSPACES', items: [
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
     { path: '/teams',        label: 'Teams',               Icon: Building2 },
-    { path: '/skills',       label: 'Skills Registry',     Icon: Zap },
+    { path: '/skills',       label: 'Skills',              Icon: Zap },
+    { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
-    { path: '/models',       label: 'Model Providers',     Icon: Sparkles },
-    { path: '/mcp',          label: 'MCP Servers',         Icon: Server },
+    { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
+    { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3, adminOnly: true },
+    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, credAdmin: true },
+    { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
+    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
   ]},
 ];
 
 const BREADCRUMBS = {
-  '/':             'Dashboard',
   '/quickstart':   'Single Agent',
   '/team-setup':   'Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
+  '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/skills':       'Skills Registry',
+  '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',
+  '/github-events': 'GitHub Event Log',
+  '/token-usage':  'Token Usage',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/teams':        'Teams',
@@ -85,6 +97,7 @@ const BREADCRUMBS = {
   '/patterns/sdlc':          'Patterns Catalog / SDLC',
   '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
   '/orchestrator-wizard': 'Orchestrator Wizard',
+  '/maintenance-mode': 'Maintenance Mode',
 };
 
 function breadcrumbFor(pathname) {
@@ -130,6 +143,25 @@ export default function Shell({ children }) {
   }, []);
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
+
+  // Hide admin-only nav entries (Skills, MCP, Maintenance Mode, …) from
+  // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens,
+  // #798; Model Providers, #800) use a looser `credAdmin` gate: visible to
+  // System Admins AND any Team Admin, so a team can self-serve its credentials
+  // and model providers. Backend route guards
+  // (App.jsx) and the scoped API back this up — defence-in-depth, not the only
+  // enforcement. Drop sections that end up empty.
+  const canSeeCreds = canAccessCredentialPages(user);
+  const nav = NAV
+    .map(section => ({
+      ...section,
+      items: section.items.filter(item => {
+        if (item.adminOnly) return !!user?.admin;
+        if (item.credAdmin) return canSeeCreds;
+        return true;
+      }),
+    }))
+    .filter(section => section.items.length > 0);
 
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
@@ -200,9 +232,9 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {NAV.map(section => (
-            <div key={section.section} style={{ marginBottom: 'var(--eb-space-2)' }}>
-              {!collapsed && (
+          {nav.map((section, sectionIndex) => (
+            <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
+              {!collapsed && section.section && (
                 <div style={{
                   padding: 'var(--eb-space-1) var(--eb-space-4)',
                   fontSize: 'var(--eb-text-xs)',
@@ -215,9 +247,7 @@ export default function Shell({ children }) {
                 </div>
               )}
               {section.items.map(({ path, label, Icon, subtitle }) => {
-                const isActive = path === '/'
-                  ? location.pathname === '/'
-                  : location.pathname === path || location.pathname.startsWith(path + '/');
+                const isActive = location.pathname === path || location.pathname.startsWith(path + '/');
                 const isChat = path === '/chats';
                 const dotColor = chatCounts.unread > 0
                   ? 'var(--eb-status-success)'
@@ -300,19 +330,37 @@ export default function Shell({ children }) {
           ))}
         </nav>
 
-        {/* Copyright footer */}
+        {/* Copyright footer — links to /about */}
         {!collapsed && (
-          <div style={{
-            flexShrink: 0,
-            padding: 'var(--eb-space-3) var(--eb-space-4)',
-            paddingTop: 'var(--eb-space-4)',
-            fontSize: 11,
-            color: 'var(--eb-text-muted)',
-            borderTop: '1px solid var(--eb-border-default)',
-            whiteSpace: 'nowrap',
-          }}>
-            © 2026 Accenture. All rights reserved.
-          </div>
+          <button
+            type="button"
+            onClick={() => navigate('/about')}
+            style={{
+              all: 'unset',
+              display: 'block',
+              boxSizing: 'border-box',
+              width: '100%',
+              flexShrink: 0,
+              padding: 'var(--eb-space-3) var(--eb-space-4)',
+              paddingTop: 'var(--eb-space-4)',
+              fontSize: 11,
+              color: 'var(--eb-text-muted)',
+              borderTop: '1px solid var(--eb-border-default)',
+              whiteSpace: 'nowrap',
+              cursor: 'pointer',
+              borderRadius: 'var(--eb-radius-sm)',
+              transition: 'background var(--eb-transition-fast)',
+              textAlign: 'left',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            onFocus={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
+            onBlur={e => e.currentTarget.style.background = 'transparent'}
+          >
+            <div style={{ fontWeight: 'bold' }}>About</div>
+            <div>© 2026 Accenture. All rights reserved.</div>
+            <div data-testid="app-version" style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
+          </button>
         )}
       </aside>
 

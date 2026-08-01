@@ -11,18 +11,33 @@
 //      type=github-event, matching repo).
 //   2. For each repo in the plan, issues a conditional GET with
 //      If-None-Match (so 304 responses don't decrement the rate limit).
-//   3. Filters fresh events by id > lastEventId, fans them out by writing
-//      to each subscriber's pending-triggers.json — same queue HTTP triggers
-//      use, so the agent-runner picks them up via its existing 5s drain.
+//   3. Selects fresh events by id membership against a per-repo sliding
+//      seen-id set (#320 — not a created_at high-water-mark, since GitHub
+//      neither orders events nor delivers them promptly), then gates each
+//      subscriber by its history horizon (activatedAt/createdAt/mtime, with
+//      a grace window) before fanning them out by writing to each
+//      subscriber's pending-triggers.json — same queue HTTP triggers use,
+//      so the agent-runner picks them up via its existing 5s drain.
 //
-// State (`state.json`) holds per-repo `etag`, `lastEventId`, `lastPolledAt`.
+// State (`state.json`) holds per-repo `etag`, `seen` (event-id set, capped
+// at SEEN_MAX), `lastPolledAt`.
 // ============================================================
 
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const githubEventLog = require('./github-event-log');
+const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 
-const POLL_INTERVAL_MS = 30_000;
+// Poll cadence. Fixed 30s in production; overridable via
+// AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
+// label-chain journey (issue.labeled→Developer→PR.labeled→Reviewer) crosses two
+// poll boundaries and must complete inside the Playwright per-test budget. A
+// non-numeric / non-positive value falls back to the production default.
+const POLL_INTERVAL_MS = (() => {
+  const raw = Number(process.env.AEE_GITHUB_POLL_INTERVAL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
 const STATE_DIR = '/workspace/github-poller';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const THROTTLE_STATE_FILE = path.join(STATE_DIR, 'throttle-state.json');
@@ -46,6 +61,49 @@ const THROTTLE_THRESHOLD = 5;
 // recovers within at most one work-break.
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 30 * 60_000;
+
+// #320-B: safety look-back applied to the per-subscriber history horizon. The
+// GitHub Events API delivers events out of order and up to hours late, so an
+// event that legitimately belongs to a subscriber can carry a `created_at`
+// slightly older than the subscriber's activation stamp. Widening the horizon
+// by GRACE_MS catches those border cases without letting a real backlog in.
+const GRACE_MS = 5 * 60_000;
+
+// #320-F: upper bound on the sliding set of processed event ids kept per repo.
+// One page of the Events API is <=100 events; retaining several polls' worth
+// means a delayed/re-observed event is still recognised as already-seen. Tiny
+// on disk; oldest ids beyond this bound are pruned.
+const SEEN_MAX = 500;
+
+// #449-C: burst cap for the fan-out. When MORE than BURST_CAP fresh events for
+// the same (agent, conversationKey) arrive in a SINGLE poll, they collapse into
+// one lossless `github-digest` queue entry instead of BURST_CAP+ individual
+// agent wake-ups. This is the poll-scoped sibling of the Layer-3 throttle
+// (THROTTLE_*, hour-scoped): the throttle silently *drops* beyond its threshold,
+// the digest *bundles* without losing any event.
+const BURST_CAP = 3;
+
+// #449: Events-API pagination. The API returns newest-first, one page at a time.
+// A burst of more than PER_PAGE events between two polls pushes the older-but-
+// still-unseen events onto later pages; reading only page 1 would silently lose
+// them. We page backwards until we reach already-seen territory. MAX_PAGES caps
+// the work (GitHub serves at most ~3 pages / 300 events on this endpoint anyway).
+const PER_PAGE = 100;
+const MAX_PAGES = 10;
+
+// #496: the GitHub Events API's PullRequestEvent/PullRequestReviewEvent
+// payload carries a *reduced* `pull_request` object — `id`/`number`/`url`/
+// `base`/`head`, but (unlike the full webhook payload the docs describe and
+// the #470/#475 synthetic tests assumed) no `title` and no `html_url`. This
+// derives the web URL from the always-present API `url` field without a
+// network round-trip. Returns null for anything that doesn't match the
+// expected shape (defensive — caller falls back to no enrichment).
+function prApiUrlToHtmlUrl(apiUrl) {
+  if (typeof apiUrl !== 'string') return null;
+  const m = apiUrl.match(/^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/);
+  if (!m) return null;
+  return `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}`;
+}
 
 // tokenId is operator-supplied via the Working Environment config, but a
 // rogue or typo'd value like "../../etc/passwd" would otherwise resolve
@@ -103,125 +161,186 @@ function conversationKey(ghEvent) {
   return ghEvent?.type || 'misc';
 }
 
+// Merged-PR detection for the PR-token-comment feature (#678). A merge is a
+// `PullRequestEvent` with `action: 'closed'` AND `pull_request.merged === true`
+// — a PR closed WITHOUT merging carries `merged: false` and must be ignored
+// (AC edge case "PR closed without merge → no comment"). Pure + unit-tested;
+// returns one `{ prNumber, event }` per merged PR (deduped by number, keeping the
+// latest by created_at so a re-delivered event resolves to a single post).
+function detectMergedPrs(ghEvents) {
+  const byNumber = new Map();
+  for (const ev of Array.isArray(ghEvents) ? ghEvents : []) {
+    if (!ev || ev.type !== 'PullRequestEvent') continue;
+    const p = ev.payload || {};
+    if (p.action !== 'closed') continue;
+    const pr = p.pull_request || {};
+    if (pr.merged !== true) continue;
+    const prNumber = Number(pr.number);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
+    const prev = byNumber.get(prNumber);
+    if (!prev || String(ev.created_at || '') >= String(prev.event.created_at || '')) {
+      byNumber.set(prNumber, { prNumber, event: ev });
+    }
+  }
+  return [...byNumber.values()];
+}
+
 // Accepts SSH (`git@github.com:owner/repo.git`) and HTTPS
 // (`https://github.com/owner/repo[.git]`) — anything else returns null and
 // is silently ignored (non-GitHub remotes can't be polled).
-function parseRepoFullName(url) {
+function parseRepoFullName(url, { allowNonGithubHost = false } = {}) {
   if (!url) return null;
   let m = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
   if (m) return `${m[1]}/${m[2]}`;
   m = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   if (m) return `${m[1]}/${m[2]}`;
-  return null;
-}
-
-// Loop protection: extract the originating agent id (if any) from an event.
-// Agents stamp their actions via the `gh-as-agent` wrapper:
-//   - commits get author email `<agentId>@agents.local`
-//   - PR / review / comment bodies get an HTML marker `<!-- agent: <id> -->`
-// Returns the agent id if any of those signals match, else null.
-//
-// Edge case — mixed-author push: if a PushEvent contains commits from
-// both an agent and a human, this returns the first agent id found and
-// the entire push is filtered. This is intentional: filtering more
-// aggressively is safer for loop prevention than letting a partial
-// agent-push through. Pure human pushes (no agent commits) are
-// unaffected.
-const AGENT_MARKER_RE = /<!--\s*agent:\s*([a-zA-Z0-9_.-]+)\s*-->/;
-const AGENT_EMAIL_RE = /^([a-zA-Z0-9_.-]+)@agents\.local$/;
-
-function extractOriginAgent(ev) {
-  const p = ev?.payload || {};
-  for (const body of [p.pull_request?.body, p.review?.body, p.comment?.body, p.issue?.body]) {
-    if (typeof body === 'string') {
-      const m = body.match(AGENT_MARKER_RE);
-      if (m) return m[1];
-    }
-  }
-  if (Array.isArray(p.commits)) {
-    for (const c of p.commits) {
-      const email = c?.author?.email;
-      if (typeof email === 'string') {
-        const m = email.match(AGENT_EMAIL_RE);
-        if (m) return m[1];
-      }
-    }
+  if (allowNonGithubHost) {
+    // #711: when the poller targets a non-github API base (the E2E fake-github),
+    // recognise the in-stack git-remote fixture repo by its last two path
+    // segments — mirroring deriveRepoIdentity (#667), so the same `owner/repo`
+    // key the fake-github events carry is derived from the env's repo URL.
+    // NEVER applied against real api.github.com (gated on a non-default base),
+    // so production repo discovery is byte-identical.
+    m = String(url).match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+    if (m) return `${m[1]}/${m[2]}`;
   }
   return null;
 }
 
-// Apply the trigger's `from` filter to a candidate event. Returns
-// `{ deliver, reason }` — `reason` is for logs only, never user-facing.
-//
-// Self-loops are blocked unconditionally before any spec applies (there is
-// no spec value that re-enables self-routing — by design).
-//
-// Spec values:
-//   undefined | null | 'any-except-self' → default. Allow anything except
-//     self-loops. This is the existing pre-`from` behavior.
-//   'humans' → only events without an agent origin (no <!-- agent: -->,
-//     no <id>@agents.local commit author).
-//   'agents' → only events with an agent origin.
-//   'team'   → events from a human OR an agent in the same team as the
-//     subscriber. Origin and subscriber teams come from each agent's
-//     config.json `team` field via the `lookupTeam` callback.
-//   ['<id>', ...] → explicit allowlist. The string 'humans' is a special
-//     token in the array meaning "humans pass too".
-//   { exclude: ['<id>', ...] } → blocklist of agent ids. Humans always pass.
-//
-// Unknown / malformed specs fail-closed (drop) and surface in logs so a
-// typo in triggers.json doesn't silently degrade to "everything passes".
-function applyFromFilter(originAgentId, subscriberAgentId, fromSpec, lookupTeam) {
-  if (originAgentId && originAgentId === subscriberAgentId) {
-    return { deliver: false, reason: 'self-loop' };
-  }
-  if (!fromSpec || fromSpec === 'any-except-self') {
-    return { deliver: true, reason: 'any-except-self' };
-  }
-  if (fromSpec === 'humans') {
-    return originAgentId === null
-      ? { deliver: true, reason: 'humans-only:human' }
-      : { deliver: false, reason: 'humans-only:agent' };
-  }
-  if (fromSpec === 'agents') {
-    return originAgentId !== null
-      ? { deliver: true, reason: 'agents-only:agent' }
-      : { deliver: false, reason: 'agents-only:human' };
-  }
-  if (fromSpec === 'team') {
-    if (originAgentId === null) return { deliver: true, reason: 'team:human-passes' };
-    const subTeam = lookupTeam ? lookupTeam(subscriberAgentId) : null;
-    const origTeam = lookupTeam ? lookupTeam(originAgentId) : null;
-    if (!subTeam || !origTeam) {
-      return { deliver: false, reason: 'team:no-team-info' };
+// True when the poller is pointed at a non-production GitHub API base (the E2E
+// fake-github). Used to relax repo-URL parsing to the in-stack fixture host
+// without ever loosening production behaviour.
+function usingNonDefaultApiBase() {
+  return githubApiBase() !== DEFAULT_GITHUB_API_BASE;
+}
+
+// #320-A: the per-subscriber history horizon. Prefer the trigger's activation
+// stamp (set on create and refreshed on re-enable), then its creation stamp,
+// then the triggers.json mtime as the legacy fallback for triggers authored
+// before the stamps existed. Returns an ISO string or null (no horizon known).
+function effectiveHorizon(trigger, triggersMtime) {
+  return (trigger && (trigger.activatedAt || trigger.createdAt)) || triggersMtime || null;
+}
+
+// #525: one-time history-horizon backfill for legacy github-event triggers. A
+// trigger authored before the #320/#446 activation stamps has neither `createdAt`
+// nor `activatedAt`, so `effectiveHorizon` falls back to the triggers.json mtime —
+// a volatile value that any unrelated rewrite (member rebuild, reconcile, edit)
+// bumps to "now", silently dropping events that arrived just before the rewrite.
+// Stamping both fields once with a STABLE value (the caller passes the file's
+// current mtime, which is exactly what the horizon resolves to right now, so no
+// backlog is replayed) pins the horizon so a later rewrite can no longer move it.
+// Pure and idempotent: only github-event triggers that lack `createdAt` are
+// touched; an already-stamped set returns `changed: false` so re-runs write nothing.
+function backfillHorizonStamps(triggers, stampIso) {
+  if (!Array.isArray(triggers) || !stampIso) return { triggers, changed: false };
+  let changed = false;
+  const out = triggers.map((t) => {
+    if (!t || t.type !== 'github-event' || t.createdAt) return t;
+    changed = true;
+    return { ...t, createdAt: stampIso, activatedAt: t.activatedAt || stampIso };
+  });
+  return { triggers: changed ? out : triggers, changed };
+}
+
+// #320-B: is `eventCreatedAt` recent enough to reach a subscriber whose horizon
+// is `horizonIso`? The horizon is widened by `graceMs` to absorb late/out-of-
+// order delivery. Missing horizon or timestamp fails open (deliver) — the same
+// posture the code had before a horizon existed.
+function passesHorizon(eventCreatedAt, horizonIso, graceMs) {
+  if (!horizonIso || !eventCreatedAt) return true;
+  const cutoff = Date.parse(horizonIso) - (graceMs || 0);
+  const ts = Date.parse(eventCreatedAt);
+  if (Number.isNaN(cutoff) || Number.isNaN(ts)) return true;
+  return ts >= cutoff;
+}
+
+// #320-F: split a freshly fetched event list into the events not yet processed
+// (`fresh`) and the next sliding id set (`nextSeen`), given the previous set.
+// Membership is by event id, so GitHub's lack of ordering and delayed delivery
+// no longer matter: an event with an older `created_at` but an unseen id is
+// still fresh, and a re-observed id is never re-delivered. `nextSeen` prepends
+// every currently visible id (so ids still in the API window stay remembered),
+// dedups preserving newest-first order, and caps at `seenMax`.
+function selectFreshEvents(events, seenArr, seenMax) {
+  const list = Array.isArray(events) ? events : [];
+  const seen = new Set(Array.isArray(seenArr) ? seenArr : []);
+  const fresh = list.filter(e => e && e.id != null && !seen.has(String(e.id)));
+
+  const nextSeen = [];
+  const added = new Set();
+  const push = (id) => {
+    if (id == null) return;
+    const s = String(id);
+    if (added.has(s)) return;
+    added.add(s);
+    nextSeen.push(s);
+  };
+  for (const e of list) push(e && e.id);
+  for (const id of (Array.isArray(seenArr) ? seenArr : [])) push(id);
+  return { fresh, nextSeen: nextSeen.slice(0, seenMax || SEEN_MAX) };
+}
+
+// #449-C (pure core, unit-tested). Given the events that passed every delivery
+// gate in one poll — each tagged as { agentId, triggerId, convKey, key, ghEvent }
+// — group them by (agentId, convKey) and decide per group how to hand off:
+//   mode 'digest'     when a group has MORE than `cap` events (the burst case
+//                     AK2 collapses into one lossless notification), else
+//   mode 'individual' (normal volume — the caller enqueues each event and applies
+//                     the Layer-3 throttle unchanged).
+// Group insertion order and per-group event order (caller passes oldest-first)
+// are preserved. Pure — no I/O.
+// #449 (pure): should the poller fetch the NEXT Events-API page? We only page to
+// recover events a burst pushed off page 1. Continue while the page just read was
+// FULL (so more may exist), we're under the page cap, and it contained NO
+// already-seen id — a seen id means we've reached previously-processed territory,
+// so everything older is already known and we stop. `pageIndex` is 1-based (the
+// page we just read). A partial/empty page is always the last one.
+function shouldFetchNextPage(pageEvents, seenArr, pageIndex, { perPage = PER_PAGE, maxPages = MAX_PAGES } = {}) {
+  const list = Array.isArray(pageEvents) ? pageEvents : [];
+  if (list.length < perPage) return false;
+  if (pageIndex >= maxPages) return false;
+  const seen = new Set((Array.isArray(seenArr) ? seenArr : []).map(String));
+  const reachedKnown = list.some(e => e && e.id != null && seen.has(String(e.id)));
+  return !reachedKnown;
+}
+
+function planBurstHandoffs(deliverables, cap) {
+  const CAP = Number.isInteger(cap) && cap >= 0 ? cap : BURST_CAP;
+  const groups = new Map();
+  const order = [];
+  for (const d of Array.isArray(deliverables) ? deliverables : []) {
+    if (!d || !d.agentId) continue;
+    const convKey = d.convKey ?? null;
+    const gkey = `${d.agentId} ${convKey ?? ''}`;
+    let g = groups.get(gkey);
+    if (!g) {
+      g = { agentId: d.agentId, convKey, items: [] };
+      groups.set(gkey, g);
+      order.push(gkey);
     }
-    return subTeam === origTeam
-      ? { deliver: true, reason: 'team:match' }
-      : { deliver: false, reason: 'team:mismatch' };
+    g.items.push(d);
   }
-  if (Array.isArray(fromSpec)) {
-    if (originAgentId === null) {
-      return fromSpec.includes('humans')
-        ? { deliver: true, reason: 'allowlist:human-token' }
-        : { deliver: false, reason: 'allowlist:human-not-listed' };
-    }
-    return fromSpec.includes(originAgentId)
-      ? { deliver: true, reason: 'allowlist:match' }
-      : { deliver: false, reason: 'allowlist:no-match' };
-  }
-  if (fromSpec && typeof fromSpec === 'object' && Array.isArray(fromSpec.exclude)) {
-    if (originAgentId === null) return { deliver: true, reason: 'blocklist:human-passes' };
-    return fromSpec.exclude.includes(originAgentId)
-      ? { deliver: false, reason: 'blocklist:match' }
-      : { deliver: true, reason: 'blocklist:no-match' };
-  }
-  return { deliver: false, reason: `unknown-spec:${JSON.stringify(fromSpec)}` };
+  return order.map((k) => {
+    const g = groups.get(k);
+    return {
+      agentId: g.agentId,
+      convKey: g.convKey,
+      mode: g.items.length > CAP ? 'digest' : 'individual',
+      items: g.items,
+    };
+  });
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
+    // #678: best-effort callback fired once per merged PR seen in a poll, so the
+    // orchestrator can post the work item's token summary. Independent of
+    // subscriber fan-out (a merge is a human action nobody need subscribe to).
+    // Absent in unit tests → merge detection is a no-op.
+    this.onMergedPr = typeof onMergedPr === 'function' ? onMergedPr : null;
     // #185 Phase 2: the orchestrator owns the pending queue (it writes to the
     // control plane when the agent's volume is isolated). When not injected
     // (unit tests), we fall back to writing the agent's pool file directly.
@@ -235,6 +354,9 @@ class GitHubPoller {
     this.throttleBuckets = this._loadThrottleState();
     this.timer = null;
     this.running = false;
+    // Rolling retention (#469) only needs to run about once a day; tracking
+    // the last day it ran avoids a readdir/stat pass every 30s tick.
+    this._lastEventLogCleanupDay = null;
   }
 
   start() {
@@ -254,6 +376,11 @@ class GitHubPoller {
     if (this.running) return;
     this.running = true;
     try {
+      const today = new Date().toISOString().slice(0, 10);
+      if (this._lastEventLogCleanupDay !== today) {
+        githubEventLog.cleanupOldEntries();
+        this._lastEventLogCleanupDay = today;
+      }
       const plan = this._buildPollPlan();
       if (plan.size === 0) return;
       for (const [repoFullName, entry] of plan) {
@@ -280,8 +407,9 @@ class GitHubPoller {
         continue;
       }
       const repos = Array.isArray(env.repositories) ? env.repositories : [];
+      const allowNonGithubHost = usingNonDefaultApiBase();
       for (const r of repos) {
-        const fullName = parseRepoFullName(r?.url);
+        const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
         if (!fullName) continue;
         if (!repoToToken.has(fullName)) repoToToken.set(fullName, env.githubTokenId);
       }
@@ -331,16 +459,13 @@ class GitHubPoller {
           agentId,
           triggerId: t.id,
           events: new Set(t.events),
-          // Layer-2 loop protection: the per-trigger `from` filter. Pass it
-          // through unchanged — applyFromFilter() understands all spec shapes
-          // (string keyword / array allowlist / { exclude } blocklist / null).
-          from: t.from || null,
-          // Per-subscriber history horizon: events with `created_at` strictly
-          // older than this stamp are dropped before any other layer fires,
-          // so a freshly-added agent never reacts to activity that predates
-          // it (e.g. PRs that were already open when the team was set up).
-          // Falls back to the triggers.json mtime for legacy triggers.
-          createdAt: t.createdAt || triggersMtime,
+          // Per-subscriber history horizon: events older than this stamp (minus
+          // a grace window, see GRACE_MS) are dropped before any other layer
+          // fires, so a freshly-added or just-reactivated agent never reacts to
+          // activity that predates it (e.g. PRs already open when the team was
+          // set up, or the backlog that accrued while a trigger was disabled).
+          // Prefers activatedAt → createdAt → triggers.json mtime (legacy).
+          horizon: effectiveHorizon(t, triggersMtime),
           // Optional exact-match filter on payload.label.name for *.labeled
           // and *.unlabeled events. Empty / null / undefined = no filter
           // (legacy behavior — fire on any label change). When set, the
@@ -378,7 +503,7 @@ class GitHubPoller {
 
     let result;
     try {
-      result = await this._fetchEvents(repoFullName, token, repoState.etag);
+      result = await this._fetchEvents(repoFullName, token, repoState.etag, 1);
     } catch (err) {
       // Track consecutive failures and back off exponentially (1m, 2m, 4m,
       // ...) up to 30m. Auth failures (revoked PAT) otherwise spam the log
@@ -418,150 +543,272 @@ class GitHubPoller {
 
     if (result.etag) repoState.etag = result.etag;
 
-    // Cursor is the `created_at` of the newest event seen. We don't use
-    // event ids because GitHub event ids are not globally monotonic across
-    // event types — PullRequestEvent ids are in a completely different
-    // numeric range from PushEvent / CreateEvent ids, so a BigInt compare
-    // would systematically misclassify some types as "already seen".
-    // Legacy state files with `lastEventId` are ignored — the next poll
-    // re-baselines from `created_at`.
-    if (!repoState.lastCreatedAt) {
-      const newestCreatedAt = result.events
-        .map(e => e.created_at)
-        .filter(Boolean)
-        .sort()
-        .pop();
-      repoState.lastCreatedAt = newestCreatedAt || new Date().toISOString();
+    // Cursor is a sliding set of processed event ids (#320-F), not a
+    // `created_at` high-water-mark. GitHub guarantees no ordering and delivers
+    // events up to hours late; a high-water-mark silently drops any event that
+    // arrives with a `created_at` behind the cursor. Set membership is immune
+    // to ordering: an unseen id is fresh regardless of its timestamp, and a
+    // re-observed id is never re-delivered. (Ids need not be monotonic — we
+    // only test membership, never compare magnitudes.)
+    //
+    // First poll (or a legacy state file with `lastCreatedAt`) only records a
+    // baseline so startup / upgrade doesn't replay history. The per-subscriber
+    // horizon (#320-A/B) is the guard against reacting to pre-activation
+    // activity — the cursor's only job is "have I processed this id before?".
+    if (!Array.isArray(repoState.seen)) {
+      // Baseline reads page 1 only — we're recording, not firing, so there's no
+      // backlog to backfill.
+      repoState.seen = selectFreshEvents(result.events, [], SEEN_MAX).nextSeen;
+      delete repoState.lastCreatedAt;
       delete repoState.lastEventId;
       this.state[repoFullName] = repoState;
       this._saveState();
-      console.log(`[GH-Poller] ${repoFullName}: baseline established (created_at=${repoState.lastCreatedAt})`);
+      console.log(`[GH-Poller] ${repoFullName}: baseline established (${repoState.seen.length} event id(s) seen)`);
       return;
     }
 
-    const cursor = repoState.lastCreatedAt;
-    const fresh = [];
-    let newestCreatedAt = cursor;
-    for (const ev of result.events) {
-      if (!ev.created_at) continue;
-      if (ev.created_at > cursor) fresh.push(ev);
-      if (ev.created_at > newestCreatedAt) newestCreatedAt = ev.created_at;
+    // #449 pagination: page 1 is the newest PER_PAGE events. A burst since the
+    // last poll can push older-but-unseen events onto later pages, which reading
+    // only page 1 would silently drop. Page backwards until we reach already-seen
+    // territory, a partial page, or the cap. Backfill pages are unconditional
+    // GETs (the ETag is page 1's); a transient failure on a later page just stops
+    // paging — page 1 is never lost and the next poll retries.
+    let allEvents = Array.isArray(result.events) ? result.events.slice() : [];
+    let pageEvents = allEvents;
+    let page = 1;
+    while (shouldFetchNextPage(pageEvents, repoState.seen, page, { perPage: PER_PAGE, maxPages: MAX_PAGES })) {
+      page += 1;
+      let next;
+      try {
+        next = await this._fetchEvents(repoFullName, token, null, page);
+      } catch (err) {
+        console.error(`[GH-Poller] ${repoFullName}: page ${page} fetch failed (${err.message}) — proceeding with ${allEvents.length} event(s)`);
+        break;
+      }
+      if (next.status !== 200) break;
+      pageEvents = Array.isArray(next.events) ? next.events : [];
+      if (pageEvents.length === 0) break;
+      allEvents = allEvents.concat(pageEvents);
     }
+    if (page > 1) {
+      console.log(`[GH-Poller] ${repoFullName}: burst backfill — read ${page} event pages (${allEvents.length} events)`);
+    }
+
+    const { fresh, nextSeen } = selectFreshEvents(allEvents, repoState.seen, SEEN_MAX);
+    repoState.seen = nextSeen;
 
     if (fresh.length > 0) {
       // GitHub returns newest-first; process oldest-first so triggers fire
-      // in causal order.
-      fresh.sort((a, b) => a.created_at.localeCompare(b.created_at));
-      for (const ev of fresh) {
-        this._fanOut(repoFullName, ev, subscribers);
-      }
-      repoState.lastCreatedAt = newestCreatedAt;
+      // in causal order. Events without a timestamp sort last (stable).
+      fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+      await this._fanOutBatch(repoFullName, fresh, subscribers, token);
+      await this._handleMergedPrs(repoFullName, fresh);
     }
 
     this.state[repoFullName] = repoState;
     this._saveState();
   }
 
-  _fanOut(repoFullName, ghEvent, subscribers) {
-    const key = eventKey(ghEvent);
-    if (!key) return;
-    const originAgentId = extractOriginAgent(ghEvent);
-
-    // Cache `team` lookups for the duration of this fan-out call. A burst of
-    // events to the same subscribers would otherwise re-read the same
-    // config.json files repeatedly. The cache is intentionally per-call so
-    // late team renames don't get stuck behind stale data — the next event
-    // re-reads.
-    const teamCache = new Map();
-    const lookupTeam = (agentId) => {
-      if (teamCache.has(agentId)) return teamCache.get(agentId);
-      let team = null;
+  // #678: fire the merge callback for every merged PR in this batch. Fully
+  // best-effort and isolated per PR — a token-comment failure must never break
+  // event delivery or poller state. The callback (orchestrator side) owns the
+  // opt-in gate, work-item resolution, idempotency and posting; the poller only
+  // detects the merge and hands off (thin shell, AC8).
+  async _handleMergedPrs(repoFullName, ghEvents) {
+    if (!this.onMergedPr) return;
+    for (const { prNumber, event } of detectMergedPrs(ghEvents)) {
       try {
-        const cfg = JSON.parse(
-          fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'),
-        );
-        if (typeof cfg?.team === 'string' && cfg.team) team = cfg.team;
-      } catch { /* missing or unreadable config = no team */ }
-      teamCache.set(agentId, team);
-      return team;
-    };
-
-    const convKey = conversationKey(ghEvent);
-    let throttleStateDirty = false;
-
-    for (const sub of subscribers) {
-      if (!sub.events.has(key)) continue;
-
-      // History horizon: skip events older than the subscriber's createdAt.
-      // Cheapest check, runs before everything else — a brand-new agent
-      // never reads (let alone reacts to) activity that pre-dates its own
-      // creation, even when the per-repo cursor is stale (e.g. another
-      // agent already advanced it past those events). String compare on
-      // ISO-8601 UTC timestamps is correct.
-      if (sub.createdAt && ghEvent.created_at && ghEvent.created_at < sub.createdAt) {
-        console.log(
-          `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-          `(event=${ghEvent.created_at}, sub-since=${sub.createdAt})`,
-        );
-        continue;
+        await this.onMergedPr(repoFullName, prNumber, event);
+      } catch (err) {
+        console.error(`[GH-Poller] ${repoFullName}#${prNumber}: merge callback failed: ${err.message}`);
       }
+    }
+  }
 
-      // Label-name filter for *.labeled / *.unlabeled events. The action
-      // payload carries the affected label as `payload.label.name`. When
-      // the subscriber pinned a label name, drop everything that doesn't
-      // match before any other layer runs — this is the cheap pre-filter
-      // that saves the Claude wake-up; the from-filter and throttle still
-      // apply afterward. No-op for non-label events.
-      if (sub.labelFilter) {
-        const labelName = ghEvent.payload?.label?.name;
-        if (labelName !== sub.labelFilter) {
+  async _fanOutBatch(repoFullName, ghEvents, subscribers, token) {
+    // Phase 1 — per-event delivery gates (history horizon, label filter).
+    // Everything that survives becomes a "deliverable" tagged with its
+    // subscriber + conversation, to be grouped in phase 2. Events arrive
+    // oldest-first (caller sorted), so per-group order stays causal.
+    //
+    // There is deliberately NO source/origin filtering here: a trigger fires on
+    // any matching event regardless of who caused it (human, another agent, or
+    // the subscriber itself). The only backstop against a self-triggering loop
+    // is the frequency-based Layer-3 throttle + burst digest in phase 2.
+    //
+    // `eventLogEntries` (#469) accumulates one entry per event for the
+    // event-transparency log, keyed by event id — populated here with the
+    // per-subscriber gate outcomes, then finalised with phase 2's digest/
+    // throttle/delivered outcomes below, and written out once at the end.
+    // A subscriber that doesn't listen to this event type at all (`!sub.events.has(key)`)
+    // is NOT recorded as an outcome — that's the "no one is listening" case
+    // (AC #4), distinct from "someone listened but a gate dropped it" (AC #3).
+    const deliverables = [];
+    const eventLogEntries = new Map();
+    for (const ghEvent of ghEvents) {
+      const key = eventKey(ghEvent);
+      const logEntry = { ghEvent, key, outcomes: [] };
+      eventLogEntries.set(ghEvent.id, logEntry);
+      if (!key) continue;
+      const convKey = conversationKey(ghEvent);
+
+      for (const sub of subscribers) {
+        if (!sub.events.has(key)) continue;
+
+        const outcome = { agentId: sub.agentId, triggerId: sub.triggerId, status: 'pending', reason: null, digest: false };
+        logEntry.outcomes.push(outcome);
+
+        // History horizon (#320-A/B): skip events older than the subscriber's
+        // horizon, widened by GRACE_MS to absorb late/out-of-order delivery.
+        // Cheapest check, runs before everything else — a brand-new or just-
+        // reactivated agent never reads (let alone reacts to) activity that
+        // pre-dates it, even when the per-repo cursor is stale (e.g. another
+        // agent already advanced it past those events).
+        if (!passesHorizon(ghEvent.created_at, sub.horizon, GRACE_MS)) {
           console.log(
-            `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-            `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
+            `[GH-Poller] history-horizon: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(event=${ghEvent.created_at}, sub-since=${sub.horizon}, grace=${GRACE_MS}ms)`,
           );
+          outcome.status = 'dropped';
+          outcome.reason = 'history-horizon';
           continue;
         }
-      }
 
-      const decision = applyFromFilter(originAgentId, sub.agentId, sub.from, lookupTeam);
-      if (!decision.deliver) {
-        if (decision.reason === 'self-loop') {
-          // Preserve the existing log line shape so operators with grep
-          // habits / log dashboards keep working.
-          console.log(
-            `[GH-Poller] Loop-protect: ${key} (${ghEvent.id}) origin=${originAgentId} matches subscriber — skipping`,
-          );
-        } else {
-          console.log(
-            `[GH-Poller] from-filter: ${key} (${ghEvent.id}) origin=${originAgentId || 'human'} → ${sub.agentId} dropped (${decision.reason})`,
-          );
+        // Label-name filter for *.labeled / *.unlabeled events. The action
+        // payload carries the affected label as `payload.label.name`. When
+        // the subscriber pinned a label name, drop everything that doesn't
+        // match — this is content routing (WHICH label), not a source filter,
+        // and is how label hand-offs (incl. human-approval gates) are wired.
+        // No-op for non-label events.
+        if (sub.labelFilter) {
+          const labelName = ghEvent.payload?.label?.name;
+          if (labelName !== sub.labelFilter) {
+            console.log(
+              `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = 'label-filter';
+            continue;
+          }
+        }
+
+        deliverables.push({
+          agentId: sub.agentId,
+          triggerId: sub.triggerId,
+          convKey,
+          key,
+          ghEvent,
+          outcome,
+        });
+      }
+    }
+
+    // Phase 2 — group by (agent, conversation) and hand off (#449-C). A group
+    // larger than BURST_CAP collapses into ONE lossless digest; smaller groups
+    // go out individually, each still gated by the Layer-3 throttle exactly as
+    // before (the throttle is deliberately NOT applied to a digest — see
+    // _enqueueDigest).
+    const plans = planBurstHandoffs(deliverables, BURST_CAP);
+    let throttleStateDirty = false;
+    // #496: cache the enrichment per event id — a PR event fanning out to
+    // several subscribers (e.g. code-reviewer + security-reviewer +
+    // test-reviewer all on pull_request.opened) enriches once, not once per
+    // subscriber. Keyed by event id since that's what identifies a ghEvent
+    // within this batch; value is the (possibly unchanged) payload.
+    const enrichedPayloads = new Map();
+
+    for (const plan of plans) {
+      if (plan.mode === 'digest') {
+        this._enqueueDigest(plan.agentId, plan.convKey, plan.items);
+        for (const it of plan.items) {
+          it.outcome.status = 'delivered';
+          it.outcome.digest = true;
         }
         continue;
       }
 
-      // Layer-3 throttle: count per (agent, conversation). Drops further
-      // reactions once the threshold is exceeded; the very first drop also
-      // schedules a one-shot DM warning so the user sees the clamp.
-      const t = this._checkAndIncThrottle(sub.agentId, convKey);
-      throttleStateDirty = true;
-      if (t.drop) {
-        console.log(
-          `[GH-Poller] throttle: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-          `(conv=${convKey}, count=${t.count}/${t.threshold}/h, window-ends=${t.windowEndsAt})`,
-        );
-        if (t.justWarned) {
-          this._enqueueThrottleWarning(sub.agentId, convKey, t);
+      for (const it of plan.items) {
+        // Layer-3 throttle: count per (agent, conversation). Drops further
+        // reactions once the threshold is exceeded; the very first drop also
+        // schedules a one-shot DM warning so the user sees the clamp.
+        const t = this._checkAndIncThrottle(it.agentId, it.convKey);
+        throttleStateDirty = true;
+        if (t.drop) {
           console.log(
-            `[GH-Poller] throttle: warning queued for ${sub.agentId} (conv=${convKey})`,
+            `[GH-Poller] throttle: ${it.key} (${it.ghEvent.id}) → ${it.agentId} dropped ` +
+            `(conv=${it.convKey}, count=${t.count}/${t.threshold}/h, window-ends=${t.windowEndsAt})`,
+          );
+          if (t.justWarned) {
+            this._enqueueThrottleWarning(it.agentId, it.convKey, t);
+            console.log(
+              `[GH-Poller] throttle: warning queued for ${it.agentId} (conv=${it.convKey})`,
+            );
+          }
+          it.outcome.status = 'dropped';
+          it.outcome.reason = 'throttle';
+          continue;
+        }
+
+        if (!enrichedPayloads.has(it.ghEvent.id)) {
+          enrichedPayloads.set(
+            it.ghEvent.id,
+            await this._enrichPullRequestPayload(it.key, it.ghEvent.payload, token),
           );
         }
-        continue;
-      }
+        const payload = enrichedPayloads.get(it.ghEvent.id);
+        const ghEvent = payload === it.ghEvent.payload ? it.ghEvent : { ...it.ghEvent, payload };
 
-      this._enqueue(sub.agentId, sub.triggerId, key, ghEvent);
+        this._enqueue(it.agentId, it.triggerId, it.key, ghEvent);
+        it.outcome.status = 'delivered';
+      }
     }
 
     if (throttleStateDirty) this._saveThrottleState();
+
+    // #469 — persist the transparency log entry for every fresh event in this
+    // batch, whether it was delivered, dropped, digested, or matched no
+    // subscriber at all. Best-effort (see github-event-log.js); never throws.
+    for (const entry of eventLogEntries.values()) {
+      githubEventLog.record(
+        githubEventLog.buildEventEntry({
+          ghEvent: entry.ghEvent,
+          repoFullName,
+          key: entry.key,
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest }) => ({
+            agentId, triggerId, status, reason, digest,
+          })),
+        }),
+      );
+    }
+  }
+
+  // #449-D: append one `github-digest` entry summarising a burst of events for a
+  // single (agent, conversation). Lossless — every event is listed — but NOT run
+  // through the Layer-3 throttle: the digest IS the anti-flood response, so it
+  // must always reach the agent. The runtime posts it as a plain DM (no LLM
+  // call), mirroring the throttle-warning delivery.
+  _enqueueDigest(agentId, convKey, items) {
+    const events = items.map((it) => ({
+      event: it.key,
+      eventId: it.ghEvent.id,
+      repo: it.ghEvent.repo?.name,
+      actor: it.ghEvent.actor?.login,
+      createdAt: it.ghEvent.created_at,
+    }));
+    const triggerIds = [...new Set(items.map((it) => it.triggerId).filter(Boolean))];
+    this._enqueuePending(agentId, {
+      kind: 'github-digest',
+      convKey,
+      cap: BURST_CAP,
+      count: events.length,
+      triggerIds,
+      events,
+    });
+    console.log(
+      `[GH-Poller] burst-digest: ${events.length} events → agent=${agentId} ` +
+      `(conv=${convKey}, cap=${BURST_CAP})`,
+    );
   }
 
   // Centralised pending-queue writer. Prefers the orchestrator's queue (which
@@ -599,19 +846,111 @@ class GitHubPoller {
     console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
   }
 
-  _fetchEvents(repoFullName, token, etag) {
+  // #496: best-effort GET of an arbitrary GitHub API resource (used to fetch
+  // the PR title the Events API omits — see prApiUrlToHtmlUrl above). Kept
+  // separate from _fetchEvents (which is list-shaped and ETag-aware).
+  _fetchJson(url, token) {
+    return new Promise((resolve, reject) => {
+      let u;
+      try {
+        u = new URL(url);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      // #710: follow the URL's own protocol so enrichment GETs work against a
+      // fake-github base served over plain HTTP. Production payload URLs are
+      // https://api.github.com/... ⇒ https, unchanged.
+      const transport = u.protocol === 'http:' ? require('http') : https;
+      const req = transport.request({
+        hostname: u.hostname,
+        port: u.port || undefined,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: {
+          'User-Agent': 'agent-studio-poller',
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        timeout: 15_000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(new Error('timeout')); });
+      req.end();
+    });
+  }
+
+  // #496: fills in the `title`/`html_url` the live Events API omits from
+  // `payload.pull_request` for pull_request(_review) events, so
+  // _github_event_detail (agent-entrypoint.py) can render "PR #<n>: <title>
+  // — <url>" instead of silently falling back to the bare event/repo line.
+  // `html_url` is derived from the always-present API `url` (no request);
+  // `title` needs one best-effort GET per delivered event — never throws,
+  // and leaves the payload untouched (identity) when there's nothing to add
+  // or the event isn't PR-shaped, so non-PR events and already-complete
+  // payloads (webhook-shaped fixtures, future API changes) pay no cost.
+  async _enrichPullRequestPayload(key, payload, token) {
+    if (typeof key !== 'string' || !key.startsWith('pull_request')) return payload;
+    const pr = payload && payload.pull_request;
+    if (!pr || typeof pr !== 'object') return payload;
+    if (pr.title && pr.html_url) return payload;
+
+    const htmlUrl = pr.html_url || prApiUrlToHtmlUrl(pr.url);
+    let title = pr.title || null;
+    if (!title && typeof pr.url === 'string') {
+      try {
+        const detail = await this._fetchJson(pr.url, token);
+        if (detail && typeof detail.title === 'string') title = detail.title;
+      } catch (err) {
+        console.error(`[GH-Poller] PR title fetch failed for ${pr.url}: ${err.message}`);
+      }
+    }
+    if (!htmlUrl && !title) return payload;
+    return {
+      ...payload,
+      pull_request: {
+        ...pr,
+        ...(htmlUrl ? { html_url: htmlUrl } : {}),
+        ...(title ? { title } : {}),
+      },
+    };
+  }
+
+  _fetchEvents(repoFullName, token, etag, page = 1) {
     return new Promise((resolve, reject) => {
       const [owner, repo] = repoFullName.split('/');
       const headers = {
-        'User-Agent': 'e-vgh-claw-poller',
+        'User-Agent': 'agent-studio-poller',
         'Accept': 'application/vnd.github+json',
         'Authorization': `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28',
       };
+      // The stored ETag is page 1's; the caller passes it only for page 1 and
+      // null for backfill pages (#449).
       if (etag) headers['If-None-Match'] = etag;
-      const req = https.request({
-        hostname: 'api.github.com',
-        path: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=100`,
+      // #710: honour GITHUB_API_BASE (default api.github.com). Absent ⇒ the
+      // resolved target is https://api.github.com with an empty path prefix,
+      // i.e. byte-identical to the previous hardcoded request.
+      const api = resolveGithubApiTarget();
+      const req = api.transport.request({
+        hostname: api.hostname,
+        port: api.port,
+        path: `${api.basePath}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/events?per_page=${PER_PAGE}&page=${page}`,
         method: 'GET',
         headers,
         timeout: 15_000,
@@ -758,10 +1097,21 @@ class GitHubPoller {
 module.exports = {
   GitHubPoller,
   parseRepoFullName,
+  prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
-  extractOriginAgent,
-  applyFromFilter,
+  detectMergedPrs,
+  effectiveHorizon,
+  backfillHorizonStamps,
+  passesHorizon,
+  selectFreshEvents,
+  planBurstHandoffs,
+  shouldFetchNextPage,
   THROTTLE_THRESHOLD,
   THROTTLE_WINDOW_MS,
+  GRACE_MS,
+  SEEN_MAX,
+  BURST_CAP,
+  PER_PAGE,
+  MAX_PAGES,
 };

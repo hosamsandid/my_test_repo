@@ -1,0 +1,41 @@
+{
+  "comment": "Labelled eval pairs for the #918 semantic convergence layer. 'converge' pairs must link at cosineThreshold 0.8 with a real multilingual model; 'distinct' pairs must NOT. The end-to-end fixture test runs ONLY when an embedding backend is available (AEE_EMBEDDING_MODEL_PATH + @xenova/transformers installed) and skips cleanly otherwise; threshold changes must keep this green. The pure-logic tests use synthetic vectors and always run.",
+  "pairs": [
+    {
+      "label": "converge",
+      "note": "DE <-> EN paraphrase",
+      "a": "Der Build schlägt fehl, wenn npm install hinter dem Proxy läuft — vorher HTTP_PROXY setzen",
+      "b": "The build fails when npm install runs behind the proxy — set HTTP_PROXY first"
+    },
+    {
+      "label": "converge",
+      "note": "DE <-> EN paraphrase, convention",
+      "a": "Branches immer von origin/main abzweigen, niemals von lokalen Ständen",
+      "b": "Always branch from origin/main, never from local state"
+    },
+    {
+      "label": "converge",
+      "note": "disjoint-vocabulary paraphrase (near-zero token overlap)",
+      "a": "Retries against the poller must be capped or an endless notification storm results",
+      "b": "Unbounded re-polling loops flood the event queue with duplicate wake-ups"
+    },
+    {
+      "label": "converge",
+      "note": "abbreviation vs expansion",
+      "a": "JCL jobs need a REGION parameter or they abend with S822",
+      "b": "Job Control Language jobs require the REGION parameter, otherwise they abnormally end with system code S822"
+    },
+    {
+      "label": "distinct",
+      "note": "same domain, different facts (shared vocabulary near-miss)",
+      "a": "The GitHub poller polls the Events API every 30 seconds",
+      "b": "The GitHub poller drops events older than the subscriber's activation horizon"
+    },
+    {
+      "label": "distinct",
+      "note": "same system, opposite concern",
+      "a": "Conduwuit admin users are created via the admin room",
+      "b": "Conduwuit rate-limits message sends per user per minute"
+    }
+  ]
+}

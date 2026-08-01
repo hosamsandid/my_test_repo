@@ -15,6 +15,7 @@ import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
+import { summarizeTeamAction } from './team-action-summary.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -1481,7 +1482,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1540,8 +1541,8 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             <ToggleSwitch
               checked={state === 'active'}
               onChange={() => onToggleEnabled(agent)}
-              label={state === 'active' ? 'Disable' : 'Enable'}
-              disabled={busy}
+              label={locked ? 'Team is disabled — enable the team first' : (state === 'active' ? 'Disable' : 'Enable')}
+              disabled={busy || locked}
             />
             <IconButton
               icon={PowerOff}
@@ -1792,7 +1793,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1836,6 +1837,11 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               background: 'var(--eb-bg-app)', padding: '2px 8px',
               borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
             }}>Team</span>
+            <ToggleSwitch
+              checked={agent.enabled !== false}
+              onChange={() => onToggleTeam(agent)}
+              label={agent.enabled !== false ? 'Disable team' : 'Enable team'}
+            />
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {agent.id} · env: {agent.environmentId}
@@ -1897,6 +1903,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               tree={{ depth: 1, ancestorMore: [], isLast: idx === children.length - 1, hasChildren: false, isCollapsed: false }}
               navigate={navigate}
               busy={busyIds.has(child.id)}
+              locked={agent.enabled === false}
               onActivate={onActivate}
               onDeactivate={onDeactivate}
               onToggleEnabled={onToggleEnabled}
@@ -2006,6 +2013,12 @@ export default function Agents() {
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null); // { agent, busy, activeTriggers }
   const [disableWarning, setDisableWarning] = useState(null); // { agent, busy, activeTriggers }
+  // Team-wide disable/enable: preview + confirm + result, mirroring the
+  // per-agent disableWarning flow but operating on every member at once.
+  const [teamActionPrompt, setTeamActionPrompt] = useState(null); // { team, action: 'disable'|'enable', members }
+  const [teamActionBusy, setTeamActionBusy] = useState(false);
+  const [teamActionError, setTeamActionError] = useState(null);
+  const [teamActionResult, setTeamActionResult] = useState(null); // { action, successIds, failedMembers }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -2201,6 +2214,55 @@ export default function Agents() {
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
+    }
+  }
+
+  async function handleToggleTeam(team) {
+    const action = team.enabled === false ? 'enable' : 'disable';
+    setTeamActionError(null);
+    try {
+      const { members } = await apiCall('GET', `/api/teams/${team.id}/members`);
+      setTeamActionPrompt({ team, action, members });
+    } catch (e) {
+      setActionError(e.message);
+    }
+  }
+
+  async function handleTeamDisableConfirmed(mode) {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/disable`, { mode });
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'disable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
+    }
+  }
+
+  async function handleTeamEnableConfirmed() {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/enable`, {});
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'enable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
     }
   }
 
@@ -2439,6 +2501,7 @@ export default function Agents() {
               onActivate={handleActivate}
               onDeactivate={a => setDeactivateTarget(a)}
               onToggleEnabled={handleToggleEnabled}
+              onToggleTeam={handleToggleTeam}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
@@ -2596,6 +2659,63 @@ export default function Agents() {
         onHardStop={() => handleDeactivateMode('hard-stop')}
         onCancel={() => setDeactivateWarning(null)}
       />
+
+      <ConfirmDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
+        title={`Enable team "${teamActionPrompt?.team?.displayName ?? ''}"?`}
+        message={teamActionPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
+            </p>
+            <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
+                <li key={m.id}>{m.displayName}</li>
+              ))}
+            </ul>
+            {teamActionError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{teamActionError}</p>
+            )}
+          </div>
+        )}
+        variant="info"
+        confirmLabel="Enable team"
+        busy={teamActionBusy}
+        onConfirm={handleTeamEnableConfirmed}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <TeamDisableDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'disable'}
+        team={teamActionPrompt?.team}
+        members={teamActionPrompt?.members || []}
+        error={teamActionError}
+        busy={teamActionBusy}
+        onDrain={() => handleTeamDisableConfirmed('drain')}
+        onAbort={() => handleTeamDisableConfirmed('abort')}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <ConfirmDialog
+        open={!!teamActionResult}
+        variant="danger"
+        alertOnly
+        title={teamActionResult?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
+        message={teamActionResult && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {teamActionResult.failedMembers.length} member(s) could not be {teamActionResult.action === 'disable' ? 'disabled' : 'enabled'}:
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {teamActionResult.failedMembers.map(m => (
+                <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        onConfirm={() => setTeamActionResult(null)}
+        onCancel={() => setTeamActionResult(null)}
+      />
     </div>
   );
 }
@@ -2653,6 +2773,79 @@ function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAb
             color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
+          }}>Hard stop</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TeamDisableDialog({ open, team, members, error, busy, onDrain, onAbort, onCancel }) {
+  if (!open) return null;
+  const name = team?.displayName ?? team?.id ?? 'this team';
+  const toDisable = members.filter(m => m.enabled);
+  const busyCount = toDisable.filter(m => m.busy || (m.activeTriggers?.length ?? 0) > 0).length;
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Disable team" style={{
+      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 520,
+        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+              Disable team "{name}"
+            </h3>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              {toDisable.length === 0
+                ? 'Every member is already disabled — this only marks the team itself as disabled.'
+                : `${toDisable.length} member${toDisable.length !== 1 ? 's' : ''} will be disabled${busyCount > 0 ? ` (${busyCount} currently busy or with active triggers)` : ''}. Choose how to proceed:`}
+            </p>
+            {toDisable.length > 0 && (
+              <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxHeight: 200, overflowY: 'auto' }}>
+                {toDisable.map(m => (
+                  <li key={m.id}>
+                    {m.displayName}
+                    {(m.busy || (m.activeTriggers?.length ?? 0) > 0) && (
+                      <span style={{ color: 'var(--eb-status-warning)' }}> — {m.busy ? 'busy' : `${m.activeTriggers.length} active trigger(s)`}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {members.some(m => !m.enabled) && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                {members.filter(m => !m.enabled).length} member(s) already disabled are left untouched.
+              </p>
+            )}
+            {error && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-2)' }}>{error}</p>
+            )}
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onCancel} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Let running work finish</button>
+          <button onClick={onAbort} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
           }}>Hard stop</button>
         </div>
       </div>

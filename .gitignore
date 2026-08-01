@@ -38,3 +38,4 @@ __pycache__/
 .terraform/
 *.tfstate
 *.tfstate.*
+.worktrees/

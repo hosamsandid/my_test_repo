@@ -23,6 +23,7 @@ import {
   probeTitle,
   probeRequest,
 } from './llm-probe-state';
+import { groupAgentsByTeam } from './group-agents-by-team.js';
 
 /* ───────────────────────── shared styles ───────────────────────── */
 
@@ -915,6 +916,14 @@ export default function ModelRegistry() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents } | null
+  const [respawning, setRespawning]       = useState(false);
+  const [respawnError, setRespawnError]   = useState(null);
+  // Set when respawn-agents reports agents it failed to restart (still on the
+  // old credentials) — surfaced as a follow-up alert so the operator can't
+  // mistake "dialog closed" for "rotation fully applied" (only console.info'd
+  // previously, which nobody watching the UI would ever see).
+  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedAgents: Array<{id, displayName, role, teamId, teamName}> } | null
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1058,6 +1067,25 @@ export default function ModelRegistry() {
     setSaving(true); setFormError(null);
     try {
       await apiCall('PUT', `/api/llm-endpoints/${editing.id}`, payload);
+      // Detect whether a spawn-time credential changed: new/cleared token, new
+      // OAuth flow, or changed baseUrl — all are baked into the container env.
+      const credentialChanged = 'authToken' in payload
+        || 'oauthFlowId' in payload
+        || payload.baseUrl !== (editing.baseUrl ?? '');
+      if (credentialChanged) {
+        try {
+          const { agents } = await apiCall('GET', `/api/llm-endpoints/${editing.id}/bound-agents`);
+          if (agents && agents.length > 0) {
+            setRespawnPrompt({ endpointId: editing.id, agents });
+            // Don't close the panel yet — dialog handles that on confirm/cancel.
+            return;
+          }
+        } catch (e) {
+          // bound-agents failure is non-blocking toward the user; the PUT
+          // already succeeded — but leave a breadcrumb for developers.
+          console.warn('[ModelRegistry] failed to fetch bound-agents for', editing.id, e);
+        }
+      }
       setEditing(null);
       refetch();
     } catch (e) {
@@ -1076,6 +1104,49 @@ export default function ModelRegistry() {
       setActionError(e.message);
       setDeleteTarget(null);
     }
+  }
+
+  async function handleRespawnConfirm() {
+    if (!respawnPrompt) return;
+    setRespawning(true); setRespawnError(null);
+    try {
+      const { respawned, skipped } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
+      const agents = respawnPrompt.agents;
+      setRespawnPrompt(null);
+      refetch();
+      if (skipped && skipped.length > 0) {
+        // `skipped` means the orchestrator's respawn call returned
+        // respawned:false for that agent id. That covers two different cases
+        // it can't distinguish from here: the agent wasn't actually running
+        // at the moment of the call (nothing to fix — it'll get the new
+        // credential on its next start), or it WAS running and the restart
+        // attempt itself failed (still on stale credentials — the exact
+        // problem this feature exists to prevent). Since we can't tell which
+        // occurred, don't close the panel silently; surface it as a
+        // follow-up alert the operator must see and dismiss.
+        const failedAgents = skipped.map(id => agents.find(a => a.id === id) || { id, displayName: id, role: 'agent', teamId: null, teamName: null });
+        setRespawnFailureNotice({ failedAgents });
+      } else {
+        setEditing(null);
+      }
+    } catch (e) {
+      setRespawnError(e.message);
+    } finally {
+      setRespawning(false);
+    }
+  }
+
+  function handleRespawnCancel() {
+    setRespawnPrompt(null);
+    setRespawnError(null);
+    setEditing(null);
+    refetch();
+  }
+
+  function handleRespawnFailureAck() {
+    setRespawnFailureNotice(null);
+    setEditing(null);
+    refetch();
   }
 
   if (loading) {
@@ -1187,6 +1258,111 @@ export default function ModelRegistry() {
         confirmLabel="Delete"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={!!respawnPrompt}
+        variant="info"
+        title="Restart agents to apply new credentials?"
+        message={respawnPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} enabled and bound to this provider, and will be restarted:
+            </p>
+            <div style={{
+              margin: '0 0 var(--eb-space-3)',
+              maxHeight: 240,
+              overflowY: 'auto',
+              fontSize: 'var(--eb-text-sm)',
+            }}>
+              {groupAgentsByTeam(respawnPrompt.agents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            {respawnError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>
+                {respawnError} — you can retry or skip.
+              </p>
+            )}
+            <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              If you skip this, agents will keep using the old credentials until you manually disable and re-enable them.
+            </p>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Restarting will interrupt any agent currently mid-task — you may need to manually restart or re-trigger interrupted work afterward.
+            </p>
+          </div>
+        )}
+        confirmLabel="Restart agents"
+        cancelLabel="Skip for now"
+        busy={respawning}
+        onConfirm={handleRespawnConfirm}
+        onCancel={handleRespawnCancel}
+      />
+
+      <ConfirmDialog
+        open={!!respawnFailureNotice}
+        variant="danger"
+        alertOnly
+        title="Some agents failed to restart"
+        message={respawnFailureNotice && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {respawnFailureNotice.failedAgents.length} agent(s) could not be restarted — if currently running, they may still be using the old credentials:
+            </p>
+            <div style={{ maxHeight: 240, overflowY: 'auto', fontSize: 'var(--eb-text-sm)' }}>
+              {groupAgentsByTeam(respawnFailureNotice.failedAgents).map(group => (
+                <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                  <div style={{
+                    fontWeight: 600,
+                    color: 'var(--eb-text-secondary)',
+                    fontSize: 'var(--eb-text-xs)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.02em',
+                    margin: '0 0 var(--eb-space-1)',
+                  }}>
+                    {group.name} ({group.agents.length})
+                  </div>
+                  <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)' }}>
+                    {group.agents.map(a => (
+                      <li key={a.id} style={{ marginBottom: 'var(--eb-space-1)' }}>
+                        <strong>{a.displayName}</strong>
+                        <span style={{ color: 'var(--eb-text-muted)', marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+                          {a.role}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)' }}>
+              Reopen this provider and confirm the restart prompt again to retry.
+            </p>
+          </div>
+        )}
+        onConfirm={handleRespawnFailureAck}
+        onCancel={handleRespawnFailureAck}
       />
     </div>
   );

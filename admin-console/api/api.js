@@ -20,6 +20,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
@@ -5656,6 +5657,60 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/members — running/busy/trigger state for every
+// member, feeding the team-wide disable/enable preview dialog.
+app.get('/api/teams/:teamId/members', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/members`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/disable — bulk-disable every enabled member.
+// Body: { mode: 'drain' | 'abort' }, required.
+app.post('/api/teams/:teamId/disable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const mode = req.body?.mode;
+  if (mode !== 'drain' && mode !== 'abort') return res.status(400).json({ error: "mode must be 'drain' or 'abort'" });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/disable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/enable — bulk-enable every member the earlier
+// disable tagged disabledByTeam.
+app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/enable`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* Derive a unified graph from a draft/imported bundle (#367) — the editable
  * counterpart of POST /api/process/graph. Maps the process-template bundle
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the
@@ -8104,6 +8159,53 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   if (ep.authTokenId) deleteLlmEndpointToken(ep.authTokenId);
   saveLlmEndpointsIndex(list.filter(e => e.id !== ep.id));
   res.status(204).end();
+});
+
+// Returns enabled, materialized agents whose effective LLM endpoint is :id.
+// Used by the UI to prompt a respawn after credential rotation. Discovery
+// logic lives in respawn-agents.js (pure, unit-tested) — this route only
+// does I/O (loading configs) and wires the result into a JSON response.
+app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  res.json({ agents });
+});
+
+// Respawn all enabled agents bound to :id so they pick up the rotated credential
+// without requiring a manual disable→enable cycle. Discovery + the bounded
+// worker-pool both live in respawn-agents.js (pure, unit-tested); this route
+// does I/O and decides the default concurrency policy.
+app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  // Bounded concurrency: an unbounded Promise.all here would fan out one
+  // stop+recreate container-lifecycle call per agent simultaneously, which
+  // can overwhelm the orchestrator's libpod socket and the host's container
+  // runtime on a large squad (observed directly while load-testing this
+  // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
+  // for their hardware; the default is conservative for a local Podman host.
+  const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
+  const { respawned, skipped } = await respawnWithConcurrency(
+    agents.map(a => a.id),
+    requestedConcurrency,
+    id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
+  );
+  res.json({ respawned, skipped });
 });
 
 // Shared between the stored-endpoint routes (use the persisted token) and the

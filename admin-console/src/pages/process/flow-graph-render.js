@@ -267,6 +267,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     `<span style="display:flex;align-items:center;gap:4px;white-space:nowrap">` +
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
+  // Node-kind swatches (#1121): a miniature of the actual card border so the
+  // canvas's distinct node shapes (solid agent card vs dashed purple human
+  // role) are named, not just its edge colours. Borders mirror the card
+  // rendering above (agent: 1px solid --eb-border-default; human: 1px dashed
+  // #7c3aed on a tinted surface).
+  const _mkNodeSwatch = ({ border, bg, icon, label }) =>
+    `<span style="display:flex;align-items:center;gap:4px;white-space:nowrap">` +
+    `<span style="width:14px;height:10px;display:inline-block;border:${border};background:${bg};border-radius:3px;box-sizing:border-box;"></span>` +
+    `<span style="color:var(--eb-text-secondary)">${icon ? icon + ' ' : ''}${label}</span></span>`;
   const _legendToggleBtn = (collapsed) =>
     `<button data-legend-toggle title="${collapsed ? 'Show legend' : 'Hide legend'}" style="`
     + 'background:none;border:none;padding:0;cursor:pointer;font-size:11px;white-space:nowrap;'
@@ -284,9 +293,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         + `cursor:pointer;font-size:11px;line-height:16px;opacity:${off ? 0.35 : 1};`
         + `color:var(--eb-text-secondary);">${ACTOR_ICON[kind]}</button>`;
     }).join('');
+    const nodeSwatches = [
+      _mkNodeSwatch({ border: '1px solid var(--eb-border-default)', bg: 'var(--eb-bg-surface)', label: 'agent' }),
+      _mkNodeSwatch({ border: '1px dashed #7c3aed', bg: 'rgba(124,58,237,0.06)', icon: '👤', label: 'human role' }),
+    ].join('');
     legendEl.innerHTML =
       _legendToggleBtn(false) +
-      `<span style="color:var(--eb-text-muted);font-size:10px;margin-left:4px">Edges:</span>` +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin-left:4px">Nodes:</span>` +
+      nodeSwatches +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Edges:</span>` +
       keys.map(k => _mkSwatch(EDGE_STYLES[k])).join('') +
       `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Sources:</span>` +
       actorToggles;

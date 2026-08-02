@@ -333,7 +333,7 @@ export default function RoleTemplates() {
               </tr>
             ))}
             {templates.length === 0 && (
-              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No agent templates.</td></tr>
+              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No agent templates yet. Use “New template” above to define a reusable role that agents can be created from.</td></tr>
             )}
           </tbody>
         </table>

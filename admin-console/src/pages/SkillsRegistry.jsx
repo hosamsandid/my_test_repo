@@ -1919,7 +1919,7 @@ export default function SkillsRegistry() {
         columns={columns}
         data={filteredSkills}
         onRowClick={openSkill}
-        emptyText="No skills found."
+        emptyText="No skills yet. Use “+ New Skill” to create one, “Import skill” to load an existing bundle, or promote lessons from the Knowledge page."
         getRowKey={row => `${row.source}:${row.agentId ?? ''}:${row.teamId ?? ''}:${row.name}`}
       />
 

@@ -894,6 +894,25 @@ test('outcomesBlock: openPr/openIssue reuse the produce wording (once)', () => {
   assert.equal((block.match(/gh issue create/g) || []).length, 1);
 });
 
+test('outcomesBlock: setLabel options carry the verbatim-label contract (create, never substitute)', () => {
+  const block = outcomesBlock(EXACTLY_ONE);
+  assert.match(block, /apply each label \*\*verbatim as written above\*\*/);
+  assert.match(block, /gh label create/);
+  assert.match(block, /never a similar-sounding label/);
+});
+
+test('outcomesBlock: no verbatim-label contract when no option sets a label', () => {
+  const block = outcomesBlock({
+    mode: 'anyOf',
+    options: [
+      { id: 'ship', title: 'Ship it', actions: [{ type: 'openPr' }] },
+      { id: 'done', title: 'Done', actions: [{ type: 'none' }] },
+    ],
+  });
+  assert.doesNotMatch(block, /verbatim as written above/);
+  assert.doesNotMatch(block, /gh label create/);
+});
+
 test('outcomesBlock: a non-authored port projects nothing (legacy no-block, AC4)', () => {
   assert.equal(outcomesBlock(null), '');
   assert.equal(outcomesBlock(undefined), '');

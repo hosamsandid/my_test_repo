@@ -14,6 +14,30 @@ Agents are driven by triggers defined in a per-agent `triggers.json` file. The s
 
 Cron format: `Minute Hour Day Month Weekday`
 
+## One run at a time (workspace serialization)
+
+An agent has a **single workspace** — one clone of the repository — so it runs
+**one thing at a time** in it. A loop iteration, any trigger run (`cron`, `once`,
+`http`, `github-event`), and a chat/DM message all pass through one agent-wide
+gate; their execution windows never overlap, so they can't interleave or corrupt
+each other's git changes.
+
+- **While a loop is running, everything else waits.** All other triggers *and*
+  chat messages are held and only run once the **whole** loop has finished
+  (natural completion or a user **Stop**) — never between iterations. Deferred
+  `http`/`github-event` work stays durably queued (it is not dropped and not
+  double-delivered) and drains in arrival order (FIFO) when the loop ends.
+- **Stop always works.** Stopping a running loop is an out-of-band control, not a
+  queued chat message, so you are never locked out while a loop holds the
+  workspace.
+- **Chat backlog is bounded.** A long loop can hold the workspace for a while; if
+  many chat messages pile up, the newest are shed with a visible notice (resend
+  them) rather than flooding the room when the loop ends. The cap is
+  `AEE_MAX_QUEUED_CHAT` (default 8).
+- The per-trigger "skip if the previous run of *this* trigger is still in
+  progress" guard and the runaway backstop still apply on top of this. Maintenance
+  Mode still pauses firing and draining.
+
 ## Webhook Server
 
 The orchestrator exposes a second HTTP server on `HOOK_PORT` (default `4003`). External systems — CI pipelines, GitHub Actions, monitoring tools — can trigger agent prompts via an outbound POST to your LAN. No public ingress is required.

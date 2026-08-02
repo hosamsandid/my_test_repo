@@ -38,6 +38,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import deque, namedtuple
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -3614,6 +3615,16 @@ _MAX_TRIGGERED_SESSIONS = _int_env("AEE_MAX_TRIGGERED_SESSIONS", 4)
 _TRIGGERED_SPAWN_LIMIT = _int_env("AEE_TRIGGERED_SPAWN_LIMIT", 12)
 _TRIGGERED_SPAWN_WINDOW_SEC = _int_env("AEE_TRIGGERED_SPAWN_WINDOW_SEC", 300)
 
+# Agent-wide serialization (#1157): an agent has ONE workspace (a single repo
+# clone), so no two workspace-touching runs may execute at once. The backstop
+# above is a *ceiling* that deliberately permits parallelism — it is not a
+# mutex. This cap bounds how many chat/DM turns may WAIT behind the gate before
+# new ones are shed with a notice (a running loop can hold the workspace for a
+# long time, so an unbounded chat backlog would flood the room when it ends).
+# Triggers are self-bounded (one runner task per id; the pending drain pauses
+# while a loop holds the workspace) so only the chat side needs an explicit cap.
+_MAX_QUEUED_CHAT = _int_env("AEE_MAX_QUEUED_CHAT", 8)
+
 
 BackstopDecision = namedtuple(
     "BackstopDecision",
@@ -3698,6 +3709,96 @@ class TriggerBackstop:
             }
 
 
+class WorkspaceGate:
+    """Agent-wide serialization of workspace-touching runs (#1157).
+
+    An agent has exactly one workspace (one repo clone), so a loop iteration,
+    any trigger run (`cron`/`once`/`http`/`github-event`), and a chat/DM run
+    must never overlap in it — concurrent runs interleave git changes and
+    corrupt each other's work. Every such run passes through this single gate.
+
+    Semantics:
+      - **Mutual exclusion.** At most one holder runs at a time; everyone else
+        waits. Backed by ``asyncio.Lock``, whose waiter queue is FIFO, so work
+        is released in arrival order (AC6).
+      - **A loop holds the workspace across ALL its iterations.** ``acquire_loop``
+        is taken once by the loop runner and released (``release_loop``) only
+        when the whole loop ends (natural completion, stop, or cancellation —
+        the runner's ``finally`` releases on any exit). Individual iterations run
+        *inside* that hold via ``_gate_held`` on ``_execute`` and never
+        re-acquire, so queued work is never released between iterations (AC5).
+        ``loop_active`` lets the pending drain pause while a loop owns the
+        workspace.
+      - **Bounded chat queue.** ``chat_full`` sheds a chat turn when too many are
+        already waiting, so a long loop can't build an unbounded chat backlog
+        that floods the room on release (AC8). Trigger callers are self-bounded
+        (one runner task per id; the pending drain pauses under ``loop_active``)
+        and never shed.
+
+    The gate is a self-contained asyncio primitive with no I/O, so it is unit
+    tested directly (``WorkspaceGateTest``) rather than through ``_execute``,
+    which the test-harness guard short-circuits.
+    """
+
+    def __init__(self, *, max_chat_waiters: int = _MAX_QUEUED_CHAT):
+        self._lock = asyncio.Lock()
+        self._max_chat_waiters = max_chat_waiters
+        self._chat_waiters = 0
+        self._loop_depth = 0
+
+    @property
+    def loop_active(self) -> bool:
+        """True while a loop holds the workspace across its iterations."""
+        return self._loop_depth > 0
+
+    @property
+    def busy(self) -> bool:
+        return self._lock.locked()
+
+    def chat_full(self) -> bool:
+        """True when the chat wait-queue is at capacity and a new chat turn
+        should be shed rather than queued. Checked synchronously (no await)
+        before acquiring, so the count is a consistent snapshot."""
+        return self._chat_waiters >= self._max_chat_waiters
+
+    @asynccontextmanager
+    async def acquire(self):
+        """Serialize one workspace-touching run (trigger or non-loop caller)."""
+        await self._lock.acquire()
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    async def acquire_chat_turn(self) -> None:
+        """Take the workspace for one chat/DM turn, counting the turn against the
+        chat wait-queue while it is blocked so ``chat_full`` can shed excess
+        turns. Paired with ``release_chat_turn``. Manual (not a context manager)
+        so the chat handler keeps its existing ``try/except/finally`` shape."""
+        self._chat_waiters += 1
+        try:
+            await self._lock.acquire()
+        finally:
+            self._chat_waiters -= 1
+
+    def release_chat_turn(self) -> None:
+        self._lock.release()
+
+    async def acquire_loop(self) -> None:
+        """Take the workspace for a whole loop. Acquired once by the loop runner
+        and released with ``release_loop`` only when the loop ends — iterations
+        run inside this hold and must not re-acquire (they pass
+        ``_gate_held=True``). Paired manually rather than as a context manager so
+        the loop runner keeps its existing ``try/except CancelledError`` shape;
+        the runner guards the pairing with a ``held`` flag + ``finally``."""
+        await self._lock.acquire()
+        self._loop_depth += 1
+
+    def release_loop(self) -> None:
+        self._loop_depth -= 1
+        self._lock.release()
+
+
 class TriggerScheduler:
     """Schedules cron / once / http triggers for an agent container.
 
@@ -3718,12 +3819,18 @@ class TriggerScheduler:
     """
 
     def __init__(self, *, client, agent_id: str, user_id: str,
-                 send_formatted, blueprint_id: str | None):
+                 send_formatted, blueprint_id: str | None,
+                 workspace_gate: "WorkspaceGate | None" = None):
         self._client = client
         self._agent_id = agent_id
         self._user_id = user_id
         self._send_formatted = send_formatted
         self._blueprint_id = blueprint_id
+        # Agent-wide serialization gate (#1157). Shared with the chat/DM path so
+        # triggers and chat serialize against each other in the one workspace;
+        # constructed here when absent (e.g. in unit tests) so the scheduler is
+        # always self-consistent.
+        self._gate = workspace_gate if workspace_gate is not None else WorkspaceGate()
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
         self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
@@ -4289,7 +4396,16 @@ class TriggerScheduler:
         pending_feedback: str | None = None   # verifier feedback → next iteration
         last_verify_output = ""
         verify_failures = 0
+        held = False
         try:
+            # Reserve the single workspace for the WHOLE loop (#1157): acquired
+            # once here and released only in the `finally` below, so every
+            # iteration runs without any other trigger or chat turn interleaving
+            # — and the reservation is NOT dropped between iterations (AC5).
+            # Other work queues on the gate and drains in arrival order once the
+            # loop ends (natural completion, stop, or cancellation).
+            await self._gate.acquire_loop()
+            held = True
             while not self._shutdown_event.is_set():
                 # Maintenance Mode parity with cron (#504): pause inside the
                 # window, then run exactly one catch-up iteration once it ends.
@@ -4313,7 +4429,10 @@ class TriggerScheduler:
                 ctx = {"loopFeedback": pending_feedback} if pending_feedback else None
                 sink: dict = {}
                 try:
-                    await self._execute(trigger, ctx, loop_sink=sink)
+                    # `_gate_held=True`: the gate is already held for the whole
+                    # loop (above), so the iteration must not re-acquire it.
+                    await self._execute(trigger, ctx, loop_sink=sink,
+                                        _gate_held=True)
                 except Exception as exc:
                     print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
                           file=sys.stderr)
@@ -4367,7 +4486,15 @@ class TriggerScheduler:
         except asyncio.CancelledError:
             # Shutdown / trigger removed mid-flight — not a terminal state, so
             # no outcome DM and the loop is left to re-run on the next start.
+            # The `finally` still releases the workspace so queued work drains
+            # even when the loop is stopped by the user (#1157 AC4).
             return
+        finally:
+            # Release the workspace the instant the loop's work is done — before
+            # the outcome DM below (a plain post that doesn't touch the
+            # workspace), so queued triggers/chat can start immediately.
+            if held:
+                self._gate.release_loop()
 
         if not outcome:
             # Exited via the shutdown check, not the stop contract.
@@ -4649,10 +4776,16 @@ class TriggerScheduler:
         correlation_id = f"loop-verify:{token}"
         passed, output = False, "verifier did not run"
         try:
-            reply = await asyncio.to_thread(
-                _call_claude, prompt, room_id or "", correlation_id,
-                self._blueprint_id, CLAUDE_TIMEOUT_SEC,
-            )
+            # #1157: a verifier run is a real Claude pass over THIS agent's
+            # workspace, so it serializes on the same gate as every other run.
+            # (The pending drain that delivers this entry is already paused while
+            # a local loop owns the workspace, so this can only contend with a
+            # cron/once/chat run — never self-deadlock against our own loop.)
+            async with self._gate.acquire():
+                reply = await asyncio.to_thread(
+                    _call_claude, prompt, room_id or "", correlation_id,
+                    self._blueprint_id, CLAUDE_TIMEOUT_SEC,
+                )
             passed, output = _parse_verify_verdict(reply)
         except Exception as exc:
             output = f"verifier run failed: {exc}"
@@ -4741,7 +4874,16 @@ class TriggerScheduler:
                 # entries keep queuing on the orchestrator/pending-file side
                 # (unaffected by this check) but are left undrained here, so
                 # they're processed normally once maintenance ends.
-                if not await self._maintenance_active():
+                #
+                # #1157: while a loop holds the single workspace, leave the
+                # pending queue undrained too — http/github-event (and
+                # handover/digest/loop-verify) entries stay durably queued on
+                # the orchestrator/file side, retained and un-double-counted,
+                # and drain in order once the loop releases the workspace. This
+                # mirrors the maintenance skip and is why the trigger side needs
+                # no in-memory queue: the durable pending queue *is* the buffer.
+                if (not await self._maintenance_active()
+                        and not self._gate.loop_active):
                     await self._process_pending()
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending error: {exc}",
@@ -5153,7 +5295,8 @@ class TriggerScheduler:
         )
 
     async def _execute(self, trigger: dict, ctx: dict | None = None,
-                       loop_sink: dict | None = None) -> None:
+                       loop_sink: dict | None = None, *,
+                       _gate_held: bool = False) -> None:
         tid = trigger.get("id", "?")
         if _under_test_harness():
             # Safety net (#606): never spawn a real Claude run, post to Matrix,
@@ -5167,6 +5310,26 @@ class TriggerScheduler:
                 file=sys.stderr,
             )
             return
+        # Agent-wide serialization (#1157): every workspace-touching run passes
+        # through the one gate so no two overlap in the single clone. A loop
+        # iteration runs *inside* the loop's own hold (`_gate_held`) and must
+        # NOT re-acquire — re-acquiring would release the workspace between
+        # iterations and let queued work interleave. The backstop / `_running`
+        # guards are evaluated only once the gate is actually held (not while
+        # parked waiting), so a run queued behind a loop doesn't burn a
+        # concurrency slot for the whole wait.
+        if _gate_held:
+            await self._execute_guarded(trigger, ctx, loop_sink)
+            return
+        async with self._gate.acquire():
+            await self._execute_guarded(trigger, ctx, loop_sink)
+
+    async def _execute_guarded(self, trigger: dict, ctx: dict | None,
+                               loop_sink: dict | None) -> None:
+        """The workspace-touching body of ``_execute`` — runs only while the
+        serialization gate is held (by ``_execute`` for a non-loop caller, or by
+        the loop runner's ``acquire_loop`` for a loop iteration)."""
+        tid = trigger.get("id", "?")
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
@@ -5946,7 +6109,11 @@ async def run_dm_listener() -> None:
 
     # Member cache for DM detection.
     member_cache: dict[str, tuple[list[str], float]] = {}
-    processing = {"flag": False}  # mutable closure
+    # Agent-wide serialization gate (#1157). Constructed here — before the
+    # scheduler, and independent of it — so the chat/DM path always has one and
+    # so both paths share the *same* gate: chat turns queue behind a running
+    # loop or an in-flight trigger, and vice versa, in the one workspace.
+    workspace_gate = WorkspaceGate()
 
     async def joined_members(room_id: str) -> list[str]:
         cached = member_cache.get(room_id)
@@ -6021,14 +6188,36 @@ async def run_dm_listener() -> None:
         if not await is_dm_from_human(room_id, sender):
             return
 
-        if processing["flag"]:
-            print(f"[Runner:{agent_id}] Busy — dropping direct message", file=sys.stderr)
+        # #1157: a chat turn is a workspace-touching run, so it serializes on
+        # the same agent-wide gate as triggers and loops — it no longer runs
+        # concurrently with them in the one clone. While a loop (or another
+        # trigger/chat turn) holds the workspace this turn WAITS its turn rather
+        # than being dropped. But a loop can hold the workspace for a long time,
+        # so cap how many turns may queue: beyond the cap, shed the newest with
+        # a visible notice instead of growing an unbounded backlog that would
+        # flood the room when the loop ends (AC8). Out-of-band Stop is unaffected
+        # — it is a signal, not a queued chat message (AC10).
+        if workspace_gate.chat_full():
+            print(f"[Runner:{agent_id}] Busy — chat queue full, shedding message",
+                  file=sys.stderr)
+            try:
+                await send_formatted(
+                    room_id,
+                    "_(Ich bin gerade ausgelastet und habe schon mehrere Nachrichten "
+                    "in der Warteschlange. Bitte sende diese gleich noch einmal.)_",
+                )
+            except Exception:
+                pass
             return
-        processing["flag"] = True
 
         correlation_id = getattr(event, "event_id", None) or str(uuid.uuid4())
         print(f"[Runner:{agent_id}] Direct message ({len(body)} chars)...", file=sys.stderr)
 
+        # Queue behind whatever currently owns the workspace (a loop, a trigger,
+        # or an earlier chat turn); released in the `finally` below. This gate
+        # also serializes chat-vs-chat, so a per-turn busy flag is no longer
+        # needed.
+        await workspace_gate.acquire_chat_turn()
         try:
             _append_event(room_id, {
                 "type": "message.received",
@@ -6125,7 +6314,7 @@ async def run_dm_listener() -> None:
             except Exception:
                 pass
         finally:
-            processing["flag"] = False
+            workspace_gate.release_chat_turn()
 
     async def save_token_callback(response):
         if isinstance(response, SyncResponse) and response.next_batch:
@@ -6153,6 +6342,9 @@ async def run_dm_listener() -> None:
                 user_id=user_id,
                 send_formatted=send_formatted,
                 blueprint_id=blueprint_id,
+                # Share the one gate with the chat path (#1157) so triggers and
+                # chat serialize against each other in the single workspace.
+                workspace_gate=workspace_gate,
             )
             await scheduler.start()
         except Exception as exc:

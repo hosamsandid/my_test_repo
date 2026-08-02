@@ -1376,7 +1376,8 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
 
         ctxs = []
 
-        async def fake_execute(trig, ctx=None, loop_sink=None):
+        async def fake_execute(trig, ctx=None, loop_sink=None, **_kw):
+            # #1157: tolerate the loop runner's `_gate_held=True` kwarg.
             ctxs.append(ctx)
 
         with patch.object(scheduler, "_resolve_verify_plan", fake_verify_plan), \
@@ -3119,3 +3120,120 @@ class BuildScopedKnowledge(unittest.TestCase):
         e = self._e("f" * 12)  # no loadTriggers
         res = entrypoint.build_scoped_knowledge(prompt="anything jcl", entries=[e])
         self.assertEqual(res["includedIds"], [])
+
+
+class WorkspaceGateTest(unittest.IsolatedAsyncioTestCase):
+    """#1157: the agent-wide serialization gate. An agent has one workspace, so
+    a loop iteration, any trigger run, and a chat/DM turn must never overlap in
+    it. These assert the primitive directly (``_execute`` itself is guarded by
+    the #606 test-harness short-circuit, so it can't drive the gate under test).
+    """
+
+    async def test_mutual_exclusion_and_arrival_order(self):
+        # While one holder runs, everyone else waits; queued work then runs in
+        # arrival order (AC1 + AC6 FIFO).
+        gate = entrypoint.WorkspaceGate()
+        order = []
+        async with gate.acquire():
+            self.assertTrue(gate.busy)
+
+            async def worker(n):
+                async with gate.acquire():
+                    order.append(n)
+
+            tasks = []
+            for n in range(5):
+                tasks.append(asyncio.create_task(worker(n)))
+                await asyncio.sleep(0)  # let each enqueue on the lock in order
+            # The gate is held, so no queued worker has entered its section yet.
+            self.assertEqual(order, [])
+        await asyncio.gather(*tasks)
+        self.assertEqual(order, [0, 1, 2, 3, 4])
+
+    async def test_loop_holds_workspace_across_iterations(self):
+        # A loop holds the workspace for its WHOLE run: a trigger queued while
+        # the loop is active does not run between iterations, only after the loop
+        # releases (AC2 + AC5).
+        gate = entrypoint.WorkspaceGate()
+        self.assertFalse(gate.loop_active)
+        await gate.acquire_loop()
+        self.assertTrue(gate.loop_active)
+        self.assertTrue(gate.busy)
+
+        ran = []
+
+        async def queued_trigger():
+            async with gate.acquire():
+                ran.append("trigger")
+
+        t = asyncio.create_task(queued_trigger())
+        # Simulate several iterations running inside the hold (each would call
+        # `_execute(..., _gate_held=True)`, i.e. NOT re-acquire the gate).
+        for _ in range(3):
+            await asyncio.sleep(0)
+            self.assertEqual(ran, [], "queued work must not run between iterations")
+            self.assertTrue(gate.loop_active)
+        gate.release_loop()
+        self.assertFalse(gate.loop_active)
+        await t
+        self.assertEqual(ran, ["trigger"])
+
+    async def test_chat_waits_behind_a_trigger(self):
+        # chat-vs-trigger serialization (AC1/AC3): a chat turn queues behind an
+        # in-flight trigger rather than running concurrently.
+        gate = entrypoint.WorkspaceGate(max_chat_waiters=5)
+        ran = []
+
+        async def chat_turn():
+            await gate.acquire_chat_turn()
+            try:
+                ran.append("chat")
+            finally:
+                gate.release_chat_turn()
+
+        async with gate.acquire():  # a trigger owns the workspace
+            t = asyncio.create_task(chat_turn())
+            await asyncio.sleep(0)
+            self.assertEqual(ran, [], "chat must wait behind the trigger")
+        await t
+        self.assertEqual(ran, ["chat"])
+
+    async def test_chat_queue_is_bounded(self):
+        # AC8: once the chat wait-queue is at capacity, `chat_full()` reports it
+        # so the handler can shed the newest turn instead of growing unbounded.
+        gate = entrypoint.WorkspaceGate(max_chat_waiters=2)
+        self.assertFalse(gate.chat_full())
+        await gate.acquire_loop()  # hold the workspace so chat turns pile up
+
+        async def chat_turn():
+            await gate.acquire_chat_turn()
+            try:
+                pass
+            finally:
+                gate.release_chat_turn()
+
+        t1 = asyncio.create_task(chat_turn())
+        await asyncio.sleep(0)
+        self.assertFalse(gate.chat_full())  # 1 waiting
+        t2 = asyncio.create_task(chat_turn())
+        await asyncio.sleep(0)
+        self.assertTrue(gate.chat_full())   # 2 waiting == cap
+        gate.release_loop()
+        await asyncio.gather(t1, t2)
+        # Drained → the wait-queue is empty again.
+        self.assertFalse(gate.chat_full())
+
+    async def test_gate_released_on_exception(self):
+        # A crashing run must not wedge the workspace shut.
+        gate = entrypoint.WorkspaceGate()
+        with self.assertRaises(RuntimeError):
+            async with gate.acquire():
+                self.assertTrue(gate.busy)
+                raise RuntimeError("boom")
+        self.assertFalse(gate.busy)
+        async with gate.acquire():  # still acquirable
+            self.assertTrue(gate.busy)
+
+
+if __name__ == "__main__":
+    unittest.main()

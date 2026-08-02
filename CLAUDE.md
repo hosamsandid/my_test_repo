@@ -94,7 +94,7 @@ Static skills live in the workspace; **MCP servers** are how agents reach runtim
 
 ### Autonomous Agent Triggers
 
-Triggers live in a per-agent `/workspace/agents/<id>/triggers.json`; the scheduler syncs every 60s (`node-cron`). **Self-managed** (the agent can edit its own), **file-based sync**, **overlap protection** (a still-running trigger skips the next tick).
+Triggers live in a per-agent `/workspace/agents/<id>/triggers.json`; the scheduler syncs every 60s (`node-cron`). **Self-managed** (the agent can edit its own), **file-based sync**, **per-trigger overlap protection** (a still-running trigger skips the next tick), and **agent-wide serialization** (#1157): an agent has one workspace, so at most one workspace-touching run — a loop iteration, any trigger, or a chat/DM turn — executes at a time. All three paths pass through one `WorkspaceGate` (`agent-entrypoint.py`); while a loop runs it holds the workspace across **all** its iterations and every other trigger and chat message queues (FIFO) until the whole loop ends (completion or user Stop). The pending-drain pauses while a loop is active so `http`/`github-event` work stays durably queued; chat backlog is bounded (`AEE_MAX_QUEUED_CHAT`, default 8); Stop stays out-of-band.
 
 - `cron` (`cron`, 5-field) — recurring. `once` (`at`, ISO) — one-shot, auto-removed after execution.
 - `http` (`secret`, auto-gen) — fired by external HTTP POST (see Webhook Server).

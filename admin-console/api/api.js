@@ -6670,7 +6670,9 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
-            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            // Carry the owning team so the UI can deep-link the "share it" path
+            // into the (team-scoped) Knowledge page for this agent (#1144).
+            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });

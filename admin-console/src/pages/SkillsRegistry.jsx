@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router';
+import { useSearchParams, Link } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -856,7 +856,14 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         )}
         {isAgent && (
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Agent skills are read-only here and can't be moved to the global pool directly. To share one, lift it into a team pool first via the Knowledge page, then promote that team skill to global using Promote to global above — both steps write provenance and skill.json lineage.
+            This skill lives inside a single agent. It can&apos;t be shared directly — copy it to a team first, then promote that team skill to global.{' '}
+            <Link
+              to={skill.teamId ? `/knowledge?team=${encodeURIComponent(skill.teamId)}` : '/knowledge'}
+              style={{ color: 'var(--eb-accent-primary)', fontStyle: 'normal' }}
+            >
+              Open the Knowledge page{skill.teamId ? ' for this team' : ''} →
+            </Link>{' '}
+            to lift it into a team pool, then use Promote to global on the resulting team skill. Both steps write provenance and skill.json lineage.
           </span>
         )}
       </div>

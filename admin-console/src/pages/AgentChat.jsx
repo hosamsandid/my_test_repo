@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router';
 import { MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList, { buildGroups } from './agent-chat/AgentList';

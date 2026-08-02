@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { ArrowLeft, ExternalLink } from 'lucide-react';
 
 export default function SdlcCatalogPage() {

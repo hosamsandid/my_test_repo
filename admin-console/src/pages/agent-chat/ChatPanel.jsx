@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown } from 'lucide-react';
+import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
@@ -1071,7 +1072,7 @@ export default function ChatPanel({
           color: 'var(--eb-text-primary)',
           flexShrink: 0,
         }}>
-          This agent is disabled. Enable it in Agent Manager to chat.
+          This agent is disabled. Enable it in <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> to chat.
         </div>
       )}
 

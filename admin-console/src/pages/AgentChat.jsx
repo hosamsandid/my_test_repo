@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router';
 import { MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
@@ -560,7 +560,7 @@ export default function AgentChat() {
             }}>
               No agents available.
               <br />
-              Create one in <strong>Agent Manager</strong>.
+              Create one in <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
             </div>
           )}
 

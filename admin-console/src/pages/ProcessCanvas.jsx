@@ -1299,6 +1299,13 @@ const TOUCHPOINT_TEXT = {
     ? <><strong>{name}</strong> delivers <code>{t.name}</code> to a person</>
     : <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
 };
+// Friendly, action-oriented headings for the raw touchpoint types (#1127) —
+// "INJECTION/DECISION/DELIVERY" read as jargon; say what the person actually does.
+const TOUCHPOINT_HEADING = {
+  injection: 'Starts work',
+  decision: 'Approval / brake',
+  delivery: 'Receives output',
+};
 function HumanTouchpointsPanel({ touchpoints, nodes, onFocus }) {
   const [open, setOpen] = useState(false);
   if (!touchpoints || touchpoints.length === 0) return null;
@@ -1337,10 +1344,13 @@ function HumanTouchpointsPanel({ touchpoints, nodes, onFocus }) {
                 fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
               }}
             >
-              <span style={{
-                color: accent, fontSize: 'var(--eb-text-xs)',
-                fontWeight: 'var(--eb-font-medium)', textTransform: 'uppercase',
-              }}>{t.type}</span>
+              <span
+                title={t.type}
+                style={{
+                  color: accent, fontSize: 'var(--eb-text-xs)',
+                  fontWeight: 'var(--eb-font-medium)',
+                }}
+              >{TOUCHPOINT_HEADING[t.type] || t.type}</span>
               <div style={{ marginTop: 2, lineHeight: 1.4 }}>
                 {(TOUCHPOINT_TEXT[t.type] || TOUCHPOINT_TEXT.injection)(t, nameOf(t.agentId))}
               </div>

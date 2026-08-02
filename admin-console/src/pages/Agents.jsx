@@ -2465,8 +2465,37 @@ export default function Agents() {
           padding: 'var(--eb-space-8)', textAlign: 'center',
           background: 'var(--eb-bg-surface)', border: '1px dashed var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-lg)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--eb-space-4)',
         }}>
-          No agents yet. Click <strong>+ New Agent</strong> to create the first one.
+          <p style={{ margin: 0 }}>No agents yet. Start with one of the guided paths:</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', justifyContent: 'center' }}>
+            <Link
+              to="/quickstart"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
+                background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              Create a single agent
+            </Link>
+            <Link
+              to="/team-setup"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
+                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+                border: '1px solid var(--eb-border-default)',
+                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              Set up a team
+            </Link>
+          </div>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)' }}>
+            Prefer full control? <strong>+ New Agent</strong> above is the advanced path.
+          </p>
         </div>
       ) : (
         <>

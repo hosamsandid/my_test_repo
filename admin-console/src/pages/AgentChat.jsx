@@ -557,10 +557,35 @@ export default function AgentChat() {
               color: 'var(--eb-text-muted)',
               textAlign: 'center',
               lineHeight: 1.5,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 'var(--eb-space-3)',
             }}>
-              No agents available.
-              <br />
-              Create one in <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
+              <span>No agents yet. Get started:</span>
+              <Link
+                to="/quickstart"
+                style={{
+                  display: 'block', width: '100%', boxSizing: 'border-box',
+                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
+                  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                  fontWeight: 600, textDecoration: 'none',
+                }}
+              >
+                Create a single agent
+              </Link>
+              <Link
+                to="/team-setup"
+                style={{
+                  display: 'block', width: '100%', boxSizing: 'border-box',
+                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
+                  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+                  border: '1px solid var(--eb-border-default)',
+                  fontWeight: 600, textDecoration: 'none',
+                }}
+              >
+                Set up a team
+              </Link>
             </div>
           )}
 

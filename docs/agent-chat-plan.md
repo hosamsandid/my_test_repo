@@ -110,6 +110,13 @@ A lightweight 1:1 chat for talking to Matrix agents directly inside the Admin Co
 { "ts":"...", "type":"thinking",            "correlationId":"$evt:abc", "text":"..." }
 { "ts":"...", "type":"result",              "correlationId":"$evt:abc",
   "durationMs":12345, "tokens":{ "input":1200, "output":340 } }
+
+// A trigger firing. `triggerType` mirrors the trigger's `type`. A loop
+// iteration additionally carries its 1-based number + cap (#1155), so the log
+// renders it as "Loop · iteration N of M" and the composer can show live
+// progress; both fields are absent on non-loop firings.
+{ "ts":"...", "type":"trigger.fired",       "correlationId":"trigger:lp:...",
+  "triggerId":"lp", "triggerType":"loop", "loopIteration":3, "loopMaxIterations":25 }
 ```
 
 `correlationId` is the Matrix event ID of the user message that triggered this work — lets the UI highlight log entries belonging to a chat bubble.

@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight,
+  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 import { systemEventSummary, systemEventHasDetail } from './system-event.js';
 import { buildSystemInitView } from './system-init.js';
+import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -76,8 +77,10 @@ function colorForType(type) {
 export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseLeave }) {
   const [expanded, setExpanded] = useState(false);
   const type = event?.type || 'unknown';
-  const Icon = iconForType(type);
-  const iconColor = colorForType(type);
+  // A loop iteration reads as a loop, not a generic trigger (#1155 AC7).
+  const loopFired = isLoopFired(event);
+  const Icon = loopFired ? Repeat : iconForType(type);
+  const iconColor = loopFired ? 'var(--eb-status-warning)' : colorForType(type);
 
   // Tool-pair short-circuit: SessionLogPanel pre-merges adjacent
   // tool_use+tool_result into a single { kind: 'tool', toolUse, toolResult }
@@ -314,6 +317,23 @@ function Body({ event, expanded }) {
         </div>
       );
     case 'trigger.fired':
+      // A loop iteration is visually a loop and carries its number (#1155 AC7),
+      // instead of the bare "Trigger fired: <id>".
+      if (isLoopFired(event)) {
+        return (
+          <div style={baseStyle}>
+            <span style={{ color: 'var(--eb-status-warning)', fontWeight: 'var(--eb-font-semibold)' }}>
+              {loopFiredLabel(event)}
+            </span>
+            {' · '}
+            <code style={{
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+            }}>{event.triggerId || event.id || ''}</code>
+          </div>
+        );
+      }
       return (
         <div style={baseStyle}>
           Trigger fired: <code style={{

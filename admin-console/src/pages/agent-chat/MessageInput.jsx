@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Send, Paperclip, Loader2, Mic, Square, Repeat } from 'lucide-react';
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
+import LoopSummaryCard from './LoopSummaryCard';
 
 /**
  * Auto-resizing textarea with a send button and inline file attachments.
@@ -29,8 +30,10 @@ import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
  *        When provided, a loop control renders immediately left of the mic.
  * @param {boolean} [loopRunning]         true while a chat-launched loop runs
  * @param {boolean} [loopBusy]            true while a loop launch/stop is in flight
+ * @param {?object} [loopTrigger]         the running launched-loop trigger (full config)
+ * @param {?object} [loopProgress]        `{ iteration, maxIterations|null }` or null
  */
-export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false }) {
+export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null }) {
   const [value, setValue] = useState('');
   const [dragging, setDragging] = useState(false);
   const taRef = useRef(null);
@@ -172,6 +175,12 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     }}>
       {(voiceState === 'recording' || loopRunning) && (
         <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }'}</style>
+      )}
+      {/* Running-loop transparency (#1155): a collapsed summary the user can
+          expand to review the loop's prompt, stop contract, verifier and live
+          progress — reachable at the moment of stopping, without extra clicks. */}
+      {loopRunning && loopTrigger && (
+        <LoopSummaryCard trigger={loopTrigger} progress={loopProgress} />
       )}
       <div
         onDragEnter={handleDragEnter}

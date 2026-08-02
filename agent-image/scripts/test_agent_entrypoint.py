@@ -992,6 +992,23 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(maintenance_calls), 2)
         self.assertIn("lp", scheduler._loop_done)
 
+    async def test_loop_passes_iteration_counters_into_execute_ctx(self):
+        # #1155: each iteration hands its 1-based number and the cap to
+        # `_execute` via ctx, so the `trigger.fired` row is numbered and the
+        # composer can show live progress.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(maxIterations=3)  # no `until` → runs to cap
+        seen_ctx = []
+
+        async def fake_execute(trig, ctx=None, loop_sink=None):
+            seen_ctx.append(ctx)
+
+        with patch.object(scheduler, "_execute", AsyncMock(side_effect=fake_execute)), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual([c.get("loopIteration") for c in seen_ctx], [1, 2, 3])
+        self.assertTrue(all(c.get("loopMaxIterations") == 3 for c in seen_ctx))
+
     async def test_loop_shutdown_before_iteration_posts_no_dm(self):
         scheduler = self._scheduler()
         scheduler._shutdown_event.set()
@@ -1389,7 +1406,10 @@ class LoopVerifierGate(unittest.IsolatedAsyncioTestCase):
         # 3 iterations: fail, fail, pass→until green→done.
         self.assertEqual(len(ctxs), 3)
         # First iteration has no feedback; the next two carry the prior failure.
-        self.assertIsNone(ctxs[0])
+        # (ctx always carries the #1155 iteration counters, but no loopFeedback
+        # key on the first pass.)
+        self.assertNotIn("loopFeedback", ctxs[0])
+        self.assertEqual(ctxs[0]["loopIteration"], 1)
         self.assertIn("lint error A", ctxs[1]["loopFeedback"])
         self.assertIn("lint error B", ctxs[2]["loopFeedback"])
         body = scheduler._send_formatted.await_args.args[1]

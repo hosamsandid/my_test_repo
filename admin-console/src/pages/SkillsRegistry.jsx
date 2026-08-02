@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';

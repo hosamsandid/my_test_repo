@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
-import { anomalyView, summarize } from './flow-anomalies-view';
+import { anomalyView, summarize, classInfo } from './flow-anomalies-view';
 
 // Observe-only flow-anomaly panel (#959, concept §4.1/§4.3). Renders the
 // orchestrator's deterministic stall classification for a LIVE team: the sweep
@@ -82,13 +82,16 @@ export default function FlowAnomaliesPanel({ teamId, onClose, onData }) {
       {anomalies.length > 0 && (
         <>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 'var(--eb-space-3)' }}>
-            {Object.entries(summary.byClass).map(([cls, n]) => (
-              <span key={cls} style={{
-                fontSize: 11, padding: '2px 8px', borderRadius: 999,
-                background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-                color: 'var(--eb-text-secondary)',
-              }}>{cls} · {n}</span>
-            ))}
+            {Object.entries(summary.byClass).map(([cls, n]) => {
+              const info = classInfo(cls);
+              return (
+                <span key={cls} title={info.blurb || undefined} style={{
+                  fontSize: 11, padding: '2px 8px', borderRadius: 999,
+                  background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+                  color: 'var(--eb-text-secondary)', cursor: info.blurb ? 'help' : undefined,
+                }}>{info.title} · {n}</span>
+              );
+            })}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
             {anomalies.map((v, i) => <AnomalyRow key={i} v={v} />)}
@@ -113,7 +116,10 @@ function AnomalyRow({ v }) {
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 4 }}>
         <span style={{ width: 8, height: 8, borderRadius: 999, background: v.color, flexShrink: 0 }} />
-        <strong style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{v.title}</strong>
+        <strong
+          title={v.blurb || undefined}
+          style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', cursor: v.blurb ? 'help' : undefined }}
+        >{v.title}</strong>
         {v.age && <span style={{ fontSize: 11, color: 'var(--eb-text-secondary)' }}>· {v.age}</span>}
         <span style={{ flex: 1 }} />
         {v.objectRef && (
@@ -128,6 +134,15 @@ function AnomalyRow({ v }) {
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         {v.message}
       </div>
+      {v.blurb && v.blurb !== v.message && (
+        <div style={{
+          marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 6,
+          fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))', lineHeight: 1.5,
+        }}>
+          <Info size={12} style={{ flexShrink: 0, marginTop: 2 }} />
+          <span>{v.blurb}</span>
+        </div>
+      )}
       {(v.agentId || v.label) && (
         <div style={{ marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
           {v.agentId && <span>agent: <code>{v.agentId}</code></span>}

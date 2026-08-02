@@ -65,6 +65,10 @@ function anomalyView(a) {
     severity: a.severity || info.severity,
     color: severityColor(a.severity || info.severity),
     message: a.message || info.blurb,
+    // The generic one-sentence explanation of this anomaly *class*, always
+    // present so the row can show it as a subtitle even when the detector
+    // supplied its own instance-specific `message` (#1123).
+    blurb: info.blurb,
     label: a.label || null,
     objectRef: obj.number != null ? `${obj.kind === 'pr' ? 'PR' : 'issue'} #${obj.number}` : null,
     objectUrl: obj.url || null,

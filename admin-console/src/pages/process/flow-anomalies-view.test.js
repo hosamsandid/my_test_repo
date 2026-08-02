@@ -31,6 +31,18 @@ test('anomalyView labels a PR object as PR', () => {
   assert.equal(v.title, 'Output missing');
 });
 
+test('anomalyView always exposes the class blurb, even alongside an instance message', () => {
+  // Detector supplied its own message → message keeps it, blurb stays the class explanation.
+  const withMsg = anomalyView({ class: 'claim-stalled', message: 'issue #7 stalled 3h' });
+  assert.equal(withMsg.message, 'issue #7 stalled 3h');
+  assert.equal(withMsg.blurb, classInfo('claim-stalled').blurb);
+  assert.notEqual(withMsg.blurb, '');
+  // No detector message → message falls back to the blurb (row de-dupes the subtitle).
+  const noMsg = anomalyView({ class: 'gate-idle' });
+  assert.equal(noMsg.message, classInfo('gate-idle').blurb);
+  assert.equal(noMsg.blurb, noMsg.message);
+});
+
 test('formatAge renders minutes, hours, days', () => {
   assert.equal(formatAge(30 * 1000), 'just now');
   assert.equal(formatAge(5 * 60000), '5m');

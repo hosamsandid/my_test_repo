@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,

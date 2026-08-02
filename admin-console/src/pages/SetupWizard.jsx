@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import {
   Check, PlugZap, RefreshCw, Plus, X, ArrowRight, SkipForward,
   Copy, KeyRound, ClipboardPaste, ExternalLink, LogIn, ShieldAlert,

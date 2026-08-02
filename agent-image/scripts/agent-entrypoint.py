@@ -2625,6 +2625,13 @@ def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
     one PATCH, so there is no window in which neither label is set; `gh issue
     edit` accepts PR numbers too, so one code path covers both.
 
+    `gh issue edit` does not auto-create labels: adding a label that was never
+    defined in the repo fails the whole PATCH with `'<name>' not found`. Claim
+    labels (`<wake>:wip`) are derived, not authored, so nobody creates them up
+    front — on that specific failure the missing label is created and the swap
+    retried once. A lost create race (concurrent claimer) still retries, since
+    the label exists by then.
+
     Best-effort: returns False on any failure instead of raising, because
     claiming is observability and must never gate the start of a run. The catch
     is deliberately broad — this runs inside `asyncio.to_thread`, so anything
@@ -2635,13 +2642,30 @@ def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
               file=sys.stderr)
         return False
     what = f"{repo}#{number} -{remove} +{add}"
-    try:
-        proc = subprocess.run(
+
+    def _edit():
+        return subprocess.run(
             ["gh", "issue", "edit", str(number), "--repo", repo,
              "--remove-label", remove, "--add-label", add],
             capture_output=True, text=True, env={**os.environ},
             timeout=CLAIM_SWAP_TIMEOUT_SEC,
         )
+
+    try:
+        proc = _edit()
+        if proc.returncode != 0 and f"'{add}' not found" in (proc.stderr or ""):
+            create = subprocess.run(
+                ["gh", "label", "create", add, "--repo", repo,
+                 "--color", "FBCA04",
+                 "--description", "work in progress (auto-created claim label)"],
+                capture_output=True, text=True, env={**os.environ},
+                timeout=CLAIM_SWAP_TIMEOUT_SEC,
+            )
+            if create.returncode != 0:
+                print(f"[Runner] label create '{add}' in {repo} failed "
+                      f"(rc={create.returncode}): "
+                      f"{(create.stderr or '').strip()}", file=sys.stderr)
+            proc = _edit()
     except Exception as exc:
         print(f"[Runner] label swap {what} error: {exc}", file=sys.stderr)
         return False

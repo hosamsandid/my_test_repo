@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { Sparkles, X, Send, Loader2, Check, AlertTriangle, Boxes, RefreshCw } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { UNAUTHORIZED_EVENT } from '../../auth/AuthContext';

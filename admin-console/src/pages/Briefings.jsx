@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router';
 import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload, Sparkles } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';

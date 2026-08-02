@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';

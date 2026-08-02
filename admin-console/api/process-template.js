@@ -653,10 +653,12 @@ function outcomeActionClause(option, wiring) {
   const parts = [];
   let opensPr = false;
   let opensIssue = false;
+  let setsLabel = false;
   for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
     if (!a || typeof a !== 'object') continue;
     if (a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) {
       const label = a.label.trim();
+      setsLabel = true;
       const consumers = wiring && wiring.consumersByLabel && wiring.consumersByLabel[label];
       parts.push(consumers && consumers.length
         ? `apply label \`${label}\` — this wakes **${[...new Set(consumers)].join('**, **')}**`
@@ -670,7 +672,7 @@ function outcomeActionClause(option, wiring) {
   if (!parts.length) parts.push('set no label');
   let clause = parts.join(' and ');
   if (option && option.notify === 'dm') clause += '; report to the user in the DM';
-  return { clause, opensPr, opensIssue };
+  return { clause, opensPr, opensIssue, setsLabel };
 }
 
 // Generate the marker-delimited `## Outcomes` block for an authored outcomes
@@ -686,11 +688,13 @@ function outcomesBlock(outcomes, wiring) {
   const items = [];
   let anyPr = false;
   let anyIssue = false;
+  let anyLabel = false;
   outcomes.options.forEach((o, i) => {
     const title = (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : o.id;
-    const { clause, opensPr, opensIssue } = outcomeActionClause(o, wiring);
+    const { clause, opensPr, opensIssue, setsLabel } = outcomeActionClause(o, wiring);
     anyPr = anyPr || opensPr;
     anyIssue = anyIssue || opensIssue;
+    anyLabel = anyLabel || setsLabel;
     const when = (typeof o.when === 'string' && o.when.trim()) ? ` when: ${o.when.trim()}.` : '';
     let line = `${i + 1}. **${title}** —${when} Then: ${clause}.`;
     // Reviewer context (#1007): the person reviewing this option's artifact,
@@ -719,6 +723,14 @@ function outcomesBlock(outcomes, wiring) {
   const body = [lead, '', ...items];
   if (exactlyOne) {
     body.push('', 'Never apply more than one of these labels in a single run.');
+  }
+  // Verbatim-label contract: downstream listeners match the exact string, so a
+  // "close enough" label that already exists in the repo wakes nobody. Without
+  // this an agent hitting `gh`'s "'<label>' not found" error tends to fall
+  // back to a similar-sounding existing label instead of creating the right
+  // one — which silently breaks the flow.
+  if (anyLabel) {
+    body.push('', 'Outcome labels are exact contracts: apply each label **verbatim as written above**, never a similar-sounding label that happens to exist in the repository. If the label does not exist yet, create it first (`gh label create "<label>" --color FBCA04 --description "flow outcome label"`), then apply it — downstream listeners match the exact string, so a near-miss label wakes nobody.');
   }
   // Flow-wide gate prohibition (#1007, §4.8 known gap): whenever the flow
   // contains human gates this agent could plausibly touch, the prohibition is

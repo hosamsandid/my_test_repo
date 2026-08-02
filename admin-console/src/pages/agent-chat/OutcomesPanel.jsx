@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { RefreshCw, AlertCircle, Loader2, ArrowRight, Target, GitPullRequest, CircleDot, Tag, Ban, MessageSquare } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import {

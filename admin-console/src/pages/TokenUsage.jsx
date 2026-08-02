@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';

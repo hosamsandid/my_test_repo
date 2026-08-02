@@ -2923,7 +2923,9 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
 
 
 class GhSwapLabels(unittest.TestCase):
-    """`_gh_swap_labels` shells out to `gh` once and never raises."""
+    """`_gh_swap_labels` shells out to `gh` and never raises; a swap that
+    fails because the claim label was never created in the repo auto-creates
+    it and retries once."""
 
     ENV = {"GH_TOKEN": "t"}
 
@@ -2944,6 +2946,50 @@ class GhSwapLabels(unittest.TestCase):
                 patch.object(entrypoint.subprocess, "run", return_value=proc):
             self.assertFalse(
                 entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_missing_claim_label_is_created_and_swap_retried(self):
+        edit_fail = unittest.mock.Mock(
+            returncode=1,
+            stderr="failed to update https://github.com/acme/repo/issues/957: "
+                   "'ready:wip' not found")
+        create_ok = unittest.mock.Mock(returncode=0, stderr="")
+        edit_ok = unittest.mock.Mock(returncode=0, stderr="")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=[edit_fail, create_ok, edit_ok]) as run:
+            self.assertTrue(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args_list[1].args[0][:4],
+                         ["gh", "label", "create", "ready:wip"])
+        self.assertEqual(run.call_args_list[2].args[0],
+                         run.call_args_list[0].args[0])
+
+    def test_lost_create_race_still_retries_the_swap(self):
+        # A concurrent claimer created the label first: `gh label create`
+        # fails, but the label exists now — the retried edit succeeds.
+        edit_fail = unittest.mock.Mock(
+            returncode=1, stderr="'ready:wip' not found")
+        create_fail = unittest.mock.Mock(
+            returncode=1, stderr="label already exists")
+        edit_ok = unittest.mock.Mock(returncode=0, stderr="")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=[edit_fail, create_fail, edit_ok]):
+            self.assertTrue(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+
+    def test_other_failures_do_not_trigger_a_create(self):
+        # `'<other>' not found` (not the added label) or any unrelated error
+        # must not create anything — one edit call, False.
+        edit_fail = unittest.mock.Mock(
+            returncode=1, stderr="'ready' not found")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             return_value=edit_fail) as run:
+            self.assertFalse(
+                entrypoint._gh_swap_labels("acme/repo", 957, "ready", "ready:wip"))
+        self.assertEqual(run.call_count, 1)
 
     def test_subprocess_error_returns_false(self):
         with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \

@@ -1,4 +1,6 @@
 import React, { useMemo } from 'react';
+import { Link } from 'react-router';
+import { buildRows, driftLineageHref } from './skill-picker-rows.js';
 
 // SkillPicker v2 (#633): a grant-aware picker over the two-tier skill pool.
 // `skills` are the objects from GET /api/skills[?teamId=] — each carries
@@ -8,62 +10,35 @@ import React, { useMemo } from 'react';
 // says so. Pre-selected names that resolve to no known skill (AC4 — a grant
 // carried through from before the picker existed, or a stale entry) are still
 // rendered, checked, and flagged, never silently dropped.
+//
+// Row-building, the shadow/unknown/drift flags and the drift → Lineage deep-link
+// target live in the pure ./skill-picker-rows.js module (node:test-covered).
 
-function tierOf(source) {
-  return source === 'team' ? 'team' : 'global';
-}
-
-// Collapse the skill list to one row per name (team-first) and append any
-// selected-but-unknown names as flagged rows so an existing grant renders
-// unchanged (AC4). Rows are sorted by name for a stable list; unknown rows
-// follow the known ones.
-function buildRows(skills, selected) {
-  const byName = new Map();
-  for (const s of skills) {
-    if (!s || typeof s.name !== 'string') continue;
-    const tier = tierOf(s.source);
-    const cur = byName.get(s.name) || { name: s.name, tiers: {} };
-    cur.tiers[tier] = s;
-    byName.set(s.name, cur);
+function Chip({ children, title, bg, fg, border, to }) {
+  const style = {
+    fontSize: 'var(--eb-text-xs)',
+    lineHeight: 1.5,
+    padding: '0 6px',
+    borderRadius: 'var(--eb-radius-sm)',
+    background: bg || 'var(--eb-bg-app)',
+    color: fg || 'var(--eb-text-muted)',
+    border: border || '1px solid var(--eb-border-default)',
+    whiteSpace: 'nowrap',
+    flex: '0 0 auto',
+  };
+  // A `to` chip is a real link (e.g. the drift chip → Lineage view). It sits
+  // inside the row's <label>, so stop the click from also toggling the grant.
+  if (to) {
+    return (
+      <Link
+        to={to}
+        title={title}
+        onClick={e => e.stopPropagation()}
+        style={{ ...style, textDecoration: 'underline', cursor: 'pointer' }}
+      >{children}</Link>
+    );
   }
-  const rows = [];
-  for (const { name, tiers } of byName.values()) {
-    const effective = tiers.team || tiers.global;
-    rows.push({
-      name,
-      tier: tiers.team ? 'team' : 'global',
-      shadowsGlobal: !!(tiers.team && tiers.global),
-      description: effective.description || '',
-      version: Number.isInteger(effective.version) ? effective.version : null,
-      drift: effective.drift && effective.drift !== 'in-sync' ? effective.drift : null,
-      unknown: false,
-    });
-  }
-  rows.sort((a, b) => a.name.localeCompare(b.name));
-  const known = new Set(rows.map(r => r.name));
-  for (const name of selected) {
-    if (typeof name === 'string' && name && !known.has(name)) {
-      rows.push({ name, unknown: true });
-      known.add(name);
-    }
-  }
-  return rows;
-}
-
-function Chip({ children, title, bg, fg, border }) {
-  return (
-    <span title={title} style={{
-      fontSize: 'var(--eb-text-xs)',
-      lineHeight: 1.5,
-      padding: '0 6px',
-      borderRadius: 'var(--eb-radius-sm)',
-      background: bg || 'var(--eb-bg-app)',
-      color: fg || 'var(--eb-text-muted)',
-      border: border || '1px solid var(--eb-border-default)',
-      whiteSpace: 'nowrap',
-      flex: '0 0 auto',
-    }}>{children}</span>
-  );
+  return <span title={title} style={style}>{children}</span>;
 }
 
 export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
@@ -84,18 +59,31 @@ export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 'var(--eb-space-1)',
-      maxHeight: 260,
-      overflowY: 'auto',
-      border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-md)',
-      padding: 'var(--eb-space-2)',
-      background: 'var(--eb-bg-elevated)',
-    }}>
-      {rows.map(row => (
+    <div>
+      {/* Global-vs-Team primer (#1143) so the row chips read on their own. */}
+      <p style={{
+        margin: '0 0 var(--eb-space-1)',
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-text-muted)',
+        lineHeight: 1.5,
+      }}>
+        A <strong>Global</strong> skill is shared with everyone; a{' '}
+        <strong>Team</strong> skill is scoped to one team and, when it shares a name,
+        shadows the global one. A <em>drift</em> chip means a copy no longer matches
+        its source — click it to open the Lineage view.
+      </p>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--eb-space-1)',
+        maxHeight: 260,
+        overflowY: 'auto',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-2)',
+        background: 'var(--eb-bg-elevated)',
+      }}>
+        {rows.map(row => (
         <label
           key={row.name}
           title={row.description || undefined}
@@ -141,7 +129,8 @@ export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
               {row.version != null && <Chip title="Skill manifest version">{`v${row.version}`}</Chip>}
               {row.drift && (
                 <Chip
-                  title="This copy has drifted from its source skill."
+                  to={driftLineageHref(row)}
+                  title="This copy has drifted from its source skill — open the Lineage/Drift view."
                   bg="var(--eb-status-warning-bg, #fff7ed)"
                   fg="var(--eb-status-warning, #b45309)"
                 >{`drift: ${row.drift}`}</Chip>
@@ -160,7 +149,8 @@ export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
             </>
           )}
         </label>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }

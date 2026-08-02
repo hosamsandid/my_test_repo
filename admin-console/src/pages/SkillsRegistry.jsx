@@ -515,15 +515,18 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   // the latter three fed by one lineage fetch. The fetch is lazy — it only fires
   // once the operator leaves the Content tab, so browsing files stays a single
   // round-trip.
-  const [tab, setTab] = useState('content');
+  // A deep link may open straight on a detail tab (#1143 — drift chips land on
+  // Lineage). `skill.initialTab` is validated against VIEWER_TABS before use.
+  const initialTab = VIEWER_TABS.some(t => t.id === skill.initialTab) ? skill.initialTab : 'content';
+  const [tab, setTab] = useState(initialTab);
   const [lineage, setLineage] = useState(null);
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageError, setLineageError] = useState(null);
 
   useEffect(() => {
     // Reset when the selected skill changes; the fetch effect below refills it
-    // when a lineage tab is active.
-    setTab('content');
+    // when a lineage tab is active. Honours a deep-linked initial tab.
+    setTab(initialTab);
     setLineage(null);
     setLineageError(null);
     setLineageLoading(false);
@@ -1585,9 +1588,11 @@ export default function SkillsRegistry() {
   }, []);
 
   // Deep link (#774 AC5): `?skill=<name>&tier=<pool|team|agent>&team=<id>`
-  // preselects the tier filter and opens the named skill's viewer. The param is
-  // left on the URL, so a full-page reload of the link restores the same view.
-  // A consumed-ref guards against reopening the panel after the user closes it
+  // preselects the tier filter and opens the named skill's viewer. An optional
+  // `&tab=<content|versions|lineage|usage>` (#1143) opens straight on that detail
+  // tab — the drift chips in SkillPicker use `tab=lineage`. The param is left on
+  // the URL, so a full-page reload of the link restores the same view. A
+  // consumed-ref guards against reopening the panel after the user closes it
   // (the URL still carries the param until the next navigation/reload).
   const [searchParams] = useSearchParams();
   const deepLinkConsumed = useRef(false);
@@ -1598,6 +1603,8 @@ export default function SkillsRegistry() {
     if (!allSkills) return; // wait until the list has loaded to resolve the copy
     const tier = searchParams.get('tier') || 'pool';
     const team = searchParams.get('team') || undefined;
+    const tabParam = searchParams.get('tab');
+    const initialTab = VIEWER_TABS.some(t => t.id === tabParam) ? tabParam : undefined;
     const source = TIER_TO_SOURCE[tier] || 'pool';
     if (TIER_TO_FILTER[tier]) setFilter(TIER_TO_FILTER[tier]);
     // Prefer the real row from the loaded list (carries teamId/agentId), else a
@@ -1605,9 +1612,12 @@ export default function SkillsRegistry() {
     const match = (allSkills || []).find(s =>
       s.name === skillName && s.source === source &&
       (source !== 'team' || !team || s.teamId === team));
-    setSelectedSkill(match || {
-      name: skillName, source,
-      ...(source === 'team' && team ? { teamId: team } : {}),
+    setSelectedSkill({
+      ...(match || {
+        name: skillName, source,
+        ...(source === 'team' && team ? { teamId: team } : {}),
+      }),
+      ...(initialTab ? { initialTab } : {}),
     });
     deepLinkConsumed.current = true;
   }, [allSkills, searchParams]);
@@ -1805,6 +1815,15 @@ export default function SkillsRegistry() {
           A team skill can be copied to the global pool with <em>Promote to global</em> or relocated with <em>Move to global</em>.{' '}
           <strong>Agent</strong> skills are read-only — lift one into a team pool first, then promote that team skill to global; use{' '}
           <em>Install into agent</em> to push a global skill into a running agent. Click a skill to browse its files.
+        </p>
+        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
+          <strong>How skills reach an agent.</strong> Three distinct things sit behind the verbs on this page:{' '}
+          a <strong>grant</strong> is the <em>list of names</em> an agent (or its team) is entitled to;{' '}
+          <strong>seeding / activation</strong> is the moment those files are actually <em>copied</em> into the agent's
+          workspace (it reads them on its next message); and <em>Install into agent</em> is a <strong>one-off push</strong> of
+          a single skill — handy for a quick trial, but a later workspace reset re-seeds only the granted skills, so an
+          install that isn't also granted won't survive. Everything else (<em>Promote</em>, <em>Move</em>, <em>Adopt</em>,{' '}
+          <em>Distill</em>, <em>Merge</em>) just moves a skill between the Global and Team tiers above.
         </p>
       </div>
 

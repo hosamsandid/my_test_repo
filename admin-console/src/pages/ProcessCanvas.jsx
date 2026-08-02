@@ -582,6 +582,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag} disabled={!!proposal}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
+              title="Create a real team and its agents from this design"
               disabled={!!proposal || !draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
         )}
@@ -596,7 +597,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               Anomalies
             </ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
-            <ToolbarButton onClick={editAsDraft} icon={Boxes}>Edit as draft</ToolbarButton>
+            <ToolbarButton onClick={editAsDraft} icon={Boxes}
+              title="Make an editable copy of this team you can revise before applying — the live team is untouched until you materialize it">Edit as draft</ToolbarButton>
           </>
         )}
         <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}>Export</ToolbarButton>
@@ -619,7 +621,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
           }}>Continue as draft</button>
-          <button onClick={() => setMaterializeOpen(true)} style={{
+          <button onClick={() => setMaterializeOpen(true)}
+            title="Create a real team and its agents from this imported design" style={{
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
@@ -1212,9 +1215,9 @@ function AddRoleDialog({ onClose, onCreate }) {
   );
 }
 
-function ToolbarButton({ onClick, icon: Icon, disabled, children, badge }) {
+function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title }) {
   return (
-    <button onClick={onClick} disabled={disabled} style={{
+    <button onClick={onClick} disabled={disabled} title={title} style={{
       display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
       background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
       border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',

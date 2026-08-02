@@ -716,6 +716,15 @@ function HowItWorks({ onDismiss }) {
       </div>
 
       <div style={{ marginTop: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
+        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>Once you have a lot of knowledge, you can shape it.</strong>{' '}
+        Group your lessons into <strong>domains</strong> (the themes they cluster into, e.g. “JCL conversion”),
+        then <strong>consolidate</strong> the many small skills in a domain into a single <strong>playbook</strong>,
+        or <strong>distill</strong> one skill to dedupe and tighten it. These are optional power tools —
+        the panels below explain each in place, and nothing is applied without your review.
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
         <ShieldCheck size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
         <strong style={{ color: 'var(--eb-text-secondary)' }}>You stay in control.</strong>{' '}
         Each team has an <strong>Autonomy</strong> dial (how much happens without you), an optional
@@ -1185,6 +1194,16 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
       )}
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {/* One-line primer so a first-time operator knows what a "domain" is (#1146) */}
+          <div style={{
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55,
+            marginBottom: 'var(--eb-space-2)',
+          }}>
+            A <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> is a theme this team’s
+            lessons cluster into — e.g. “JCL conversion” or “DB2 migration”. Domains are the buckets that
+            Consolidation folds the team’s many small skills into, so the routing stays tidy as knowledge grows.
+            Changing them is always a human decision — seed the defaults, or let AI propose a set you review first.
+          </div>
           {/* Toolbar: LLM bootstrap + merge action */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
             <button disabled={busy} onClick={runBootstrap}
@@ -1511,6 +1530,15 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
 
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {/* One-line primer: what consolidation produces and why (#1146) */}
+          <div style={{
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55,
+            marginBottom: 'var(--eb-space-2)',
+          }}>
+            Consolidation collapses the many small skills that belong to one <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> into
+            a single <strong style={{ color: 'var(--eb-text-secondary)' }}>playbook</strong> — one well-structured skill
+            replacing a scattered set. You review every playbook before it is applied; nothing is merged automatically.
+          </div>
           {!hasDomains ? (
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
               Confirm this team’s domains first (Domains panel above). Consolidation folds the existing

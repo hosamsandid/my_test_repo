@@ -1114,6 +1114,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxWidth: 900, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--eb-border-default)' }}>
               <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Distill “{skill.name}”</strong>
+              {/* Primer so a first-time operator knows what distillation does (#1146) */}
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginTop: 4 }}>
+                Distilling re-synthesises the whole skill from everything that has accumulated in it — deduping
+                repeats, restructuring, and re-abstracting — so it stays tight as agents keep adding to it.
+                It only rewrites the wording; you review the diff below and apply it yourself.
+              </div>
             </div>
             <div style={{ padding: 16, overflow: 'auto', flex: 1 }}>
               {distill.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Re-synthesising the skill…</div>}

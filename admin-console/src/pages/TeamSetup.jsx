@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
   Loader2, Circle, XCircle,
-  Layers, RefreshCw,
+  Layers, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SkillPicker from '../components/SkillPicker';
@@ -607,9 +607,50 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
             <BundleRolesSummary bundle={form.processBundle} teamId={form.teamId} />
           </div>
         )}
+        {/* #1129: the Review step showed the wiring but never stated the
+            consequence of "Create team" — that it provisions live containers
+            which immediately start watching the repo and act on issues/PRs on
+            their own. Make that explicit before the irreversible-feeling click. */}
+        <GoLiveNotice
+          agentCount={(form.processBundle?.roles || []).length}
+          repoLabel={repoSlug(form.repoUrl) || form.repoUrl}
+        />
         <ErrorBox message={error} />
       </div>
     </Card>
+  );
+}
+
+// "What happens next" callout on the Review step (#1129): creating the team
+// spins up autonomous agents that go live at once. Uses the repo convention for
+// warning text-on-bg (color:--eb-status-warning on --eb-status-warning-bg; no
+// -text token exists — see Agents.jsx truncation banner).
+function GoLiveNotice({ agentCount, repoLabel }) {
+  const agents = agentCount > 0 ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : 'the team’s agents';
+  return (
+    <div style={{
+      display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
+      padding: 'var(--eb-space-3) var(--eb-space-4)',
+      background: 'var(--eb-status-warning-bg)',
+      border: '1px solid var(--eb-status-warning)',
+      borderRadius: 'var(--eb-radius-md)',
+      fontSize: 'var(--eb-text-sm)',
+      color: 'var(--eb-text-secondary)',
+      lineHeight: 1.6,
+    }}>
+      <AlertTriangle size={18} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+      <div>
+        <div style={{ fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', marginBottom: 'var(--eb-space-1)' }}>
+          What happens next
+        </div>
+        <p style={{ margin: 0 }}>
+          Creating the team provisions {agents} that go live immediately and begin watching{' '}
+          {repoLabel ? <code>{repoLabel}</code> : 'the bound repository'} for issues and pull requests,
+          acting autonomously from that moment. You can disable individual agents afterwards on the{' '}
+          <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> page.
+        </p>
+      </div>
+    </div>
   );
 }
 

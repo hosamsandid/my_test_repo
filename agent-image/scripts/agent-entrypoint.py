@@ -4455,8 +4455,26 @@ class TriggerScheduler:
                 # attempt still consumes the maxIterations budget (the guardrail
                 # against an unbounded loop stays intact even if verify never
                 # passes).
+                #
+                # An `agent` verifier runs in a *different* container and returns
+                # its verdict through the store, so nothing surfaces in this
+                # agent's chat during the round-trip — post a note so the loop
+                # doesn't look stalled between iterations (transparency).
+                gate_mode = verify_plan.get("mode")
+                if gate_mode == "agent":
+                    await self._post_loop_note(
+                        trigger,
+                        f"🔍 Iteration {iterations} complete — independent "
+                        f"verification by `{verify_plan.get('agentId')}` is "
+                        f"running …")
                 verified, verify_output = await self._run_loop_verify(
                     verify_plan, trigger, iterations)
+                if gate_mode == "agent":
+                    await self._post_loop_note(
+                        trigger,
+                        f"✅ Verification of iteration {iterations} passed."
+                        if verified else
+                        f"❌ Verification of iteration {iterations} did not pass.")
                 if not verified:
                     verify_failures += 1
                     last_verify_output = verify_output
@@ -4622,6 +4640,28 @@ class TriggerScheduler:
         print(f"[Runner:{self._agent_id}] loop {tid} → {outcome} "
               f"after {iterations} iteration(s)", file=sys.stderr)
 
+    async def _post_loop_note(self, trigger: dict, body: str) -> None:
+        """Best-effort progress DM into the loop's room (transparency).
+
+        Makes the otherwise-silent phases *between* iterations legible in chat —
+        chiefly the independent verifier gate, which runs a full pass in a
+        *different* agent's container, so without a note the loop looks stalled
+        for the round-trip. A missing/invalid room just skips the note.
+        """
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(room_id, body)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop note post failed: {exc}",
+                  file=sys.stderr)
+
     # -- loop verifier gate (#933) -------------------------------------------
 
     async def _resolve_verify_plan(self, trigger: dict) -> dict:
@@ -4774,6 +4814,23 @@ class TriggerScheduler:
             else None
         )
         correlation_id = f"loop-verify:{token}"
+
+        # Transparency: the verifier runs a full Claude pass here, but the
+        # verdict travels back through the store — not Matrix — so historically
+        # nothing showed up in the verifier's OWN chat. Post a start + result
+        # note into the verifier's own room (never the requester's) so the
+        # review is legible where it actually happens.
+        if room_id:
+            try:
+                await self._send_formatted(
+                    room_id,
+                    f"🔍 **Loop verification** requested by `{requester}` "
+                    f"(loop `{loop_id}`, iteration {iteration}) — reviewing the "
+                    f"work …")
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] loop-verify start note failed: "
+                      f"{exc}", file=sys.stderr)
+
         passed, output = False, "verifier did not run"
         try:
             # #1157: a verifier run is a real Claude pass over THIS agent's
@@ -4791,6 +4848,17 @@ class TriggerScheduler:
             output = f"verifier run failed: {exc}"
             print(f"[Runner:{self._agent_id}] loop-verify Claude call failed: {exc}",
                   file=sys.stderr)
+
+        if room_id:
+            badge = ("✅ **Verification verdict: PASS**" if passed
+                     else "❌ **Verification verdict: FAIL**")
+            snippet = (output or "").strip()
+            try:
+                await self._send_formatted(
+                    room_id, f"{badge}\n\n{snippet}" if snippet else badge)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] loop-verify result note failed: "
+                      f"{exc}", file=sys.stderr)
 
         # Post the verdict back to the rendezvous — always, so the loop never
         # blocks waiting on a crashed verifier (fail-closed above).

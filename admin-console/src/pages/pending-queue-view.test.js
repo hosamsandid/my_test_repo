@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { kindLabel, entryDetail, totalPending } from './pending-queue-view.js';
+import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view.js';
 
 test('kindLabel maps known kinds and falls back gracefully', () => {
   assert.equal(kindLabel('github'), 'GitHub event');
@@ -8,6 +8,15 @@ test('kindLabel maps known kinds and falls back gracefully', () => {
   assert.equal(kindLabel('bp-event-batch'), 'Briefing-pack event');
   assert.equal(kindLabel('weird'), 'weird');
   assert.equal(kindLabel(undefined), 'Unknown');
+});
+
+test('kindTooltip explains known kinds and falls back to the unknown copy', () => {
+  assert.match(kindTooltip('github'), /waiting to be delivered/);
+  assert.match(kindTooltip('github-digest'), /lossless summary/);
+  assert.match(kindTooltip('throttle-warning'), /rate cap/);
+  const fallback = kindTooltip('unknown');
+  assert.equal(kindTooltip('weird'), fallback);
+  assert.equal(kindTooltip(undefined), fallback);
 });
 
 test('entryDetail summarises a GitHub entry with all fields', () => {

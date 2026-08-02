@@ -4,7 +4,8 @@ import { RefreshCw, Trash2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
-import { kindLabel, entryDetail, totalPending } from './pending-queue-view';
+import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
+import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -59,6 +60,7 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
   // else stays a plain, non-interactive status chip.
+  const explain = outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
   if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
     return (
@@ -66,7 +68,7 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
         type="button"
         onClick={() => onOpenSession(outcome.agentId, correlationId)}
         aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
-        title={`Open the session this event triggered for ${outcome.agentName || outcome.agentId}`}
+        title={`${explain}\n\nClick to open the session this event triggered.`}
         style={{
           ...baseStyle,
           cursor: 'pointer',
@@ -80,24 +82,71 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
     );
   }
 
-  return <span style={baseStyle}>{label}</span>;
+  return <span style={baseStyle} title={explain || undefined}>{label}</span>;
 }
 
 function NoMatchBadge() {
   return (
-    <span style={{
-      display: 'inline-block',
-      padding: '1px 6px',
-      borderRadius: 'var(--eb-radius-full)',
-      fontSize: 'var(--eb-text-xs)',
-      fontWeight: 'var(--eb-font-medium)',
-      background: 'var(--eb-status-warning-bg)',
-      color: 'var(--eb-status-warning)',
-      border: '1px solid var(--eb-status-warning)',
-      whiteSpace: 'nowrap',
-    }}>
+    <span
+      title={noMatchTooltip()}
+      style={{
+        display: 'inline-block',
+        padding: '1px 6px',
+        borderRadius: 'var(--eb-radius-full)',
+        fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-medium)',
+        background: 'var(--eb-status-warning-bg)',
+        color: 'var(--eb-status-warning)',
+        border: '1px solid var(--eb-status-warning)',
+        whiteSpace: 'nowrap',
+        cursor: 'help',
+      }}
+    >
       nobody's listening
     </span>
+  );
+}
+
+/* ── Collapsible legend for the outcome chips (AC #1) ──────────────────
+   Native <details> so no extra deps; each row pairs the chip wording with a
+   plain meaning + a "what to do" line sourced from event-outcome-view.js. */
+function OutcomeLegend() {
+  return (
+    <details style={{
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-lg)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)',
+      background: 'var(--eb-bg-elevated)',
+    }}>
+      <summary style={{
+        cursor: 'pointer',
+        fontSize: 'var(--eb-text-sm)',
+        fontWeight: 'var(--eb-font-medium)',
+        color: 'var(--eb-text-secondary)',
+      }}>
+        What do these outcomes mean?
+      </summary>
+      <div style={{
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        marginTop: 'var(--eb-space-3)',
+      }}>
+        {OUTCOME_LEGEND.map(e => (
+          <div key={e.key} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <span style={{
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-primary)',
+              fontWeight: 'var(--eb-font-medium)',
+            }}>
+              {e.term}
+            </span>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+              {e.meaning} <span style={{ color: 'var(--eb-text-muted, var(--eb-text-secondary))' }}>{e.whatToDo}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -148,6 +197,11 @@ function ProcessedEventsView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        History of events the poller already processed — each was delivered, folded into a digest, dropped by a
+        protection layer, or matched no trigger. Read-only; nothing here can be acted on.
+      </p>
+      <OutcomeLegend />
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
         <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
@@ -176,17 +230,21 @@ function ProcessedEventsView() {
 /* ── Kind badge for a pending entry ────────────────────────────────── */
 function KindBadge({ kind }) {
   return (
-    <span style={{
-      display: 'inline-block',
-      padding: '1px 6px',
-      borderRadius: 'var(--eb-radius-full)',
-      fontSize: 'var(--eb-text-xs)',
-      fontWeight: 'var(--eb-font-medium)',
-      background: 'var(--eb-bg-elevated)',
-      color: 'var(--eb-text-secondary)',
-      border: '1px solid var(--eb-border-default)',
-      whiteSpace: 'nowrap',
-    }}>
+    <span
+      title={kindTooltip(kind)}
+      style={{
+        display: 'inline-block',
+        padding: '1px 6px',
+        borderRadius: 'var(--eb-radius-full)',
+        fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-medium)',
+        background: 'var(--eb-bg-elevated)',
+        color: 'var(--eb-text-secondary)',
+        border: '1px solid var(--eb-border-default)',
+        whiteSpace: 'nowrap',
+        cursor: 'help',
+      }}
+    >
       {kindLabel(kind)}
     </span>
   );
@@ -289,6 +347,10 @@ function PendingQueueView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        Events accepted but not yet delivered to their agent. The queue drains every few seconds; a backlog only
+        builds up during Maintenance Mode or while an agent is busy. Cancel an entry to stop it before it fires.
+      </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
         <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
@@ -332,9 +394,16 @@ export default function GithubEventLog() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        GitHub Event Log
-      </h1>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+          GitHub Event Log
+        </h1>
+        <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          What the GitHub poller saw and what happened to each event — purely observational.
+          <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Processed events</strong> is the history;
+          <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Pending queue</strong> is the actionable backlog waiting to be delivered.
+        </p>
+      </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-1)', borderBottom: '1px solid var(--eb-border-default)' }}>
         {TABS.map(t => (

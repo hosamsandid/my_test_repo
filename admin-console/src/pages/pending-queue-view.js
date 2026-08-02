@@ -19,6 +19,24 @@ export function kindLabel(kind) {
   return KIND_LABELS[kind] || kind || 'Unknown';
 }
 
+// One-line "what is this" tooltip for each pending-queue entry kind (#1149).
+// Surfaced as the KindBadge `title` so an operator can tell a normal digest
+// from a throttle warning without leaving the page.
+const KIND_TOOLTIPS = {
+  github: 'A GitHub event waiting to be delivered to this agent — it drains within seconds unless maintenance mode is active.',
+  'github-digest': 'A burst of GitHub events on one conversation, folded into a single lossless summary wake.',
+  'throttle-warning': "A heads-up that this agent's per-conversation rate cap was hit and further events were dropped.",
+  'bp-event-batch': 'A Briefing-Pack change (revised / completed / input-changed) routed to this agent.',
+  'session-reset': "A queued request to reset this room's Claude session.",
+  'session-set': 'A queued request to resume a specific Claude session in this room.',
+  trigger: 'A queued trigger invocation waiting to run.',
+  unknown: 'An unrecognised queue entry.',
+};
+
+export function kindTooltip(kind) {
+  return KIND_TOOLTIPS[kind] || KIND_TOOLTIPS.unknown;
+}
+
 // Compact one-line detail string for the entry's kind-specific fields. Returns
 // '' when there is nothing extra to show (kept out of the cell entirely).
 export function entryDetail(entry) {

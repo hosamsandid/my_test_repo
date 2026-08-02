@@ -87,6 +87,30 @@ function EditableDraftTitle({ name, onRename }) {
   );
 }
 
+// Mode pill (#1125): live-team and draft canvases were visually near-identical,
+// yet a live edit re-derives triggers on running agents at once. This badge
+// makes the current mode unmistakable in the toolbar. `live` = amber (edits hit
+// production), `draft` = blue (safe sandbox).
+function ModePill({ tone, icon: Icon, title, children }) {
+  const live = tone === 'live';
+  return (
+    <span
+      title={title}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'help',
+        padding: '2px 8px', borderRadius: 'var(--eb-radius-full)',
+        fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)',
+        background: live ? 'var(--eb-status-warning-bg)' : 'var(--eb-status-info-bg)',
+        color: live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)',
+        border: `1px solid ${live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)'}`,
+      }}
+    >
+      {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
+      {children}
+    </span>
+  );
+}
+
 // Process graph panel (#330) — data-driven view of the agent orchestration:
 // which agent reacts to which label, in what order. Embedded into the Flows
 // view; the scope (a team id or 'draft:<id>') is supplied by the
@@ -569,6 +593,16 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'wrap', minWidth: 0 }}>
+        {/* Mode pill (#1125): live-team and draft canvases looked almost
+            identical, yet a live edit re-derives triggers on running agents
+            immediately. Badge the mode explicitly. Imported/Copilot previews
+            carry their own banners below, so suppress the pill for them. */}
+        {!imported && !proposal && isTeamScope && (
+          <ModePill tone="live" icon={Activity} title="You are editing a live team — changes apply to running agents immediately.">Live team</ModePill>
+        )}
+        {!imported && !proposal && isDraft && (
+          <ModePill tone="draft" icon={Pencil} title="You are editing a draft copy — nothing is applied until you materialize it.">Draft</ModePill>
+        )}
         {isDraft && draftBundle && (
           <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
         )}
@@ -640,6 +674,25 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       )}
       {importError && (
         <div style={{ marginBottom: 'var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{importError}</div>
+      )}
+
+      {/* Live-mode warning (#1125): the toolbar controls for a live team look
+          like a normal editor, but port and structural edits re-derive triggers
+          on the running agents at once (reconcileTeamDataFlow /
+          reconcileTeamGithubChannels). Spell that out so nobody edits
+          production unaware. Suppressed while an imported or Copilot preview is
+          on screen (those are read-only and carry their own banner). */}
+      {isTeamScope && !imported && !proposal && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <AlertTriangle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
+            <strong>Live team.</strong> Edits apply to running agents immediately — port and structural changes re-derive triggers on save. To try changes safely, use <strong>Edit as draft</strong>.
+          </span>
+        </div>
       )}
 
       {/* Copilot-proposal banner (#1069) — the pendingImport-style preview

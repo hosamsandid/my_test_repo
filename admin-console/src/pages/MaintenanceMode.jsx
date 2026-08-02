@@ -173,6 +173,9 @@ export default function MaintenanceMode() {
                 <div style={{ fontSize: 'var(--eb-text-2xl, 28px)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
                   {formatDuration(remainingSec)}
                 </div>
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                  Wind-down window for in-flight sessions — it does not end maintenance mode on its own. Scheduled triggers stay suppressed and events keep queuing until you end it below.
+                </div>
                 {remainingSec === 0 && (
                   <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                     Grace period has elapsed. Maintenance mode stays active until ended below.
@@ -223,6 +226,22 @@ export default function MaintenanceMode() {
                 >
                   minutes
                 </span>
+              </div>
+
+              <div style={{
+                background: 'var(--eb-bg-app)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-3)',
+              }}>
+                <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-2)' }}>
+                  While active
+                </div>
+                <ul style={{ margin: 0, paddingLeft: '1.1em', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
+                  <li>Scheduled (cron / once) triggers won't fire — exactly one catch-up run happens after you end it.</li>
+                  <li>HTTP and GitHub events keep queuing and drain once you end it — they aren't dropped.</li>
+                  <li>The grace period is the wind-down window for sessions still in flight; nothing is force-stopped.</li>
+                </ul>
               </div>
 
               {formError && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</span>}

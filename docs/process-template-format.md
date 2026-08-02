@@ -19,12 +19,14 @@ that still carry `emits` are lifted transparently on read.)
 |---|---|---|
 | Export | Process Canvas → **Export** | `GET /api/process/template?team=<id>` or `?templates=1` |
 | Preview (render) | Process Canvas → **Import** | `POST /api/process/graph` `{ processTemplate }` |
-| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate }` |
+| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix? }` |
 
 `POST /api/teams` accepts the bundle under `processTemplate` (or the equivalent
 `customRoles` pseudo-template array). Inline roles are materialised by the same
 env → team → members pipeline (with rollback) the Team-Setup wizard uses; each
 role's `{{vars}}` and the target repo are applied per member.
+
+**`labelSuffix` (optional, `[a-z0-9]{1,8}`).** When two or more teams share one GitHub repository, their label-based hand-offs would collide. Pass a short suffix (e.g. `"abc1"`) to stamp every label token — trigger `labelFilter`, channel `label`, `setLabel` outcome actions, bundle label registry, and prompt text — before any agents are created. `GET /api/teams/suggest-suffix` returns a random 4-char suggestion. In extend mode the suffix must match the stored one (400 on mismatch). Warnings are returned for any label mention in prompt text that could not be stamped automatically (`suffixWarnings` in the stream response). Omit when the team is the sole tenant on its repository.
 
 ## Schema (`processTemplateVersion: 1`)
 

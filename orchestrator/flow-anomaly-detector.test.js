@@ -7,6 +7,8 @@ const {
   buildFlowModel,
   detectFlowAnomalies,
   claimLabelFor,
+  CLAIM_SUFFIX,
+  COMPLETED_SUFFIX,
   DEFAULT_THRESHOLDS,
 } = require('./flow-anomaly-detector');
 
@@ -180,6 +182,24 @@ test('claim-stalled suppressed when there is branch/PR activity', () => {
   ] };
   const { anomalies } = detectFlowAnomalies({ model: MODEL, github, sessions: {}, now: NOW });
   assert.equal(anomalies.length, 0);
+});
+
+test('#1163: a `ready:completed` ticket is done, never flagged claim-stalled', () => {
+  // The success mirror marks a finished claimed run `<wake>:completed`. That is
+  // a terminal marker, not an active claim — a finished-but-quiet run must not
+  // be mistaken for a stalled one even long past T2.
+  const github = { objects: [
+    { kind: 'issue', number: 13, url: 'u', state: 'open',
+      createdAt: hoursAgo(5), updatedAt: hoursAgo(3),
+      labels: [{ name: 'ready:completed', appliedAt: hoursAgo(3) }] },
+  ] };
+  const { anomalies } = detectFlowAnomalies({ model: MODEL, github, sessions: {}, now: NOW });
+  assert.equal(anomalies.length, 0);
+});
+
+test('#1163: COMPLETED_SUFFIX does not satisfy the :wip claim test', () => {
+  assert.equal('ready:completed'.endsWith(CLAIM_SUFFIX), false);
+  assert.equal(COMPLETED_SUFFIX, ':completed');
 });
 
 test('output-missing: Merger ran on PR #949 but it never merged / advanced (the #949 dead-end)', () => {

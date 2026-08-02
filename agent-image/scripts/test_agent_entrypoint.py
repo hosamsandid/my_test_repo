@@ -2822,8 +2822,9 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
         append_mock = unittest.mock.Mock()
         await self._run(scheduler, call_mock, swap_mock, append_mock,
                         self._trigger(), self._ctx())
-        # The swap precedes the LLM call, and is the only one (no rollback).
-        self.assertEqual([e[0] for e in order], ["swap", "claude"])
+        # The claim swap precedes the LLM call; the completion swap follows it
+        # (no rollback on success).
+        self.assertEqual([e[0] for e in order], ["swap", "claude", "swap"])
         self.assertEqual(order[0][1:], ("acme/repo", 957, "ready", "ready:wip"))
         rows = self._rows(append_mock, "trigger.claimed")
         self.assertEqual(len(rows), 1)
@@ -2857,6 +2858,8 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
                         self._trigger(claim=False), self._ctx())
         swap_mock.assert_not_called()
         self.assertEqual(self._rows(append_mock, "trigger.claimed"), [])
+        # No claim was applied, so the completion step does nothing (AC-2).
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
 
     async def test_swap_failure_does_not_block_the_run(self):
         # Claiming is observability, never a start gate.
@@ -2869,6 +2872,10 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
         call_mock.assert_called_once()
         scheduler._send_formatted.assert_awaited_once()
         self.assertFalse(self._rows(append_mock, "trigger.claimed")[0]["ok"])
+        # The initial swap failed, so `claimed` stayed False — the completion
+        # step is skipped, the only swap attempt was the claim (AC-2).
+        swap_mock.assert_called_once()
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
 
     async def test_rollback_on_double_failure_restores_the_wake_label(self):
         scheduler = self._scheduler()
@@ -2915,7 +2922,8 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("claimRolledBack", content["io.aee.triggerFailure"])
 
     async def test_no_rollback_on_single_transient_failure(self):
-        # The retry succeeded, so the claim legitimately stays on the issue.
+        # The retry succeeded, so the run completed — the claim is swapped to
+        # `:completed`, never rolled back.
         scheduler = self._scheduler()
         err = subprocess.CalledProcessError(1, "claude")
         swap_mock = unittest.mock.Mock(return_value=True)
@@ -2923,7 +2931,10 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
         append_mock = unittest.mock.Mock()
         await self._run(scheduler, call_mock, swap_mock, append_mock,
                         self._trigger(), self._ctx())
-        swap_mock.assert_called_once()
+        # Claim, then completion — no rollback swap in between.
+        self.assertEqual(swap_mock.call_count, 2)
+        self.assertEqual(swap_mock.call_args_list[1].args[:4],
+                         ("acme/repo", 957, "ready:wip", "ready:completed"))
         self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
 
     async def test_no_rollback_on_user_abort(self):
@@ -2940,7 +2951,65 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
                             self._trigger(), self._ctx())
         swap_mock.assert_called_once()
         self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        # A user abort is not a successful completion (AC-5): it raises out of
+        # the invoke loop, so the claim stays `:wip` — never marked `:completed`.
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
         scheduler._client.room_send.assert_not_awaited()
+
+    async def test_successful_claimed_run_marks_completed(self):
+        # AC-1/3/6/8: a claimed run that completes swaps `<wake>:wip` ->
+        # `<wake>:completed` on the same object and logs the transition.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("done", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        # Claim first, completion last (no rollback).
+        self.assertEqual(swap_mock.call_count, 2)
+        self.assertEqual(swap_mock.call_args_list[1].args[:4],
+                         ("acme/repo", 957, "ready:wip", "ready:completed"))
+        # The completed label is auto-created green, not the `:wip` amber.
+        self.assertEqual(swap_mock.call_args_list[1].args[4],
+                         entrypoint.CLAIM_COMPLETED_COLOR)
+        self.assertEqual(self._rows(append_mock, "trigger.claim-rolled-back"), [])
+        rows = self._rows(append_mock, "trigger.claim-completed")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            (rows[0]["ok"], rows[0]["removed"], rows[0]["added"],
+             rows[0]["repo"], rows[0]["number"], rows[0]["triggerId"]),
+            (True, "ready:wip", "ready:completed", "acme/repo", 957, "t1"))
+
+    async def test_pass_result_still_marks_completed(self):
+        # AC-1 edge: a `[PASS]` reply is a successful run — nothing is posted,
+        # but the claim is still completed (the lifecycle tracks the run).
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("[PASS]", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        scheduler._send_formatted.assert_not_awaited()
+        rows = self._rows(append_mock, "trigger.claim-completed")
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["ok"])
+        self.assertEqual(swap_mock.call_args_list[1].args[:4],
+                         ("acme/repo", 957, "ready:wip", "ready:completed"))
+
+    async def test_completion_swap_failure_does_not_block_the_result(self):
+        # AC-4: marking completed is best-effort — a failed swap is logged
+        # (`ok: False`) and never gates posting the result.
+        scheduler = self._scheduler()
+        # Claim succeeds, completion swap fails.
+        swap_mock = unittest.mock.Mock(side_effect=[True, False])
+        call_mock = unittest.mock.Mock(return_value=("done", None))
+        append_mock = unittest.mock.Mock()
+        await self._run(scheduler, call_mock, swap_mock, append_mock,
+                        self._trigger(), self._ctx())
+        scheduler._send_formatted.assert_awaited_once()
+        rows = self._rows(append_mock, "trigger.claim-completed")
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["ok"])
 
 
 class GhSwapLabels(unittest.TestCase):
@@ -2985,6 +3054,28 @@ class GhSwapLabels(unittest.TestCase):
                          ["gh", "label", "create", "ready:wip"])
         self.assertEqual(run.call_args_list[2].args[0],
                          run.call_args_list[0].args[0])
+        # Default create color is the `:wip` amber.
+        self.assertIn("FBCA04", run.call_args_list[1].args[0])
+
+    def test_completed_label_auto_created_with_its_own_color(self):
+        # The completion swap (#1163) paints a missing `:completed` label green,
+        # distinct from the `:wip` amber, via the create_color/description args.
+        edit_fail = unittest.mock.Mock(
+            returncode=1, stderr="'ready:completed' not found")
+        create_ok = unittest.mock.Mock(returncode=0, stderr="")
+        edit_ok = unittest.mock.Mock(returncode=0, stderr="")
+        with patch.dict(entrypoint.os.environ, self.ENV, clear=False), \
+                patch.object(entrypoint.subprocess, "run",
+                             side_effect=[edit_fail, create_ok, edit_ok]) as run:
+            self.assertTrue(entrypoint._gh_swap_labels(
+                "acme/repo", 957, "ready:wip", "ready:completed",
+                entrypoint.CLAIM_COMPLETED_COLOR,
+                entrypoint.CLAIM_COMPLETED_LABEL_DESC))
+        create_argv = run.call_args_list[1].args[0]
+        self.assertEqual(create_argv[:4],
+                         ["gh", "label", "create", "ready:completed"])
+        self.assertIn(entrypoint.CLAIM_COMPLETED_COLOR, create_argv)
+        self.assertNotIn("FBCA04", create_argv)
 
     def test_lost_create_race_still_retries_the_swap(self):
         # A concurrent claimer created the label first: `gh label create`

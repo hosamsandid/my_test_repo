@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -1043,6 +1043,14 @@ test('deriveClaim follows the <wakeLabel>:wip convention', () => {
   assert.deepEqual(deriveClaim('ready'), { remove: 'ready', add: 'ready:wip' });
   assert.deepEqual(deriveClaim('  ready-2  '), { remove: 'ready-2', add: 'ready-2:wip' });
   assert.equal(claimLabelFor('ready'), `ready${CLAIM_SUFFIX}`);
+});
+
+test('#1163: completedLabelFor derives the <wakeLabel>:completed success mirror', () => {
+  assert.equal(COMPLETED_SUFFIX, ':completed');
+  assert.equal(completedLabelFor('ready'), `ready${COMPLETED_SUFFIX}`);
+  assert.equal(completedLabelFor('ready'), 'ready:completed');
+  // Distinct from the `:wip` claim label, so the two states never collide.
+  assert.notEqual(completedLabelFor('ready'), claimLabelFor('ready'));
 });
 
 test('deriveClaim returns null where there is nothing to claim', () => {

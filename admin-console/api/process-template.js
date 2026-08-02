@@ -94,6 +94,18 @@ function claimLabelFor(wakeLabel) {
   return `${wakeLabel}${CLAIM_SUFFIX}`;
 }
 
+// The success mirror `<wakeLabel>:completed` (#1163) — the runtime swaps
+// `<wake>:wip` for it when a claimed run finishes, so "done" is a visibly
+// distinct third state. Never authored (runtime-derived only, like `:wip`); this
+// constant/helper keep the convention's third location in sync with
+// `CLAIM_COMPLETED_SUFFIX` in agent-entrypoint.py and flow-anomaly-detector.js.
+const COMPLETED_SUFFIX = ':completed';
+
+// The completed label a given wake label maps to.
+function completedLabelFor(wakeLabel) {
+  return `${wakeLabel}${COMPLETED_SUFFIX}`;
+}
+
 /**
  * Derive the `claim` field for a label listener, or null when the trigger is not
  * claimable. Pure — the single source of truth for the convention, shared by the
@@ -1341,8 +1353,9 @@ module.exports = {
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
-  // Claim labels (#958)
+  // Claim labels (#958) + success mirror (#1163)
   deriveClaim, claimLabelFor, claimError, rawTriggerError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
+  completedLabelFor, COMPLETED_SUFFIX,
   // Chat-launched loops (#1020)
   launchedLoopConflict,
 };

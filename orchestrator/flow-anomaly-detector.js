@@ -39,6 +39,14 @@ function claimLabelFor(wakeLabel) {
   return `${wakeLabel}${CLAIM_SUFFIX}`;
 }
 
+// The success mirror `<wake>:completed` (#1163): a claimed run that finishes
+// swaps `<wake>:wip` for this terminal marker. It is NOT an active claim — a
+// `:completed` ticket has done its work, so it must never register as a wake or
+// claim label here, otherwise a finished-but-quiet run would be falsely flagged
+// `claim-stalled` after T₂. A DOCUMENTED MIRROR of `CLAIM_COMPLETED_SUFFIX` in
+// `agent-image/scripts/agent-entrypoint.py` and process-template.js.
+const COMPLETED_SUFFIX = ':completed';
+
 // Threshold defaults (concept §4.1). Overridable per team; the ratios matter
 // more than the absolutes — a wake should claim within minutes, a claim should
 // show branch/PR activity within hours, a human gate is measured in a day.
@@ -132,6 +140,13 @@ function buildFlowModel(members, options = {}) {
       if (t.enabled === false) continue;
       const label = str(t.labelFilter);
       if (!label) continue; // raw event listener — no wake label to reason about
+
+      if (label.endsWith(COMPLETED_SUFFIX)) {
+        // A `<wake>:completed` marker is a terminal done-state, never a wake or
+        // claim to reason about (#1163) — a listener never waits on it, and
+        // treating it as a wake would derive a bogus `<wake>:completed:wip`.
+        continue;
+      }
 
       if (label.endsWith(CLAIM_SUFFIX)) {
         // A listener that waits on a claim label itself — record the consumer so
@@ -481,6 +496,7 @@ module.exports = {
   buildFlowModel,
   detectFlowAnomalies,
   CLAIM_SUFFIX,
+  COMPLETED_SUFFIX,
   claimLabelFor,
   DEFAULT_THRESHOLDS,
   CLASS_SEVERITY,

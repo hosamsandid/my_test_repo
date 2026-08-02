@@ -70,9 +70,10 @@ modes now separate cleanly:
 
 | Observation on GitHub | Meaning | Safe reaction |
 |---|---|---|
-| wake label old, no claim label | wake never arrived / run never started | re-trigger (toggle label) |
-| claim label old, no branch/PR/commit activity | run died after claiming (#902) | retry or escalate |
-| neither label, no PR | agent finished without emitting its outgoing label (#949) | Layer-3 diagnosis |
+| wake label set (`ready`), no claim label | wake never arrived / run never started | re-trigger (toggle label) |
+| claim label set (`ready:wip`), no branch/PR/commit activity | run died after claiming (#902) | retry or escalate |
+| completed label set (`ready:completed`) | claimed run finished successfully (#1163) | none — done |
+| no wake/claim/completed label, no PR | agent finished without emitting its outgoing label (#949) | Layer-3 diagnosis |
 
 Side benefits: the label transition is the missing **delivery ack**, and a
 duplicate wake sees the claim label instead of the wake label and can trivially
@@ -112,10 +113,27 @@ fresh run. The failure-notice DM is still sent, so a repeatedly-crashing run
 stays visible; the conversation throttle (5 events/h per issue) is the natural
 runaway brake for a crash loop, and the backstop (#611) caps concurrency.
 
+### 3.3.1 Completion on success — the symmetric forward swap (#1163)
+
+Rollback is only half the lifecycle. Without a success counterpart the claim
+label is never cleared on a *successful* run either, so a finished ticket keeps
+`:wip` forever and is indistinguishable from a run that died mid-work — the
+three-state indicator collapses back to two. So on a run that reaches **normal
+completion** (result posted, `[PASS]`, or empty-after-harvest — the claim
+lifecycle tracks the run, not whether a message was posted) the runner swaps the
+claim **forward**: `<wake>:wip` → `<wake>:completed`, the mirror of the failure
+rollback. `<wake>:completed` is a fourth derived label, auto-created green when
+missing (distinct from the `:wip` amber) and best-effort like every claim edit —
+a failed completion swap is logged and never gates the result. A run that failed
+both attempts (rolled back) or was **user-aborted** (stays `:wip`) is never
+marked completed. Nobody subscribes to `<wake>:completed`, so the re-emitted
+`labeled` event starts no chain; the anomaly detector treats it as terminal, not
+an active claim, so a finished-but-quiet ticket is never flagged `claim-stalled`.
+
 ### 3.4 Naming and derivation
 
 Derive claim names, don't author them: `<wakeLabel>:wip` (`ready:wip`,
-`ready-2:wip`). This keeps parallel chains distinct automatically and stays
+`ready-2:wip`) and its success mirror `<wakeLabel>:completed` (#1163). This keeps parallel chains distinct automatically and stays
 orthogonal to the team-label-suffix concept (#902's subject). Derived triggers
 (`reconcileTeamGithubChannels` / `expandGithubChannels` /
 `expandDataFlowSteps`) can generate the `claim` field **by convention** for

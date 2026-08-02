@@ -2620,7 +2620,10 @@ def _claim_plan(trigger: dict, gh: dict | None) -> dict | None:
             "remove": remove.strip(), "add": add.strip()}
 
 
-def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
+def _gh_swap_labels(repo: str, number: int, remove: str, add: str,
+                    create_color: str = "FBCA04",
+                    create_description: str = "work in progress "
+                    "(auto-created claim label)") -> bool:
     """Swap one label for another on an issue/PR via the `gh` CLI (the
     spawn-time PAT is already in the container env). A single `gh issue edit` is
     one PATCH, so there is no window in which neither label is set; `gh issue
@@ -2628,10 +2631,11 @@ def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
 
     `gh issue edit` does not auto-create labels: adding a label that was never
     defined in the repo fails the whole PATCH with `'<name>' not found`. Claim
-    labels (`<wake>:wip`) are derived, not authored, so nobody creates them up
-    front — on that specific failure the missing label is created and the swap
-    retried once. A lost create race (concurrent claimer) still retries, since
-    the label exists by then.
+    labels (`<wake>:wip`, `<wake>:completed`) are derived, not authored, so
+    nobody creates them up front — on that specific failure the missing label is
+    created (`create_color`/`create_description` let the completion swap paint
+    its `:completed` label green) and the swap retried once. A lost create race
+    (concurrent claimer) still retries, since the label exists by then.
 
     Best-effort: returns False on any failure instead of raising, because
     claiming is observability and must never gate the start of a run. The catch
@@ -2657,8 +2661,8 @@ def _gh_swap_labels(repo: str, number: int, remove: str, add: str) -> bool:
         if proc.returncode != 0 and f"'{add}' not found" in (proc.stderr or ""):
             create = subprocess.run(
                 ["gh", "label", "create", add, "--repo", repo,
-                 "--color", "FBCA04",
-                 "--description", "work in progress (auto-created claim label)"],
+                 "--color", create_color,
+                 "--description", create_description],
                 capture_output=True, text=True, env={**os.environ},
                 timeout=CLAIM_SWAP_TIMEOUT_SEC,
             )
@@ -3118,6 +3122,16 @@ _MAX_EVENT_FIELD_CHARS = 4000
 # The claim-label convention `<wake>:wip` (#958) — a documented mirror of
 # admin-console/api/process-template.js CLAIM_SUFFIX. Keep in sync.
 CLAIM_SUFFIX = ":wip"
+
+# The success mirror (#1163): a claimed run that reaches normal completion swaps
+# `<wake>:wip` for `<wake>:completed`, so "finished" becomes a visibly distinct
+# third state instead of a stuck `:wip`. Kept in sync with the `COMPLETED_SUFFIX`
+# mirror in orchestrator/flow-anomaly-detector.js (which must NOT treat it as an
+# active claim) and admin-console/api/process-template.js. Auto-created green,
+# distinct from the `:wip` amber.
+CLAIM_COMPLETED_SUFFIX = ":completed"
+CLAIM_COMPLETED_COLOR = "0E8A16"
+CLAIM_COMPLETED_LABEL_DESC = "run completed (auto-created claim label)"
 
 
 def _nonconformant_trigger_reason(trigger) -> str | None:
@@ -5852,6 +5866,40 @@ class TriggerScheduler:
                     await asyncio.sleep(delay)
         finally:
             _bump_active(-1, session)
+
+        # Mark the claim done (#1163) — the success mirror of the double-failure
+        # rollback above. Reaching this point means the invoke loop broke
+        # normally: every failure path (double-failure, user abort, permanent
+        # error) `raise`s out of the loop and never gets here, so this runs on a
+        # successful completion only — including a `[PASS]` or empty-after-harvest
+        # reply, since the claim lifecycle tracks the run, not whether a message
+        # was posted. Swap `<wake>:wip` -> `<wake>:completed` so the finished
+        # ticket stops looking in-progress. Only when we actually claimed
+        # (`claimed` True): a non-claimed trigger or a failed initial swap left
+        # the wake label in place, so there is nothing to complete. Best-effort,
+        # off the critical path — a create/swap failure is logged inside
+        # `_gh_swap_labels` and never gates the result posting below (same
+        # contract as claiming).
+        if claim and claimed:
+            completed_label = f"{claim['remove']}{CLAIM_COMPLETED_SUFFIX}"
+            completed = await asyncio.to_thread(
+                _gh_swap_labels, claim["repo"], claim["number"],
+                claim["add"], completed_label,
+                CLAIM_COMPLETED_COLOR, CLAIM_COMPLETED_LABEL_DESC,
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "trigger.claim-completed",
+                    "correlationId": correlation_id,
+                    "triggerId": tid,
+                    "repo": claim["repo"],
+                    "number": claim["number"],
+                    "removed": claim["add"],
+                    "added": completed_label,
+                    "ok": completed,
+                })
+            except Exception:
+                pass
 
         # Loop token budget (#934): surface this iteration's output-token spend
         # (accumulated onto run_context by _call_claude_once, including any

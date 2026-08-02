@@ -4310,7 +4310,17 @@ class TriggerScheduler:
                 # (#933); `sink` carries back this iteration's output-token
                 # spend (#934 budget) and a backstop-tripped flag
                 # (#611 → paused loop state).
-                ctx = {"loopFeedback": pending_feedback} if pending_feedback else None
+                # Carry the iteration counters into the shared chokepoint so the
+                # `trigger.fired` session-log row is numbered (#1155 AC7) and the
+                # chat composer can show "Iteration N of M" (#1155 AC5). The
+                # iteration about to run is `iterations + 1` (completed count so
+                # far, plus this one). Feedback (if any) rides in the same ctx.
+                ctx = {
+                    "loopIteration": iterations + 1,
+                    "loopMaxIterations": max_iterations,
+                }
+                if pending_feedback:
+                    ctx["loopFeedback"] = pending_feedback
                 sink: dict = {}
                 try:
                     await self._execute(trigger, ctx, loop_sink=sink)
@@ -5435,6 +5445,15 @@ class TriggerScheduler:
                 "triggerId": tid,
                 "triggerType": trigger.get("type"),
             }
+            # Loop iteration counters (#1155): make a loop iteration identifiable
+            # and numbered in the session log, and expose live progress to the
+            # chat composer. Only present for loop runs (ctx set by _loop_runner).
+            loop_iteration = (ctx or {}).get("loopIteration")
+            if isinstance(loop_iteration, int) and not isinstance(loop_iteration, bool) and loop_iteration >= 1:
+                fired_event["loopIteration"] = loop_iteration
+                loop_max = (ctx or {}).get("loopMaxIterations")
+                if isinstance(loop_max, int) and not isinstance(loop_max, bool) and loop_max >= 1:
+                    fired_event["loopMaxIterations"] = loop_max
             if gh:
                 fired_event["github"] = gh
             _append_event(room_id, fired_event)

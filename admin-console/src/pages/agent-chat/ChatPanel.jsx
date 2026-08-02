@@ -11,6 +11,7 @@ import Message from './Message';
 import MessageInput from './MessageInput';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
+import { latestLoopProgress } from './loop-run-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
@@ -122,6 +123,10 @@ export default function ChatPanel({
   // reflect its lifecycle (it self-removes on any terminal outcome).
   const [loopDialogOpen, setLoopDialogOpen] = useState(false);
   const [activeLoop, setActiveLoop] = useState(null);
+  // Live progress of the running loop (#1155): `{ iteration, maxIterations }`
+  // or null (neutral running state), derived from the numbered `trigger.fired`
+  // session-log rows at the same cadence as the trigger poll.
+  const [loopProgress, setLoopProgress] = useState(null);
   const [loopBusy, setLoopBusy] = useState(false);
   const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
 
@@ -651,15 +656,32 @@ export default function ChatPanel({
    * at most one per agent (the control then offers Stop instead of Start).
    */
   const refreshActiveLoop = useCallback(async () => {
-    if (!agent?.id) { setActiveLoop(null); return; }
+    if (!agent?.id) { setActiveLoop(null); setLoopProgress(null); return; }
     try {
       const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
       const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
       setActiveLoop(running || null);
+      // Live progress (#1155 AC5/AC6): read the tail of THIS room's session log
+      // and take the newest numbered loop firing for the running trigger. The
+      // log is persisted per room, so this is correct after a reload and for
+      // whichever agent's loop is running. No numbered firing yet ⇒ null
+      // (neutral running state, never a fabricated count).
+      if (running && roomId) {
+        try {
+          const res = await apiCall('GET',
+            `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}?limit=120`);
+          const evts = Array.isArray(res?.events) ? res.events : [];
+          setLoopProgress(latestLoopProgress(evts, running.id));
+        } catch {
+          /* keep the last known progress on a transient read error */
+        }
+      } else {
+        setLoopProgress(null);
+      }
     } catch {
       /* best-effort — a transient error just keeps the last known state */
     }
-  }, [agent?.id]);
+  }, [agent?.id, roomId]);
 
   useEffect(() => {
     if (!agent?.id) return undefined;
@@ -1274,6 +1296,8 @@ export default function ChatPanel({
         onLoopClick={handleLoopClick}
         loopRunning={!!activeLoop}
         loopBusy={loopBusy}
+        loopTrigger={activeLoop}
+        loopProgress={loopProgress}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}
@@ -1315,7 +1339,12 @@ export default function ChatPanel({
       <ConfirmDialog
         open={showStopLoopConfirm}
         title="Stop loop"
-        message="Stop the running loop for this agent? The current iteration is interrupted and no further iterations run."
+        message={`Stop the running loop for this agent${
+          loopProgress?.iteration
+            ? ` (currently on iteration ${loopProgress.iteration}${
+                loopProgress.maxIterations ? ` of ${loopProgress.maxIterations}` : ''})`
+            : ''
+        }? The current iteration is interrupted and no further iterations run.`}
         variant="danger"
         confirmLabel="Stop loop"
         onConfirm={handleStopLoop}

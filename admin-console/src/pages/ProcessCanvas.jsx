@@ -560,6 +560,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     URL.revokeObjectURL(a.href);
   }
 
+  // Header guidance line, resolved once so it can double as the `title` tooltip
+  // when the visible text is truncated. Kept to a single line in the header (see
+  // the toolbar below) so the block stays compact when both side panels squeeze
+  // the middle column (#1093).
+  const guidanceText = proposal
+    ? 'Copilot proposal — read-only preview. Apply it to the draft or discard it, then keep editing.'
+    : caps.readOnlyHint
+      ? caps.readOnlyHint
+      : isDraft
+        ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
+        : 'Click a node to edit · drag the ● port (agents and sources) to wire a hand-off · click an edge to edit it.';
+
   return (
     // Outer row: the canvas column + the docked Copilot rail (#1069). The rail
     // is a flex CHILD, not an overlay — the canvas stays visible and
@@ -567,21 +579,25 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Toolbar — the scope picker lives in the Flows left list, not here. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {/* Single-row header: it must NOT wrap onto extra rows, otherwise a narrow
+          middle column (both side panels open, #1093) pushes the canvas out of
+          view. The title/guidance column truncates first; the action strip
+          scrolls horizontally as a last resort. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-3) var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0, flexWrap: 'nowrap', minWidth: 0 }}>
+        <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
           {isDraft && draftBundle && (
             <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
           )}
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {proposal
-              ? 'Copilot proposal — read-only preview. Apply it to the draft or discard it, then keep editing.'
-              : caps.readOnlyHint
-                ? caps.readOnlyHint
-                : isDraft
-                  ? 'Draft — design from scratch: + Add agent, drag the ● port (agents and sources) to wire, click nodes/edges to edit. Nothing is created until you materialize.'
-                  : 'Click a node to edit · drag the ● port (agents and sources) to wire a hand-off · click an edge to edit it.'}
+          {/* One line, ellipsised — the full sentence stays available as a
+              tooltip, so the header never grows into a tall, thin text column. */}
+          <div title={guidanceText} style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
+            {guidanceText}
           </div>
         </div>
+        {/* Action strip — buttons keep their natural size (flexShrink:0 in
+            ToolbarButton) and never stack; at very narrow widths this strip
+            scrolls horizontally so every action stays reachable. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flex: '0 1 auto', minWidth: 0, overflowX: 'auto' }}>
         {isDraft && (
           <>
             {/* Structural editing pauses while a Copilot proposal is on screen —
@@ -610,6 +626,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           </>
         )}
         <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}>Export</ToolbarButton>
+        </div>
       </div>
 
       {/* Imported-bundle banner */}
@@ -1216,7 +1233,7 @@ function AddRoleDialog({ onClose, onCreate }) {
 function ToolbarButton({ onClick, icon: Icon, disabled, children, badge }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
-      display: 'inline-flex', alignItems: 'center', gap: 6,
+      display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
       background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
       border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
       padding: 'var(--eb-space-1) var(--eb-space-3)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',

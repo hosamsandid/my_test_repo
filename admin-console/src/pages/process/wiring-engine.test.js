@@ -291,3 +291,38 @@ test('the engine never calls setGithubProduces — produces* is a projection (#1
   await unwireChannel(ctx, { from: 'ba', to: 'dev', artifact: 'pr' });
   assert.equal(flagWrites, 0);
 });
+
+// ── #1174: internal-channel delivery on label hand-offs ─────────────────────
+
+test('wireLabelHandoff: transport internal lands on the listener; default writes none', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'ready', prompt: 'go', transport: 'internal' });
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'plain', prompt: 'go' });
+  });
+  const internal = state.roles.dev.triggers.find(t => t.labelFilter === 'ready');
+  const plain = state.roles.dev.triggers.find(t => t.labelFilter === 'plain');
+  assert.equal(internal.transport, 'internal');
+  assert.equal('transport' in plain, false, 'default delivery writes no transport field');
+  // Claim coexists — the runner swap works on internally delivered wakes too.
+  assert.deepEqual(internal.claim, { remove: 'ready', add: 'ready:wip' });
+});
+
+test('wireLabelHandoff: a human gate never becomes internal (person sets it on GitHub)', async () => {
+  const labels = [{ name: 'approved', humanGate: true }];
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'approved', labels, prompt: 'x', transport: 'internal' });
+  });
+  assert.equal('transport' in state.roles.dev.triggers[0], false);
+});
+
+test('updateLabelHandoff: toggles internal on and back off via an explicit github', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'ready', prompt: 'go' });
+    const tid = (await ctx.ops.listTriggers('dev'))[0].id;
+    await updateLabelHandoff(ctx, { from: 'ba', to: 'dev', triggerId: tid, label: 'ready', newLabel: 'ready', prompt: 'go', transport: 'internal' });
+    const mid = (await ctx.ops.listTriggers('dev'))[0];
+    assert.equal(mid.transport, 'internal', 'toggle on');
+    await updateLabelHandoff(ctx, { from: 'ba', to: 'dev', triggerId: tid, label: 'ready', newLabel: 'ready', prompt: 'go', transport: 'github' });
+  });
+  assert.equal(state.roles.dev.triggers[0].transport, 'github', 'explicit github clears the poller exclusion');
+});

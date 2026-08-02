@@ -196,6 +196,9 @@ function processEdgeToUnified(e) {
   // so the canvas can render the claim badge on the listener edge — same
   // pass-through shape as the loop stop-contract blob (#936).
   if (e.claim) u.claim = e.claim;
+  // Internal-channel transport (#1174): forwarded so the canvas styles the
+  // delivery path and the edge dialog can toggle it.
+  if (e.transport === 'internal') u.transport = 'internal';
   return u;
 }
 

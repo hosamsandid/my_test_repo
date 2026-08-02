@@ -64,7 +64,7 @@ function weaverBlock(lines) {
 
 function authorWakePrompt(stageName, { authorGo, escalate }) {
   const blocked = escalate
-    ? `4. If you are blocked (contradictory input, missing decisions above your authority): apply \`${escalate}\` to the issue, describe the blocker in a comment, stop.`
+    ? `4. If you are blocked (contradictory input, missing decisions above your authority): announce \`${escalate}\` on the issue (\`aee-emit "${escalate}" --issue <n>\` — internal channel, never \`gh --add-label\`), describe the blocker in a comment, stop.`
     : '4. If you are blocked (contradictory input, missing decisions above your authority): describe the blocker in an issue comment and ask the humans directly — this stage has no escalation broker.';
   return [
     `The label \`${authorGo}\` was added to an issue in \`{{repoFullName}}\` (payload above) — the ${stageName} stage's work on it is released to you.`,
@@ -96,7 +96,7 @@ function escalateWakePrompt(stageName, { authorGo, escalate }) {
     '',
     '1. Read the blocker description on the issue.',
     '2. Gather what is needed to unblock: ask the humans concrete questions in the issue, propose options with a recommendation.',
-    `3. Once the decision is clear, summarise it in a comment, remove \`${escalate}\`, and re-apply \`${authorGo}\` so the Author continues.`,
+    `3. Once the decision is clear, summarise it in a comment, remove \`${escalate}\`, and re-announce \`${authorGo}\` (\`aee-emit "${authorGo}" --issue <n>\` — internal channel, never \`gh --add-label\`) so the Author continues.`,
     '',
     'Use `gh-as-agent` for all GitHub actions. Reply `[PASS]` if there is nothing to do.',
   ].join('\n');
@@ -107,7 +107,7 @@ function humanFeedbackPrompt(stageName, { authorGo }) {
     `A human commented / reviewed / edited something in \`{{repoFullName}}\` (payload above). Only act if it concerns the ${stageName} stage's issues or PRs — otherwise reply \`[PASS]\`.`,
     '',
     '1. Read the feedback in context.',
-    `2. If the work must change: distil the feedback into concrete work items in a comment and re-apply \`${authorGo}\` to the issue.`,
+    `2. If the work must change: distil the feedback into concrete work items in a comment and re-announce \`${authorGo}\` on the issue (\`aee-emit "${authorGo}" --issue <n>\` — internal channel, never \`gh --add-label\`).`,
     '3. If it is a question: answer it in a comment.',
     '4. If it is merely informational: acknowledge briefly or `[PASS]`.',
     '',
@@ -270,8 +270,22 @@ function weaveProcess(input) {
     let n = 2;
     while (role.triggers.some(t => t.id === id)) id = `${trigger.id}-${n++}`;
     const claim = trigger.claim || deriveClaim(trigger.labelFilter);
-    role.triggers.push({ ...trigger, id, ...(claim ? { claim } : {}) });
+    // Internal-channel default (#1175): every label listener the weaver
+    // GENERATES is a pure agent→agent intra-stage hand-off (author-go /
+    // escalate — stage boundaries ride gated issue channels, which never pass
+    // through here), so it is delivered over the internal channel: no poller
+    // latency, no Events-API loss. The matching producer prose below says
+    // `aee-emit`. Catalog-copied triggers stay hand-authored, as before.
+    const internal = trigger.type === 'github-event' && trigger.labelFilter
+      ? { transport: 'internal' } : {};
+    role.triggers.push({ ...trigger, id, ...(claim ? { claim } : {}), ...internal });
   };
+
+  // Producer-side instruction for an internally delivered label (#1175). The
+  // woven bundle carries flat `emits` (no authored outcomes port), so no
+  // generated Outcomes block ever adds the aee-emit rule — this prose is the
+  // ONLY place the producer learns it. A plain `gh` label would wake nobody.
+  const emitCmd = (label) => `\`aee-emit "${label}" --issue <n>\``;
 
   const labelRegistry = new Map(); // name -> humanGate
   const noteLabel = (label, humanGate = false) => {
@@ -301,7 +315,7 @@ function weaveProcess(input) {
     for (const scout of scouts) {
       if (authors.length) {
         scout.emits.push(authorGo);
-        scout.wiring.push(`When the incoming work is ready and your Evidence comment is posted, apply \`${authorGo}\` to the issue — that starts ${authorNames}.`);
+        scout.wiring.push(`When the incoming work is ready and your Evidence comment is posted, announce \`${authorGo}\` on the issue (${emitCmd(authorGo)} — internal channel, never \`gh --add-label\`) — that starts ${authorNames}.`);
       }
     }
 
@@ -325,7 +339,7 @@ function weaveProcess(input) {
       }
       if (companions.length) {
         author.emits.push(escalate);
-        author.wiring.push(`If you are blocked, apply \`${escalate}\` to the issue and describe the blocker — the ${stage.name} Companion brokers it and re-applies \`${authorGo}\` once resolved.`);
+        author.wiring.push(`If you are blocked, announce \`${escalate}\` on the issue (${emitCmd(escalate)} — internal channel, never \`gh --add-label\`) and describe the blocker — the ${stage.name} Companion brokers it and re-announces \`${authorGo}\` once resolved.`);
       } else {
         note(stage.name, 'no-companion',
           `No Companion in "${stage.name}" — review, feedback-routing and escalation duties are merged into ${authorNames}; there is no \`${escalate}\` loop.`);
@@ -350,7 +364,7 @@ function weaveProcess(input) {
           description: `Broker a ${stage.name} escalation`,
           prompt: escalateWakePrompt(stage.name, { authorGo, escalate }),
         });
-        companion.wiring.push(`To send work back to ${authorNames} (rework from feedback, resolved escalation), re-apply \`${authorGo}\` to the issue.`);
+        companion.wiring.push(`To send work back to ${authorNames} (rework from feedback, resolved escalation), re-announce \`${authorGo}\` on the issue (${emitCmd(authorGo)} — internal channel, never \`gh --add-label\`).`);
         noteLabel(escalate);
       }
       // One trigger per event (#1008, the 2026-07-05 single-event rule): the

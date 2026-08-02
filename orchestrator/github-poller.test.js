@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   GitHubPoller,
+  pollerSubscribes,
   parseRepoFullName,
   effectiveHorizon,
   backfillHorizonStamps,
@@ -435,4 +436,34 @@ test("_enrichPullRequestPayload: missing pull_request is untouched", async () =>
   const payload = {};
   const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
   assert.equal(out, payload);
+});
+
+// ── pollerSubscribes (#1173): internal-channel triggers never enter the plan ─
+//
+// The exclusion below is the SINGLE dedup mechanism of the internal-channels
+// design: /internal/flow-emit mirrors the label onto GitHub after delivering
+// the wake through the queue, and that stamp may never wake the listener a
+// second time via the poller (docs/internal-channels-concept.md §4.3).
+
+const subscribable = (over = {}) => ({
+  id: "t1", type: "github-event", repo: "org/repo",
+  events: ["issues.labeled"], labelFilter: "ready",
+  ...over,
+});
+
+test("pollerSubscribes: a plain github-event trigger subscribes", () => {
+  assert.equal(pollerSubscribes(subscribable()), true);
+  assert.equal(pollerSubscribes(subscribable({ transport: "github" })), true);
+});
+
+test("pollerSubscribes: transport 'internal' is excluded — the label mirror cannot double-deliver", () => {
+  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), false);
+});
+
+test("pollerSubscribes: disabled, wrong-type and malformed triggers are excluded", () => {
+  assert.equal(pollerSubscribes(subscribable({ enabled: false })), false);
+  assert.equal(pollerSubscribes(subscribable({ type: "cron" })), false);
+  assert.equal(pollerSubscribes(subscribable({ repo: undefined })), false);
+  assert.equal(pollerSubscribes(subscribable({ events: [] })), false);
+  assert.equal(pollerSubscribes(null), false);
 });

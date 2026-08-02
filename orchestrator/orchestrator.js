@@ -31,6 +31,8 @@ const {
   KINDS: KNOWLEDGE_KINDS,
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
+const flowEmit = require("./flow-emit");
+const githubEventLog = require("./github-event-log");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -5815,6 +5817,81 @@ function enqueuePending(agentId, entry) {
   }
 }
 
+// #1173: pick the GitHub token an internal-channel emit uses to mirror its
+// label — the first environment whose repositories contain the repo, the same
+// first-env-wins rule the poller's plan applies. null when no env covers it.
+function resolveRepoGithubTokenId(repoFullName) {
+  const { parseRepoFullName } = require("./github-poller");
+  const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
+  const allowNonGithubHost = githubApiBase() !== DEFAULT_GITHUB_API_BASE;
+  let envIds = [];
+  try {
+    envIds = fs.readdirSync(ENVIRONMENTS_DIR).filter((n) => !n.startsWith("_"));
+  } catch { return null; }
+  for (const envId of envIds) {
+    const env = loadEnvironment(envId);
+    if (!env?.githubTokenId || !/^[A-Za-z0-9._-]+$/.test(env.githubTokenId)) continue;
+    const repos = Array.isArray(env.repositories)
+      ? env.repositories
+      : (env.repository ? [env.repository] : []);
+    for (const r of repos) {
+      if (parseRepoFullName(r?.url, { allowNonGithubHost }) === repoFullName) {
+        return env.githubTokenId;
+      }
+    }
+  }
+  return null;
+}
+
+// #1173: mirror a label onto an issue/PR after an internal-channel delivery.
+// Decoration only — the wake already went through the queue, so every failure
+// here becomes a returned warning, never a delivery failure (concept §4.2
+// step 3: enqueue first, stamp second). The add endpoint doesn't reliably
+// auto-create labels, so on a failed add the label is created (422 = already
+// exists, e.g. a lost race — fine) and the add retried once, mirroring the
+// runner's claim-swap behavior.
+async function stampMirrorLabel(repoFullName, number, label, warnings) {
+  const tokenId = resolveRepoGithubTokenId(repoFullName);
+  if (!tokenId) {
+    warnings.push(`no environment with a GitHub token covers ${repoFullName} — label not stamped`);
+    return false;
+  }
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+  } catch (err) {
+    warnings.push(`cannot read GitHub token '${tokenId}': ${err.message} — label not stamped`);
+    return false;
+  }
+  const { githubApiBase } = require("./github-api-base");
+  const base = githubApiBase();
+  const headers = {
+    "Authorization": `Bearer ${token}`,
+    "Accept": "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const addLabel = () => fetch(`${base}/repos/${repoFullName}/issues/${number}/labels`, {
+    method: "POST", headers, body: JSON.stringify({ labels: [label] }),
+  });
+  try {
+    let resp = await addLabel();
+    if (!resp.ok) {
+      await fetch(`${base}/repos/${repoFullName}/labels`, {
+        method: "POST", headers,
+        body: JSON.stringify({ name: label, color: "ededed", description: "internal-channel mirror label" }),
+      }).catch(() => {});
+      resp = await addLabel();
+    }
+    if (resp.ok) return true;
+    warnings.push(`label stamp failed: GitHub returned ${resp.status}`);
+    return false;
+  } catch (err) {
+    warnings.push(`label stamp failed: ${err.message}`);
+    return false;
+  }
+}
+
 // Read one agent's pending queue as a raw array WITHOUT draining it (#724 AC1).
 // Corrupt / missing / non-array → [] (mirrors enqueue/drain; AC10). Every entry
 // is returned with a guaranteed `id` (legacy entries get a deterministic one)
@@ -9577,6 +9654,87 @@ async function main() {
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Internal-channel emit (#1173, epic #1172) ─────────────────────────
+    // A producer agent announces "label L set on issue/PR #n of repo R"
+    // (via the `aee-emit` CLI) and the wake is delivered directly to every
+    // `transport: 'internal'` listener — enqueue FIRST, then mirror the label
+    // onto GitHub as decoration (best-effort). Internal-transport triggers
+    // are excluded from the poller plan (`pollerSubscribes`), so the mirror
+    // stamp can never double-deliver. docs/internal-channels-concept.md §4.2.
+    if (req.method === 'POST' && req.url === '/internal/flow-emit') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        let parsed;
+        try {
+          parsed = flowEmit.validateEmitRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { agentId, repo, label, target } = parsed.value;
+          const key = flowEmit.eventKeyForKind(target.kind);
+          const agents = listAgentIds().map((aid) => ({
+            agentId: aid,
+            enabled: loadAgentConfig(aid)?.enabled !== false,
+            triggers: loadTriggers(aid),
+          }));
+          const listeners = flowEmit.matchInternalListeners(
+            { repo, label, kind: target.kind }, agents);
+          const ghEvent = flowEmit.buildSyntheticEvent({
+            repo, label, kind: target.kind, number: target.number,
+            producerId: agentId,
+            eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
+            now: new Date().toISOString(),
+          });
+          for (const l of listeners) {
+            enqueuePending(l.agentId, flowEmit.buildPendingEntry(l.triggerId, key, ghEvent));
+            console.log(
+              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
+              `by ${agentId} → agent=${l.agentId} trigger=${l.triggerId}`);
+          }
+          const warnings = [];
+          const labelStamped = await stampMirrorLabel(repo, target.number, label, warnings);
+          // Same transparency log the poller writes, tagged with the delivery
+          // path — internal and polled events share one operator timeline.
+          githubEventLog.record({
+            ...githubEventLog.buildEventEntry({
+              ghEvent, repoFullName: repo, key,
+              outcomes: listeners.map((l) => ({
+                agentId: l.agentId, triggerId: l.triggerId,
+                status: 'delivered', reason: null, digest: false,
+              })),
+            }),
+            source: 'internal',
+            emittedBy: agentId,
+          });
+          if (listeners.length === 0) {
+            console.log(
+              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
+              `by ${agentId} matched no internal listener (label ${labelStamped ? 'stamped' : 'NOT stamped'})`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            matched: listeners.length,
+            listeners,
+            labelStamped,
+            warnings,
+          }));
+        } catch (err) {
+          console.error(`[Orchestrator] flow-emit error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });

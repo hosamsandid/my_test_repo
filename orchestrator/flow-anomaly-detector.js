@@ -167,9 +167,15 @@ function buildFlowModel(members, options = {}) {
           ? str(t.claim.add)
           : claimLabelFor(label);
       let we = wake.get(label);
-      if (!we) we = { label, claimLabel: claimAdd, consumers: new Set(), triggerIds: new Set() };
+      if (!we) we = { label, claimLabel: claimAdd, consumers: new Set(), triggerIds: new Set(), internalConsumers: new Set() };
       we.consumers.add(m.id);
       if (str(t.id)) we.triggerIds.add(str(t.id));
+      // Internal-channel listener (#1175): the wake is delivered by the
+      // orchestrator queue and the GitHub label is a mirror. Recorded so the
+      // wake-not-claimed diagnosis can point at the right failure surface —
+      // an internal delivery is durable, so "the wake may have been lost" (an
+      // Events-API failure mode) would send the operator down the wrong path.
+      if (t.transport === 'internal') we.internalConsumers.add(m.id);
       wake.set(label, we);
 
       // The claim label this wake maps to also has these consumers (they take it
@@ -190,6 +196,9 @@ function buildFlowModel(members, options = {}) {
       claimLabel: w.claimLabel,
       consumers: [...w.consumers],
       triggerIds: [...w.triggerIds],
+      // true iff EVERY listener of this wake is internal-transport — only then
+      // is the Events-API loss hypothesis off the table for the whole edge.
+      internal: w.consumers.size > 0 && w.internalConsumers.size === w.consumers.size,
     })),
     claimEdges: [...claim.values()].map((c) => ({
       claimLabel: c.claimLabel,
@@ -340,6 +349,13 @@ function detectFlowAnomalies(args = {}) {
           object.linkedPrNumbers.length > 0 &&
           we.consumers.some((id) => consumers[id] && consumers[id].producesPr);
         if (!claimPresent && !anyRan && !workExists) {
+          // Internal-channel wake (#1175): delivery is a durable queue write,
+          // so "lost event" is not a plausible cause — point the operator at
+          // the consumer instead (disabled agent, backed-up pending queue, or
+          // a crash before the claim swap).
+          const cause = we.internal
+            ? 'the wake was delivered over the internal channel (durable) — check whether the consumer is disabled, its pending queue is backed up, or the run crashed before claiming.'
+            : 'the wake may have been lost or the run crashed before claiming.';
           anomalies.push(mkAnomaly('wake-not-claimed', {
             object,
             label: name,
@@ -348,8 +364,7 @@ function detectFlowAnomalies(args = {}) {
             agentId: we.consumers[0] || null,
             consumers: we.consumers,
             message:
-              `\`${name}\` has waited ${humanizeAge(ageMs)} with no \`${we.claimLabel}\` claim and no run — ` +
-              `the wake may have been lost or the run crashed before claiming.`,
+              `\`${name}\` has waited ${humanizeAge(ageMs)} with no \`${we.claimLabel}\` claim and no run — ${cause}`,
           }));
         }
       }

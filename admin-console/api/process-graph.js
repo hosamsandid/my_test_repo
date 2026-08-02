@@ -168,6 +168,9 @@ function triggerView(t) {
     // editor can render the claim badge and the read-only claim readout.
     const c = claimView(t);
     if (c) v.claim = c;
+    // Internal-channel transport (#1174) — carried so the editor's trigger
+    // readout and the edge dialog can show/toggle the delivery path.
+    if (t.transport === 'internal') v.transport = 'internal';
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -485,6 +488,9 @@ function buildProcessGraph(agents, options) {
         // Claim (#958) rides on the listener edge so the renderer can badge it.
         const cv = claimView(t);
         const clm = cv ? { claim: cv } : {};
+        // Internal-channel transport (#1174) rides on the edge so the canvas
+        // can style the delivery path and the edge dialog can toggle it.
+        const tpt = t.transport === 'internal' ? { transport: 'internal' } : {};
         const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
@@ -508,11 +514,11 @@ function buildProcessGraph(agents, options) {
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
             // runtime; this is only about what the static graph can prove.
-            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm });
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm, ...tpt });
           } else {
             for (const s of emitters) {
               const oc = ocOf(key, s);
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm });
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm, ...tpt });
             }
           }
         }
@@ -782,6 +788,23 @@ function computeLints(nodes, edges, classifier) {
   for (const label of unboundBrake) {
     lints.push({ code: 'unbound-brake', severity: 'info', label,
       message: `brake label \`${label}\` pauses for a human but no human role decides it — wire a human role.` });
+  }
+  // Internal-channel candidate (#1175, advisory). A pure agent→agent label
+  // hand-off delivered by the poller inherits the Events-API failure modes
+  // (narrow window, restart loss, throttle/burst) that internal delivery
+  // avoids — suggest the Delivery toggle. `info` only: poller delivery also
+  // means a HUMAN applying the label wakes the listener, which some flows
+  // want, so this is a hint, never a defect. Gate/brake/orphan/human-bound
+  // edges are exempt by construction (kind 'agent' + both endpoints agents).
+  const internalCandidates = new Set();
+  for (const e of edges) {
+    if (e.kind !== 'agent' || e.orphan || e.transport === 'internal') continue;
+    if (e.from == null || e.to == null || !e.triggerId || !e.label) continue;
+    const key = `${e.to} ${e.label} ${e.triggerId}`;
+    if (internalCandidates.has(key)) continue;
+    internalCandidates.add(key);
+    lints.push({ code: 'internal-channel-candidate', severity: 'info', label: e.label, nodeId: e.to,
+      message: `\`${e.to}\` is woken by \`${e.label}\` via GitHub events — an agent-to-agent hand-off can use internal delivery (Delivery toggle on the edge) for lossless, low-latency wakes; the label stays mirrored on GitHub.` });
   }
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
   // consumes, and a channel that points at a role which doesn't produce that

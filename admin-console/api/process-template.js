@@ -234,6 +234,10 @@ function bundleTrigger(t) {
     // export → materialise → edit-as-draft. Derived listeners get it re-stamped
     // by the expanders anyway; a hand-authored claim would otherwise be lost.
     if (isValidClaim(t.claim, t.labelFilter)) out.claim = { remove: t.claim.remove, add: t.claim.add };
+    // Internal-channel transport (#1174) — part of the wiring, must round-trip:
+    // dropping it would silently turn an internal listener back into a
+    // poller-delivered one on re-materialise. Only the non-default is carried.
+    if (t.transport === 'internal') out.transport = 'internal';
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -349,6 +353,15 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       if (!t || typeof t !== 'object') continue;
       const te = allowEmptyRoles ? claimError(t.claim, t.labelFilter, t.type) : rawTriggerError(t);
       if (te) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${te}` };
+      // Internal-channel transport (#1174): a mistyped value would silently
+      // fall back to poller delivery, so the shape is checked, not tolerated.
+      if (t.transport !== undefined && t.transport !== 'internal' && t.transport !== 'github') {
+        return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: transport must be 'internal' or 'github'` };
+      }
+      if (t.transport === 'internal'
+          && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
+        return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: transport 'internal' requires a github-event label listener (labelFilter)` };
+      }
     }
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome
@@ -511,6 +524,12 @@ function templateToCustomRoles(bundle) {
       // swap the wake label for `<wake>:wip`. Dropping it here made the whole
       // feature a silent no-op at runtime even though the graph rendered it.
       ...(t.claim ? { claim: t.claim } : {}),
+      // Internal-channel transport (#1174) — MUST survive for the same reason:
+      // the poller excludes `transport: 'internal'` triggers from its plan and
+      // /internal/flow-emit only matches them; dropping the field here would
+      // leave the listener poller-delivered and the producer's `aee-emit`
+      // waking nobody.
+      ...(t.transport === 'internal' ? { transport: 'internal' } : {}),
       cron: t.cron,
       at: t.at,
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
@@ -623,6 +642,12 @@ function stripOutcomesBlock(text) {
 function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } = {}) {
   const nameOf = (r) => r.displayName || r.name || r.id;
   const consumersByLabel = {};
+  // Labels with ≥1 `transport: 'internal'` listener (#1174). One internal
+  // listener is enough to flip the producer instruction to `aee-emit`: the
+  // emit delivers internally AND mirrors the label onto GitHub, so any
+  // remaining poller-delivered listener of the same label still fires — the
+  // reverse (a plain `gh` label) can never wake the internal one.
+  const internalLabels = new Set();
   for (const r of roles) {
     if (!r || r.id === roleId) continue;
     for (const t of (Array.isArray(r.triggers) ? r.triggers : [])) {
@@ -630,6 +655,7 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
       const lf = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
       if (!lf) continue;
       (consumersByLabel[lf] = consumersByLabel[lf] || []).push(nameOf(r));
+      if (t.transport === 'internal') internalLabels.add(lf);
     }
   }
   const reviewers = {};
@@ -651,7 +677,12 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
   if (!Object.keys(consumersByLabel).length && !Object.keys(reviewers).length && !gateLabels.length) {
     return null;
   }
-  return { consumersByLabel, reviewers, gateLabels };
+  return {
+    consumersByLabel,
+    reviewers,
+    gateLabels,
+    ...(internalLabels.size ? { internalLabels: [...internalLabels].sort() } : {}),
+  };
 }
 
 // The "Then: …" action clause for one option — a human-readable summary of its
@@ -672,9 +703,16 @@ function outcomeActionClause(option, wiring) {
       const label = a.label.trim();
       setsLabel = true;
       const consumers = wiring && wiring.consumersByLabel && wiring.consumersByLabel[label];
-      parts.push(consumers && consumers.length
-        ? `apply label \`${label}\` — this wakes **${[...new Set(consumers)].join('**, **')}**`
-        : `apply label \`${label}\``);
+      const who = consumers && consumers.length
+        ? ` — this wakes **${[...new Set(consumers)].join('**, **')}**` : '';
+      // Internal-channel label (#1174): the hand-off is delivered by the
+      // orchestrator, so the instruction is `aee-emit` (which also mirrors the
+      // label onto GitHub) — a plain `gh` label would wake nobody internal.
+      const internal = wiring && Array.isArray(wiring.internalLabels)
+        && wiring.internalLabels.includes(label);
+      parts.push(internal
+        ? `announce label \`${label}\` over the internal channel: run \`aee-emit "${label}" --issue <n>\` (or \`--pr <n>\`)${who ? `${who} directly` : ''}`
+        : `apply label \`${label}\`${who}`);
     } else if (a.type === 'openPr') {
       parts.push('open a pull request'); opensPr = true;
     } else if (a.type === 'openIssue') {
@@ -743,6 +781,14 @@ function outcomesBlock(outcomes, wiring) {
   // one — which silently breaks the flow.
   if (anyLabel) {
     body.push('', 'Outcome labels are exact contracts: apply each label **verbatim as written above**, never a similar-sounding label that happens to exist in the repository. If the label does not exist yet, create it first (`gh label create "<label>" --color FBCA04 --description "flow outcome label"`), then apply it — downstream listeners match the exact string, so a near-miss label wakes nobody.');
+    // Internal-channel labels (#1174): the aee-emit instruction is repeated as
+    // a hard rule, because the failure mode (agent falls back to `gh` and the
+    // hand-off silently reaches nobody) is invisible on GitHub — the label
+    // looks set either way.
+    if (wiring && Array.isArray(wiring.internalLabels) && wiring.internalLabels.length) {
+      const ints = wiring.internalLabels.map(l => `\`${l}\``).join(', ');
+      body.push('', `The label${wiring.internalLabels.length > 1 ? 's' : ''} ${ints} ${wiring.internalLabels.length > 1 ? 'are' : 'is'} delivered over the **internal channel**: always announce ${wiring.internalLabels.length > 1 ? 'them' : 'it'} with \`aee-emit\`, never with \`gh issue edit --add-label\` — a manually applied label is only visible decoration and wakes no internal listener. \`aee-emit\` also mirrors the label onto GitHub for you, so it needs no separate \`gh\` step and no \`gh label create\`.`);
+    }
   }
   // Flow-wide gate prohibition (#1007, §4.8 known gap): whenever the flow
   // contains human gates this agent could plausibly touch, the prohibition is
@@ -1279,6 +1325,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
         const c = deriveClaim(out.labelFilter);
         if (c) out.claim = c;
       }
+      // Internal-channel transport (#1174): the runtime field the poller
+      // exclusion and /internal/flow-emit matching read — must land on the
+      // materialised trigger or the listener silently reverts to poller
+      // delivery. Suffix/var substitution never touches it (not a label).
+      if (tr.transport === 'internal') out.transport = 'internal';
       // Data-flow (agent dependency) marker so the trigger UI renders it as an
       // editable "push from <upstream>" hand-off rather than a raw push (#379).
       if (tr.dataFlow) out.dataFlow = true;

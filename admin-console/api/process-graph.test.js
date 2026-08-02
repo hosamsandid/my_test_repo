@@ -340,7 +340,7 @@ test('lint: a brake label emitted by an agent trips NOTHING', () => {
   assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
 });
 
-test('lint: a clean wired pair produces no lints', () => {
+test('lint: a clean wired pair produces no problem lints; poller delivery gets the internal hint', () => {
   const g = buildProcessGraph([
     { id: 'a', emits: ['dispatch'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
     // The listener carries its derived claim (#958): since `unclaimed-listener`
@@ -349,7 +349,28 @@ test('lint: a clean wired pair produces no lints', () => {
     { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch',
       claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
+  // #1175: a poller-delivered agent→agent hand-off is not a defect, but it is
+  // no longer silent either — the one advisory hint suggests internal delivery.
+  assert.deepEqual(g.lints.map((l) => `${l.code}:${l.severity}`), ['internal-channel-candidate:info']);
+});
+
+test('#1175: an internal-transport listener silences the internal-channel hint', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['dispatch'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch', transport: 'internal',
+      claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
+  ]);
   assert.deepEqual(g.lints, []);
+});
+
+test('#1175: gate and orphan label edges never raise the internal-channel hint', () => {
+  const g = buildProcessGraph([
+    { id: 'b', triggers: [
+      { id: 'tg', type: 'github-event', labelFilter: 'approved', claim: { remove: 'approved', add: 'approved:wip' } },
+      { id: 'to', type: 'github-event', labelFilter: 'nobody-sets-this', claim: { remove: 'nobody-sets-this', add: 'nobody-sets-this:wip' } },
+    ] },
+  ], { labels: [{ name: 'approved', humanGate: true }] });
+  assert.ok(!g.lints.some((l) => l.code === 'internal-channel-candidate'));
 });
 
 test('github channel: derived channel triggers do not produce label/event edges', () => {
@@ -1283,4 +1304,20 @@ test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger 
   const raws = g.lints.filter(l => l.code === 'raw-trigger-nonconformant');
   assert.deepEqual(raws.map(l => l.triggerIds[0]), ['hand-authored-two'],
     'only the hand-authored deviation is flagged');
+});
+
+// ── #1174: internal-channel transport rides on label-listener edges ──────────
+
+test('#1174: a transport-internal listener projects transport onto its edge and triggerView', () => {
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['ready'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'internal' }] },
+    { id: 'c', triggers: [{ id: 'u', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
+  ]);
+  const eb = g.edges.find(x => x.to === 'b' && x.label === 'ready');
+  const ec = g.edges.find(x => x.to === 'c' && x.label === 'ready');
+  assert.equal(eb.transport, 'internal');
+  assert.equal(ec.transport, undefined);
+  const nb = g.nodes.find(n => n.id === 'b');
+  assert.equal(nb.triggers.find(t => t.id === 't').transport, 'internal');
 });

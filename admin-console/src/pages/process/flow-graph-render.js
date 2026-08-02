@@ -1853,11 +1853,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         // structured outcome. Title the edge with the outcome, colour it like the
         // switch badge, and tag the hit payload so a click focuses the Routing tab.
         const isOutcome = e.on === 'label' && !!e.outcome;
+        // Internal-channel delivery (#1174): same hue as its label/outcome edge
+        // family, but dotted — the wake bypasses GitHub (orchestrator queue),
+        // and the dot pattern is distinct from the 6-4 dash of actor edges.
+        const isInternal = e.on === 'label' && e.transport === 'internal';
         list.push({
           from: e.from, to: e.to,
           color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),
           width: isGithub ? 2 : 1.5,
-          dash: '',
+          dash: isInternal ? '2 3' : '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
             : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || ''))),
@@ -1865,6 +1869,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
             artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
+            ...(isInternal ? { transport: 'internal' } : {}),
             // Carry the `audience` tag (#1036): a github delivery to a NAMED
             // human role (unified-graph tags it `audience:'human'`) must reach
             // the human-aware review-gate editor via findReviewGate — dropping

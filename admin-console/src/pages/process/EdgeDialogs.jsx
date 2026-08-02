@@ -110,6 +110,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
   const [action, setAction] = useState('labeled');       // labeled | unlabeled
   const [repo, setRepo] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [transport, setTransport] = useState('github');  // github | internal (#1174)
 
   useEffect(() => {
     let alive = true;
@@ -155,7 +156,7 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
       // (skipped for human gates/brakes and for outcome-port drags, #828).
       await wireLabelHandoff({ ops }, {
         from, to, label: trimmed, target, action, repo,
-        prompt: effectivePrompt, labels, emitSource, fromName, toName,
+        prompt: effectivePrompt, labels, emitSource, fromName, toName, transport,
       });
       onDone?.();
     } catch (e) {
@@ -205,6 +206,22 @@ export function CreateHandoffDialog({ from, to, fromName, toName, labels, ops = 
               <strong>{fromName || from}</strong> gets an outcome that sets <code>{label.trim() || '<label>'}</code>,
               and <strong>{toName || to}</strong> gets the matching input — no need to pre-configure a trigger on {fromName || from}.
             </div>
+          )}
+
+          {/* Delivery transport (#1174) — never offered for human gates/brakes:
+              a person sets those on GitHub, so only the poller can see them. */}
+          {!humanLabel && (
+            <Field label="Delivery">
+              <select value={transport} onChange={e => setTransport(e.target.value)} style={input}>
+                <option value="github">Via GitHub events — the poller delivers the wake</option>
+                <option value="internal">Direct (internal) — label mirrored to GitHub</option>
+              </select>
+              <small style={small}>
+                {transport === 'internal'
+                  ? <>The orchestrator delivers the wake directly (no polling latency, no event-window loss); <strong>{fromName || from}</strong> announces the label with <code>aee-emit</code> and it is still stamped on GitHub as visible status.</>
+                  : <>The wake rides the GitHub Events API — delivered by the poller (~30s cadence).</>}
+              </small>
+            </Field>
           )}
 
           <Field label="Wake instruction — what the consumer is told">
@@ -1103,6 +1120,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
   const [labelName, setLabelName] = useState(label || '');
   const [initialEvents, setInitialEvents] = useState([]);
   const [repo, setRepo] = useState('');
+  const [transport, setTransport] = useState('github'); // github | internal (#1174)
   // The stored listener prompt. `null` = untouched / not yet loaded (AC3: seed
   // the auto-generated default); any string (incl. '') = an operator-owned value
   // shown verbatim and saved as-is (AC2 + the empty-prompt / rename edge cases).
@@ -1128,6 +1146,7 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
             setLabelName(t.labelFilter.trim());
           }
           if (typeof t.repo === 'string') setRepo(t.repo);
+          if (t.transport === 'internal') setTransport('internal');
           // Prefill the stored prompt verbatim (AC2). A trigger with no stored
           // prompt (undefined / non-string — e.g. created before this field
           // existed) stays `null`, so the default seeds it below (AC3).
@@ -1167,6 +1186,10 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       await updateLabelHandoff({ ops }, {
         from, to, triggerId, label, newLabel, target, action,
         prompt: effectivePrompt, humanSource,
+        // Delivery (#1174): human-set labels never toggle (poller-only); for
+        // agent hand-offs the explicit value ('github' too) is written so
+        // flipping internal → github clears the poller exclusion.
+        ...(humanSource ? {} : { transport }),
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -1209,6 +1232,20 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
             </small>
           </Field>
           <LegacyMultiEventNote events={initialEvents} selected={event} />
+          {/* Delivery transport (#1174) — human-set labels stay poller-only. */}
+          {!humanSource && (
+            <Field label="Delivery">
+              <select value={transport} onChange={e => setTransport(e.target.value)} style={input}>
+                <option value="github">Via GitHub events — the poller delivers the wake</option>
+                <option value="internal">Direct (internal) — label mirrored to GitHub</option>
+              </select>
+              <small style={small}>
+                {transport === 'internal'
+                  ? <>Delivered by the orchestrator queue; <strong>{fromName || from}</strong> announces the label with <code>aee-emit</code>, and it is still stamped on GitHub as visible status.</>
+                  : <>Delivered by the GitHub poller (~30s cadence, Events-API window).</>}
+              </small>
+            </Field>
+          )}
           <Field label="Label name">
             <input value={labelName} onChange={e => setLabelName(e.target.value)} style={input} />
             {labelName.trim() && labelName.trim() !== label && !humanSource && (

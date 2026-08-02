@@ -3476,6 +3476,11 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // direct API) can persist a non-conformant listener unchallenged again.
   const te = rawTriggerError(newTrigger);
   if (te) return res.status(400).json({ error: te });
+  // Internal-channel transport (#1174): a mistyped value would silently leave
+  // the listener poller-delivered while the producer runs `aee-emit` — checked
+  // here (route-level), mirroring validateProcessTemplate's bundle check.
+  const tpe = triggerTransportError(newTrigger);
+  if (tpe) return res.status(400).json({ error: tpe });
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -3524,6 +3529,9 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
   const te = rawTriggerError(merged, prev);
   if (te) return res.status(400).json({ error: te });
+  // Internal-channel transport (#1174) — same route-level check as POST.
+  const tpe = triggerTransportError(merged);
+  if (tpe) return res.status(400).json({ error: tpe });
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -3566,6 +3574,22 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   await reconcileTeamOutcomesForAgent(id);
   res.status(204).end();
 });
+
+// Internal-channel transport (#1174): value + shape hygiene for a trigger write.
+// The failure mode of a bad value is silent (the listener stays in the poller
+// plan and `aee-emit` wakes nobody), so it is rejected, not tolerated. Kept
+// route-level — the bundle-side twin lives in validateProcessTemplate.
+function triggerTransportError(t) {
+  if (t.transport === undefined) return null;
+  if (t.transport !== 'internal' && t.transport !== 'github') {
+    return "transport must be 'internal' or 'github'";
+  }
+  if (t.transport === 'internal'
+      && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
+    return "transport 'internal' requires a github-event label listener (labelFilter)";
+  }
+  return null;
+}
 
 // A trigger write on a team member changes WHO CONSUMES its siblings' labels —
 // re-render the team's generated Outcomes blocks (#1007). Best-effort: a

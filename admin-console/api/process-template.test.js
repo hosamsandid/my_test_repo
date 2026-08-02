@@ -1449,3 +1449,99 @@ test('launchedLoopConflict: rejects a second launched loop, allows the first (#1
   assert.equal(launchedLoopConflict([{ type: 'loop', launched: true }], { type: 'loop' }), false);
   assert.equal(launchedLoopConflict(null, launched), false);
 });
+
+// ── #1174: internal-channel transport — round-trip, validation, prompt wording ─
+
+test('#1174: transport survives export → validate → customRoles → materialise', () => {
+  const bundle = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [{
+      id: 'acme-dev', displayName: 'Dev', systemPrompt: 'p',
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'],
+        labelFilter: 'ready', transport: 'internal',
+        claim: { remove: 'ready', add: 'ready:wip' } }],
+    }],
+  });
+  const exported = bundle.roles[0].triggers.find(t => t.id === 't');
+  assert.equal(exported.transport, 'internal');
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+
+  const roles = templateToCustomRoles(bundle);
+  assert.equal(roles[0].triggers[0].transport, 'internal');
+
+  const member = buildMemberFromTemplate(roles[0], { teamId: 'acme', vars: { repoFullName: 'o/r' } });
+  const mt = member.triggers.find(t => t.id === 't');
+  assert.equal(mt.transport, 'internal');
+  // Claim coexists — the runner swap works on internally delivered wakes too.
+  assert.deepEqual(mt.claim, { remove: 'ready', add: 'ready:wip' });
+});
+
+test('#1174: default (github/absent) transport is not exported — bundles stay noise-free', () => {
+  const bundle = buildProcessTemplate({
+    name: 'x', level: 'template',
+    roles: [{ id: 'dev', displayName: 'Dev', systemPrompt: 'p',
+      triggers: [
+        { id: 'a', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'github' },
+        { id: 'b', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' },
+      ] }],
+  });
+  for (const t of bundle.roles[0].triggers) assert.equal(t.transport, undefined);
+});
+
+test('#1174: validateProcessTemplate rejects a bad transport value and internal on a non-label trigger', () => {
+  const mk = (trigger) => ({
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'dev', displayName: 'Dev', triggers: [trigger] }],
+  });
+  assert.equal(validateProcessTemplate(mk(
+    { id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'quantum' },
+  )).ok, false);
+  assert.equal(validateProcessTemplate(mk(
+    { id: 't', type: 'github-event', events: ['pull_request.opened'], transport: 'internal' },
+  )).ok, false);
+  assert.equal(validateProcessTemplate(mk(
+    { id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'internal' },
+  )).ok, true);
+});
+
+test('#1174: outcomesWiringContext reports labels with an internal listener', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  const ctx = outcomesWiringContext('ba', {
+    roles: [
+      { id: 'ba', displayName: 'BA', triggers: [] },
+      { id: 'dev', displayName: 'Developer', triggers: [
+        { type: 'github-event', labelFilter: 'ready', transport: 'internal' }] },
+      { id: 'qa', displayName: 'QA', triggers: [
+        { type: 'github-event', labelFilter: 'qa:go' }] },
+    ],
+  });
+  assert.deepEqual(ctx.internalLabels, ['ready']);
+  // A poller-delivered label contributes no internal marker.
+  assert.deepEqual(ctx.consumersByLabel['qa:go'], ['QA']);
+});
+
+test('#1174: outcomesBlock instructs aee-emit for internal labels, gh for the rest', () => {
+  const outcomes = { mode: 'anyOf', options: [
+    { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready' }] },
+    { id: 'qa', title: 'QA', actions: [{ type: 'setLabel', label: 'qa:go' }] },
+  ] };
+  const wiring = {
+    consumersByLabel: { ready: ['Developer'], 'qa:go': ['QA'] },
+    reviewers: {}, gateLabels: [], internalLabels: ['ready'],
+  };
+  const block = outcomesBlock(outcomes, wiring);
+  assert.match(block, /aee-emit "ready" --issue <n>/);
+  assert.match(block, /wakes \*\*Developer\*\* directly/);
+  // The github-delivered label keeps the plain apply wording.
+  assert.match(block, /apply label `qa:go` — this wakes \*\*QA\*\*/);
+  // Hard rule appended once for the internal label set.
+  assert.match(block, /never with `gh issue edit --add-label`/);
+});
+
+test('#1174: outcomesBlock without internal labels is unchanged (no aee-emit mention)', () => {
+  const outcomes = { mode: 'anyOf', options: [
+    { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready' }] },
+  ] };
+  const wiring = { consumersByLabel: { ready: ['Dev'] }, reviewers: {}, gateLabels: [] };
+  assert.doesNotMatch(outcomesBlock(outcomes, wiring), /aee-emit/);
+});

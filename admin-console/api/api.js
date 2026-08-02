@@ -1006,11 +1006,17 @@ function buildComplianceAck(req) {
 // ever called server-side — the raw token never travels to the browser.
 async function claimOauthFlowToken(flowId) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  if (!/^[a-f0-9]+$/.test(String(flowId))) {
+  // Validate and reuse the SAME sanitized value in the request URL. The guard
+  // must test the exact string that flows into fetch() — testing a separate
+  // `String(flowId)` node left the raw `flowId` untrusted on the URL path
+  // (SSRF/path-injection, CWE-918). The anchored hex allow-list forbids any
+  // host- or path-traversal characters; encodeURIComponent is belt-and-braces.
+  const safeFlowId = String(flowId);
+  if (!/^[a-f0-9]+$/.test(safeFlowId)) {
     return { error: 'invalid oauthFlowId' };
   }
   try {
-    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows/${flowId}/claim`, { method: 'POST' });
+    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows/${encodeURIComponent(safeFlowId)}/claim`, { method: 'POST' });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { error: body.error || `claim failed (HTTP ${r.status})` };
     if (!body.token) return { error: 'login flow returned no token' };

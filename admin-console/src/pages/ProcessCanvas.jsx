@@ -688,6 +688,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         {!isDraft && !imported && error && (
           <Overlay tone="error">Could not load graph: {error}</Overlay>
         )}
+        {/* Empty-state (#1124): a brand-new draft opens to a blank canvas whose
+            only cue is a grey toolbar hint newcomers miss. When the draft has
+            zero agent roles, surface a centered prompt with a primary CTA that
+            shares the toolbar's Add-agent handler; it disappears once the first
+            node exists. Suppressed while a Copilot proposal previews the graph. */}
+        {isDraft && !proposal && displayGraph && !(draftBundle?.roles?.length) && (
+          <EmptyCanvasState onAddAgent={() => setAddRoleOpen(true)} />
+        )}
 
         <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 20, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, maxWidth: 360 }}>
           <LintsPanel
@@ -1342,6 +1350,36 @@ function HumanTouchpointsPanel({ touchpoints, nodes, onFocus }) {
 }
 
 function stripTicks(s) { return typeof s === 'string' ? s.replace(/`/g, '') : s; }
+
+// Centered empty state for a draft flow with no agents yet (#1124). Unlike
+// Overlay this captures pointer events on its CTA so a newcomer can start the
+// flow straight from the blank canvas instead of hunting the toolbar hint.
+function EmptyCanvasState({ onAddAgent }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-3)',
+      pointerEvents: 'none', textAlign: 'center', padding: 'var(--eb-space-4)',
+    }}>
+      <Boxes size={40} style={{ color: 'var(--eb-text-muted)' }} />
+      <div style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+        This flow is empty
+      </div>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxWidth: 340 }}>
+        Add your first agent to start wiring the flow. You can add more agents,
+        human touchpoints and stages, then materialize it into a live team.
+      </div>
+      <button onClick={onAddAgent} style={{
+        pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6,
+        background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+        borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2) var(--eb-space-4)',
+        fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+      }}>
+        <Plus size={16} /> Add agent
+      </button>
+    </div>
+  );
+}
 
 function Overlay({ children, tone }) {
   return (

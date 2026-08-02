@@ -72,14 +72,19 @@ export default function CredentialOwnership({ value, onChange, teams = [], isSys
       <div style={labelStyle}>Ownership</div>
 
       {scopes.length > 1 && (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-          <ScopeTab active={own.scope === 'system'} onClick={() => !disabled && setScope('system')}>
-            System (assign to teams)
-          </ScopeTab>
-          <ScopeTab active={own.scope === 'team'} onClick={() => !disabled && setScope('team')}>
-            Team-owned
-          </ScopeTab>
-        </div>
+        <>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-1)' }}>
+            Scope controls who can see and use this credential. System-scoped is visible to all admins (and any teams you assign); Team-owned is limited to one team.
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <ScopeTab active={own.scope === 'system'} onClick={() => !disabled && setScope('system')}>
+              System (assign to teams)
+            </ScopeTab>
+            <ScopeTab active={own.scope === 'team'} onClick={() => !disabled && setScope('team')}>
+              Team-owned
+            </ScopeTab>
+          </div>
+        </>
       )}
 
       {own.scope === 'system' ? (

@@ -41,7 +41,7 @@ done. References are `agent-image/scripts/agent-entrypoint.py` unless noted.
 | Durable state between runs | ✅ | `memory/`, git clone, knowledge-digest, `.aee/artifacts.jsonl` |
 | Objective gate (pre-run, exit-code) | ⚠️ partial | `preCheckScript` gates the LLM call by exit code (`_execute_inner` ~3902) — but it runs **before** and only *skips*, it is not a post-run stop condition |
 | Anti-runaway budget (global) | ⚠️ partial | Backstop `try_acquire` — concurrency ceiling + spawn-rate window, "so a self-triggering loop can't grow unbounded" (#611, `_execute` ~3805). Plus conversation throttle + burst digest (github-poller). Not a *purposeful* per-loop budget with a clean done/exhausted outcome |
-| Overlap protection | ✅ (skip, not chain) | `_execute`: `if tid in self._running: … skipping` (~3801) |
+| Overlap protection | ✅ agent-wide serialization (#1157) | `WorkspaceGate` — every run (loop iteration, any trigger, chat/DM) passes one gate; a loop holds it across all iterations. Per-trigger-id `if tid in self._running: … skipping` remains a backstop. |
 | Self-managed, file-synced triggers | ✅ | `triggers.json`, `_load_triggers`/`_save_triggers` (~2650), SIGUSR2 re-sync |
 | ACE LoopScript | ✅ but ≠ loop | Phase protocol *within one invocation*: "Follow the LoopScript phases strictly and sequentially" (`agent-image/CLAUDE.md:207`); resolved by `sase_lib.resolve_loopscript` |
 
@@ -49,7 +49,9 @@ done. References are `agent-image/scripts/agent-entrypoint.py` unless noted.
 
 1. **Chaining.** No "fire again as soon as the previous run finished." `cron` is
    wall-clock (`_cron_runner` sleeps to `croniter` next-fire, ~3273); overlap
-   protection only *skips* a tick, it never re-arms on completion.
+   protection only *skips* a tick, it never re-arms on completion. *(Resolved by
+   the `loop` type; separately, cross-run serialization is now handled by the
+   agent-wide `WorkspaceGate`, #1157 — §4.2.)*
 2. **Post-run stop / `until` condition.** `preCheckScript` gates *before* a run.
    Nothing evaluates *after* a run to decide "goal met → stop the loop." Note
    CLAUDE.md states agents have no `completed` state — a loop needs one, scoped
@@ -106,6 +108,15 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
   the existing `_execute`, and when it returns, immediately arms the next — no
   wall-clock. `minGapSeconds` optionally throttles. Overlap can't occur by
   construction (strictly sequential), so `_running` still applies as a backstop.
+- **Workspace serialization (#1157).** An agent has one workspace, so the loop
+  reserves it for its **whole** run via the agent-wide `WorkspaceGate` — acquired
+  once in `_loop_runner` and released only when the loop ends (completion, stop,
+  or cancellation). Iterations run *inside* that hold (`_execute(..., _gate_held=True)`)
+  and never release it between them, so no cron/once/http/github-event run and no
+  chat/DM turn can touch the workspace mid-loop; they queue and drain in arrival
+  order once the loop finishes. The pending-queue drain pauses while a loop is
+  active, so deferred http/github-event work stays durably queued (not dropped,
+  not double-counted). See the AC-mapped detail in the #1157 issue.
 - **Fresh context by default.** Loops default to `per-invocation` so each iteration
   starts clean and re-reads `memory/` + the worklist — principle #1, already ours.
 - **Stop conditions (any of):**

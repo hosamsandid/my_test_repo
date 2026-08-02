@@ -56,7 +56,7 @@ const NAV = [
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
-  { section: 'WORKSPACES', items: [
+  { section: 'INFRASTRUCTURE', items: [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },

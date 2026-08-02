@@ -686,6 +686,27 @@ function HowItWorks({ onDismiss }) {
         </button>
       </div>
 
+      {/* Skills vs Knowledge vs Memory — the three concepts placed side by side (#1142) */}
+      <div style={{
+        display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap',
+        margin: '0 0 var(--eb-space-3)', padding: 'var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+      }}>
+        <div style={stepStyle}>
+          <div style={stepTitle}><Brain size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Memory</div>
+          <p style={stepBody}>What <em>one agent</em> privately remembers — its own episodic notebook, not shared with anyone.</p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}><Share2 size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Knowledge</div>
+          <p style={stepBody}>Lessons <em>shared across the team</em>, so every agent benefits from what any one of them learned (this page).</p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}><FileText size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Skills</div>
+          <p style={stepBody}>Polished, reusable instruction files agents load automatically — often distilled from the best knowledge.</p>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap' }}>
         <div style={stepStyle}>
           <div style={stepTitle}>{num(1)} Agents learn while they work</div>
@@ -722,6 +743,13 @@ function HowItWorks({ onDismiss }) {
         then <strong>consolidate</strong> the many small skills in a domain into a single <strong>playbook</strong>,
         or <strong>distill</strong> one skill to dedupe and tighten it. These are optional power tools —
         the panels below explain each in place, and nothing is applied without your review.
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
+        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>The most important lessons are always in context.</strong>{' '}
+        Each agent gets a per-agent <strong>digest</strong> — the top knowledge, guaranteed to be loaded every session
+        (the green badge on an agent) — while the rest stays reachable on demand via search.
       </div>
 
       <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>

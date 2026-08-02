@@ -1831,6 +1831,12 @@ export default function SkillsRegistry() {
           install that isn't also granted won't survive. Everything else (<em>Promote</em>, <em>Move</em>, <em>Adopt</em>,{' '}
           <em>Distill</em>, <em>Merge</em>) just moves a skill between the Global and Team tiers above.
         </p>
+        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
+          <strong>Skills vs Knowledge vs Memory.</strong> <strong>Memory</strong> is what one agent privately remembers;{' '}
+          <strong>Knowledge</strong> is lessons shared across the team; <strong>Skills</strong> (this page) are the polished,
+          reusable instruction files agents load automatically — often distilled from the best knowledge.{' '}
+          <Link to="/knowledge" style={{ color: 'var(--eb-accent-primary)' }}>See how the knowledge system works →</Link>
+        </p>
       </div>
 
       {/* Import feedback */}

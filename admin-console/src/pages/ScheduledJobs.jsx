@@ -521,9 +521,14 @@ export default function ScheduledJobs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-        Triggers
-      </h1>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+          Triggers
+        </h1>
+        <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxWidth: '60ch', lineHeight: 1.5 }}>
+          All triggers across every agent — the same triggers you can edit from an agent's chat <strong>Triggers</strong> tab. Adding, editing, or deleting one here changes it for that agent everywhere.
+        </p>
+      </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button onClick={() => setAddOpen(true)} disabled={!agents || agents.length === 0} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit', opacity: (!agents || agents.length === 0) ? 0.5 : 1 }}>

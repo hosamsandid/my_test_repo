@@ -56,6 +56,7 @@ const skillGrantValidate = require('./skill-grant-validate');
 const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -10088,6 +10089,51 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
   return planned;
 }
 
+// Suggest a random label suffix for the team-setup wizard (#902).
+app.get('/api/teams/suggest-suffix', (req, res) => {
+  res.json({ suffix: generateSuffix() });
+});
+
+// Deterministic label color derived from the suffix string: hash to an HSL hue,
+// convert to a readable pastel-ish hex color. Two teams with different suffixes
+// get visually distinct label colors in the GitHub UI.
+function suffixLabelColor(suffix) {
+  let h = 0;
+  for (let i = 0; i < suffix.length; i++) h = (h * 31 + suffix.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  // Fixed saturation + lightness for a consistent pastel palette.
+  const s = 65, l = 60;
+  const a = s * Math.min(l, 100 - l) / 100;
+  const f = n => {
+    const k = (n + hue / 30) % 12;
+    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * c / 100).toString(16).padStart(2, '0');
+  };
+  return `${f(0)}${f(8)}${f(4)}`;
+}
+
+// Best-effort label provisioning call to the orchestrator after materialisation.
+// Creates missing GitHub labels for the stamped token set. Failures are warnings.
+async function provisionGithubLabels(orchestratorUrl, envId, tokenSet, suffix) {
+  if (!suffix || !tokenSet || !tokenSet.size) return [];
+  try {
+    const color = suffixLabelColor(suffix);
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/github-labels`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels: [...tokenSet], color }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (data.warnings?.length) return data.warnings;
+    return [];
+  } catch (err) {
+    return [`Label provisioning: ${err.message}`];
+  }
+}
+
 app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, mcpServers } = body;
@@ -10160,6 +10206,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     return res.status(400).json({
       error: `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`,
     });
+  }
+  // Label suffix (#902): optional short base36 tag applied once to all label
+  // tokens at materialisation so parallel teams/stacks on one repo don't
+  // cross-trigger. Empty/absent = standard shared label vocabulary.
+  const labelSuffix = (typeof body.labelSuffix === 'string' && body.labelSuffix.trim())
+    ? body.labelSuffix.trim()
+    : '';
+  {
+    const sv = validateSuffix(labelSuffix);
+    if (!sv.ok) return res.status(400).json({ error: sv.error });
   }
 
   // ── 1. Validate input ─────────────────────────────────────────────
@@ -10267,7 +10323,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     : [];
   // Authoritative gate/brake label registry (#928) — normalized to the persisted
   // shape so the live graph reads booleans back, never a stray truthy value.
-  const bundleLabels = Array.isArray(body.processTemplate?.labels)
+  let bundleLabels = Array.isArray(body.processTemplate?.labels)
     ? body.processTemplate.labels
       .filter(l => l && typeof l.name === 'string' && l.name.trim())
       .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
@@ -10276,6 +10332,20 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+
+  // Label-suffix stamping (#902): one-shot rename applied to the member array
+  // + bundle label registry before any agent is created. No-op when labelSuffix
+  // is empty (byte-identical output). Warnings surface un-stamped prompt mentions.
+  let suffixWarnings = [];
+  let suffixTokenSet = null;
+  if (labelSuffix) {
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    customRolesRaw = stamped.members;
+    bundleLabels = stamped.bundleLabels;
+    suffixWarnings = stamped.warnings;
+    suffixTokenSet = stamped.tokenSet;
+  }
+
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -10346,6 +10416,14 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     if (!teamExists) {
       return res.status(409).json({
         error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
+      });
+    }
+    // Enforce suffix consistency: added roles must use the stored suffix.
+    const storedSuffix = existingTeamCfg.labelSuffix || '';
+    if (labelSuffix !== storedSuffix) {
+      return res.status(400).json({
+        error: `labelSuffix mismatch: team '${teamId}' was created with suffix '${storedSuffix || '(none)'}'; ` +
+          `extending it with '${labelSuffix || '(none)'}' would create mismatched labels.`,
       });
     }
     toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
@@ -10484,6 +10562,9 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
+          // Label suffix (#902): stored so extend-mode adds roles with the same
+          // suffix and Flow-Editor dialogs can pre-fill new label inputs.
+          ...(labelSuffix ? { labelSuffix } : {}),
         }),
       });
       if (!resp.ok) {
@@ -10575,7 +10656,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
       dms: created.dms,
+      ...(suffixWarnings.length ? { warnings: suffixWarnings } : {}),
     });
+
+    // Phase E — label provisioning (best-effort, after response sent).
+    // Create the stamped labels in the target repo so `gh issue edit --add-label`
+    // doesn't fail on a label that doesn't exist yet. Failures are logged only.
+    provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix)
+      .then(provWarn => {
+        if (provWarn.length) console.warn(`[Team] Label provisioning warnings for ${teamId}:`, provWarn);
+      })
+      .catch(err => console.warn(`[Team] Label provisioning error for ${teamId}: ${err.message}`));
   } catch (err) {
     await rollback(err.message);
     res.status(500).json({ error: `Team creation failed: ${err.message}` });
@@ -10654,6 +10745,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const dispatchLabel = (typeof body.dispatchLabel === 'string' && body.dispatchLabel.trim())
     ? body.dispatchLabel.trim()
     : 'dispatch';
+  // Label suffix (#902) — see the non-streaming handler above.
+  const labelSuffix = (typeof body.labelSuffix === 'string' && body.labelSuffix.trim())
+    ? body.labelSuffix.trim()
+    : '';
 
   // ── 1. Validate input ─────────────────────────────────────────────
   if (!READY_LABEL_RE.test(readyLabel)) {
@@ -10676,6 +10771,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const maxParallel = body.maxParallel ?? 1;
   if (maxParallel < MAX_PARALLEL_MIN || maxParallel > MAX_PARALLEL_MAX) {
     return fail(400, `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`);
+  }
+  {
+    const sv = validateSuffix(labelSuffix);
+    if (!sv.ok) return fail(400, sv.error);
   }
   if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) {
     return fail(400, 'teamId must be a lowercase slug, 1–40 chars, [a-z0-9-]');
@@ -10758,7 +10857,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     : [];
   // Authoritative gate/brake label registry (#928) — normalized to the persisted
   // shape so the live graph reads booleans back, never a stray truthy value.
-  const bundleLabels = Array.isArray(body.processTemplate?.labels)
+  let bundleLabels = Array.isArray(body.processTemplate?.labels)
     ? body.processTemplate.labels
       .filter(l => l && typeof l.name === 'string' && l.name.trim())
       .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
@@ -10767,6 +10866,18 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+
+  // Label-suffix stamping (#902) — see the non-streaming handler.
+  let suffixWarnings = [];
+  let suffixTokenSet = null;
+  if (labelSuffix) {
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    customRolesRaw = stamped.members;
+    bundleLabels = stamped.bundleLabels;
+    suffixWarnings = stamped.warnings;
+    suffixTokenSet = stamped.tokenSet;
+  }
+
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -10838,6 +10949,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   if (mode === 'extend') {
     if (!teamExists) {
       return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
+    }
+    // Enforce suffix consistency on extend — mirror the non-streaming handler.
+    const storedSuffix = existingTeamCfg.labelSuffix || '';
+    if (labelSuffix !== storedSuffix) {
+      return fail(400,
+        `labelSuffix mismatch: team '${teamId}' was created with suffix '${storedSuffix || '(none)'}'; ` +
+        `extending it with '${labelSuffix || '(none)'}' would create mismatched labels.`);
     }
     toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
     if (toCreate.length === 0) {
@@ -10990,6 +11108,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
+          // Label suffix (#902) — see the non-streaming handler.
+          ...(labelSuffix ? { labelSuffix } : {}),
         }),
       });
       if (!resp.ok) {
@@ -11078,6 +11198,19 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       emit({ type: 'step', id: 'dms', status: 'done' });
     }
 
+    // Emit any suffix coverage warnings as separate warning events before
+    // the complete event so the wizard can render them in the result step.
+    for (const w of suffixWarnings) {
+      emit({ type: 'warning', message: w });
+    }
+    // Phase E — label provisioning (best-effort, before complete event).
+    // Emit provisioning warnings as individual warning events so the wizard
+    // result step can surface them inline.
+    const provWarn = await provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix);
+    for (const w of provWarn) {
+      emit({ type: 'warning', message: w });
+    }
+
     emit({
       type: 'complete',
       result: {
@@ -11089,6 +11222,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),
         dms: created.dms,
+        ...(suffixWarnings.length ? { warnings: [...suffixWarnings, ...provWarn] } : (provWarn.length ? { warnings: provWarn } : {})),
       },
     });
     res.end();

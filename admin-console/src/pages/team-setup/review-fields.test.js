@@ -36,14 +36,23 @@ function byKey(fields) {
   return Object.fromEntries(fields.map(f => [f.key, f.value]));
 }
 
-test('buildReviewFields returns every scalar field in order', () => {
+test('buildReviewFields returns every scalar field in order (no-suffix case)', () => {
   const fields = buildReviewFields({ form: baseForm, env, sshKey, ghToken, knowledgeMeta: KNOWLEDGE_META });
   assert.deepEqual(
     fields.map(f => f.key),
     ['team', 'environment', 'repository', 'sshKey', 'githubToken', 'skills', 'knowledge'],
   );
-  // No information dropped in the compaction (#760 AC2).
+  // No information dropped in the compaction (#760 AC2). 7 = baseForm has no
+  // labelSuffix, so the optional suffix row is absent (see suffix test below).
   assert.equal(fields.length, 7);
+});
+
+test('labelSuffix row appears after team row when suffix is set', () => {
+  const form = { ...baseForm, labelSuffix: 'k3f9' };
+  const fields = buildReviewFields({ form, env, sshKey, ghToken, knowledgeMeta: KNOWLEDGE_META });
+  assert.equal(fields.length, 8);
+  assert.equal(fields[1].key, 'labelSuffix');
+  assert.equal(fields[1].value, 'k3f9');
 });
 
 test('resolved values render name + id / url + branch', () => {

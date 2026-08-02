@@ -10,6 +10,7 @@ import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
+import { lintView } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
 import { outcomeDropDialog } from './process/outcome-routing';
@@ -1274,11 +1275,32 @@ function LintsPanel({ lints, onFocus }) {
                 fontFamily: 'inherit', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
               }}
             >
-              <span style={{
-                color: l.severity === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-warning)',
-                fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', textTransform: 'uppercase',
-              }}>{l.code}</span>
-              <div style={{ marginTop: 2, lineHeight: 1.4 }}>{stripTicks(l.message)}</div>
+              {(() => {
+                const v = lintView(l);
+                return (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+                      <span
+                        title={v.slug}
+                        style={{
+                          color: v.severityColor, fontSize: 'var(--eb-text-xs)',
+                          fontWeight: 'var(--eb-font-semibold)', textTransform: 'uppercase',
+                          cursor: 'help', flexShrink: 0,
+                        }}
+                      >{v.severityWord}</span>
+                      <span style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                        {v.title}
+                      </span>
+                    </div>
+                    <div style={{ marginTop: 2, lineHeight: 1.4 }}>{stripTicks(v.message)}</div>
+                    {v.fix && (
+                      <div style={{ marginTop: 4, lineHeight: 1.4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                        <strong style={{ fontWeight: 'var(--eb-font-medium)' }}>To fix:</strong> {v.fix}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </button>
           ))}
         </div>

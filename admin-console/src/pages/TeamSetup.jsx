@@ -1040,7 +1040,7 @@ export default function TeamSetup() {
           margin: 0,
           color: 'var(--eb-text-primary)',
         }}>
-          Team Setup
+          Agent Team Wizard
         </h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
@@ -1049,6 +1049,15 @@ export default function TeamSetup() {
           marginBottom: 0,
         }}>
           Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.
+        </p>
+        <p style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-muted)',
+          marginTop: 'var(--eb-space-2)',
+          marginBottom: 0,
+        }}>
+          This builds an <strong>Agent Team</strong> (a squad of agents) — not the same as a human{' '}
+          <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (members &amp; access scope).
         </p>
       </div>
 

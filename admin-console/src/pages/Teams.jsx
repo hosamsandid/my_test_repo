@@ -588,7 +588,7 @@ export default function Teams() {
         A <strong>Team</strong> is a <em>human</em> collaboration & visibility scope (the tenant). Every agent, Agent Team,
         orchestrator and Working Environment is owned by exactly one Team. Add human users as <strong>Team Admins</strong> or
         <strong> Team Members</strong>; <strong>System Admins</strong> have global access. This is distinct from the
-        <em> Agent Team</em> construct (a squad of agents) created via the Team Wizard.
+        <em> Agent Team</em> construct (a squad of agents) created via the Agent Team Wizard.
       </div>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />

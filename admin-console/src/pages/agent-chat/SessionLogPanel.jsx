@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, PanelRightClose } from 'lucide-react';
+import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
@@ -369,6 +369,28 @@ export default function SessionLogPanel({
           >
             <PanelRightClose size={16} />
           </button>
+        </div>
+      )}
+
+      {/* Discoverability hint for the cross-panel hover correlation: hovering a
+          chat message dims the log rows it did NOT produce (and vice-versa).
+          Without this caption the dimming reads like a random flicker. Shown
+          only once there is activity to correlate. */}
+      {!loading && agentId && roomId && renderable.length > 0 && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          borderBottom: '1px solid var(--eb-border-default)',
+          background: 'var(--eb-bg-surface)',
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-text-muted)',
+          flexShrink: 0,
+          lineHeight: 1.4,
+        }}>
+          <Info size={12} style={{ flexShrink: 0 }} />
+          <span>Hover a chat message to highlight the events that produced it — and hover a log entry to highlight its message.</span>
         </div>
       )}
 

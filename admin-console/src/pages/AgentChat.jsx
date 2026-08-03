@@ -586,6 +586,12 @@ export default function AgentChat() {
               >
                 Set up a team
               </Link>
+              <Link
+                to="/getting-started"
+                style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none', fontSize: 'var(--eb-text-xs)' }}
+              >
+                New here? Read the Getting Started overview →
+              </Link>
             </div>
           )}
 

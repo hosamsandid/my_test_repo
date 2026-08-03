@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -46,7 +46,8 @@ function NavBadge({ count, color }) {
 
 const NAV = [
   { items: [
-    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
   ]},
   { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },

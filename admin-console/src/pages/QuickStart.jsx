@@ -98,14 +98,19 @@ export default function QuickStart() {
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>Quick Start</h1>
+        }}>Single Agent</h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
         }}>
-          Paste a GitHub URL, hit Enter, start chatting. The Working Environment and Agent are created automatically.
+          {ready
+            ? 'Paste a GitHub URL, hit Enter, start chatting. The Working Environment and Agent are created automatically.'
+            : <>Point an agent at a repository and start chatting — you first need an{' '}
+                <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>SSH key</Link> and a{' '}
+                <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>GitHub token</Link>{' '}
+                (see below). Then paste a URL and the Working Environment and Agent are created automatically.</>}
         </p>
         <p style={{
           fontSize: 'var(--eb-text-sm)',
@@ -129,7 +134,7 @@ export default function QuickStart() {
                 No GitHub token configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                Quick Start needs a GitHub PAT for API actions (PR creation, event polling).{' '}
+                A single agent needs a GitHub PAT for API actions (PR creation, event polling).{' '}
                 <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>
                   Create token →
                 </Link>
@@ -148,7 +153,7 @@ export default function QuickStart() {
                 No SSH key configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                Quick Start clones via SSH (<code>git@github.com:…</code>).{' '}
+                Cloning uses SSH (<code>git@github.com:…</code>).{' '}
                 <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>
                   Add SSH key →
                 </Link>

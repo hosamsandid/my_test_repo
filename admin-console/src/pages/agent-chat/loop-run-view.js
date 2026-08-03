@@ -130,6 +130,81 @@ export function progressLabel(progress) {
   return Number.isFinite(cap) && cap > 0 ? `Iteration ${it} of ${cap}` : `Iteration ${it}`;
 }
 
+// ── finished-loop record (#1231) ─────────────────────────────────────────────
+// A launched loop self-removes on any terminal outcome, so the running
+// `LoopSummaryCard` unmounts and its config vanishes. The runtime persists a
+// structured `io.aee.loop-record` payload on the terminal message — config +
+// terminal outcome + iterations — so the finished loop stays reviewable in
+// scrollback and re-runnable. These helpers turn that payload into a render
+// model and back into the launcher's `initialValues`, reusing the running
+// card's `buildLoopSummaryModel` so both surfaces show the same fields.
+
+// Display metadata for a terminal outcome: a human label and a semantic tone
+// the card colours by. Unknown outcomes fall back to a neutral label.
+export function loopOutcomeMeta(outcome) {
+  switch (outcome) {
+    case 'done':      return { label: 'Done',      tone: 'success' };
+    case 'exhausted': return { label: 'Exhausted', tone: 'neutral' };
+    case 'paused':    return { label: 'Paused',    tone: 'warning' };
+    case 'stopped':   return { label: 'Stopped',   tone: 'neutral' };
+    default:          return { label: outcome ? String(outcome) : 'Finished', tone: 'neutral' };
+  }
+}
+
+// A compact "<Outcome> · <ran> of <cap>" summary chip for the finished-loop
+// card (AC5). Omits the " of <cap>" tail when no cap is known.
+export function loopRecordSummary(record) {
+  const r = record && typeof record === 'object' ? record : {};
+  const { label } = loopOutcomeMeta(r.outcome);
+  const it = Number(r.iterations);
+  const ran = Number.isFinite(it) && it >= 0 ? it : null;
+  const cap = Number(r.config && r.config.maxIterations);
+  const capOk = Number.isFinite(cap) && cap > 0;
+  if (ran == null) return label;
+  return capOk ? `${label} · ${ran} of ${cap}` : `${label} · ${ran}`;
+}
+
+// Structured, render-ready model of a *finished* loop (#1231). Reuses
+// `buildLoopSummaryModel` for the shared config fields (prompt / stop rows /
+// verify) so the persisted card and the running card render identically, and
+// adds the terminal outcome + iteration count. `progress` is intentionally
+// null — a finished loop has no live progress.
+export function buildLoopRecordModel(record) {
+  const r = record && typeof record === 'object' ? record : {};
+  const config = r.config && typeof r.config === 'object' ? r.config : {};
+  const base = buildLoopSummaryModel(config, null);
+  const it = Number(r.iterations);
+  return {
+    ...base,
+    outcome: r.outcome || null,
+    outcomeMeta: loopOutcomeMeta(r.outcome),
+    iterations: Number.isFinite(it) && it >= 0 ? it : null,
+    summary: loopRecordSummary(r),
+  };
+}
+
+// Turn a persisted loop record into the loop launcher's `initialValues` so
+// "Start again" (AC7/AC8) opens the configuration dialog pre-filled with the
+// finished loop's settings. Only the fields `TriggerForm` reads for a loop are
+// emitted; `id` is deliberately omitted so starting creates a NEW independent
+// loop rather than colliding with the removed trigger.
+export function loopRecordToInitialValues(record) {
+  const r = record && typeof record === 'object' ? record : {};
+  const config = r.config && typeof r.config === 'object' ? r.config : {};
+  const values = { type: 'loop' };
+  if (typeof config.prompt === 'string') values.prompt = config.prompt;
+  if (Number.isFinite(Number(config.maxIterations))) values.maxIterations = Number(config.maxIterations);
+  if (config.until && typeof config.until === 'object'
+      && typeof config.until.command === 'string' && config.until.command.trim()) {
+    values.until = { command: config.until.command };
+  }
+  if (Number.isFinite(Number(config.maxTokens))) values.maxTokens = Number(config.maxTokens);
+  if (Number.isFinite(Number(config.minGapSeconds))) values.minGapSeconds = Number(config.minGapSeconds);
+  if (config.verify && typeof config.verify === 'object') values.verify = config.verify;
+  if (typeof r.description === 'string' && r.description) values.description = r.description;
+  return values;
+}
+
 // Label for a loop `trigger.fired` row in the session log (#1155 AC7): a loop
 // iteration reads as a loop and carries its number, never a bare
 // "Trigger fired: <id>". Falls back to a plain "Loop iteration" when the row

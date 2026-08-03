@@ -1029,6 +1029,73 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("3 / 3", body)
         self.assertIn("lp", scheduler._loop_done)
 
+    async def test_loop_stopped_on_user_abort(self):
+        # #1231: a user Stop aborts the in-flight iteration (surfaced via the
+        # loop sink) → the loop terminates as `stopped`, leaving a persistent
+        # record. The aborted iteration is not counted.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(maxIterations=10)
+
+        async def fake_execute(_trigger, ctx=None, loop_sink=None, **_kw):
+            # First iteration completes; the user stops during the second.
+            if ctx.get("loopIteration") == 2 and loop_sink is not None:
+                loop_sink["userAborted"] = True
+
+        with patch.object(scheduler, "_execute", side_effect=fake_execute) as execute_mock, \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        self.assertEqual(execute_mock.await_count, 2)
+        scheduler._send_formatted.assert_awaited_once()
+        body = scheduler._send_formatted.await_args.args[1]
+        self.assertIn("stopped", body)
+        # Only the completed iteration counts (the aborted one does not).
+        self.assertIn("1 / 10", body)
+        self.assertIn("lp", scheduler._loop_done)
+
+    async def test_loop_record_persisted_on_terminal_outcome(self):
+        # #1231: the terminal message carries a structured `io.aee.loop-record`
+        # payload (config + outcome + iterations) so the finished loop is
+        # reviewable and re-runnable from chat scrollback.
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(
+            maxIterations=3, prompt="fix the flake",
+            until={"command": "npm test"}, maxTokens=2000000,
+            minGapSeconds=60, verify={"agentId": "reviewer-1"})
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)), \
+             patch.object(scheduler, "_run_loop_verify", AsyncMock(return_value=(True, ""))), \
+             patch.object(scheduler, "_post_loop_note", AsyncMock()), \
+             patch.object(entrypoint.asyncio, "sleep", AsyncMock(return_value=None)), \
+             patch.object(entrypoint, "_run_pre_check", return_value=(1, "nope")):
+            await scheduler._loop_runner(trigger)
+        rec = scheduler._send_formatted.await_args.kwargs["extra_content"]["io.aee.loop-record"]
+        self.assertEqual(rec["outcome"], "exhausted")
+        self.assertEqual(rec["iterations"], 3)
+        self.assertEqual(rec["triggerId"], "lp")
+        cfg = rec["config"]
+        self.assertEqual(cfg["prompt"], "fix the flake")
+        self.assertEqual(cfg["maxIterations"], 3)
+        self.assertEqual(cfg["until"], {"command": "npm test"})
+        self.assertEqual(cfg["maxTokens"], 2000000)
+        self.assertEqual(cfg["minGapSeconds"], 60)
+        self.assertEqual(cfg["verify"], {"agentId": "reviewer-1"})
+
+    async def test_loop_record_omits_unset_optional_config(self):
+        # A minimal loop records only the fields that were configured — parity
+        # with the running card's `buildLoopSummaryModel` (#1231 AC3).
+        scheduler = self._scheduler()
+        trigger = self._loop_trigger(maxIterations=2, prompt="just iterate")
+        with patch.object(scheduler, "_execute", AsyncMock()), \
+             patch.object(scheduler, "_maintenance_active", AsyncMock(return_value=False)):
+            await scheduler._loop_runner(trigger)
+        cfg = scheduler._send_formatted.await_args.kwargs["extra_content"]["io.aee.loop-record"]["config"]
+        self.assertEqual(cfg["prompt"], "just iterate")
+        self.assertEqual(cfg["maxIterations"], 2)
+        self.assertNotIn("until", cfg)
+        self.assertNotIn("maxTokens", cfg)
+        self.assertNotIn("minGapSeconds", cfg)
+        self.assertNotIn("verify", cfg)
+
     async def test_loop_exhausted_when_until_never_passes(self):
         scheduler = self._scheduler()
         trigger = self._loop_trigger(until={"command": "false"}, maxIterations=2)

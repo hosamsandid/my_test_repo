@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypePrettyCode from 'rehype-pretty-code';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, Zap } from 'lucide-react';
+import LoopRecordCard from './LoopRecordCard';
 
 /**
  * Defensive markdown wrapper.
@@ -331,7 +332,24 @@ function NoticeMessage({ message }) {
   );
 }
 
-export default function Message({ message, agentUserId, thinking }) {
+export default function Message({ message, agentUserId, thinking, onRelaunchLoop }) {
+  // Finished-loop record (#1231): a persistent, re-runnable card that replaces
+  // the plain terminal-outcome bubble in the Admin Console. The full narrative
+  // stays available as the message `body` (shown in the card's "Run details").
+  if (message['io.aee.loop-record']) {
+    return (
+      <LoopRecordCard
+        record={message['io.aee.loop-record']}
+        onRelaunch={onRelaunchLoop}
+        time={formatMessageTime(message.ts)}
+        details={
+          message.body
+            ? <div className="agent-chat-md"><SafeMarkdown body={message.body} /><style>{AGENT_CHAT_MD_CSS}</style></div>
+            : null
+        }
+      />
+    );
+  }
   if (message.msgtype === 'm.notice' && message['io.aee.trigger']) {
     return <NoticeMessage message={message} />;
   }

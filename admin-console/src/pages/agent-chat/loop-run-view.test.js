@@ -7,6 +7,10 @@ import {
   latestLoopProgress,
   progressLabel,
   loopFiredLabel,
+  loopOutcomeMeta,
+  loopRecordSummary,
+  buildLoopRecordModel,
+  loopRecordToInitialValues,
 } from './loop-run-view.js';
 
 // ── buildLoopSummaryModel ────────────────────────────────────────────────────
@@ -131,4 +135,87 @@ test('loopFiredLabel: numbered, capped and legacy', () => {
   assert.equal(loopFiredLabel({ loopIteration: 3, loopMaxIterations: 25 }), 'Loop · iteration 3 of 25');
   assert.equal(loopFiredLabel({ loopIteration: 3 }), 'Loop · iteration 3');
   assert.equal(loopFiredLabel({}), 'Loop iteration');
+});
+
+// ── finished-loop record (#1231) ─────────────────────────────────────────────
+
+test('loopOutcomeMeta: labels + tone for every terminal outcome (AC5)', () => {
+  assert.deepEqual(loopOutcomeMeta('done'), { label: 'Done', tone: 'success' });
+  assert.deepEqual(loopOutcomeMeta('exhausted'), { label: 'Exhausted', tone: 'neutral' });
+  assert.deepEqual(loopOutcomeMeta('paused'), { label: 'Paused', tone: 'warning' });
+  assert.deepEqual(loopOutcomeMeta('stopped'), { label: 'Stopped', tone: 'neutral' });
+  // Unknown falls back to a neutral, non-empty label.
+  assert.equal(loopOutcomeMeta('weird').tone, 'neutral');
+  assert.equal(loopOutcomeMeta(undefined).label, 'Finished');
+});
+
+test('loopRecordSummary: "<Outcome> · <ran> of <cap>" (AC5)', () => {
+  assert.equal(
+    loopRecordSummary({ outcome: 'exhausted', iterations: 10, config: { maxIterations: 10 } }),
+    'Exhausted · 10 of 10');
+  assert.equal(
+    loopRecordSummary({ outcome: 'stopped', iterations: 3, config: { maxIterations: 10 } }),
+    'Stopped · 3 of 10');
+  // No cap known → drop the " of N" tail.
+  assert.equal(loopRecordSummary({ outcome: 'done', iterations: 2, config: {} }), 'Done · 2');
+  // No iteration count → label only.
+  assert.equal(loopRecordSummary({ outcome: 'done', config: { maxIterations: 5 } }), 'Done');
+});
+
+test('buildLoopRecordModel: reuses buildLoopSummaryModel for config + adds outcome (AC3/AC5)', () => {
+  const m = buildLoopRecordModel({
+    outcome: 'stopped',
+    iterations: 3,
+    config: {
+      prompt: 'Fix the flake',
+      maxIterations: 10,
+      until: { command: 'npm test' },
+      verify: { command: 'npm run lint' },
+    },
+  });
+  assert.equal(m.prompt, 'Fix the flake');
+  assert.deepEqual(m.stop.map(r => r.key), ['maxIterations', 'until']);
+  assert.equal(m.verify.kind, 'command');
+  assert.equal(m.outcome, 'stopped');
+  assert.equal(m.iterations, 3);
+  assert.equal(m.summary, 'Stopped · 3 of 10');
+  assert.equal(m.progress, null); // a finished loop has no live progress
+});
+
+test('buildLoopRecordModel: minimal record renders no blank stop rows (AC3)', () => {
+  const m = buildLoopRecordModel({ outcome: 'done', iterations: 2, config: { prompt: 'go', maxIterations: 2 } });
+  assert.deepEqual(m.stop.map(r => r.key), ['maxIterations']);
+  assert.equal(m.verify.kind, 'self');
+});
+
+test('loopRecordToInitialValues: seeds the launcher, drops id, keeps only set fields (AC7/AC8)', () => {
+  const vals = loopRecordToInitialValues({
+    triggerId: 'loop-old',
+    description: 'nightly flake hunt',
+    outcome: 'exhausted',
+    iterations: 10,
+    config: {
+      prompt: 'Fix the flake',
+      maxIterations: 10,
+      until: { command: 'npm test' },
+      maxTokens: 2000000,
+      minGapSeconds: 60,
+      verify: { agentId: 'reviewer-1' },
+    },
+  });
+  assert.equal(vals.type, 'loop');
+  assert.equal(vals.prompt, 'Fix the flake');
+  assert.equal(vals.maxIterations, 10);
+  assert.deepEqual(vals.until, { command: 'npm test' });
+  assert.equal(vals.maxTokens, 2000000);
+  assert.equal(vals.minGapSeconds, 60);
+  assert.deepEqual(vals.verify, { agentId: 'reviewer-1' });
+  assert.equal(vals.description, 'nightly flake hunt');
+  // The old trigger id must NOT be carried — starting creates a fresh loop.
+  assert.ok(!('id' in vals));
+});
+
+test('loopRecordToInitialValues: minimal record omits unset optional fields', () => {
+  const vals = loopRecordToInitialValues({ outcome: 'done', config: { prompt: 'go', maxIterations: 3 } });
+  assert.deepEqual(vals, { type: 'loop', prompt: 'go', maxIterations: 3 });
 });

@@ -81,6 +81,7 @@ The loop posts a summary and stops when it reaches any terminal state:
 | **done** | `until.command` exits `0` — goal confirmed met. |
 | **exhausted** | `maxIterations` cap or `maxTokens` budget reached. |
 | **paused** | Platform runaway safeguard tripped. |
+| **stopped** | User pressed **Stop** mid-loop. |
 
 ### Admin Console
 

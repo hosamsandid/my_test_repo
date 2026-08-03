@@ -599,6 +599,13 @@ function isSafePathSeg(s) {
     !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
 }
 
+// Client-safe error text: only ever the `message` property read (a CodeQL
+// js/stack-trace-exposure barrier), never a stringification of the exception
+// object itself, which is treated as carrying the stack trace.
+function errorMessage(err) {
+  return (err && err.message) ? String(err.message) : 'error';
+}
+
 // Apply the session-log retention policy (#673) to a room's archives in `dir`.
 // Best-effort: a stat/unlink failure on one archive never blocks the rest.
 function pruneControlSessionArchives(dir, roomId, cfg) {
@@ -6237,7 +6244,7 @@ function inspectAgentRepoStatuses(agentId, env) {
       base.pushed = base.upstream !== null && base.ahead === 0;
       base.ready  = base.clean && base.pushed;
     } catch (err) {
-      base.error = err.message || String(err);
+      base.error = errorMessage(err);
     }
 
     results.push(base);
@@ -11018,7 +11025,7 @@ async function main() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           // 424 (Failed Dependency) + stable code for a missing GitHub token —
           // distinct from a real git failure so the agent can tell "no PAT in
           // this environment" apart from a non-fast-forward reject;
@@ -11066,7 +11073,7 @@ async function main() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           // 409 for a git-level refusal the operator can act on (dirty tree,
           // diverged branch, checkout/pull failure); 400 for bad requests.
           const status = err && err.gitFailed ? 409 : 400;
@@ -11108,7 +11115,7 @@ async function main() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           const status = err && err.gitFailed ? 409 : 400;
           console.warn(`[Orchestrator] knowledge push for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -11153,7 +11160,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, teamId, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11203,7 +11210,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, candidate }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11316,7 +11323,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11344,7 +11351,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11417,7 +11424,7 @@ async function main() {
           return respond(r.doc);
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11446,7 +11453,7 @@ async function main() {
           res.end(JSON.stringify({ ok: result.reason !== 'not-found', ...result }));
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11532,7 +11539,7 @@ async function main() {
           const e = new Error(`unknown op '${op}'`); e.status = 400; throw e;
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11555,7 +11562,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11579,7 +11586,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, config: result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11603,7 +11610,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11638,7 +11645,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11660,7 +11667,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11681,7 +11688,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11702,7 +11709,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11723,7 +11730,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11743,7 +11750,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -11768,7 +11775,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;

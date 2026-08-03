@@ -1,6 +1,8 @@
 # Hill-Climbing Loop — Concept
 
-> Status: **draft concept** — no ticket yet; terminology check + architecture proposal.
+> Status: **concept / plan of record** — epic #1219; implementation split into #1221–#1226
+> (Phase 1 measure: #1221/#1222/#1223 · Phase 2 propose: #1224/#1225 · Phase 3 validate: #1226;
+> Phase 4 deliberately unticketed).
 > Relates to: flow reconciliation (`docs/flow-reconciliation-concept.md` — Layer 3 detector shipped,
 > Phase-4 responder is design), knowledge curation (`docs/knowledge-curation.md` — autonomy dial,
 > review cards), prompt version history (`docs/prompt-version-history-concept.md`, #990 — the undo

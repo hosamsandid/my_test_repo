@@ -67,6 +67,26 @@ function normalizeHumans(humans) {
   return out;
 }
 
+// Optional top-level `hillClimb` on the bundle (hill-climbing loop Phase 1,
+// #1222): the team's run-metrics collector config `{ cron?, windowDays?,
+// minRunsPerWindow?, excludeAgents? }` on the team agent. Round-tripped through
+// export→materialise→Edit-as-draft like `stages`/`labels`/`anomalyThresholds`.
+// Normalized to only the known config keys — the applied-card / snapshot state
+// deliberately NEVER travels (it is per-instance run history, not config).
+// Returns null when nothing meaningful is set, so an empty config stays
+// byte-identical to a flow that never configured it.
+function normalizeHillClimb(hc) {
+  if (!hc || typeof hc !== 'object' || Array.isArray(hc)) return null;
+  const out = {};
+  if (typeof hc.cron === 'string' && hc.cron.trim()) out.cron = hc.cron.trim();
+  if (Number.isFinite(hc.windowDays) && hc.windowDays > 0) out.windowDays = hc.windowDays;
+  if (Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0) out.minRunsPerWindow = hc.minRunsPerWindow;
+  const ex = (Array.isArray(hc.excludeAgents) ? hc.excludeAgents : [])
+    .filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
+  if (ex.length) out.excludeAgents = [...new Set(ex)];
+  return Object.keys(out).length ? out : null;
+}
+
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
 // key (e.g. `acme-developer` → `developer`). Idempotent for ids without it.
 function roleKeyOf(id, teamId) {
@@ -283,8 +303,9 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb }) {
   const normHumans = normalizeHumans(humans);
+  const normHillClimb = normalizeHillClimb(hillClimb);
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
@@ -298,6 +319,9 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     // an exported team re-materialises its human boxes and Edit-as-draft carries
     // them. Omitted when empty so a flow with no humans stays byte-identical.
     ...(normHumans.length ? { humans: normHumans } : {}),
+    // Hill-climb collector config (#1222) — team-agent config, round-tripped;
+    // omitted when unset so a flow that never configured it stays byte-identical.
+    ...(normHillClimb ? { hillClimb: normHillClimb } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -438,6 +462,21 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   if (b.stages) {
     if (!Array.isArray(b.stages)) return { ok: false, error: 'stages must be an array' };
     if (!b.stages.every(s => typeof s === 'string')) return { ok: false, error: 'stages must be an array of strings' };
+  }
+  // Hill-climb collector config (#1222): an object of known scalar/array keys.
+  if (b.hillClimb !== undefined) {
+    const hc = b.hillClimb;
+    if (!hc || typeof hc !== 'object' || Array.isArray(hc)) return { ok: false, error: 'hillClimb must be an object' };
+    if (hc.cron !== undefined && typeof hc.cron !== 'string') return { ok: false, error: 'hillClimb.cron must be a string' };
+    if (hc.windowDays !== undefined && !(Number.isFinite(hc.windowDays) && hc.windowDays > 0)) {
+      return { ok: false, error: 'hillClimb.windowDays must be a positive number' };
+    }
+    if (hc.minRunsPerWindow !== undefined && !(Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0)) {
+      return { ok: false, error: 'hillClimb.minRunsPerWindow must be a non-negative number' };
+    }
+    if (hc.excludeAgents !== undefined && (!Array.isArray(hc.excludeAgents) || !hc.excludeAgents.every(s => typeof s === 'string'))) {
+      return { ok: false, error: 'hillClimb.excludeAgents must be an array of strings' };
+    }
   }
   // Named human roles (#987): unique slug ids, non-empty names, well-formed
   // consume entries. Purely declarative — no trigger/runtime shape to check.
@@ -1449,7 +1488,7 @@ module.exports = {
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
   outcomesWiringContext,
-  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans,
+  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, normalizeHillClimb,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

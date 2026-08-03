@@ -7,7 +7,7 @@ Covers issue #207. Run against a local stack (`make up`).
 ## Prerequisites
 
 - Stack is running (`make up`, admin console at `http://localhost:4000`).
-- A team agent with at least one `cron` trigger has been created via Team Setup.
+- A team agent with at least one `cron` trigger has been created via the Agent Team Wizard.
 - The team member is active (green dot, process running).
 
 ---

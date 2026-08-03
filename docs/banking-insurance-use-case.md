@@ -134,7 +134,7 @@ The Admin Console's agent list currently shows roles like "Developer", "Code Rev
 
 What is missing:
 - A `domain` field on the team config to select a pre-built vocabulary set (e.g. `domain: "regulatory"` sets default label names, trigger descriptions, and help text).
-- The Team Setup wizard should surface domain selection as the first step, driving downstream defaults.
+- The Agent Team Wizard should surface domain selection as the first step, driving downstream defaults.
 
 ### 5.5 Isolation and data handling (high priority for production)
 

@@ -33,7 +33,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -3041,7 +3041,13 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
 // acting human (skillActor), so history is attributed to the person.
 function captureAuthoredPromptEdit(id, { field, oldContent, newContent, req, action = 'edited', note }) {
   try {
-    const agentDir = path.join(AGENTS_DIR, id);
+    // Containment: every caller AGENT_ID_RE-validates `id`, which already
+    // excludes traversal, but CodeQL doesn't model the regex as a sanitiser once
+    // the value travels through a call — re-check with path.relative before fs.
+    const agentsBaseDir = path.resolve(AGENTS_DIR);
+    const agentDir = path.resolve(agentsBaseDir, id);
+    const rel = path.relative(agentsBaseDir, agentDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     const existing = promptHistory.readPromptHistory(agentDir);
     const next = promptHistory.stampPromptHistory(existing, {
       field,
@@ -3069,17 +3075,29 @@ function resolveAuthoredPrompt(id, cfg) {
   }
   // Prefer the materialized AGENT-PROMPT.md (the byte-exact authored text); fall
   // back to config.systemPrompt when the file isn't there yet.
-  let content = '';
-  try { content = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); }
-  catch { content = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : ''; }
+  const fallback = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
+  // Containment re-check (see captureAuthoredPromptEdit) — `id` is AGENT_ID_RE-
+  // validated upstream; confirm the resolved dir stays under AGENTS_DIR for CodeQL.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  let content = fallback;
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    try { content = fs.readFileSync(path.join(agentDir, 'AGENT-PROMPT.md'), 'utf8'); }
+    catch { content = fallback; }
+  }
   return { field: 'systemPrompt', content };
 }
 
 app.get('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   let content = '';
   try { content = fs.readFileSync(promptPath, 'utf8'); } catch { /* file may not exist yet */ }
   res.json({ content });
@@ -3088,7 +3106,10 @@ app.get('/api/agents/:id/prompt', (req, res) => {
 app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): a prompt edit is a management action, not
   // a visibility one — require team-admin rights over the agent's owning team.
@@ -3123,7 +3144,10 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
 app.get('/api/agents/:id/prompt-history', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   const existing = promptHistory.readPromptHistory(agentDir);
@@ -3140,7 +3164,10 @@ app.get('/api/agents/:id/prompt-history', (req, res) => {
 app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
   const { id, version } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const existing = promptHistory.readPromptHistory(agentDir);
   const entry = promptHistory.findVersion(existing, version);
@@ -3155,7 +3182,10 @@ app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
 app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (req, res) => {
   const { id, version } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
@@ -5962,6 +5992,42 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
+// snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
+// the Improvements panel (#1223) renders the metric tiles from this.
+app.get('/api/teams/:teamId/hill-climb/metrics', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/metrics`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/run — manual metrics pass (#1222). Same
+// code path as the daily scheduled pass; a run while one is already in flight
+// returns 409 pass-running. Team-scoped + audited (mutating write).
+app.post('/api/teams/:teamId/hill-climb/run', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/run`, {
+      method: 'POST',
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/members — running/busy/trigger state for every
 // member, feeding the team-wide disable/enable preview dialog.
 app.get('/api/teams/:teamId/members', apiLimiter, async (req, res) => {
@@ -6051,10 +6117,14 @@ app.get('/api/process/template', (req, res) => {
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
   let teamName = team;
   let teamStages = [];
+  let teamHillClimb = null;
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
     if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
+    // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
+    // (in buildProcessTemplate) drops applied-card/snapshot state so only config travels.
+    teamHillClimb = teamCfg?.hillClimb || null;
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -6095,6 +6165,8 @@ app.get('/api/process/template', (req, res) => {
     // Named human roles (#987) round-trip with the bundle so an exported team
     // re-materialises its human boxes and Edit-as-draft carries them.
     humans: teamHumansRegistry(team),
+    // Hill-climb collector config (#1222) rides along on the team agent.
+    hillClimb: teamHillClimb,
   }));
 });
 
@@ -10462,6 +10534,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
 
   // Label-suffix stamping (#902): one-shot rename applied to the member array
   // + bundle label registry before any agent is created. No-op when labelSuffix
@@ -10688,6 +10764,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           ...(bundleStages.length ? { stages: bundleStages } : {}),
           // Named human roles (#987) — held on the team agent like stages/labels.
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Authoritative gate/brake label registry (#928): the live graph has no
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
@@ -10996,6 +11074,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
 
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
@@ -11235,6 +11317,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleStages.length ? { stages: bundleStages } : {}),
           // Named human roles (#987) — held on the team agent like stages/labels.
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),

@@ -160,6 +160,12 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     ? `Message ${agentDisplayName}…  (⌘↩ to send)`
     : 'Message…  (⌘↩ to send)';
 
+  // Loop launcher discoverability (#1120): name the otherwise icon-only loop
+  // control in the composer helper line so newcomers know what it does.
+  const loopHint = onLoopClick
+    ? <> · <Repeat size={11} style={{ verticalAlign: '-1px' }} /> runs a loop until a goal is met</>
+    : null;
+
   const canAttach = !!onUpload && !disabled && !uploading;
   // The loop control stays clickable even while the composer is disabled IF a
   // loop is running — so a launched loop can always be stopped (#1020 AC5).
@@ -379,8 +385,8 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
             : uploading
               ? 'Uploading attachment…'
               : onUpload
-                ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send</>
-                : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline</>}
+                ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send{loopHint}</>
+                : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline{loopHint}</>}
       </div>
     </div>
   );

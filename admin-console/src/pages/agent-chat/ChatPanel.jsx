@@ -1357,6 +1357,23 @@ export default function ChatPanel({
         onClose={closeLoopDialog}
         title={relaunchValues ? 'Start loop again' : 'Start a loop'}
       >
+        {/* Loop-launcher explainer (#1120): a loop is one of the most
+            consequential actions in the UI (repeated autonomous runs, token
+            spend), so state plainly what it does and how it stops before the
+            form. */}
+        <p style={{
+          margin: '0 0 var(--eb-space-4)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          lineHeight: 1.5,
+        }}>
+          A loop re-runs this agent on the instruction below — each run starts
+          fresh — until a goal is reached, working on its own between runs. It
+          stops when the <strong>max iterations</strong> cap is hit, when the{' '}
+          <strong>stop condition</strong> passes, or when you press Stop; if a{' '}
+          <strong>verifier</strong> is set, each run only counts once that check
+          passes.
+        </p>
         <TriggerForm
           // Remount on each open so the form re-seeds from the current
           // pre-fill (fresh launch vs "Start again"): TriggerForm reads

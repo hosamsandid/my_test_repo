@@ -180,6 +180,13 @@ test('slugifyOutcome makes a stable id from a label', () => {
   assert.equal(slugifyOutcome('ready-2'), 'ready-2');
   assert.equal(slugifyOutcome('stage:build'), 'stage-build');
   assert.equal(slugifyOutcome('!!!'), 'outcome');
+  // Leading/trailing separator runs are trimmed; interior dashes are preserved.
+  assert.equal(slugifyOutcome('  ready  '), 'ready');
+  assert.equal(slugifyOutcome('---ready---'), 'ready');
+  assert.equal(slugifyOutcome('a--b'), 'a--b');
+  assert.equal(slugifyOutcome('----'), 'outcome');
+  // A long run of separators must not blow up (js/polynomial-redos regression).
+  assert.equal(slugifyOutcome('-'.repeat(100000) + 'x'), 'x');
 });
 
 // ─── bundle round-trip (AC1) ─────────────────────────────────────────────────

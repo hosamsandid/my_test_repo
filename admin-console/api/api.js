@@ -5572,14 +5572,32 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   if (!DOMAIN_OPS.has(op)) return res.status(400).json({ error: 'invalid op' });
+  // #1214: `bootstrap` is the only op that runs an LLM synthesis in the orchestrator,
+  // so it must bill against the caller's header-selected assist provider (same 403/400
+  // semantics as the nine console assist routes). We forward IDS ONLY over the internal
+  // hop — the orchestrator reads the token locally from `_keys/`, so it never travels
+  // the wire. Deterministic ops (add/rename/merge/…) skip enforcement entirely.
+  let assistTarget = null;
+  if (op === 'bootstrap') {
+    assistTarget = resolveAssistTarget(req);
+    if (assistTarget.selectionError) return sendAssistSelectionError(res, assistTarget);
+    if (assistTarget.error) return res.status(400).json({ error: assistTarget.error });
+  }
   try {
+    const forward = { ...req.body, teamId, op };
+    if (assistTarget && assistTarget.endpointId) {
+      forward.assistEndpointId = assistTarget.endpointId; // env fallback (endpointId=null) → orchestrator uses .env
+      forward.model = assistTarget.model;
+    }
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...req.body, teamId, op }),
+      body: JSON.stringify(forward),
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
-    res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback });
+    const payload = { ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback };
+    if (assistTarget) payload.meta = assistMeta(assistTarget); // "which key paid for this" (#1211 §4.5)
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }

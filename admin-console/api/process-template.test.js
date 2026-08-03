@@ -459,6 +459,141 @@ test('buildProcessTemplate carries github + channels; drops derived channel trig
   assert.equal(rev.triggers.length, 0); // derived channel trigger dropped from the portable bundle
 });
 
+// ── #1194: internal transport on labelled PR/issue channels ──
+
+test('#1194: expandGithubChannels stamps transport:internal on a labelled internal channel; poller-excluded', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'reviewer', github: { producesPr: true }, triggers: [] },
+      { id: 'merger', channels: [{ artifact: 'pr', from: 'reviewer', label: 'approved', transport: 'internal' }], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const t = out.roles.find(r => r.id === 'merger').triggers.find(x => x.channel);
+  assert.equal(t.labelFilter, 'approved');
+  assert.deepEqual(t.events, ['pull_request.labeled']);
+  assert.equal(t.transport, 'internal', 'derived listener carries internal transport');
+});
+
+test('#1194: an UNLABELLED channel never goes internal (artifact-open stays poller-delivered)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'dev', github: { producesPr: true }, triggers: [] },
+      // transport on an unlabelled channel is meaningless — must be ignored.
+      { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', transport: 'internal' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'rev').triggers.find(x => x.channel);
+  assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
+  assert.ok(!('transport' in t), 'no transport stamped on an artifact-open listener');
+});
+
+test('#1194: a gate:human labelled channel stays poller-delivered even if transport:internal is set', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'dev', github: { producesPr: true }, triggers: [] },
+      { id: 'deployer', channels: [{ artifact: 'pr', from: 'dev', label: 'approved', gate: 'human', transport: 'internal' }], triggers: [] },
+    ],
+  };
+  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'deployer').triggers.find(x => x.channel);
+  assert.equal(t.labelFilter, 'approved');
+  assert.ok(!('transport' in t), 'a person applies the label on GitHub — poller only');
+});
+
+test('#1194: consolidation is all-or-nothing — a mixed internal/poller group stays poller-delivered', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'a', github: { producesIssue: true }, triggers: [] },
+      { id: 'b', github: { producesIssue: true }, triggers: [] },
+      { id: 'router', channels: [
+        { artifact: 'issue', from: 'a', label: 'dispatch', transport: 'internal' },
+        { artifact: 'issue', from: 'b', label: 'dispatch' }, // poller — one poller producer disqualifies the shared listener
+      ], triggers: [] },
+    ],
+  };
+  const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'router').triggers.filter(x => x.channel);
+  assert.equal(listeners.length, 1, 'still one consolidated listener');
+  assert.ok(!('transport' in listeners[0]), 'a lone poller producer keeps the whole listener on the poller');
+});
+
+test('#1194: all-internal channels consolidate into ONE internal listener', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'a', github: { producesIssue: true }, triggers: [] },
+      { id: 'b', github: { producesIssue: true }, triggers: [] },
+      { id: 'router', channels: [
+        { artifact: 'issue', from: 'a', label: 'dispatch', transport: 'internal' },
+        { artifact: 'issue', from: 'b', label: 'dispatch', transport: 'internal' },
+      ], triggers: [] },
+    ],
+  };
+  const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'router').triggers.filter(x => x.channel);
+  assert.equal(listeners.length, 1);
+  assert.equal(listeners[0].transport, 'internal');
+});
+
+test('#1194: the internal channel flips the producer Outcomes-block instruction to aee-emit', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'reviewer', displayName: 'Reviewer', systemPrompt: 'Base.',
+        outcomes: { mode: 'anyOf', options: [{ id: 'approved', title: 'Approve', actions: [{ type: 'setLabel', label: 'approved' }] }] },
+        github: { producesPr: true }, triggers: [] },
+      { id: 'merger', displayName: 'Merger',
+        channels: [{ artifact: 'pr', from: 'reviewer', label: 'approved', transport: 'internal' }], triggers: [] },
+    ],
+  };
+  const out = expandGithubChannels(bundle);
+  const rev = out.roles.find(r => r.id === 'reviewer');
+  assert.match(rev.systemPrompt, /aee-emit/, 'producer told to announce the label internally');
+});
+
+test('#1194: buildProcessTemplate round-trips channel transport on export', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-rev', displayName: 'Rev', github: { producesPr: true }, triggers: [] },
+      { id: 'acme-mrg', displayName: 'Mrg', channels: [{ artifact: 'pr', from: 'acme-rev', label: 'approved', transport: 'internal' }], triggers: [] },
+    ],
+  });
+  const mrg = b.roles.find(r => r.id === 'mrg');
+  assert.equal(mrg.channels[0].transport, 'internal', 'export preserves the internal-delivery choice');
+  assert.equal(mrg.channels[0].from, 'rev', 'and still remaps the portable role key');
+});
+
+test('#1194: remapChannel drops transport on an unlabelled or human channel (not meaningful)', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-p', displayName: 'P', github: { producesPr: true, producesIssue: true }, triggers: [] },
+      { id: 'acme-c', displayName: 'C', channels: [
+        { artifact: 'pr', from: 'acme-p', transport: 'internal' }, // unlabelled — drop
+        { artifact: 'issue', from: 'acme-p', label: 'approved', gate: 'human', transport: 'internal' }, // human — drop
+      ], triggers: [] },
+    ],
+  });
+  const c = b.roles.find(r => r.id === 'c');
+  assert.ok(!('transport' in c.channels[0]), 'unlabelled channel carries no transport');
+  assert.ok(!('transport' in c.channels[1]), 'human-gated channel carries no transport');
+});
+
+test('#1194: validateProcessTemplate rejects a bad transport value / internal without a label / internal on a human gate', () => {
+  const mk = (ch) => ({
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [{ id: 'r', channels: [ch], triggers: [] }],
+  });
+  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', transport: 'bogus' })).ok, false);
+  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', transport: 'internal' })).ok, false);
+  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', gate: 'human', transport: 'internal' })).ok, false);
+  // A valid labelled internal channel passes.
+  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', transport: 'internal' })).ok, true);
+});
+
 test('#981: buildProcessTemplate round-trips the artifact audience flags', () => {
   const b = buildProcessTemplate({
     name: 'x', level: 'live', teamId: 'acme',

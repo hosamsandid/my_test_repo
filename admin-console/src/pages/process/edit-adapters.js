@@ -299,12 +299,13 @@ export const liveOps = {
   },
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim, transport }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    // `autoClaim` (#958) rides along so the claim opt-out survives the live port
-    // write — otherwise the reconciler re-stamps the claim the author turned off.
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim });
+    // `autoClaim` (#958) + `transport` (#1194) ride along so the claim opt-out and
+    // the internal-delivery choice survive the live port write — otherwise the
+    // reconciler re-stamps the claim / re-derives a poller-delivered listener.
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim, transport });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),

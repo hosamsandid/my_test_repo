@@ -259,6 +259,18 @@ test('github channel edges: a labelled human-gated channel carries label + gate'
   assert.equal(e.gate, 'human');
 });
 
+test('#1194: a labelled internal channel edge surfaces transport; a human/unlabelled one does not', () => {
+  const g = buildUnifiedGraph([
+    { id: 'rev', triggers: [], github: { producesPr: true } },
+    { id: 'mrg', triggers: [], channels: [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }] },
+    { id: 'dep', triggers: [], channels: [{ artifact: 'pr', from: 'rev', label: 'approved', gate: 'human', transport: 'internal' }] },
+    { id: 'cons', triggers: [], channels: [{ artifact: 'pr', from: 'rev', transport: 'internal' }] },
+  ]);
+  assert.equal(findEdge(g, x => x.on === 'github' && x.to === 'mrg').transport, 'internal');
+  assert.ok(!('transport' in findEdge(g, x => x.on === 'github' && x.to === 'dep')), 'human gate stays poller-delivered');
+  assert.ok(!('transport' in findEdge(g, x => x.on === 'github' && x.to === 'cons')), 'unlabelled stays poller-delivered');
+});
+
 test('github channel edges: PR and issue channels between the same pair are distinct', () => {
   const g = buildUnifiedGraph([
     { id: 'ba', triggers: [], github: { producesPr: true, producesIssue: true } },

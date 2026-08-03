@@ -432,6 +432,10 @@ function buildUnifiedGraph(nodes, edges, options) {
         // Authored wake-prompt override (#868), surfaced so the channel edit
         // dialog can pre-fill and round-trip it.
         ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
+        // Internal-channel transport (#1194), surfaced so the channel edit dialog /
+        // Routing row can pre-fill the Delivery control and the canvas can style
+        // the edge. Only the non-default is carried (mirrors the port).
+        ...(ch.transport === 'internal' && ch.label && ch.gate !== 'human' ? { transport: 'internal' } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }

@@ -13,7 +13,7 @@ export function chLabelKey(label) {
 // Upsert a channel into a list, keyed on (artifact, from, label). Re-drawing the
 // same (artifact, from, label) edits in place (updates the gate/wake-prompt); a
 // new label adds a sibling channel.
-export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim }) {
+export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, autoClaim, transport }) {
   const art = artifact === 'issue' ? 'issue' : 'pr';
   const lbl = chLabelKey(label);
   const wp = typeof wakePrompt === 'string' && wakePrompt.trim() ? wakePrompt.trim() : '';
@@ -28,6 +28,11 @@ export function upsertChannel(list, { artifact, from, label, gate, wakePrompt, a
     // derived listener itself is regenerated on every reconcile. Only the
     // non-default (`false`) is persisted; anything else means "auto-claim on".
     ...(autoClaim === false ? { autoClaim: false } : {}),
+    // Internal-channel transport (#1194) — the port is the durable authoring point
+    // for the derived listener's delivery. Only meaningful on a labelled, non-human
+    // channel (an unlabelled/human-gated channel stays poller-delivered), so it is
+    // dropped otherwise; only the non-default (`'internal'`) is persisted.
+    ...(transport === 'internal' && lbl && gate !== 'human' ? { transport: 'internal' } : {}),
   };
   const out = (Array.isArray(list) ? list : []).slice();
   const i = out.findIndex(c => c.artifact === art && c.from === from && chLabelKey(c.label) === lbl);

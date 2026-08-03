@@ -4985,165 +4985,188 @@ class TriggerScheduler:
             except asyncio.TimeoutError:
                 pass
 
-    async def _drain_pending(self) -> list:
-        """Read-and-clear the pending queue. With per-agent volume isolation the
-        orchestrator owns the queue and we pull it over HTTP (it clears on read);
-        otherwise we read+clear our own local file, byte-identical to before."""
+    async def _drain_pending_one(self) -> dict | None:
+        """Pop and return ONLY the head of the pending queue, leaving the tail
+        durably queued until its turn (#1195 follow-up). A triggered run can
+        take many minutes; pulling the whole queue up front would strand
+        entries 2..N in a volatile in-memory list for the entire first run, so
+        a container restart mid-run lost them (the poller won't re-fire — the
+        event id is already seen). Draining one at a time keeps the tail on
+        disk / in the orchestrator's queue until it's actually about to run, so
+        a crash loses at most this single in-flight entry (its #506 marker
+        flags it on next startup). Returns None when the queue is empty. With
+        per-agent volume isolation the orchestrator owns the queue and pops the
+        head over HTTP; otherwise we pop our own local file."""
         if _PER_AGENT_VOLUME:
             status, body = await asyncio.to_thread(
                 self._orch_get,
-                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain",
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain-one",
             )
             if status != 200:
                 if status != 0:  # 0 == orchestrator unreachable; stay quiet, retry next tick
-                    print(f"[Runner:{self._agent_id}] pending-drain HTTP {status}",
+                    print(f"[Runner:{self._agent_id}] pending-drain-one HTTP {status}",
                           file=sys.stderr)
-                return []
+                return None
             try:
                 data = json.loads(body)
             except Exception:
-                return []
-            entries = data.get("entries") if isinstance(data, dict) else data
-            entries = entries if isinstance(entries, list) else []
-            # #506: the orchestrator's pending-drain endpoint already cleared
-            # the canonical queue in the same round trip, so this is the
-            # earliest point we can persist a marker under per-agent-volume
-            # isolation — still closes almost all of the crash window.
-            self._attach_pending_markers(entries)
-            return entries
+                return None
+            entry = data.get("entry") if isinstance(data, dict) else None
+            if not isinstance(entry, dict):
+                return None
+            # #506: the orchestrator's pending-drain-one endpoint already popped
+            # this entry from the canonical queue in the same round trip, so this
+            # is the earliest point we can persist its marker under per-agent-
+            # volume isolation — still closes almost all of the crash window.
+            self._attach_pending_markers([entry])
+            return entry
 
         pending_path = _agent_workdir() / _PENDING_FILENAME
         if not pending_path.exists():
-            return []
+            return None
         try:
             entries = json.loads(pending_path.read_text(encoding="utf-8"))
         except Exception:
-            return []
+            return None
         if not isinstance(entries, list) or not entries:
-            return []
-        # #506: persist a durable marker for each in-scope entry *before* the
-        # queue is cleared, so a crash between the clear and a completed
-        # execution is detectable on the next startup.
-        self._attach_pending_markers(entries)
-        # Clear before firing so a slow run can't double-process the queue
-        # (matches agent-runner.js:501).
+            return None
+        entry = entries.pop(0)
+        # Persist the remaining tail *before* handing this entry off, so a slow
+        # run can't double-process it and a crash mid-execution loses at most
+        # this one entry — never the still-queued tail (matches agent-runner.js
+        # semantics, one entry at a time).
         try:
-            _atomic_write_json(pending_path, [])
+            _atomic_write_json(pending_path, entries)
         except Exception as exc:
-            print(f"[Runner:{self._agent_id}] pending clear failed: {exc}",
+            print(f"[Runner:{self._agent_id}] pending tail persist failed: {exc}",
                   file=sys.stderr)
-        return entries
+        if not isinstance(entry, dict):
+            return None
+        # #506: persist a durable marker for the in-scope entry we're about to
+        # hand off, so a crash before it completes is detectable on startup.
+        self._attach_pending_markers([entry])
+        return entry
 
     async def _process_pending(self) -> None:
-        entries = await self._drain_pending()
-        if not entries:
-            return
+        triggers: list | None = None
+        while not self._shutdown_event.is_set():
+            # #1157: if a loop grabbed the single workspace between entries, stop
+            # pulling — the tail stays durably queued and drains once the loop
+            # releases the workspace. Cheap in-memory check, no round-trip.
+            if self._gate.loop_active:
+                return
+            entry = await self._drain_pending_one()
+            if entry is None:
+                return
+            if triggers is None:
+                triggers = _load_triggers()
+            await self._handle_pending_entry(entry, triggers)
 
-        triggers = _load_triggers()
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            # #506: clear this entry's in-flight marker (if any — only
-            # http/github-event trigger entries get one) once it's been
-            # handled, whichever branch below that turns out to be.
-            marker_id = entry.pop("_inFlightMarkerId", None)
-            try:
-                kind = entry.get("kind")
-                if kind == "session-reset":
-                    # Control→agent reset command (#185): the admin can't delete our
-                    # pointer on an isolated volume, so it asks us to drop it.
-                    rid = entry.get("roomId")
-                    if rid:
-                        _clear_session_pointer(rid)
-                        print(f"[Runner:{self._agent_id}] session-reset for {rid}",
-                              file=sys.stderr)
-                    continue
-                if kind == "session-set":
-                    # Control→agent resume command (#574): the admin can't write our
-                    # pointer on an isolated volume, so it asks us to re-point the
-                    # room at a chosen finished session. resumeRequested is persisted
-                    # so a failed resume surfaces an error instead of a fresh session.
-                    rid = entry.get("roomId")
-                    sid = entry.get("sessionId")
-                    if rid and isinstance(sid, str) and sid:
-                        _write_session_pointer(
-                            rid, sid, resume_requested=bool(entry.get("resumeRequested")))
-                        print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
-                              file=sys.stderr)
-                    continue
-                if kind == "handover-dm":
-                    print(f"[Runner:{self._agent_id}] handover-dm from queue",
+    async def _handle_pending_entry(self, entry: dict, triggers: list) -> None:
+        """Dispatch one drained queue entry (extracted from the old
+        ``_process_pending`` for-loop body so the drain can pull one at a time
+        — #1195 follow-up). Every early exit is a ``return`` (not a loop
+        ``continue``); the caller loops to the next entry."""
+        # #506: clear this entry's in-flight marker (if any — only
+        # http/github-event trigger entries get one) once it's been
+        # handled, whichever branch below that turns out to be.
+        marker_id = entry.pop("_inFlightMarkerId", None)
+        try:
+            kind = entry.get("kind")
+            if kind == "session-reset":
+                # Control→agent reset command (#185): the admin can't delete our
+                # pointer on an isolated volume, so it asks us to drop it.
+                rid = entry.get("roomId")
+                if rid:
+                    _clear_session_pointer(rid)
+                    print(f"[Runner:{self._agent_id}] session-reset for {rid}",
                           file=sys.stderr)
-                    try:
-                        await self._execute_handover_dm(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
-                              file=sys.stderr)
-                    continue
-                if kind == "loop-verify":
-                    # #933: another agent asked us to verify its loop iteration.
-                    try:
-                        await self._execute_loop_verify(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] loop-verify error: {exc}",
-                              file=sys.stderr)
-                    continue
-                if kind == "github-digest":
-                    # #449-D: a burst of GitHub events for one (agent, conversation)
-                    # was collapsed by the poller into a single lossless digest.
-                    # Deliver it as a plain DM (no Claude call) — the burst is an
-                    # exceptional/loop-ish signal, so we surface it and let the human
-                    # decide rather than auto-acting on a batched backlog.
-                    try:
-                        await self._execute_github_digest(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
-                              file=sys.stderr)
-                    continue
-                if kind in _PENDING_OUT_OF_SCOPE_KINDS:
-                    print(
-                        f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
-                        f"in Python — skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-
-                entry_tid = entry.get("triggerId")
-                if not entry_tid:
-                    continue
-                match = next(
-                    (
-                        t for t in triggers
-                        if t.get("id") == entry_tid
-                        and t.get("type") in ("http", "github-event")
-                        and t.get("enabled", True)
-                    ),
-                    None,
-                )
-                if not match:
-                    print(
-                        f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
-                        f"not found or disabled — skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-
-                gh = entry.get("github")
-                label = (
-                    f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
-                    if match.get("type") == "github-event"
-                    else "HTTP trigger"
-                )
-                print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
+                return
+            if kind == "session-set":
+                # Control→agent resume command (#574): the admin can't write our
+                # pointer on an isolated volume, so it asks us to re-point the
+                # room at a chosen finished session. resumeRequested is persisted
+                # so a failed resume surfaces an error instead of a fresh session.
+                rid = entry.get("roomId")
+                sid = entry.get("sessionId")
+                if rid and isinstance(sid, str) and sid:
+                    _write_session_pointer(
+                        rid, sid, resume_requested=bool(entry.get("resumeRequested")))
+                    print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
+                          file=sys.stderr)
+                return
+            if kind == "handover-dm":
+                print(f"[Runner:{self._agent_id}] handover-dm from queue",
+                      file=sys.stderr)
                 try:
-                    await self._execute(dict(match), ctx={"github": gh} if gh else None)
+                    await self._execute_handover_dm(entry)
                 except Exception as exc:
-                    print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
+                    print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
                           file=sys.stderr)
-            finally:
-                if marker_id:
-                    self._clear_in_flight(marker_id)
+                return
+            if kind == "loop-verify":
+                # #933: another agent asked us to verify its loop iteration.
+                try:
+                    await self._execute_loop_verify(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] loop-verify error: {exc}",
+                          file=sys.stderr)
+                return
+            if kind == "github-digest":
+                # #449-D: a burst of GitHub events for one (agent, conversation)
+                # was collapsed by the poller into a single lossless digest.
+                # Deliver it as a plain DM (no Claude call) — the burst is an
+                # exceptional/loop-ish signal, so we surface it and let the human
+                # decide rather than auto-acting on a batched backlog.
+                try:
+                    await self._execute_github_digest(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
+                          file=sys.stderr)
+                return
+            if kind in _PENDING_OUT_OF_SCOPE_KINDS:
+                print(
+                    f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
+                    f"in Python — skipping",
+                    file=sys.stderr,
+                )
+                return
+
+            entry_tid = entry.get("triggerId")
+            if not entry_tid:
+                return
+            match = next(
+                (
+                    t for t in triggers
+                    if t.get("id") == entry_tid
+                    and t.get("type") in ("http", "github-event")
+                    and t.get("enabled", True)
+                ),
+                None,
+            )
+            if not match:
+                print(
+                    f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
+                    f"not found or disabled — skipping",
+                    file=sys.stderr,
+                )
+                return
+
+            gh = entry.get("github")
+            label = (
+                f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
+                if match.get("type") == "github-event"
+                else "HTTP trigger"
+            )
+            print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
+            try:
+                await self._execute(dict(match), ctx={"github": gh} if gh else None)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
+                      file=sys.stderr)
+        finally:
+            if marker_id:
+                self._clear_in_flight(marker_id)
 
     # -- handover DM ---------------------------------------------------------
 

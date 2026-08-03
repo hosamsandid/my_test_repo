@@ -5974,6 +5974,28 @@ function drainPending(agentId) {
   return entries;
 }
 
+// Pop and return ONLY the head of the pending queue, persisting the remaining
+// tail (#1195 follow-up). The agent drains one entry per round-trip, executes
+// it (a triggered run can take many minutes), then asks for the next — so
+// entries 2..N stay durably queued until their turn instead of living in the
+// agent's volatile in-memory list for the whole first run. A container
+// restart mid-run then loses at most the single in-flight entry (its #506
+// marker flags it on next startup), never the still-queued tail. Returns null
+// when the queue is empty. FIFO, matching the agent-side drain order.
+function drainPendingOne(agentId) {
+  const p = pendingPath(agentId);
+  let entries = [];
+  try {
+    if (fs.existsSync(p)) entries = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!Array.isArray(entries)) entries = [];
+  } catch { entries = []; }
+  if (!entries.length) return null;
+  const head = entries.shift();
+  try { fs.writeFileSync(p, JSON.stringify(entries, null, 2)); }
+  catch (err) { console.error(`[Orchestrator] drainPendingOne clear ${agentId}: ${err.message}`); }
+  return head;
+}
+
 // Append a bp-event-batch entry to an agent's pending queue. The agent drain
 // loop picks it up by `kind` (no triggers.json entry required — the routing
 // decision was already made centrally).
@@ -9624,6 +9646,22 @@ async function main() {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, entries: drainPending(id) }));
+      return;
+    }
+
+    // Drain ONE entry (#1195 follow-up): pop the head, keep the tail durably
+    // queued. The agent loops this per entry so a long first run can't leave
+    // the rest stranded in a volatile in-memory list.
+    const pendingDrainOneMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/pending-drain-one$/);
+    if (pendingDrainOneMatch) {
+      const id = decodeURIComponent(pendingDrainOneMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, entry: drainPendingOne(id) }));
       return;
     }
 

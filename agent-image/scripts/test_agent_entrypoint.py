@@ -356,6 +356,73 @@ class InFlightMarkerReconciliation(unittest.IsolatedAsyncioTestCase):
         scheduler._execute_handover_dm.assert_awaited_once()
         self.assertEqual(entrypoint._load_in_flight(), [])
 
+    # -- #1195 follow-up: drain one entry at a time, keep the tail durable ----
+
+    async def test_process_pending_drains_multiple_entries_oldest_first(self):
+        """The #1195 fan-in: two events for the same trigger (two tickets set
+        to Ready) both run, oldest-first, back-to-back — the second is not lost
+        when the first is picked up."""
+        import json
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([
+            {"id": "t-gh", "type": "github-event", "enabled": True, "prompt": "p"},
+        ])
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 2}},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        self.assertEqual(scheduler._execute.await_count, 2)
+        seen = [c.kwargs["ctx"]["github"]["eventId"]
+                for c in scheduler._execute.await_args_list]
+        self.assertEqual(seen, [1, 2])
+        self.assertEqual(
+            json.loads((self.workdir / entrypoint._PENDING_FILENAME).read_text()), [])
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_drain_pending_one_pops_head_and_leaves_tail_durable(self):
+        """Draining one entry pops the head but leaves the remaining entries on
+        disk — so a crash while the first runs can't lose the still-queued
+        tail (the durability hole the batch drain had)."""
+        import json
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 2}},
+        ])
+
+        first = await scheduler._drain_pending_one()
+
+        self.assertEqual(first["github"]["eventId"], 1)
+        tail = json.loads((self.workdir / entrypoint._PENDING_FILENAME).read_text())
+        self.assertEqual([e["github"]["eventId"] for e in tail], [2])
+
+    async def test_process_pending_leaves_tail_when_loop_holds_workspace(self):
+        """If a loop owns the single workspace, the drain pauses and the queue
+        stays durably parked until the loop releases it (#1157)."""
+        import json
+        scheduler, _client, _send = self._scheduler()
+        entrypoint._save_triggers([
+            {"id": "t-gh", "type": "github-event", "enabled": True, "prompt": "p"},
+        ])
+        entrypoint._atomic_write_json(self.workdir / entrypoint._PENDING_FILENAME, [
+            {"triggerId": "t-gh", "github": {"event": "issues.labeled", "repo": "o/r", "eventId": 1}},
+        ])
+        scheduler._execute = AsyncMock()
+
+        await scheduler._gate.acquire_loop()
+        try:
+            await scheduler._process_pending()
+        finally:
+            scheduler._gate.release_loop()
+
+        scheduler._execute.assert_not_awaited()
+        queued = json.loads((self.workdir / entrypoint._PENDING_FILENAME).read_text())
+        self.assertEqual(len(queued), 1)
+
     # -- Race 2: once-trigger removal -----------------------------------------
 
     async def test_sync_marks_once_trigger_before_removal_then_clears_after_execution(self):

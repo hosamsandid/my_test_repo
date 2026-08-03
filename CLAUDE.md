@@ -283,7 +283,7 @@ Matrix users are managed via the Conduwuit admin room (`!cUxr0SyfINf9yEvBOD:loca
 
 ## Skills
 
-Skills live in the skill-pool volume (`agent-studio_claude-workspace`) under `skills/<name>/SKILL.md`, granted per **agent construct** (team `skills[]` / standalone `skills[]` / member `skillsOverride`) via the Agents page, the wizard's Knowledge step, or the Knowledge page. Environments have **no** skill picker. Intended domain: **Mainframe Migration** (COBOL, JCL, DB2, IMS/VSAM).
+Skills live in the skill-pool volume (`agent-studio_claude-workspace`) under `skills/<name>/SKILL.md`, granted per **agent construct** (team `skills[]` / standalone `skills[]` / member `skillsOverride`) via the Agents page, the wizard's Knowledge step, or the Knowledge page. Environments have **no** skill picker. **Agents page create form**: the SkillPicker for `agent`/`orchestrator` roles pools `source==='pool'` only (global pool — no team context at create); team-tier skills appear in the edit form once the agent belongs to a team. `role==='team'` create form correctly shows the team-inheritance framing. Intended domain: **Mainframe Migration** (COBOL, JCL, DB2, IMS/VSAM).
 
 ### Two-tier skill pool
 

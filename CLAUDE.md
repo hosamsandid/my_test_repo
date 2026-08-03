@@ -215,7 +215,7 @@ Separate from the audit trail: answers "what did the poller see and what happene
 - `issue-triage` — `issues.opened`, emits `req:refine`; `dispatcher` — `issues.labeled` `ready`, releases via `dispatch`
 - `generic` (persistent) — blank slate, no curation cron
 
-**Materialisation:** one shared env (reused or auto-created id `<teamId>`); one `team` agent id `<teamId>` (`skipFirstMember: true`); one `team-member` per role id `<teamId>-<roleId>` carrying `systemPrompt` (role override), `sessionPolicy: per-invocation`, and a full `triggers.json` (`{{repoFullName}}`/`{{agentId}}` substituted); one DM room per member (best-effort). `skillsOverride` omitted — members inherit the team `skills[]`. On any failure, roll back members → team → env. Members are later editable with Inherit ↔ Custom toggles.
+**Materialisation:** one shared env (reused or auto-created id `<teamId>`); one `team` agent id `<teamId>` (`skipFirstMember: true`); one `team-member` per role id `<teamId>-<roleId>` carrying `systemPrompt` (role override), `sessionPolicy: per-invocation`, and a full `triggers.json` (`{{repoFullName}}`/`{{agentId}}` substituted); one DM room per member (best-effort). `skillsOverride` omitted — members inherit the team `skills[]`. On any failure, roll back members → team → env; a failure card (`progressError && !result && !collisionInfo`) surfaces this with a **Retry** button that re-calls `submit('create')` (which resets all error/progress state at its top). Members are later editable with Inherit ↔ Custom toggles.
 
 ### Direct Messages & Session Log
 

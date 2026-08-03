@@ -1130,6 +1130,38 @@ export default function TeamSetup() {
         <ProgressCard steps={progressSteps} error={progressError} />
       )}
 
+      {/* Creation failed: reassure that the backend rolled everything back
+          (members → team → env, so no half-built team lingers) and offer a
+          one-click Retry that re-runs the same create. Collisions have their
+          own card, so this stays out of their way. */}
+      {progressError && !result && !collisionInfo && (
+        <Card accent="var(--eb-status-error)">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertTriangle size={20} style={{ color: 'var(--eb-status-error)', flexShrink: 0, marginTop: 2 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                Team creation failed
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
+                No partial team was left behind — every resource created during this attempt
+                (members, then the team, then the working environment) was rolled back. Fix the
+                issue above and try again.
+              </div>
+              <div style={{ marginTop: 'var(--eb-space-3)' }}>
+                <button
+                  type="button"
+                  onClick={() => submit('create')}
+                  disabled={submitting}
+                  style={primaryButtonStyle(submitting)}
+                >
+                  {submitting ? 'Retrying…' : <><RefreshCw size={16} /> Retry</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {collisionInfo && (
         <Card accent="var(--eb-status-warning)">
           <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>

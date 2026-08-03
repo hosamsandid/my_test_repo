@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   rowLabels, rowArtifact, consumerCandidates, wireConsumerSpec, unwireConsumerSpec, currentConsumers,
-  outcomeDropDialog, openEndMarker, edgeOpensProducerOutcome,
+  outcomeDropDialog, openEndMarker, edgeOpensProducerOutcome, labelEdgeHasListener,
 } from './outcome-routing.js';
 
 // #1003 — pure specs for the per-row consumer picker (concept §4.2).
@@ -145,4 +145,15 @@ test('edgeOpensProducerOutcome: guards missing outcome / from', () => {
   assert.equal(edgeOpensProducerOutcome({ on: 'github', outcome: 'o' }), false);       // no from (actor-sourced)
   assert.equal(edgeOpensProducerOutcome(null), false);
   assert.equal(edgeOpensProducerOutcome(undefined), false);
+});
+
+// #1195 — a fan-in/feedback label edge has no backing listener trigger.
+
+test('labelEdgeHasListener: true only when the edge carries a triggerId', () => {
+  assert.equal(labelEdgeHasListener({ on: 'label', from: 'a', to: 'b', triggerId: 't1' }), true);
+  // fan-in / feedback edge (channel-label loop) → no triggerId → false.
+  assert.equal(labelEdgeHasListener({ on: 'label', from: 'reworker', to: 'cr', label: 'ready-for-review', outcome: 'ready-for-review' }), false);
+  assert.equal(labelEdgeHasListener({ on: 'label', from: 'a', to: 'b', triggerId: '' }), false);
+  assert.equal(labelEdgeHasListener(null), false);
+  assert.equal(labelEdgeHasListener(undefined), false);
 });

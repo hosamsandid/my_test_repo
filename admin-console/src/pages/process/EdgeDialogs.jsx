@@ -6,6 +6,7 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
 import { isGateLabel, isBrakeLabel } from './label-flags';
 import { defaultGateKind } from './human-gate-ops';
+import { labelEdgeHasListener } from './outcome-routing';
 // Every multi-write hand-off goes through the wiring engine (#1002) — dialogs
 // collect input and render state; they never sequence ops calls themselves.
 import {
@@ -1206,6 +1207,42 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  // Fan-in / feedback edge (#1195): a label edge with no backing listener
+  // trigger. `<to>` already listens on this label via another input (a PR/issue
+  // channel or another listener); this edge only shows that `<from>` ALSO sets
+  // it. There is no per-edge trigger to edit — editing it as a hand-off would
+  // save against `updateTrigger(to, undefined)` and 404 "Trigger not found". So
+  // explain it and link to the two places that ARE editable instead.
+  if (!labelEdgeHasListener(edge)) {
+    return (
+      <SidePanel open onClose={onClose} title="Edit hand-off" width="520px">
+        <p style={hint}>
+          <strong>{fromName || from}</strong> → <code>{label}</code> → <strong>{toName || to}</strong>
+        </p>
+        <div style={{ ...small, padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', lineHeight: 1.6, color: 'var(--eb-text-secondary)' }}>
+          <strong>{toName || to}</strong> already listens on <code>{label}</code> through another
+          input (a PR/issue channel or another listener). This edge shows that <strong>{fromName || from}</strong> <em>also</em> sets <code>{label}</code> — a fan-in. There is no separate
+          trigger for this edge, so the two sides are edited where they live:
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-3)' }}>
+          {edge.outcome && !humanSource && (
+            <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={from} section="routing"
+              outcome={edge.outcome} label={`Edit ${fromName || from}'s “${edge.outcome}” outcome (the emit)`} />
+          )}
+          <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs"
+            label={`Open ${toName || to}'s inputs (the shared listener + its Delivery)`} />
+        </div>
+        <div style={{ ...small, marginTop: 'var(--eb-space-3)', lineHeight: 1.6 }}>
+          Delivery (internal vs GitHub) is a property of <strong>{toName || to}</strong>'s listener and is
+          shared by every emitter of <code>{label}</code> — set it once there.
+        </div>
+        <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onClose} style={ghost}>Close</button>
+        </div>
+      </SidePanel>
+    );
   }
 
   return (

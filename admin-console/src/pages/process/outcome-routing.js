@@ -130,3 +130,13 @@ export function currentConsumers(option, node, peers) {
 export function edgeOpensProducerOutcome(edge) {
   return !!(edge && edge.outcome && edge.from && edge.on !== 'label');
 }
+
+// #1195: does a label edge have its own backing consumer listener trigger? A
+// fan-in / feedback edge — a 2nd emitter of a label the consumer already listens
+// on via a channel or another listener — is synthesized WITHOUT a triggerId (see
+// the channel-label loop in process-graph.js). It has no per-edge trigger, so the
+// hand-off editor must not try to update one (`updateTrigger(to, undefined)` →
+// "Trigger not found"); it shows an explanatory panel instead. Pure + tested.
+export function labelEdgeHasListener(edge) {
+  return !!(edge && edge.triggerId);
+}

@@ -51,7 +51,7 @@ const NAV = [
   ]},
   { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
-    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
+    { path: '/team-setup',   label: 'Agent Team Wizard',   Icon: Users2, subtitle: 'Build a squad of agents' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
@@ -63,7 +63,7 @@ const NAV = [
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
-    { path: '/teams',        label: 'Teams',               Icon: Building2 },
+    { path: '/teams',        label: 'Teams',               Icon: Building2, subtitle: 'Human members & access' },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
@@ -78,7 +78,7 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/quickstart':   'Single Agent',
-  '/team-setup':   'Team Wizard',
+  '/team-setup':   'Agent Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/knowledge':    'Knowledge',

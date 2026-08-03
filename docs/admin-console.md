@@ -75,7 +75,7 @@ handling, gate middleware, or the login UI/routing.
 
 The **Teams** page (`/teams`) is the UI for the human **Team** scope (the
 tenant) introduced by the teams data model (#299). It is distinct from the
-*Agent Team* squad created by the **Team Wizard** — see
+*Agent Team* squad created by the **Agent Team Wizard** — see
 [docs/teams-data-model.md](./teams-data-model.md).
 
 A System Admin can:

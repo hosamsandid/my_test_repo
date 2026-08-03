@@ -468,11 +468,13 @@ const ROLE_INFO = {
   },
   'team': {
     icon: Users,
-    title: 'Team',
+    title: 'Agent Team',
     short: 'A reusable template — spawn multiple team members from one prompt.',
     body: (
       <>
-        Stores a system-prompt template without creating an agent itself. Instead you click
+        A squad of agents working a repo — <em>not</em> the same thing as a <strong>Team</strong> on the
+        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Teams</Link> page (which is a human tenant / access scope).
+        This construct stores a system-prompt template without creating an agent itself. Instead you click
         <strong> Add Member</strong> on the team card to spawn one or more agents that all
         share the same prompt and Working Environment, but each gets its own workspace and
         its own conversation in the Agent Chat.
@@ -865,7 +867,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             <span>
               Consider using the{' '}
               <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>
-                Team Wizard
+                Agent Team Wizard
               </Link>{' '}
               instead — it sets up the full team structure automatically.
             </span>
@@ -1836,7 +1838,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
               background: 'var(--eb-bg-app)', padding: '2px 8px',
               borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
-            }}>Team</span>
+            }} title="A squad of agents working a repo — not the same as a Team on the Teams page">Agent Team</span>
             <ToggleSwitch
               checked={agent.enabled !== false}
               onChange={() => onToggleTeam(agent)}
@@ -2437,8 +2439,8 @@ export default function Agents() {
               <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Use <Link to="/quickstart" style={{ color: 'var(--eb-accent-primary)' }}>Single Agent</Link> for the fastest setup.</td>
             </tr>
             <tr>
-              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Team / Team-member</strong></td>
-              <td style={{ padding: '4px 8px' }}>Part of a coordinated group. Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
+              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent Team / member</strong></td>
+              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>

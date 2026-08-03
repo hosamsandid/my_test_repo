@@ -116,7 +116,7 @@ export default function QuickStart() {
         }}>
           Creates a single chat agent bound to your repository. The agent can answer questions, read code, and help
           you work. It does not include automated code review, issue triage, or a development workflow — use the{' '}
-          <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Team Wizard</Link> for that.
+          <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> for that.
         </p>
       </div>
 
@@ -357,7 +357,7 @@ export default function QuickStart() {
       }}>
         Need a full development team instead?{' '}
         <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
-          → Team Wizard
+          → Agent Team Wizard
         </Link>
       </div>
     </div>

@@ -2,7 +2,7 @@
 
 ## Chapter intro (slide 1)
 
-Let's walk through the Team Setup wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
+Let's walk through the Agent Team Wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
 
 So what exactly is a team here? A team is a coordinated group of AI agents — think of a Business Analyst, a Developer, a Code Reviewer — each with its own role, its own system prompt. They all share one working environment, which means they all work against the same GitHub repository with the same credentials and the same knowledge sources. What makes it a team rather than just a collection of agents is that they're wired together: one agent's output becomes the next agent's trigger. The Business Analyst writes an issue, a human approves it, the Developer picks it up, opens a pull request, the Code Reviewer reacts to that pull request, and so on. The hand-offs happen automatically over GitHub labels and events.
 

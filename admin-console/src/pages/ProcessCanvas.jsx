@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity, TrendingUp } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
@@ -7,6 +7,7 @@ import StageManager from './process/StageManager';
 import LabelRegistryPanel from './process/LabelRegistryPanel';
 import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
+import ImprovementsPanel from './process/ImprovementsPanel';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
@@ -183,6 +184,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [anomaliesOpen, setAnomaliesOpen] = useState(false);
   // Per-node anomaly counts (#959) — overlaid as a badge on the canvas cards.
   const [anomalyCounts, setAnomalyCounts] = useState({});
+  // Improvements panel (#1223, hill-climbing loop Phase 1) — run-metric tiles.
+  const [improvementsOpen, setImprovementsOpen] = useState(false);
 
   // Flow Copilot (#1069): a docked chat rail; each turn yields a PROPOSAL
   // { bundle, graph, ok } rendered exactly like the import preview — read-only
@@ -364,7 +367,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // scope change from the parent also drops any imported blueprint preview or
   // Copilot proposal preview.
   useEffect(() => { setSelectedId(null); setConnectPair(null); setOutcomeConnect(null); setSelectedEdge(null); setRoutingFocus(null); }, [scope, imported, proposal]);
-  useEffect(() => { setAnomaliesOpen(false); setAnomalyCounts({}); }, [scope]);
+  useEffect(() => { setAnomaliesOpen(false); setAnomalyCounts({}); setImprovementsOpen(false); }, [scope]);
   useEffect(() => { setImported(null); setImportError(null); setProposal(null); }, [scope]);
 
   // Sidebar-triggered import (#512): seed the read-only preview from the
@@ -638,6 +641,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             <ToolbarButton onClick={() => setAnomaliesOpen(true)} icon={Activity}
               badge={Object.keys(anomalyCounts).length ? Object.values(anomalyCounts).reduce((a, b) => a + b, 0) : null}>
               Anomalies
+            </ToolbarButton>
+            <ToolbarButton onClick={() => setImprovementsOpen(true)} icon={TrendingUp}
+              title="Deterministic run metrics for this team over the measurement window">
+              Improvements
             </ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}
@@ -966,6 +973,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           teamId={scope}
           onClose={() => setAnomaliesOpen(false)}
           onData={(data) => setAnomalyCounts(anomalyCountByNode(data && data.anomalies))}
+        />
+      )}
+
+      {improvementsOpen && isTeamScope && !imported && (
+        <ImprovementsPanel
+          teamId={scope}
+          onClose={() => setImprovementsOpen(false)}
         />
       )}
 

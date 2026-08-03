@@ -137,6 +137,33 @@ function visibleCredential(scope, cred) {
   return canManageTeam(scope, c.teamId);
 }
 
+// ── Assist model selection — selection (usage) visibility (#1210) ────────────
+//
+// The global assist model selector (Flow Copilot, Generate agent prompt, port
+// suggestions, Knowledge drafting, skill merge, orchestrator syntheses) must
+// bill against a provider the acting user's teams are entitled to *use*. This is
+// deliberately DISTINCT from visibleCredential (the management rule, Team-Admin-
+// oriented): a plain Team Member may run the Flow Copilot billed against their
+// team's provider — exactly as their agents already do via
+// usableEndpointsForTeam (api.js). So selection is membership-based (any role),
+// not gated on canManageTeam.
+//
+//   A user may select provider P iff `scope.all`, OR P is usable by at least one
+//   team the user is a member of: P is team-scoped with P.teamId ∈ teamIds, or
+//   system-scoped with assignedTeamIds ∩ teamIds ≠ ∅.
+//
+// Additional filter: `oauth-token` providers are never selectable — subscription
+// CLI-seat tokens must not be spent on server-side /v1/messages calls (mirrors
+// resolveGenerationTarget), and they carry no baseUrl.
+function assistSelectableEndpoint(scope, ep) {
+  if (!scope || !ep) return false;
+  if (ep.authType === 'oauth-token') return false;
+  if (scope.all) return true;
+  const c = normalizeCredential(ep);
+  if (c.scope === 'team') return scope.teamIds.has(c.teamId);
+  return c.assignedTeamIds.some(t => scope.teamIds.has(t));
+}
+
 // May the caller edit/delete THIS existing credential? A Team Admin may manage
 // team-scoped credentials of a team they administer, never system-scoped ones
 // (AC5); System Admins may manage all.
@@ -249,6 +276,7 @@ module.exports = {
   describeAuthz,
   normalizeCredential,
   visibleCredential,
+  assistSelectableEndpoint,
   canManageCredential,
   canCreateCredential,
   canReassignCredential,

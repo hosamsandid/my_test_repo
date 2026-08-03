@@ -9,7 +9,7 @@ const {
   canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
-  canViewUsageStatistics,
+  canViewUsageStatistics, assistSelectableEndpoint,
 } = require('./scope');
 
 const users = [
@@ -209,6 +209,52 @@ test('visibleCredential: plain team-member sees no credentials (access deferred)
   const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
   assert.equal(visibleCredential(bob, { scope: 'team', teamId: 'risk' }), false);
   assert.equal(visibleCredential(bob, { scope: 'system', assignedTeamIds: ['risk'] }), false);
+});
+
+// ── assistSelectableEndpoint (#1210) — selection visibility, NOT management ──
+
+test('assistSelectableEndpoint: plain team-member CAN select their team providers (unlike visibleCredential)', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // team-member of risk
+  // The whole point: a member who may NOT manage the credential may still select it.
+  assert.equal(visibleCredential(bob, { authType: 'api-key', scope: 'team', teamId: 'risk' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'team', teamId: 'risk' }), true);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: ['risk'] }), true);
+  // Other teams / unassigned system providers stay non-selectable.
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'team', teamId: 'payments' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: ['payments'] }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: [] }), false);
+});
+
+test('assistSelectableEndpoint: oauth-token providers are never selectable (even for admins)', () => {
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(sys, { authType: 'oauth-token', scope: 'system', assignedTeamIds: [] }), false);
+  assert.equal(assistSelectableEndpoint(env, { authType: 'oauth-token', scope: 'team', teamId: 'risk' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'oauth-token', scope: 'team', teamId: 'risk' }), false);
+});
+
+test('assistSelectableEndpoint: scope.all (System Admin / env admin) selects any non-oauth provider', () => {
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(sys, { authType: 'api-key', scope: 'system', assignedTeamIds: [] }), true);
+  assert.equal(assistSelectableEndpoint(env, { authType: 'api-key', scope: 'team', teamId: 'risk' }), true);
+});
+
+test('assistSelectableEndpoint: pre-#800 legacy record (no scope) is team-scoped via normalizeCredential', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // risk member
+  // Legacy entry carries only teamId, no scope → treated as team-scoped owned by that team.
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'risk' }), true);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'payments' }), false);
+  // A legacy record with no teamId at all collapses to the default team.
+  const legacyDefault = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships }); // member of default
+  assert.equal(assistSelectableEndpoint(legacyDefault, { authType: 'api-key' }), true);
+});
+
+test('assistSelectableEndpoint: fail-closed on missing scope/endpoint', () => {
+  assert.equal(assistSelectableEndpoint(null, { authType: 'api-key', scope: 'team', teamId: 'risk' }), false);
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(bob, null), false);
 });
 
 test('canManageCredential: team-admin manages own team creds, never system creds', () => {

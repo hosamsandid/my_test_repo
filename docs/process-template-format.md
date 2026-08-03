@@ -84,7 +84,7 @@ role's `{{vars}}` and the target repo are applied per member.
       "emits": ["dispatch"],                       // labels this person applies (implicitly gates)
       "consumes": [                                // what lands with the person
         { "artifact": "issue", "from": "business-analyst" }, // an issue they review
-        { "label": "human-decision-required" },              // a brake they decide on
+        { "label": "human-decision-required" },              // a brake they decide on (or a plain notification if not flagged brake)
         { "artifact": "file", "name": "risk-report" }        // a data-flow output they read
       ]
     }
@@ -237,8 +237,8 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   byte-identical when only `humans[]` changes). A label a human `emits` is
   *implicitly a gate* (an agent emitting it is a `gate-violation`); its `consumes`
   bind the generic-`@human` gate/brake/delivery touchpoints (#981) to the named
-  node — `{ label }` a brake they decide on, `{ artifact:'pr'|'issue', from }` an
-  artifact they review, `{ artifact:'file', name }` a data-flow output they read.
+  node — `{ label }` a brake they decide on **or** (when the label is not flagged `brake`) a plain delivery — they are notified when the label is set (a touchpoint, no blocking); `{ artifact:'pr'|'issue', from }` an
+  artifact they review; `{ artifact:'file', name }` a data-flow output they read.
   First matching human in `humans[]` order wins a binding; a label emitted by two
   humans draws both edges. The generic `@human` hub is GONE (#987 supersedes the
   #981 actor): a gate/brake/delivery with no human role wired stays UNBOUND — its

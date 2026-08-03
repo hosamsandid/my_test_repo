@@ -485,16 +485,19 @@ const ROLE_INFO = {
   'orchestrator': {
     icon: Workflow,
     title: 'Orchestrator',
-    short: 'Watches a directory of BriefingPacks and manages one agent per mission.',
+    short: 'Watches a folder of mission files and runs one agent per mission.',
     body: (
       <>
-        Pointed at a folder of ACE BriefingPacks. The orchestrator scans the folder, lists one
-        stub <em>bp-instance</em> per mission, and offers to materialise / claim the mission
-        when it transitions to <code>dispatched</code>. Each materialised mission becomes its
-        own agent with its own chat, executing the BriefingPack's LoopScript.
+        Pointed at a folder of <strong>missions</strong> — task files (<em>BriefingPacks</em>)
+        from an <strong>ACE (Agent Control Environment)</strong> briefings repository. The
+        orchestrator scans the folder and lists one stub agent per mission; when a mission is
+        marked <code>dispatched</code> it offers to turn that stub into a live agent with its
+        own chat, which then works the mission end to end. Open{' '}
+        <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flows</Link> to see
+        active orchestrators.
       </>
     ),
-    when: 'Use when you have a Briefings repository (ACE) that you want to drive end-to-end through this console.',
+    when: 'Use when you have an ACE briefings repository whose missions you want to drive end-to-end through this console.',
   },
   'team-member': {
     icon: User,
@@ -712,9 +715,9 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 
   const helpText = (
     <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-      Path inside the agent's workspace where ACE BriefingPacks live — usually the directory of a cloned briefings repository.
+      Path inside the agent's workspace where the mission files live — usually a cloned ACE briefings repository.
       The <code>artifacts/briefings/</code> subdirectory is appended automatically.
-      On creation, the orchestrator scans this path and registers one stub <em>bp-instance</em> per mission found.
+      On creation, the orchestrator scans this path and registers one stub agent per mission it finds.
     </div>
   );
 
@@ -916,8 +919,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           }}>
             <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
             <span>
-              An Orchestrator monitors a directory of BriefingPacks (ACE task files) and manages their lifecycle.
-              Use this only if you are working with ACE LoopScripts. See{' '}
+              An Orchestrator watches a folder of <strong>missions</strong> — task files from an
+              ACE briefings repository — and runs one agent per mission.
+              Use this only if you have such a repository. See{' '}
               <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>
                 Flows
               </Link>{' '}
@@ -2481,7 +2485,7 @@ export default function Agents() {
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
-              <td style={{ padding: '4px 8px' }}>Manages a folder of BriefingPacks (ACE workflow tasks). Only needed for ACE-based workflows.</td>
+              <td style={{ padding: '4px 8px' }}>Runs a folder of mission files from an <strong>ACE (Agent Control Environment)</strong> briefings repository. Only needed for ACE-based workflows.</td>
             </tr>
           </tbody>
         </table>

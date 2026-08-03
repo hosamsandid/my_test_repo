@@ -34,10 +34,12 @@ const { processTemplateToUnified, buildUnifiedGraph } = require('./unified-graph
 // ≤ 3 LLM calls per turn: one generation + at most two repairs (#1047 decision 3).
 const MAX_REPAIR_ITERATIONS = 2;
 
-// Whole bundles with many role prompts are large — generous output budget,
-// low temperature for schema discipline.
+// Whole bundles with many role prompts are large — generous output budget.
+// No `temperature`: newer models (e.g. claude-opus-4-8) reject the param as
+// deprecated, and the Model Provider Selector can route this call to any
+// provider — so we rely on the model default, matching every other assist
+// call site (port-suggestion, hill-climb-analyst, …).
 const MAX_TOKENS = 16000;
-const TEMPERATURE = 0.2;
 
 // ── sanitize ─────────────────────────────────────────────────────────────────
 // Untrusted model output must not smuggle extra fields toward the import path
@@ -398,7 +400,6 @@ function buildCopilotSystem({ formatDoc, addendum, bundle }) {
 function buildCopilotRequest({ bundle, messages, formatDoc, addendum }) {
   return {
     max_tokens: MAX_TOKENS,
-    temperature: TEMPERATURE,
     system: buildCopilotSystem({ formatDoc, addendum, bundle }),
     messages: messages.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',

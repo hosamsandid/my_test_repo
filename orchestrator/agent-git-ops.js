@@ -262,6 +262,26 @@ function normalizePushRequest(body = {}) {
   };
 }
 
+// Serialize async work per key (one key ≙ one repo checkout): each call chains
+// onto the previous call's settled promise for the same key, so two overlapping
+// pushes to the same checkout never interleave — the ordering guarantee the old
+// blocking execFileSync calls provided implicitly by parking the event loop.
+// A rejection propagates to its own caller only and never breaks the chain;
+// the map entry is dropped once the last queued call settles.
+function makeKeyedQueue() {
+  const tails = new Map();
+  return function enqueue(key, fn) {
+    const prev = tails.get(key) || Promise.resolve();
+    const next = prev.then(fn);
+    const tail = next.catch(() => {});
+    tails.set(key, tail);
+    tail.then(() => {
+      if (tails.get(key) === tail) tails.delete(key);
+    });
+    return next;
+  };
+}
+
 module.exports = {
   isHttpsGithubUrl,
   isSshUrl,
@@ -273,4 +293,5 @@ module.exports = {
   githubTokenStatus,
   sanitizeGitOutput,
   normalizePushRequest,
+  makeKeyedQueue,
 };

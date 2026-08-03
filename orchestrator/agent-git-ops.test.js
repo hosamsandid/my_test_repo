@@ -248,3 +248,61 @@ test("sanitizeGitOutput redacts Authorization headers", () => {
   assert.match(out, /Authorization: \[redacted\]/);
   assert.doesNotMatch(out, /c2VjcmV0/);
 });
+
+// ── makeKeyedQueue ───────────────────────────────────────────────────────────
+const { makeKeyedQueue } = require("./agent-git-ops");
+
+test("makeKeyedQueue serializes work on the same key", async () => {
+  const enqueue = makeKeyedQueue();
+  const order = [];
+  let releaseFirst;
+  const firstRunning = new Promise((r) => { releaseFirst = r; });
+  const a = enqueue("repo", async () => {
+    order.push("a:start");
+    await firstRunning;
+    order.push("a:end");
+    return "a";
+  });
+  const b = enqueue("repo", async () => {
+    order.push("b:start");
+    return "b";
+  });
+  // b must not start while a is still in flight.
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ["a:start"]);
+  releaseFirst();
+  assert.deepEqual(await Promise.all([a, b]), ["a", "b"]);
+  assert.deepEqual(order, ["a:start", "a:end", "b:start"]);
+});
+
+test("makeKeyedQueue runs different keys concurrently", async () => {
+  const enqueue = makeKeyedQueue();
+  const order = [];
+  let releaseA;
+  const gate = new Promise((r) => { releaseA = r; });
+  const a = enqueue("repo-1", async () => { order.push("a:start"); await gate; return "a"; });
+  const b = enqueue("repo-2", async () => { order.push("b:start"); return "b"; });
+  await b;
+  // repo-2 finished while repo-1 is still blocked — no cross-key serialization.
+  assert.deepEqual(order, ["a:start", "b:start"]);
+  releaseA();
+  assert.equal(await a, "a");
+});
+
+test("makeKeyedQueue propagates a rejection to its caller only", async () => {
+  const enqueue = makeKeyedQueue();
+  const failing = enqueue("repo", async () => { throw new Error("push failed"); });
+  const following = enqueue("repo", async () => "ok");
+  await assert.rejects(failing, /push failed/);
+  assert.equal(await following, "ok");
+});
+
+test("makeKeyedQueue drops the chain entry once the tail settles", async () => {
+  const enqueue = makeKeyedQueue();
+  await enqueue("repo", async () => "done");
+  await new Promise((r) => setImmediate(r));
+  // A fresh call after the chain drained must run immediately (no stale tail).
+  const order = [];
+  await enqueue("repo", async () => { order.push("ran"); });
+  assert.deepEqual(order, ["ran"]);
+});

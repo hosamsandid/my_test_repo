@@ -286,6 +286,7 @@ function resolveAssistBindingFromSelection(endpointId, modelId) {
 }
 
 const { execFile, execFileSync } = require("child_process");
+const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
@@ -5235,9 +5236,22 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
   return cand;
 }
 
+// #855-class fix: `git push` / `gh pr create` are network round-trips (SSH to
+// GitHub, HTTPS API) that routinely take many seconds — run synchronously they
+// park the single-threaded event loop and freeze every other request (admin
+// API, session-log pushes, poller). Async execFile keeps the loop free; the
+// per-checkout queue preserves the serialization the blocking calls provided
+// implicitly, so overlapping pushes to one repo clone still never interleave.
+const _repoGitQueue = agentGitOps.makeKeyedQueue();
+
+async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
+  const { stdout } = await execFileP(cmd, args, { cwd, env, timeout });
+  return stdout.toString();
+}
+
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
 // setUpstream? }. Throws caller-facing Errors (safe to return over the API).
-function agentGitPush(id, env, body = {}) {
+async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -5245,12 +5259,16 @@ function agentGitPush(id, env, body = {}) {
   });
   const req = agentGitOps.normalizePushRequest(body);
   const gitEnv = _buildAgentGitEnv(id, repo, env);
+  return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
+}
+
+async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
 
   let branch = req.branch;
   if (!branch) {
-    branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    branch = (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
     if (branch === "HEAD") {
       throw new Error("workspace is in detached HEAD — check out a branch before pushing");
     }
@@ -5264,7 +5282,7 @@ function agentGitPush(id, env, body = {}) {
   pushArgs.push(req.remote, branch);
 
   try {
-    const stdout = run(pushArgs);
+    const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
     // the correlationId↔branch binding corroborates the branch-tier (C) join if a
     // PR is later opened on this head another way. Best-effort, never blocks.
@@ -5302,7 +5320,7 @@ function agentGitPush(id, env, body = {}) {
 // Push the current branch, then open a PR via `gh`. `body` = { repo?, title,
 // body?, base?, head?, draft? }. Stamps the agent marker into the PR body so the
 // GitHub poller can attribute the resulting events (loop protection).
-function agentCreatePr(id, env, body = {}) {
+async function agentCreatePr(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -5317,10 +5335,14 @@ function agentCreatePr(id, env, body = {}) {
   }
 
   const gitEnv = _buildAgentGitEnv(id, repo, env);
-  const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  return _repoGitQueue(repo.repoPath, () => _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body));
+}
 
-  let head = body.head != null ? String(body.head) : run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
+  const run = (args, timeout = 30_000) =>
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
+
+  let head = body.head != null ? String(body.head) : (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head === "HEAD") {
     throw new Error("workspace is in detached HEAD — check out a branch before opening a PR");
   }
@@ -5331,7 +5353,7 @@ function agentCreatePr(id, env, body = {}) {
 
   // Ensure the branch exists on the remote before gh reads it.
   try {
-    run(["push", "--set-upstream", "origin", head]);
+    await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
     const detail = agentGitOps
       .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
@@ -5370,12 +5392,7 @@ function agentCreatePr(id, env, body = {}) {
     const ghArgs = ["pr", "create", "--title", title, "--body-file", tmp, "--head", head];
     if (base) ghArgs.push("--base", base);
     if (body.draft) ghArgs.push("--draft");
-    const out = execFileSync("gh", ghArgs, {
-      cwd: repo.repoPath,
-      env: gitEnv,
-      stdio: "pipe",
-      timeout: 30_000,
-    }).toString();
+    const out = await _execRepo("gh", ghArgs, { cwd: repo.repoPath, env: gitEnv });
     const url = (out.match(/https?:\/\/\S+/) || [])[0] || null;
     // PR-link record (#655 §4.2, tier A): the exact "which run created this PR"
     // fact. prNumber from the URL just parsed; closes[] for the artifact graph
@@ -5456,16 +5473,18 @@ function _resolveRepoCommentContext(repoFullName) {
 }
 
 // gh api helper bound to a token — no repo checkout needed (`gh api` works from
-// anywhere). Returns stdout string; throws on non-zero exit.
-function _ghApi(token, args, input) {
+// anywhere). Returns stdout string; throws on non-zero exit. Async for the same
+// reason as _execRepo above: a gh network round-trip must not park the loop.
+async function _ghApi(token, args, input) {
   const env = { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token };
-  return execFileSync("gh", ["api", ...args], {
+  const pending = execFileP("gh", ["api", ...args], {
     env,
-    stdio: input === undefined ? "pipe" : ["pipe", "pipe", "pipe"],
-    input,
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,
-  }).toString();
+  });
+  if (input !== undefined) pending.child.stdin.end(input);
+  const { stdout } = await pending;
+  return stdout.toString();
 }
 
 async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
@@ -5495,7 +5514,7 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
     // stable marker; PATCH if the content changed, skip if identical, else create.
     let existing = null;
     try {
-      const raw = _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
+      const raw = await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
       existing = prTokenComment.findExistingComment(JSON.parse(raw));
     } catch (err) {
       console.error(`[PR-token-comment] ${repoFullName}#${prNumber}: could not list comments: ${err.message}`);
@@ -5506,10 +5525,10 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
 
     if (existing) {
       if (typeof existing.body === "string" && existing.body.trim() === body.trim()) return; // no change
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: updated existing comment ${existing.id}`);
     } else {
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: posted token-usage comment`);
     }
   } catch (err) {
@@ -10593,7 +10612,7 @@ async function main() {
       const id = decodeURIComponent((gitPushMatch || gitPrMatch)[1]);
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => {
         let parsed = {};
         try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
         try {
@@ -10604,7 +10623,7 @@ async function main() {
             return;
           }
           const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-          const result = gitPushMatch ? agentGitPush(id, env, parsed) : agentCreatePr(id, env, parsed);
+          const result = gitPushMatch ? await agentGitPush(id, env, parsed) : await agentCreatePr(id, env, parsed);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {

@@ -7044,7 +7044,11 @@ function safeSkillFilePath(rootDir, relFile) {
   const target = path.resolve(realRoot, normalized);
   let realTarget;
   try { realTarget = fs.realpathSync(target); } catch { return null; }
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  // Canonical path.relative containment idiom — recognised as a CodeQL
+  // js/path-injection barrier on the returned value; behaviour-equivalent to
+  // the previous `startsWith(realRoot + sep)` check.
+  const rel = path.relative(realRoot, realTarget);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   return realTarget;
 }
 
@@ -13057,7 +13061,12 @@ function safeAgentPath(agentId, relPath) {
     if (err.code === 'ENOENT') return null;
     return null;
   }
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  // Final containment guard, expressed as the canonical path.relative idiom so
+  // it is recognised as a CodeQL js/path-injection barrier on the returned
+  // value (an outward-pointing symlink yields a rel that escapes the root).
+  // Behaviour-equivalent to the previous `startsWith(realRoot + sep)` check.
+  const rel = path.relative(realRoot, realTarget);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   return realTarget;
 }
 

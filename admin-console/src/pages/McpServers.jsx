@@ -8,6 +8,7 @@ import FormInput from '../components/FormInput';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
+import InfoTip from '../components/InfoTip';
 
 const inputStyle = {
   width: '100%',
@@ -316,7 +317,19 @@ export default function McpServers() {
         {(r.transport === 'http' || r.transport === 'sse') ? r.url : [r.command, ...(r.args || [])].join(' ')}
       </span>
     )},
-    { key: 'requiresCredential', label: 'Credential', render: v => v ? 'required' : '—' },
+    { key: 'requiresCredential', label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+        Credential
+        <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+          <InfoTip
+            title="Where does “required” come from?"
+            text={<>Shows <strong>required</strong> automatically when this server's template references <code>{'${credential}'}</code> in its env/headers. At seed time the orchestrator fills that placeholder with the secret from the credential the Working Environment binds to this server.</>}
+          />
+        </span>
+      </span>
+    ), render: v => v
+      ? <span title="Required because this server's template references ${credential} — bind a credential in the Working Environment.">required</span>
+      : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteServer(row)} /></div>
     )},
@@ -347,8 +360,11 @@ export default function McpServers() {
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>MCP Servers</h1>
         <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-2)', marginBottom: 0, lineHeight: 1.6 }}>
           Configure runtime knowledge sources (wiki, vector store, graph DB, …) that agents can query through the
-          Model Context Protocol. Servers describe <em>how</em> to launch a backend; credentials carry the secrets;
-          a Working Environment pairs a server with a credential, and the orchestrator materializes the merged
+          Model Context Protocol. It's a three-part model: <strong>servers</strong> describe <em>how</em> to launch a
+          backend and mark where a secret goes with the <code style={monoStyle}>${'${credential}'}</code> placeholder;
+          <strong> credentials</strong> carry the secrets; a <strong>Working Environment</strong> pairs a server with a
+          credential. A server whose template uses that placeholder shows <em>required</em> in the Credential column
+          below until an environment binds one. The orchestrator then substitutes the secret and materializes the merged
           config into each agent's own <code style={monoStyle}>.claude/settings.json</code> at workspace seed time.
         </p>
       </div>

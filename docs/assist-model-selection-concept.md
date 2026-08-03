@@ -1,6 +1,6 @@
 # Assist Model Selection — global, team-scoped model-provider selector for cross-cutting AI helpers
 
-Status: concept (2026-08-03)
+Status: in progress — §4.1 (`assistSelectableEndpoint`) + §4.2 (`GET /api/assist/model-options`) shipped in #1210; rest of Phase 1 pending (#1211 enforcement, #1212 header UI)
 
 ## 1. Problem
 
@@ -92,12 +92,13 @@ New pure helper in `admin-console/api/scope.js` (unit-testable next to `visibleC
 
 ```js
 // scope.js — selection (usage) visibility, distinct from management visibility
-export function assistSelectableEndpoint(scope, ep) {
-  if (normalizeAuthType(ep.authType) === 'oauth-token') return false;
+function assistSelectableEndpoint(scope, ep) {
+  if (!scope || !ep) return false;
+  if (ep.authType === 'oauth-token') return false;
   if (scope.all) return true;
   const c = normalizeCredential(ep);
   if (c.scope === 'team') return scope.teamIds.has(c.teamId);
-  return c.assignedTeamIds.some((t) => scope.teamIds.has(t));
+  return c.assignedTeamIds.some(t => scope.teamIds.has(t));
 }
 ```
 

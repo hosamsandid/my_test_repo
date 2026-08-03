@@ -119,7 +119,7 @@ The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a 
 
 ### Left panel — Agent list
 
-Pick any enabled agent. The status indicator shows current state (Unread / Busy / Idle / Offline).
+Pick any enabled agent. The status indicator shows current state: **Unread** (new message), **Busy** (active run), **Idle** (waiting), **Disabled** (amber — intentionally off, one-click enable to resume), **Offline** (red — container not running).
 
 ### Middle panel — Chat
 

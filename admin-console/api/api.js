@@ -5259,7 +5259,15 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'invalid agent id' });
-  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  // Containment guard: AGENT_ID_RE excludes traversal segments, but CodeQL does
+  // not recognise the regex as a sanitiser once `id` travels through a
+  // destructure, so re-verify with path.relative before any fs access and build
+  // every downstream path from the contained dir (house idiom, cf. ~L2578).
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const agentRel = path.relative(agentsBaseDir, agentDir);
+  if (agentRel.startsWith('..') || path.isAbsolute(agentRel)) return res.status(400).json({ error: 'invalid agent id' });
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
   // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
   const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
@@ -5272,13 +5280,23 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
     : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
     : null;
-  const parentCfg = parentId ? readJsonFile(path.join(AGENTS_DIR, parentId, 'config.json'), null) : null;
+  // parentId originates from the agent's own config rather than the request,
+  // but contain it the same way before reading so no unvalidated value ever
+  // reaches fs (keeps CodeQL's taint tracker satisfied here too).
+  let parentCfg = null;
+  if (parentId) {
+    const parentDir = path.resolve(agentsBaseDir, String(parentId));
+    const parentRel = path.relative(agentsBaseDir, parentDir);
+    if (!parentRel.startsWith('..') && !path.isAbsolute(parentRel)) {
+      parentCfg = readJsonFile(path.join(parentDir, 'config.json'), null);
+    }
+  }
   const granted = new Set(
     Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
     : Array.isArray(cfg.skills) ? cfg.skills
     : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
     : []);
-  const skillsDir = path.join(AGENTS_DIR, id, 'skills');
+  const skillsDir = path.join(agentDir, 'skills');
   const skills = [];
   try {
     for (const name of fs.readdirSync(skillsDir)) {

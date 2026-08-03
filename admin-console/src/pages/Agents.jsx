@@ -908,7 +908,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Skills</div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-          The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          {form.role === 'team'
+            ? "The whole team's skill set, copied into every member's workspace at seed time — members inherit it unless they set their own override."
+            : "Skills copied into this agent's workspace at seed time. Only global-pool skills are offered here; team-tier skills become available once the agent belongs to a team and you edit it there."}
         </div>
         <SkillPicker
           skills={poolSkills}

@@ -304,7 +304,7 @@ function candidateFromEntries(entries, { teamId, source = 'manual', now } = {}) 
 }
 
 // ---------------------------------------------------------------------------
-// LLM draft request (reuses api.js resolveGenerationTarget + httpPostJson)
+// LLM draft request (reuses api.js resolveAssistTarget + httpPostJson)
 // ---------------------------------------------------------------------------
 
 // Output budget for an aggregated draft SCALES with the number of combined

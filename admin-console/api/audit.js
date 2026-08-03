@@ -47,6 +47,11 @@ function buildEvent(req, res) {
     status: res.statusCode,
     outcome: classifyOutcome(res.statusCode),
     ip: req.ip || (req.socket && req.socket.remoteAddress) || null,
+    // Assist provenance (#1211): resolveAssistTarget stamps req.assistMeta with
+    // the { endpointId, model } an AI-helper call billed against, so the audit
+    // trail answers "which key paid for this" after the fact. Absent on
+    // non-assist mutations.
+    ...(req.assistMeta ? { assist: req.assistMeta } : {}),
   };
 }
 

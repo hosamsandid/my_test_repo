@@ -154,7 +154,7 @@ function visibleCredential(scope, cred) {
 //
 // Additional filter: `oauth-token` providers are never selectable — subscription
 // CLI-seat tokens must not be spent on server-side /v1/messages calls (mirrors
-// resolveGenerationTarget), and they carry no baseUrl.
+// resolveAssistTarget's env fallback), and they carry no baseUrl.
 function assistSelectableEndpoint(scope, ep) {
   if (!scope || !ep) return false;
   if (ep.authType === 'oauth-token') return false;

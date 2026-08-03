@@ -8,7 +8,7 @@
 //
 // The server is STATELESS: the client resends the full conversation and the
 // current bundle each turn (mirrors agent-ports/suggest). Transport is owned by
-// the route in api.js (resolveGenerationTarget + httpPostJson), which hands
+// the route in api.js (resolveAssistTarget + httpPostJson), which hands
 // this module a `callLlm(payload) → Promise<string>` — everything here (prompt
 // composition, tolerant parsing, sanitize → STRICT validate → lint, the repair
 // loop) is deterministic and unit-testable with a mocked callLlm.

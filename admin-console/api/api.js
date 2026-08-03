@@ -27,6 +27,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
 const { buildAssistModelOptions } = require('./assist-model-options');
+const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
@@ -4715,7 +4716,8 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -4733,7 +4735,7 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
     name: heuristic.name, description: heuristic.description,
   });
-  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
@@ -4770,7 +4772,8 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic', entryIds: cand.entryIds });
   if (req.body?.heuristicOnly) return fallback();
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -4786,7 +4789,7 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
     name: heuristic.name, description: heuristic.description,
   });
-  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds, meta: assistMeta(target) });
 });
 
 // Generate-and-store human-readable summaries (#635, AC3) for a team's KB entries
@@ -4816,7 +4819,10 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   const batch = missing.slice(0, MAX_PER_REQUEST);
   if (batch.length === 0) return res.json({ generated: 0, persisted: 0, remaining: 0, source: 'none' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  // Resolve the assist target ONCE per request (not per entry) — the whole
+  // batch bills against the one selected provider.
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   // No LLM target: persist nothing (heuristic is display-only). Report the count
   // so the caller knows these render via the read-time fallback (AC4).
   if (target.error) return res.json({ generated: 0, persisted: 0, remaining, source: 'heuristic', reason: target.error });
@@ -4841,7 +4847,7 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   }
 
   const ids = Object.keys(summaries);
-  if (ids.length === 0) return res.json({ generated: 0, persisted: 0, remaining, source: 'llm', failures });
+  if (ids.length === 0) return res.json({ generated: 0, persisted: 0, remaining, source: 'llm', failures, meta: assistMeta(target) });
 
   try {
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/summaries`, {
@@ -4850,7 +4856,7 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'summary persist failed' });
-    res.json({ generated: ids.length, persisted: out.persisted || ids.length, remaining, source: 'llm', model: target.model, failures });
+    res.json({ generated: ids.length, persisted: out.persisted || ids.length, remaining, source: 'llm', model: target.model, failures, meta: assistMeta(target) });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -4887,7 +4893,8 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   });
   if (req.body?.heuristicOnly) return fallback();
 
-  const gen = resolveGenerationTarget(req.body?.llmEndpointId);
+  const gen = resolveAssistTarget(req);
+  if (gen.selectionError) return sendAssistSelectionError(res, gen);
   if (gen.error) return fallback();
   const url = buildMessagesUrl(gen.baseUrl);
   const headers = {
@@ -4899,7 +4906,7 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { skillMd, llmDrafted: true }, source: 'llm', model: gen.model, entryIds: cand.entryIds });
+  res.json({ draft: { skillMd, llmDrafted: true }, source: 'llm', model: gen.model, entryIds: cand.entryIds, meta: assistMeta(gen) });
 });
 
 app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (req, res) => {
@@ -6058,7 +6065,8 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     return res.status(400).json({ error: 'bundle must be an object' });
   }
 
-  const target = resolveGenerationTarget(body.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return res.status(400).json({ error: target.error });
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -6099,9 +6107,13 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     } catch { /* socket gone */ }
   }
 
+  // Provenance first (§4.5): the NDJSON stream announces which provider + model
+  // is paying for this turn before any generation begins.
+  emit({ type: 'assist', ...assistMeta(target).assist });
+
   try {
     const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
-    emit({ type: 'result', ...out, model: target.model });
+    emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
     // Transport failure with no bundle to fall back to, or no parseable reply
     // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
@@ -7944,7 +7956,8 @@ app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
   if (req.body?.heuristicOnly) return fallback();
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -7956,7 +7969,7 @@ app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: plan.target.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+  res.json({ draft: { name: plan.target.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 // POST /api/skills/merge — commit the merge: write the target from the operator's
@@ -8679,35 +8692,74 @@ app.delete('/api/llm-auth/flows/:id', apiLimiter, (req, res) => {
  * from .env. This is a stateless, one-shot completion — nothing is persisted.
  */
 
-// Resolve which endpoint + model + token to use for a one-shot generation call.
-// Prefers a caller-named endpoint, else the first registered one, else the
-// .env fallback. Within an endpoint, prefer a Sonnet-class model (good quality
-// at low latency for this short task), then its configured default, then the
-// first model. Returns { baseUrl, token, model } or { error }.
-function resolveGenerationTarget(preferredEndpointId) {
-  // Subscription-OAuth providers are excluded here: their token authenticates
-  // the Claude *CLI* under the subscriber's seat, not arbitrary server-side
-  // /v1/messages calls — routing one-shot generation through it would be both
-  // unreliable and outside the subscription's permitted use.
-  const endpoints = listLlmEndpoints().filter(e => normalizeAuthType(e.authType) !== 'oauth-token');
-  const ep = (preferredEndpointId && endpoints.find(e => e.id === preferredEndpointId))
-    || endpoints[0]
-    || null;
-  if (ep) {
-    const models = Array.isArray(ep.models) ? ep.models : [];
-    const sonnet = models.find(m => m.kind === 'sonnet');
-    const model = sonnet?.id || pickEndpointDefaultModel(ep);
-    if (!ep.baseUrl) return { error: `LLM endpoint '${ep.id}' has no base URL` };
-    if (!model) return { error: `LLM endpoint '${ep.id}' has no models configured` };
-    return { baseUrl: ep.baseUrl, token: readLlmEndpointToken(ep.authTokenId), model };
-  }
-  // No registered endpoint — fall back to the raw ANTHROPIC_* env vars.
+// The raw ANTHROPIC_* fallback — used only in the bootstrap case (no Model
+// Provider registered platform-wide). Kept identical to the pre-#1211 behaviour
+// so a freshly-installed stack with just a `.env` proxy keeps working with zero
+// configuration. Subscription-OAuth is not involved here (bootstrap installs
+// have no providers at all).
+function envFallbackTarget() {
   const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
   if (!baseUrl) {
     return { error: 'No LLM endpoint configured. Add one on the Model Providers page or set ANTHROPIC_BASE_URL.' };
   }
   const model = (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6').trim();
-  return { baseUrl, token: (process.env.ANTHROPIC_AUTH_TOKEN || '').trim(), model };
+  return { baseUrl, token: (process.env.ANTHROPIC_AUTH_TOKEN || '').trim(), model, endpointId: null, endpointName: '.env' };
+}
+
+// Resolve the Model Provider + model an assist call must bill against (#1211,
+// concept §4.5). This is the server-side authority: the client's selection
+// (X-Assist-Model header, or legacy body.llmEndpointId) is validated against
+// the caller's team visibility (assistSelectableEndpoint) and never trusted to
+// pick a provider its teams may not use. The pure decision lives in
+// assist-target.js; here we add the impure bits (scope, registry, token read,
+// .env material) and stamp req.assistMeta for the audit trail.
+//
+// Returns one of:
+//   { selectionError: { status, code, error } } — a 403 (not permitted) or 400
+//       (unselected while providers exist). Callers MUST surface it and never
+//       mask it behind a heuristic fallback (that would re-open the billing bug).
+//   { error }                — a resolved-but-misconfigured provider, or the
+//       bootstrap .env fallback with no base URL. Same shape resolveGeneration-
+//       Target used, so existing routes treat it exactly as before.
+//   { baseUrl, token, model, endpointId, endpointName } — ready to call.
+function resolveAssistTarget(req, { requireSelection = true } = {}) {
+  const scope = getScope(req);
+  const decision = resolveAssistSelection({
+    scope,
+    endpoints: listLlmEndpoints(),
+    selection: parseAssistSelection(req),
+    requireSelection,
+  });
+  if (decision.selectionError) return decision;
+  if (decision.error) return { error: decision.error };
+  if (decision.env) {
+    const env = envFallbackTarget();
+    if (!env.error) req.assistMeta = { endpointId: env.endpointId, model: env.model };
+    return env;
+  }
+  const target = {
+    baseUrl: decision.baseUrl,
+    token: readLlmEndpointToken(decision.endpoint.authTokenId),
+    model: decision.model,
+    endpointId: decision.endpointId,
+    endpointName: decision.endpointName,
+  };
+  req.assistMeta = { endpointId: target.endpointId, model: target.model };
+  return target;
+}
+
+// Provenance block echoed on every assist response (#1211 §4.5) — "which key
+// paid for this". endpointId is null for the .env bootstrap fallback.
+function assistMeta(target) {
+  return { assist: { endpointId: target.endpointId ?? null, model: target.model } };
+}
+
+// Send a resolveAssistTarget selection error (403/400) as JSON. Returns true so
+// route bodies can `if (target.selectionError) return sendAssistSelectionError(res, target);`.
+function sendAssistSelectionError(res, target) {
+  const e = target.selectionError;
+  res.status(e.status).json({ error: e.error, code: e.code });
+  return true;
 }
 
 // Meta-prompt: instruct the LLM to author a reusable agent/system prompt for a
@@ -8752,7 +8804,8 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   const notes    = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
   if (!roleName) return res.status(400).json({ error: 'roleName is required' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return res.status(400).json({ error: target.error });
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -8771,7 +8824,7 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   }
   const prompt = extractMessageText(result.body);
   if (!prompt) return res.status(502).json({ error: 'LLM returned an empty prompt' });
-  res.json({ prompt, model: target.model });
+  res.json({ prompt, model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── Port suggestion for custom composer roles (#423) ──────────────────
@@ -8791,7 +8844,8 @@ app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
     source: 'heuristic',
   });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -8804,7 +8858,7 @@ app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const suggestion = parsePortSuggestion(extractMessageText(result.body));
   if (!suggestion) return fallback();
-  res.json({ suggestion, source: 'llm', model: target.model });
+  res.json({ suggestion, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── Outcome suggestion for the Routing tab (#828) ─────────────────────
@@ -8823,7 +8877,8 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
     source: 'heuristic',
   });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -8836,7 +8891,7 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const suggestion = parseOutcomeSuggestion(extractMessageText(result.body));
   if (!suggestion) return fallback();
-  res.json({ suggestion, source: 'llm', model: target.model });
+  res.json({ suggestion, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── MCP server registry ───────────────────────────────────────────── */

@@ -67,20 +67,24 @@ function normalizeHumans(humans) {
   return out;
 }
 
-// Optional top-level `hillClimb` on the bundle (hill-climbing loop Phase 1,
-// #1222): the team's run-metrics collector config `{ cron?, windowDays?,
-// minRunsPerWindow?, excludeAgents? }` on the team agent. Round-tripped through
-// export→materialise→Edit-as-draft like `stages`/`labels`/`anomalyThresholds`.
-// Normalized to only the known config keys — the applied-card / snapshot state
-// deliberately NEVER travels (it is per-instance run history, not config).
-// Returns null when nothing meaningful is set, so an empty config stays
-// byte-identical to a flow that never configured it.
+// Optional top-level `hillClimb` on the bundle (hill-climbing loop, #1222 +
+// #1224): the team's loop config `{ autonomy?, cron?, windowDays?,
+// minRunsPerWindow?, maxCardsPerPass?, excludeAgents? }` on the team agent.
+// Round-tripped through export→materialise→Edit-as-draft like `stages`/`labels`/
+// `anomalyThresholds`. Normalized to only the known config keys — the
+// applied-card / snapshot state deliberately NEVER travels (it is per-instance
+// run history, not config). `autonomy` (0–2; 3 is not authored in v1) is the
+// analyst/apply dial (#1224): 0 = collector only (no cards). Returns null when
+// nothing meaningful is set, so an empty config stays byte-identical to a flow
+// that never configured it.
 function normalizeHillClimb(hc) {
   if (!hc || typeof hc !== 'object' || Array.isArray(hc)) return null;
   const out = {};
+  if ([0, 1, 2, 3].includes(hc.autonomy)) out.autonomy = hc.autonomy;
   if (typeof hc.cron === 'string' && hc.cron.trim()) out.cron = hc.cron.trim();
   if (Number.isFinite(hc.windowDays) && hc.windowDays > 0) out.windowDays = hc.windowDays;
   if (Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0) out.minRunsPerWindow = hc.minRunsPerWindow;
+  if (Number.isFinite(hc.maxCardsPerPass) && hc.maxCardsPerPass >= 0) out.maxCardsPerPass = hc.maxCardsPerPass;
   const ex = (Array.isArray(hc.excludeAgents) ? hc.excludeAgents : [])
     .filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
   if (ex.length) out.excludeAgents = [...new Set(ex)];
@@ -463,16 +467,22 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     if (!Array.isArray(b.stages)) return { ok: false, error: 'stages must be an array' };
     if (!b.stages.every(s => typeof s === 'string')) return { ok: false, error: 'stages must be an array of strings' };
   }
-  // Hill-climb collector config (#1222): an object of known scalar/array keys.
+  // Hill-climb loop config (#1222 + #1224): an object of known scalar/array keys.
   if (b.hillClimb !== undefined) {
     const hc = b.hillClimb;
     if (!hc || typeof hc !== 'object' || Array.isArray(hc)) return { ok: false, error: 'hillClimb must be an object' };
+    if (hc.autonomy !== undefined && ![0, 1, 2, 3].includes(hc.autonomy)) {
+      return { ok: false, error: 'hillClimb.autonomy must be 0, 1, 2 or 3' };
+    }
     if (hc.cron !== undefined && typeof hc.cron !== 'string') return { ok: false, error: 'hillClimb.cron must be a string' };
     if (hc.windowDays !== undefined && !(Number.isFinite(hc.windowDays) && hc.windowDays > 0)) {
       return { ok: false, error: 'hillClimb.windowDays must be a positive number' };
     }
     if (hc.minRunsPerWindow !== undefined && !(Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0)) {
       return { ok: false, error: 'hillClimb.minRunsPerWindow must be a non-negative number' };
+    }
+    if (hc.maxCardsPerPass !== undefined && !(Number.isFinite(hc.maxCardsPerPass) && hc.maxCardsPerPass >= 0)) {
+      return { ok: false, error: 'hillClimb.maxCardsPerPass must be a non-negative number' };
     }
     if (hc.excludeAgents !== undefined && (!Array.isArray(hc.excludeAgents) || !hc.excludeAgents.every(s => typeof s === 'string'))) {
       return { ok: false, error: 'hillClimb.excludeAgents must be an array of strings' };

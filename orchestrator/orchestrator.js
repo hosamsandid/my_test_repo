@@ -35,6 +35,7 @@ const flowEmit = require("./flow-emit");
 const githubEventLog = require("./github-event-log");
 const hillClimbMetrics = require("./hill-climb-metrics");
 const hillClimbSweep = require("./hill-climb-sweep");
+const hillClimbCards = require("./hill-climb-cards");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -1413,22 +1414,131 @@ function readLatestHillClimbSnapshot(teamId) {
   } catch { return null; }
 }
 
+// ── improvement-card store (hill-climbing loop Phase 2, #1224) ───────────────
+//
+// Persist the team's improvement cards next to its metrics snapshots at
+// /workspace/teams/<teamId>/hill-climb/cards.json. Traversal-guarded via
+// safeTeamSegment (same guard as the snapshot/anomaly-history files). The store
+// is the single JSON array of cards across their whole lifecycle (open → applied
+// → validated/… ); config never travels here (it rides the team-agent bundle).
+function hillClimbCardsPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "cards.json");
+}
+function readHillClimbCards(teamId) {
+  const p = hillClimbCardsPath(teamId);
+  if (!p) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    return Array.isArray(raw) ? raw : (Array.isArray(raw.cards) ? raw.cards : []);
+  } catch { return []; }
+}
+function writeHillClimbCards(teamId, cards) {
+  const p = hillClimbCardsPath(teamId);
+  if (!p) return null;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(Array.isArray(cards) ? cards : [], null, 2));
+    return p;
+  } catch { return null; }
+}
+
+// The per-team card budget/window config, read off the team agent's hillClimb
+// blob (round-tripped like stages/labels). autonomy 0 = collector only (no cards).
+function hillClimbCardConfig(teamId) {
+  const cfg = loadAgentConfig(teamId) || {};
+  const hc = cfg.hillClimb && typeof cfg.hillClimb === "object" ? cfg.hillClimb : {};
+  const autonomy = [0, 1, 2, 3].includes(hc.autonomy) ? hc.autonomy : 2;
+  const maxCardsPerPass = Number.isFinite(hc.maxCardsPerPass) && hc.maxCardsPerPass >= 0
+    ? hc.maxCardsPerPass : hillClimbCards.DEFAULT_MAX_CARDS_PER_PASS;
+  const windowDays = Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7;
+  return { autonomy, maxCardsPerPass, windowDays };
+}
+
+// Fold this pass's incoming cards (heuristic and/or analyst) into the persisted
+// store under the budget/dedup/cooldown rules, re-validating every incoming card
+// through the schema (invalid ones are dropped — the store is the authority even
+// for analyst output). Persists and returns the merge summary. Never throws.
+function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic" } = {}) {
+  const { maxCardsPerPass, windowDays } = hillClimbCardConfig(teamId);
+  const existing = readHillClimbCards(teamId);
+  const passId = `pass-${new Date(now).toISOString()}`;
+  const valid = [];
+  let rejected = 0;
+  for (const raw of Array.isArray(incoming) ? incoming : []) {
+    // Heuristic cards arrive already-normalized; analyst cards are raw JSON.
+    const card = raw && raw.status && raw.id
+      ? raw
+      : (() => { const n = hillClimbCards.normalizeCard(raw, { teamId, now, source, passId }); return n.ok ? n.card : null; })();
+    if (!card) { rejected += 1; continue; }
+    if (!hillClimbCards.validateCard(card).ok) { rejected += 1; continue; }
+    valid.push(card);
+  }
+  const merged = hillClimbCards.mergeCards(existing, valid, { maxCardsPerPass, windowDays, now, passId });
+  const savedPath = writeHillClimbCards(teamId, merged.cards);
+  return { ...merged, rejected, path: savedPath, cards: merged.cards };
+}
+
+// Dismiss a card (human action): flip its status to 'dismissed' so it is not
+// re-raised. Returns the updated card or null when unknown. Proposals-only —
+// dismiss changes card state, never any agent config.
+function dismissHillClimbCard(teamId, cardId, { now = Date.now() } = {}) {
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return null;
+  card.status = "dismissed";
+  card.updatedAt = new Date(now).toISOString();
+  writeHillClimbCards(teamId, cards);
+  return card;
+}
+
 // Run one hill-climb pass for a team behind the per-team single-flight lock —
 // the SAME code path for the scheduled timer and the manual POST endpoint (AC:
 // manual and scheduled passes produce identical snapshots for identical inputs).
 // A manual run started while a pass is already in flight is refused so the
-// endpoint can answer 409 pass-running. Returns { ok:true, snapshot, path } or
-// { ok:false, reason:'pass-running' }.
+// endpoint can answer 409 pass-running. Also folds the deterministic heuristic
+// findings into the card store (concept §3.2 honest fallback — cards ship on
+// every pass, provider or not) and returns the secret-free analyst digest so the
+// console can run the LLM analyst step over it (#1224). Cards are proposals only.
+// Returns { ok:true, snapshot, path, cards, digest, merge } or { ok:false, reason }.
 async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
   if (_hillClimbInFlight.has(teamId)) return { ok: false, reason: "pass-running" };
   _hillClimbInFlight.add(teamId);
   try {
     const snapshot = await computeTeamHillClimbMetrics(teamId, { now });
     const savedPath = persistHillClimbSnapshot(teamId, snapshot, now);
-    return { ok: true, snapshot, path: savedPath };
+    const { autonomy } = hillClimbCardConfig(teamId);
+    let merge = null;
+    let digest = null;
+    if (autonomy >= 1) {
+      // Deterministic findings → cards (the honest fallback shipped every pass).
+      const anomalyHistory = _readTeamAnomalyHistory(teamId);
+      const findings = hillClimbCards.heuristicFindings(snapshot, { now, anomalyHistory });
+      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic" });
+      // Secret-free digest for the console's server-side analyst (concept §3.2).
+      digest = hillClimbCards.buildAnalystDigest(snapshot, { findings });
+    }
+    return {
+      ok: true,
+      snapshot,
+      path: savedPath,
+      cards: merge ? merge.cards : [],
+      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected } : null,
+      digest,
+      autonomy,
+    };
   } finally {
     _hillClimbInFlight.delete(teamId);
   }
+}
+
+// Read the team's raw #1221 anomaly-history rows (for object-keyed recurrence
+// cards). Best-effort; [] when absent. Traversal-guarded like the metrics files.
+function _readTeamAnomalyHistory(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return [];
+  return _readJsonlRows(path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "anomaly-history.jsonl"));
 }
 
 // Enrich a token-usage record (#654) with the authoritative control-plane
@@ -12005,13 +12115,89 @@ async function main() {
           if (!out.ok) {
             return sendJson(res, 409, { error: out.reason });
           }
-          return sendJson(res, 200, { teamId, maintenance: false, snapshot: out.snapshot });
+          // The run also folded the deterministic heuristic cards into the store
+          // (#1224) and returns the secret-free analyst `digest`; the console
+          // runs the LLM analyst over it and POSTs any cards back to
+          // .../hill-climb/cards/merge. Cards are proposals only.
+          return sendJson(res, 200, {
+            teamId, maintenance: false, snapshot: out.snapshot,
+            cards: out.cards, merge: out.merge, digest: out.digest, autonomy: out.autonomy,
+          });
         } catch (err) {
           console.error(`[Orchestrator] hill-climb run error for ${teamId}: ${err.message}`);
           return sendJson(res, 500, { error: err.message });
         }
       })();
       return;
+    }
+
+    // GET /internal/teams/:teamId/hill-climb/cards — the persisted improvement
+    // cards (#1224). Read-only; returns the full card list across their whole
+    // lifecycle so the Improvements panel can render open cards + the closed
+    // ledger. Never re-computes.
+    const hillClimbCardsMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards(?:\?.*)?$/);
+    if (hillClimbCardsMatch) {
+      const teamId = decodeURIComponent(hillClimbCardsMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+        return sendJson(res, 200, { teamId, cards: readHillClimbCards(teamId) });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb cards error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/merge — hand-back path for
+    // the console's server-side analyst (#1224). Body: { cards: [...] } (raw
+    // analyst JSON). Every card is re-validated through the schema here (the
+    // store is the authority — the analyst is untrusted) and merged under the
+    // budget/dedup/cooldown rules. Proposals only; nothing mutates agent config.
+    const hillClimbMergeMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/merge$/);
+    if (hillClimbMergeMatch) {
+      const teamId = decodeURIComponent(hillClimbMergeMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const { autonomy } = hillClimbCardConfig(teamId);
+          if (autonomy < 1) return sendJson(res, 200, { teamId, autonomy, merge: null, cards: readHillClimbCards(teamId) });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const incoming = Array.isArray(body.cards) ? body.cards : [];
+          const merge = mergeAndPersistHillClimbCards(teamId, incoming, { source: 'analyst' });
+          return sendJson(res, 200, {
+            teamId,
+            merge: { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected },
+            cards: merge.cards,
+          });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb cards merge error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/dismiss — flip a card
+    // to 'dismissed' so it is not re-raised (#1224). Human action; card-state
+    // only, never touches agent config.
+    const hillClimbDismissMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/dismiss$/);
+    if (hillClimbDismissMatch) {
+      const teamId = decodeURIComponent(hillClimbDismissMatch[1]);
+      const cardId = decodeURIComponent(hillClimbDismissMatch[2]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+        const card = dismissHillClimbCard(teamId, cardId);
+        if (!card) return sendJson(res, 404, { error: 'card not found' });
+        return sendJson(res, 200, { teamId, card });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb card dismiss error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned

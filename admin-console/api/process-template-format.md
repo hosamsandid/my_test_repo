@@ -89,10 +89,12 @@ role's `{{vars}}` and the target repo are applied per member.
       ]
     }
   ],
-  "hillClimb": {                          // OPTIONAL — hill-climb metrics collector config (#1222)
+  "hillClimb": {                          // OPTIONAL — hill-climb metrics collector + card config (#1222/#1224)
+    "autonomy": 2,                        // 0–3, default 2; 0 = collector-only (no improvement cards) (#1224)
     "cron": "0 2 * * *",                  // override daily sweep schedule (default: daily)
     "windowDays": 7,                      // rolling window for ratio metrics (default 7)
     "minRunsPerWindow": 20,               // below this, snapshot is flagged `insufficientData` (default 20)
+    "maxCardsPerPass": 5,                 // max improvement cards raised per pass (default 5) (#1224)
     "excludeAgents": ["agentId"]          // agent ids excluded from the metrics pass
   }
 }

@@ -815,6 +815,26 @@ test('validateProcessTemplate accepts a well-formed hillClimb, rejects bad shape
   assert.equal(validateProcessTemplate({ ...base, hillClimb: { excludeAgents: [1] } }, { allowEmptyRoles: true }).ok, false);
 });
 
+// ─── hillClimb autonomy + maxCardsPerPass (#1224) ────────────────────────────
+
+test('normalizeHillClimb carries the #1224 autonomy + maxCardsPerPass keys', () => {
+  assert.deepEqual(
+    normalizeHillClimb({ autonomy: 1, maxCardsPerPass: 3, windowDays: 7 }),
+    { autonomy: 1, maxCardsPerPass: 3, windowDays: 7 },
+  );
+  assert.deepEqual(normalizeHillClimb({ autonomy: 0 }), { autonomy: 0 }); // 0 is meaningful (collector-only)
+  // Out-of-range / non-numeric values are dropped, not clamped.
+  assert.equal(normalizeHillClimb({ autonomy: 5 }), null);
+  assert.equal(normalizeHillClimb({ maxCardsPerPass: -1 }), null);
+});
+
+test('validateProcessTemplate accepts autonomy/maxCardsPerPass and rejects bad values', () => {
+  const base = { processTemplateVersion: 1, roles: [], gates: [], labels: [] };
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { autonomy: 2, maxCardsPerPass: 5 } }, { allowEmptyRoles: true }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { autonomy: 4 } }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { maxCardsPerPass: -2 } }, { allowEmptyRoles: true }).ok, false);
+});
+
 // #522: the default (unnamed) draft is labelled with the standardised "Flow"
 // terminology, not the legacy "Process" wording.
 test('emptyDraftBundle defaults an unnamed draft to "Untitled flow"', () => {

@@ -41,6 +41,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const { runCopilot, sanitizeCopilotHistory } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
+const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
@@ -6033,9 +6034,19 @@ app.get('/api/teams/:teamId/hill-climb/metrics', apiLimiter, async (req, res) =>
   }
 });
 
-// POST /api/teams/:teamId/hill-climb/run — manual metrics pass (#1222). Same
-// code path as the daily scheduled pass; a run while one is already in flight
-// returns 409 pass-running. Team-scoped + audited (mutating write).
+// POST /api/teams/:teamId/hill-climb/run — manual pass (#1222 metrics + #1224
+// analyst). Same code path as the daily scheduled pass; a run while one is
+// already in flight returns 409 pass-running. Team-scoped + audited.
+//
+// The orchestrator pass computes the metrics snapshot AND folds the deterministic
+// heuristic improvement cards into the store (the honest fallback), returning a
+// secret-free `digest`. When the team's autonomy dial is ≥ 1 and a Model Provider
+// resolves for this caller, we then run the server-side one-shot analyst
+// (`resolveAssistTarget` — skips oauth-token providers, same discipline as
+// port-suggestion) over that digest and hand any validated cards back to the
+// orchestrator's merge endpoint, which re-validates + merges them under the
+// budget rules. If no provider resolves or the LLM fails, the heuristic cards
+// still stand — the pass is never blocked on the analyst. Cards are proposals only.
 app.post('/api/teams/:teamId/hill-climb/run', apiLimiter, async (req, res) => {
   const teamId = req.params.teamId;
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
@@ -6043,6 +6054,75 @@ app.post('/api/teams/:teamId/hill-climb/run', apiLimiter, async (req, res) => {
   if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
   try {
     const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/run`, {
+      method: 'POST',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200 || data.maintenance || !data.digest || (data.autonomy != null && data.autonomy < 1)) {
+      return res.status(resp.status).json(data);
+    }
+    // Server-side analyst step (#1224). A selection error (403/400) surfaces so
+    // the picker can nudge; a soft/misconfigured target quietly keeps heuristics.
+    const target = resolveAssistTarget(req);
+    if (target.selectionError) return res.status(resp.status).json({ ...data, analyst: 'skipped' });
+    if (target.error) return res.status(resp.status).json({ ...data, analyst: 'no-provider' });
+    let analyst = 'no-cards';
+    try {
+      const url = buildMessagesUrl(target.baseUrl);
+      const headers = {
+        'anthropic-version': '2023-06-01',
+        ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+      };
+      const payload = { model: target.model, ...buildHillClimbAnalystRequest(data.digest) };
+      const result = await httpPostJson(url, headers, payload);
+      if (!result.error && result.status >= 200 && result.status < 300) {
+        const cards = parseHillClimbCards(extractMessageText(result.body));
+        if (cards.length) {
+          const mergeResp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/merge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cards }),
+          });
+          const merged = await mergeResp.json().catch(() => ({}));
+          if (mergeResp.status === 200) {
+            return res.status(200).json({ ...data, cards: merged.cards, analystMerge: merged.merge, analyst: 'llm', meta: assistMeta(target) });
+          }
+        }
+      }
+    } catch { /* analyst failure → heuristic cards already stand */ }
+    return res.status(resp.status).json({ ...data, analyst });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/hill-climb/cards — the persisted improvement cards
+// (#1224). Team-scoped read-only proxy; the Improvements panel (#1223) renders
+// the open cards + closed ledger from this.
+app.get('/api/teams/:teamId/hill-climb/cards', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/dismiss — dismiss a card
+// (#1224) so it is not re-raised. Team-scoped + audited. Card-state only — no
+// apply path runs in this ticket.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/dismiss', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/dismiss`, {
       method: 'POST',
     });
     const data = await resp.json().catch(() => ({}));

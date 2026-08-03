@@ -1853,10 +1853,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         // structured outcome. Title the edge with the outcome, colour it like the
         // switch badge, and tag the hit payload so a click focuses the Routing tab.
         const isOutcome = e.on === 'label' && !!e.outcome;
-        // Internal-channel delivery (#1174): same hue as its label/outcome edge
-        // family, but dotted — the wake bypasses GitHub (orchestrator queue),
-        // and the dot pattern is distinct from the 6-4 dash of actor edges.
-        const isInternal = e.on === 'label' && e.transport === 'internal';
+        // Internal-channel delivery (#1174, extended to labelled PR/issue channels
+        // in #1194): same hue as its label/outcome/github edge family, but dotted —
+        // the wake bypasses the GitHub poller (orchestrator queue), and the dot
+        // pattern is distinct from the 6-4 dash of actor edges.
+        const isInternal = (e.on === 'label' || e.on === 'github') && e.transport === 'internal';
         list.push({
           from: e.from, to: e.to,
           color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),

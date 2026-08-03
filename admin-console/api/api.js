@@ -1888,6 +1888,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
         ...(c.autoClaim === false ? { autoClaim: false } : {}),
+        // Internal-channel transport (#1194) — must survive the live port write so
+        // reconcileTeamGithubChannels re-derives an internal (poller-excluded)
+        // listener. Only meaningful on a labelled, non-human channel; anything else
+        // stays poller-delivered, so a stray `transport` on those is dropped here.
+        ...(c.transport === 'internal' && typeof c.label === 'string' && c.label.trim() && c.gate !== 'human'
+          ? { transport: 'internal' } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;

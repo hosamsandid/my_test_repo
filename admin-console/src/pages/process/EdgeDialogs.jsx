@@ -1042,9 +1042,18 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
   // Optional authored wake-prompt override (#868): empty = keep the generated
   // "a PR/issue arrived" prompt; any text overrides it on the derived listener.
   const [wakePrompt, setWakePrompt] = useState(edge.wakePrompt || '');
+  // Delivery transport (#1194): only a labelled, non-human channel may go internal
+  // (poller-excluded, woken by aee-emit). Re-labelling that already-open PR/issue
+  // is a pure label-setting act — the same shape internal transport handles for
+  // label hand-offs.
+  const [transport, setTransport] = useState(edge.transport === 'internal' ? 'internal' : 'github');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const noun = artifact === 'pr' ? 'pull request' : 'issue';
+  // Internal delivery is meaningful only when a person is NOT the one applying the
+  // label (poller-only) and there is a label to filter on (an artifact-open channel
+  // is artifact creation, which stays on GitHub by design — concept §7).
+  const canGoInternal = !human && !!label.trim();
 
   async function save() {
     if (human && !label.trim()) { setError('A human-approval gate needs the label a human applies.'); return; }
@@ -1055,6 +1064,7 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
         ...(label.trim() ? { label: label.trim() } : {}),
         ...(human ? { gate: 'human' } : {}),
         ...(wakePrompt.trim() ? { wakePrompt: wakePrompt.trim() } : {}),
+        ...(transport === 'internal' && canGoInternal ? { transport: 'internal' } : {}),
       } });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -1085,6 +1095,23 @@ function EditChannelDialog({ edge, fromName, toName, ops = liveOps, onClose, onD
           <input type="checkbox" checked={human} onChange={e => setHuman(e.target.checked)} />
           Human approval gate — a person applies the label
         </label>
+        {/* Delivery transport (#1194) — only for a labelled, agent-set channel:
+            re-labelling an already-open PR/issue is a pure label hand-off, so it
+            can ride the internal channel. Hidden for human gates (a person sets
+            the label on GitHub) and unlabelled channels (artifact creation). */}
+        {canGoInternal && (
+          <Field label="Delivery">
+            <select value={transport} onChange={e => setTransport(e.target.value)} style={input}>
+              <option value="github">Via GitHub events — the poller delivers the wake</option>
+              <option value="internal">Direct (internal) — label mirrored to GitHub</option>
+            </select>
+            <span style={hint}>
+              {transport === 'internal'
+                ? <>Delivered by the orchestrator queue; <strong>{fromName || from}</strong> announces the label with <code>aee-emit</code>, and it is still stamped on the {noun} as visible status.</>
+                : <>Delivered by the GitHub poller (~30s cadence, Events-API window).</>}
+            </span>
+          </Field>
+        )}
         <Field label="Wake instruction — what the consumer is told (optional)">
           <textarea value={wakePrompt} onChange={e => setWakePrompt(e.target.value)}
             placeholder="Leave empty to use the generated wake instruction for this input."

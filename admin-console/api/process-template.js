@@ -204,6 +204,18 @@ function channelAutoClaim(ch) {
   return !(ch && ch.autoClaim === false);
 }
 
+// A channel opts its derived listener into internal delivery (#1194) only when it
+// is a **labelled, non-human** channel. `transport: 'internal'` on an unlabelled
+// channel (artifact-open — that is artifact creation, a real GitHub write) or a
+// `gate: 'human'` channel (a person applies the label in the GitHub UI, only the
+// poller can see it) is meaningless, so it is treated as absent everywhere. Same
+// shape as `channelAutoClaim`: the port carries the intent, the expander decides.
+function channelIsInternal(ch) {
+  return !!(ch && ch.transport === 'internal'
+    && typeof ch.label === 'string' && ch.label.trim()
+    && ch.gate !== 'human');
+}
+
 // Remap a channel's `from` role reference through roleKeyOf so an exported team's
 // GitHub-channel wiring uses portable role keys (#380).
 function remapChannel(ch, teamId) {
@@ -219,6 +231,13 @@ function remapChannel(ch, teamId) {
     // Claim opt-out (#958) — only the non-default is carried, so a bundle stays
     // free of `autoClaim: true` noise on every channel.
     ...(channelAutoClaim(ch) ? {} : { autoClaim: false }),
+    // Internal-channel transport (#1194) — a labelled channel may opt its derived
+    // listener into internal delivery (poller-excluded, woken by `aee-emit`). Only
+    // the non-default is carried, and only where it is meaningful: a labelled,
+    // non-human channel. Dropping it would silently turn the listener back into a
+    // poller-delivered one on re-materialise (same reason as the trigger-level
+    // carry in bundleTrigger).
+    ...(channelIsInternal(ch) ? { transport: 'internal' } : {}),
   };
 }
 
@@ -378,6 +397,19 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
         if (typeof c.from !== 'string' || !c.from) return { ok: false, error: `role ${r.id}: each channel needs a string 'from'` };
         if (c.wakePrompt !== undefined && typeof c.wakePrompt !== 'string') {
           return { ok: false, error: `role ${r.id}: channel wakePrompt must be a string` };
+        }
+        // Internal-channel transport (#1194): a mistyped value would silently fall
+        // back to poller delivery, so the shape is checked, not tolerated — and
+        // `internal` is only meaningful on a labelled, non-human channel (an
+        // unlabelled/human-gated channel stays poller-delivered by design).
+        if (c.transport !== undefined && c.transport !== 'internal' && c.transport !== 'github') {
+          return { ok: false, error: `role ${r.id}: channel transport must be 'internal' or 'github'` };
+        }
+        if (c.transport === 'internal' && !(typeof c.label === 'string' && c.label.trim())) {
+          return { ok: false, error: `role ${r.id}: channel transport 'internal' requires a label (an unlabelled channel stays poller-delivered)` };
+        }
+        if (c.transport === 'internal' && c.gate === 'human') {
+          return { ok: false, error: `role ${r.id}: channel transport 'internal' is not allowed on a human-approval gate (a person applies the label on GitHub)` };
         }
       }
     }
@@ -984,7 +1016,7 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, internal: true, sources: [] }; groups.set(key, g); }
       // Claim opt-out (#958): several channels consolidate into ONE derived
       // listener, and the claim is a property of that single listener — so an
       // explicit opt-out on any contributing channel wins, mirroring the
@@ -995,6 +1027,15 @@ function expandGithubChannels(bundle, _opts = {}) {
       // the same label is degenerate — treat as gated, matching the old behaviour
       // where the labelled trigger already reacted to the label change).
       g.human = g.human || human;
+      // Internal delivery (#1194): several channels consolidate into ONE derived
+      // listener, and a listener is either poller-excluded or not — so it may go
+      // internal only when EVERY contributing channel opted in. A lone
+      // poller-delivered producer in the group would otherwise be dropped by the
+      // poller exclusion (its plain `gh` label never reaches an internal-only
+      // listener); the safe fallback is poller delivery, where the internal
+      // producer's `aee-emit` still mirrors the label onto GitHub and the poller
+      // picks it up. Mirrors the anomaly detector's all-or-nothing edge rule.
+      g.internal = g.internal && channelIsInternal(ch);
       // Optional authored wake-prompt override (#868): several channels can
       // consolidate into one derived listener, so the first non-empty override in
       // insertion order wins the slot (deterministic; the graph shows one edge).
@@ -1009,11 +1050,18 @@ function expandGithubChannels(bundle, _opts = {}) {
       const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
       const producerLabel = producerNames.join(', ') || 'an upstream';
       const claim = g.autoClaim ? deriveClaim(g.label) : null;
+      // Internal-channel transport (#1194): only a labelled, non-human,
+      // all-opted-in group delivers internally (deriveClaim/channelIsInternal
+      // guarantee a label is present). The poller then excludes this listener and
+      // `/internal/flow-emit` wakes it — the runtime, anomaly detector and
+      // producer-instruction plumbing all key off this one field, unchanged.
+      const internal = !!g.label && !g.human && g.internal;
       b.triggers.push({
         id,
         type: 'github-event',
         events,
         ...(g.label ? { labelFilter: g.label } : {}),
+        ...(internal ? { transport: 'internal' } : {}),
         // Derived claim (#958, concept §3.4) — zero authoring cost: every derived
         // LABEL listener takes over its wake label as `<wake>:wip` when it fires.
         // An unlabelled channel listener (PR/issue opened) has no wake label to

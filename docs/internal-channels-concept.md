@@ -144,8 +144,19 @@ listener is internal-transport" as delivered-and-claimed, not anomalous.
 
 - `CreateEdgeDialog` / `ConnectionsSection`: a delivery toggle on label edges
   between two agents — **"Direct (internal) — label mirrored to GitHub"** vs
-  **"Via GitHub events"**. Hidden for human nodes and PR/issue-artifact
-  channels (always GitHub).
+  **"Via GitHub events"**. Hidden for human nodes.
+- **Labelled PR/issue channels (#1194):** the same Delivery toggle appears on
+  the channel edit dialog (`EditChannelDialog`) and the Routing → Inputs channel
+  row. Applying a routing label to an **already-open** PR/issue is itself a
+  label-setting act on an existing object — the exact shape internal transport
+  handles for label hand-offs — so a labelled channel's derived `<artifact>.labeled`
+  listener may carry `transport: 'internal'`. The toggle is gated to labelled
+  channels and hidden for `gate: 'human'` ones (a person sets the label on
+  GitHub, poller-only). Because several channels over one `(artifact, label)`
+  consolidate into ONE listener, the listener goes internal only when **every**
+  contributing channel opted in (a lone poller producer would be dropped by the
+  plan exclusion). The **unlabelled** channel case (react to `*.opened`) stays
+  GitHub-delivered — that is artifact creation, not a label signal (§7).
 - Canvas: internal edges get a distinct stroke (e.g. solid vs the current
   style) + a badge in the edge dialog.
 - Template round-trip: `transport` is part of the `processTemplateVersion: 1`

@@ -1213,7 +1213,17 @@ function EditLabelHandoff({ edge, fromName, toName, ops = liveOps, onClose, onDo
       <p style={hint}>
         <strong>{fromName || from}</strong> → <code>{label}</code> → <strong>{toName || to}</strong>
       </p>
-      <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
+        <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={to} section="inputs" />
+        {/* Outcome jump (#1192): this label is set by an authored outcome on the
+            producer. Editing its `when`/multiple actions lives there — one click
+            away, so routing the click here (for the Delivery/label/prompt edit)
+            never hides the richer outcome editing. */}
+        {edge.outcome && !humanSource && (
+          <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={from} section="routing"
+            outcome={edge.outcome} label={`Edit the “${edge.outcome}” outcome`} />
+        )}
+      </div>
       {loading ? (
         <Center><Loader2 size={14} style={spin} /> Loading…</Center>
       ) : (
@@ -1886,12 +1896,12 @@ function Field({ label, children }) {
 // setRoutingFocus pattern the canvas uses for outcome edges. `section` of
 // 'structure' targets the Details tab (Parent lives there now); everything else
 // targets a Routing section (inputs / artifacts / legacy).
-function OpenRoutingLink({ onOpenRouting, nodeId, section }) {
+function OpenRoutingLink({ onOpenRouting, nodeId, section, outcome, label }) {
   if (typeof onOpenRouting !== 'function' || !nodeId) return null;
   const where = section === 'structure' ? 'Details' : 'Routing';
   return (
-    <button type="button" onClick={() => onOpenRouting(nodeId, section)} style={jumpLink}>
-      <ArrowUpRight size={12} /> Open in {where}
+    <button type="button" onClick={() => onOpenRouting(nodeId, section, outcome)} style={jumpLink}>
+      <ArrowUpRight size={12} /> {label || `Open in ${where}`}
     </button>
   );
 }

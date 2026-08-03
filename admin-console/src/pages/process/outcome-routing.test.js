@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   rowLabels, rowArtifact, consumerCandidates, wireConsumerSpec, unwireConsumerSpec, currentConsumers,
-  outcomeDropDialog, openEndMarker,
+  outcomeDropDialog, openEndMarker, edgeOpensProducerOutcome,
 } from './outcome-routing.js';
 
 // #1003 — pure specs for the per-row consumer picker (concept §4.2).
@@ -124,4 +124,25 @@ test('openEndMarker: a non-true terminal or non-object external is ignored', () 
   assert.deepEqual(openEndMarker({ external: null }), {});
   assert.deepEqual(openEndMarker({ external: 'nope' }), {});
   assert.deepEqual(openEndMarker({ external: ['a'] }), {});
+});
+
+// #1192 — edge-click routing: a label hand-off edge opens its edit dialog even
+// when outcome-keyed (symmetric with create); other outcome edges focus Outcomes.
+
+test('edgeOpensProducerOutcome: a label hand-off edge is NOT short-circuited, even when outcome-keyed', () => {
+  // outcome-keyed label edge → false → opens EditLabelHandoff (has Delivery).
+  assert.equal(edgeOpensProducerOutcome({ on: 'label', from: 'a', to: 'b', outcome: 'o1' }), false);
+  // plain (non-outcome) label edge → false → same edit dialog as before.
+  assert.equal(edgeOpensProducerOutcome({ on: 'label', from: 'a', to: 'b' }), false);
+});
+
+test('edgeOpensProducerOutcome: a non-label outcome edge still focuses the producer Outcomes', () => {
+  assert.equal(edgeOpensProducerOutcome({ on: 'github', from: 'a', to: 'b', outcome: 'opens-pr' }), true);
+});
+
+test('edgeOpensProducerOutcome: guards missing outcome / from', () => {
+  assert.equal(edgeOpensProducerOutcome({ on: 'github', from: 'a' }), false);         // no outcome
+  assert.equal(edgeOpensProducerOutcome({ on: 'github', outcome: 'o' }), false);       // no from (actor-sourced)
+  assert.equal(edgeOpensProducerOutcome(null), false);
+  assert.equal(edgeOpensProducerOutcome(undefined), false);
 });

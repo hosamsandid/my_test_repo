@@ -119,3 +119,14 @@ export function currentConsumers(option, node, peers) {
   }
   return out;
 }
+
+// #1192: which target a canvas edge click opens. An outcome-keyed edge focuses
+// the producer's Outcomes panel (#828) — EXCEPT a label hand-off edge, which
+// opens the hand-off edit dialog (Delivery, label, wake prompt, delete) so
+// editing an edge is symmetric with creating it (drag → CreateHandoffDialog
+// already exposes Delivery). That dialog links back to the producing outcome
+// for the richer when/action editing. Non-label outcome edges (opens-PR/issue)
+// keep focusing the Outcomes directly. Pure so the routing rule is unit-tested.
+export function edgeOpensProducerOutcome(edge) {
+  return !!(edge && edge.outcome && edge.from && edge.on !== 'label');
+}

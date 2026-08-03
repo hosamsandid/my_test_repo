@@ -13,7 +13,7 @@ import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { lintView } from './process/lint-view';
 import HumanNodeInspector from './process/HumanNodeInspector';
 import { EditHandoffDialog, CreateEdgeDialog, CreateHandoffDialog, CreateChannelDialog, AgentToPersonDialog } from './process/EdgeDialogs';
-import { outcomeDropDialog } from './process/outcome-routing';
+import { outcomeDropDialog, edgeOpensProducerOutcome } from './process/outcome-routing';
 import MaterializeDialog from './process/MaterializeDialog';
 import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
@@ -291,10 +291,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       // via its outcome).
       onConnectOutcome: (from, to, outcome) => { if (editableRef.current) setOutcomeConnect({ from, to, outcome }); },
       // Clicking an outcome-keyed edge focuses the Routing tab on that outcome
-      // (#828); every other edge keeps its own edit dialog.
+      // (#828) — but NOT a label hand-off edge (#1192): that opens the hand-off
+      // edit dialog (Delivery, label, wake prompt, delete), so editing an edge
+      // is symmetric with creating it; the dialog links back to the outcome.
+      // Every other edge keeps its own edit dialog.
       onSelectEdge: (edge) => {
         if (!editableRef.current) return;
-        if (edge && edge.outcome && edge.from) {
+        if (edgeOpensProducerOutcome(edge)) {
           setSelectedId(edge.from);
           graphRef.current?.setSelected(edge.from);
           setRoutingFocus({ tab: 'routing', outcome: edge.outcome });
@@ -436,12 +439,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // owning node's inspector, focused on the row/section that carries the edge —
   // the same setRoutingFocus mechanism the canvas uses for outcome-edge clicks.
   // A 'structure' section targets the Details tab (Parent lives there now).
-  function openRouting(nodeId, section) {
+  function openRouting(nodeId, section, outcome) {
     if (!nodeId) return;
     setSelectedEdge(null);
     setSelectedId(nodeId);
     graphRef.current?.setSelected(nodeId);
-    setRoutingFocus({ tab: section === 'structure' ? 'details' : 'routing', section });
+    // An outcome jump (#1192) focuses the producer's Outcomes on that option —
+    // the same shape the canvas uses for a direct outcome-edge click; otherwise
+    // focus a section ('structure' → the Details tab).
+    setRoutingFocus(outcome
+      ? { tab: 'routing', outcome }
+      : { tab: section === 'structure' ? 'details' : 'routing', section });
   }
 
   // Round-trip (#348): open a live team as an editable draft copy. The Copilot

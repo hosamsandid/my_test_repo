@@ -511,23 +511,42 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
 
         {/* Knowledge learning configuration (#567) — same sections/copy/controls
             as the Knowledge page panel (#566), pre-filled with today's defaults. */}
-        <div>
-          <div style={labelStyle}>How this team learns and shares knowledge</div>
-          <div style={{ ...hintStyle, marginTop: 0 }}>
-            These are the defaults every new team starts on. Adjust them here if you like — the result is the
-            same as configuring them on the Knowledge page right after the team is created. You can change all
-            of them later. <strong style={{ color: 'var(--eb-text-primary)' }}>Optional</strong> — leave them as-is to keep the defaults.
+        {/* Knowledge learning configuration (#567). Collapsed by default (#1131):
+            autonomy levels + promotion gates are advanced concepts that overwhelm
+            a first-time team creator, and the step is optional with sensible
+            defaults — so hide them behind a closed disclosure with a one-line
+            summary, keeping the skill picker above always visible. */}
+        <details
+          style={{
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            background: 'var(--eb-bg-surface)',
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+          }}
+        >
+          <summary style={{ cursor: 'pointer' }}>
+            <span style={{ ...labelStyle, display: 'inline', marginBottom: 0 }}>Advanced: knowledge learning</span>
+            <span style={{ ...hintStyle, marginTop: 'var(--eb-space-1)', display: 'block' }}>
+              Controls how much the team auto-learns from its work — defaults are fine to start.
+            </span>
+          </summary>
+          <div style={{ marginTop: 'var(--eb-space-3)' }}>
+            <div style={{ ...hintStyle, marginTop: 0 }}>
+              These are the defaults every new team starts on. Adjust them here if you like — the result is the
+              same as configuring them on the Knowledge page right after the team is created. You can change all
+              of them later. <strong style={{ color: 'var(--eb-text-primary)' }}>Optional</strong> — leave them as-is to keep the defaults.
+            </div>
+            <KnowledgeLearningSections
+              showDefaults
+              autonomy={form.knowledgeConfig.autonomy}
+              review={form.knowledgeConfig.review}
+              gates={form.knowledgeConfig.gates}
+              onAutonomy={(level) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, autonomy: level } }))}
+              onReview={(enabled) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, review: enabled } }))}
+              onGate={(transition, mode) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, gates: { ...f.knowledgeConfig.gates, [transition]: mode } } }))}
+            />
           </div>
-          <KnowledgeLearningSections
-            showDefaults
-            autonomy={form.knowledgeConfig.autonomy}
-            review={form.knowledgeConfig.review}
-            gates={form.knowledgeConfig.gates}
-            onAutonomy={(level) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, autonomy: level } }))}
-            onReview={(enabled) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, review: enabled } }))}
-            onGate={(transition, mode) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, gates: { ...f.knowledgeConfig.gates, [transition]: mode } } }))}
-          />
-        </div>
+        </details>
 
         <ErrorBox message={error} />
       </div>

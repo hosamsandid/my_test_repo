@@ -17,7 +17,7 @@ import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK 
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
 
-// Default prompt sent when the user clicks "Full Learn". The agent
+// Default prompt sent when the user clicks "Save & Learn". The agent
 // continues in its current Claude session (so it has full conversational
 // context), is asked to consolidate that context into the memory files
 // AND to share durable, team-useful lessons via the knowledge CLI, then
@@ -170,7 +170,7 @@ export default function ChatPanel({
     if (!contextFill || contextWindowTokens == null) return null;
     return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
   }, [contextFill, contextWindowTokens]);
-  // Wall-clock at the moment the user clicked "Full Learn". The
+  // Wall-clock at the moment the user clicked "Save & Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
   // whose timestamp is at or after this value.
@@ -998,13 +998,13 @@ export default function ChatPanel({
           type="button"
           onClick={handleFullLearn}
           disabled={!sessionId || learnPending || disabled || maintenance.active}
-          title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
+          title="Save & Learn: the agent summarizes this conversation, persists session state to its memory files and pushes durable lessons to the team knowledge base — a deliberate, consequential action. The session stays open afterwards."
           style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <GraduationCap size={11} />}
-          Full Learn
+          Save &amp; Learn
         </button>
         <button
           type="button"
@@ -1440,13 +1440,16 @@ function ContextResetSeparator({ ts }) {
 
 function SessionBadge({ active }) {
   return (
-    <span style={{
+    <span
+      title="This room keeps one running Claude session; your next message resumes it. Reset Session starts fresh with no memory of this conversation."
+      style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 'var(--eb-space-1)',
       fontSize: 'var(--eb-text-xs)',
       color: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
       fontWeight: 'var(--eb-font-medium)',
+      cursor: 'help',
     }}>
       <span style={{
         width: 7,

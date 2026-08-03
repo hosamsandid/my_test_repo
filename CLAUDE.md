@@ -227,7 +227,7 @@ claude [--resume <sessionId>] -p <prompt> \
 
 NDJSON stdout is parsed and written with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`) to `/workspace/agents/<agentId>/sessions/<roomId>.jsonl` (schema: `docs/agent-chat-plan.md` §4.1). Every entry carries a `correlationId` (Matrix `event_id`, or `trigger:<id>:<ts>`) tying log rows to chat bubbles.
 
-**Per-room session pinning.** After each successful run the runner writes `session_id` to `<roomId>.current.json`; the next message in that room uses `--resume` (on failure it clears the pointer and retries once). `GET`/`DELETE /api/agents/:agentId/session/:roomId/current` read/drop it; the chat header shows *Reset Session* / *Full Learn*. Snapshots live under `~/.claude/projects/<encoded-cwd>/` (persisted via the `claude-home` volume so `--resume` survives restarts).
+**Per-room session pinning.** After each successful run the runner writes `session_id` to `<roomId>.current.json`; the next message in that room uses `--resume` (on failure it clears the pointer and retries once). `GET`/`DELETE /api/agents/:agentId/session/:roomId/current` read/drop it; the chat header shows *Reset Session* / *Save & Learn*. Snapshots live under `~/.claude/projects/<encoded-cwd>/` (persisted via the `claude-home` volume so `--resume` survives restarts).
 
 **DM heuristic** (`agent-entrypoint.py`): act iff `getJoinedRoomMembers(roomId)` is exactly two (this agent + one other) AND the sender isn't this agent (cached 30s).
 

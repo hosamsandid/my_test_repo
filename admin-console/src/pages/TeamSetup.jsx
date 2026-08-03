@@ -272,7 +272,7 @@ function StepProject({ form, setForm, environments, takenAgentIds, error }) {
             <SuggestSuffixButton onSuggest={suffix => setForm(f => ({ ...f, labelSuffix: suffix }))} />
           </div>
           <div style={hintStyle}>
-            Appended to every label in this team — prevents cross-triggering between parallel stacks materialised from the same template on one repo. Leave blank to use the template&apos;s default label names.
+            <strong>Leave this blank</strong> unless another agent team already uses the <strong>same GitHub repo</strong>. In that case, a short suffix is added to every label this team uses so the two teams&apos; issue/PR labels don&apos;t wake each other&apos;s agents.
           </div>
         </div>
 

@@ -126,7 +126,7 @@ Pick any enabled agent. The status indicator shows current state: **Unread** (ne
 Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar shows whether a Claude session is active and offers:
 
 - **Reset Session** — drop the session pointer so the next message starts fresh
-- **Full Learn** — send a learn prompt then auto-drop the session
+- **Save & Learn** — summarize the conversation to memory and push durable lessons to the team knowledge base; the session stays open
 
 ### Right rail — Three tabs
 

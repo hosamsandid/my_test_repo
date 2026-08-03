@@ -2673,7 +2673,15 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
 app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check: AGENT_ID_RE already excludes traversal segments,
+  // but CodeQL doesn't always recognise the regex as a sanitiser when the
+  // value travels through a destructure first. Re-check with path.relative.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): deleting an agent requires management
   // rights over its owning team.

@@ -178,6 +178,137 @@ function ratioTile({ key, label, help, insufficient, value, sub = null, noneNote
   return { key, label, help, value, sub: sub || null, note: null, state: 'ok' };
 }
 
+// ── improvement cards (#1224 store / #1225 applier / #1226 verdicts) ─────────
+//
+// `GET /api/teams/:id/hill-climb/cards` returns `{ teamId, autonomy, cards }`;
+// each card is a full `hill-climb-cards.js` record across its lifecycle
+// (open → applied → validated/neutral/regressed → rolled-back, or dismissed).
+// These helpers turn that into the panel's two sections: the ACTIONABLE list
+// (open cards awaiting Apply/Dismiss + regressed cards offering a rollback)
+// and the closed-card LEDGER that doubles as the loop's change log.
+
+const CARD_CLASS_LABELS = {
+  'prompt-improvement': 'Prompt improvement',
+  'flow-wiring': 'Flow wiring',
+  'threshold-tuning': 'Threshold tuning',
+  'trigger-hygiene': 'Trigger hygiene',
+  'knowledge-handoff': 'Knowledge hand-off',
+};
+
+// Mirror of the server-side wiring (`hill-climb-apply-guard.js` / the rollback
+// route): only these classes/plan kinds execute in this release. The server is
+// the authority and re-checks every gate — this set only decides whether the
+// button is live or explains why it is not wired yet.
+const EXECUTABLE_CARD_CLASSES = ['trigger-hygiene'];
+const EXECUTABLE_ROLLBACK_KINDS = ['restore-trigger'];
+
+// Card lifecycle → badge label + tone ('ok' | 'info' | 'warn' | 'error' | 'muted').
+const CARD_STATUS_BADGES = {
+  open: { label: 'Open', tone: 'info' },
+  applied: { label: 'Applied — measuring', tone: 'info' },
+  validated: { label: 'Validated', tone: 'ok' },
+  neutral: { label: 'Neutral', tone: 'muted' },
+  regressed: { label: 'Regressed', tone: 'error' },
+  'rolled-back': { label: 'Rolled back', tone: 'warn' },
+  dismissed: { label: 'Dismissed', tone: 'muted' },
+  superseded: { label: 'Superseded', tone: 'muted' },
+};
+
+function cardClassLabel(cardClass) {
+  return CARD_CLASS_LABELS[cardClass] || String(cardClass || 'card');
+}
+
+function cardStatusBadge(status) {
+  return CARD_STATUS_BADGES[status] || { label: String(status || 'unknown'), tone: 'muted' };
+}
+
+// Normalize the cards API envelope. `autonomy` is null when absent so the
+// caller can distinguish "unknown" from a real 0.
+function cardsFromResponse(resp) {
+  return {
+    autonomy: resp && typeof resp.autonomy === 'number' ? resp.autonomy : null,
+    cards: resp && Array.isArray(resp.cards) ? resp.cards : [],
+  };
+}
+
+// Split the store into the actionable list and the ledger. Regressed cards
+// lead (a live regression with a rollback waiting on a human beats a fresh
+// proposal), then open cards in store order (already priority-sorted by the
+// merge). The ledger is everything terminal plus `applied` (still measuring),
+// newest update first.
+function splitCards(cards) {
+  const list = Array.isArray(cards) ? cards.filter((c) => c && c.id) : [];
+  const actionable = [
+    ...list.filter((c) => c.status === 'regressed'),
+    ...list.filter((c) => c.status === 'open'),
+  ];
+  const ledger = list
+    .filter((c) => c.status !== 'open' && c.status !== 'regressed')
+    .sort((a, b) => (Date.parse(b.updatedAt || 0) || 0) - (Date.parse(a.updatedAt || 0) || 0));
+  return { actionable, ledger };
+}
+
+// The one action a card offers right now (Apply for open, Roll back for
+// regressed), with the autonomy/wiring gate pre-resolved so the panel renders
+// a disabled button with an honest hint instead of a doomed request. The
+// server re-enforces every gate — this never grants anything.
+function cardAction(card, autonomy) {
+  if (!card) return { kind: null, enabled: false, hint: null };
+  if (card.status === 'open') {
+    if (!(autonomy >= 2)) {
+      return { kind: 'apply', enabled: false, hint: 'One-click Apply needs autonomy level 2 for this team.' };
+    }
+    if (!EXECUTABLE_CARD_CLASSES.includes(card.class)) {
+      return { kind: 'apply', enabled: false, hint: `Apply for ${cardClassLabel(card.class)} cards is not wired yet — apply it by hand and dismiss the card.` };
+    }
+    return { kind: 'apply', enabled: true, hint: null };
+  }
+  if (card.status === 'regressed') {
+    const planKind = card.rollback && card.rollback.plan ? card.rollback.plan.kind : null;
+    if (!(autonomy >= 2)) {
+      return { kind: 'rollback', enabled: false, hint: 'Rolling back needs autonomy level 2 for this team.' };
+    }
+    if (!EXECUTABLE_ROLLBACK_KINDS.includes(planKind)) {
+      return { kind: 'rollback', enabled: false, hint: `Automated rollback for '${planKind || 'this change'}' is not wired yet — revert it by hand and dismiss the card.` };
+    }
+    return { kind: 'rollback', enabled: true, hint: null };
+  }
+  return { kind: null, enabled: false, hint: null };
+}
+
+// "trigger · reviewer/on-pr-opened" — the object a card is about.
+function cardObjectLabel(card) {
+  const o = card && card.object;
+  if (!o || !o.kind) return null;
+  return `${o.kind} · ${o.id}`;
+}
+
+// Compact metric value for verdict lines: numbers trimmed to ≤3 decimals,
+// everything else stringified.
+function formatMetricValue(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3)));
+  }
+  return v == null ? '—' : String(v);
+}
+
+// One-line before/after summary of a card's recorded verdict (#1226), e.g.
+// "waste.wasteRuns 6 → 9". Null when the card has no decided measurement.
+function verdictLine(card) {
+  const v = card && card.verdict;
+  if (!v || !v.targetMetric) return null;
+  if (v.before == null && v.after == null) return null;
+  return `${v.targetMetric} ${formatMetricValue(v.before)} → ${formatMetricValue(v.after)}`;
+}
+
+// Render-ready evidence lines: "metric · metrics.deadConfig.zeroFireTriggers · a/t".
+function evidenceLines(card) {
+  const ev = card && Array.isArray(card.evidence) ? card.evidence : [];
+  return ev
+    .filter((e) => e && typeof e === 'object')
+    .map((e) => [e.type, e.ref, e.value != null ? String(e.value) : null].filter(Boolean).join(' · '));
+}
+
 export {
   hasSnapshot,
   isMaintenance,
@@ -187,4 +318,13 @@ export {
   formatDuration,
   snapshotMeta,
   metricTiles,
+  cardClassLabel,
+  cardStatusBadge,
+  cardsFromResponse,
+  splitCards,
+  cardAction,
+  cardObjectLabel,
+  formatMetricValue,
+  verdictLine,
+  evidenceLines,
 };

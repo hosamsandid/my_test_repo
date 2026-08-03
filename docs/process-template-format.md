@@ -88,7 +88,13 @@ role's `{{vars}}` and the target repo are applied per member.
         { "artifact": "file", "name": "risk-report" }        // a data-flow output they read
       ]
     }
-  ]
+  ],
+  "hillClimb": {                          // OPTIONAL — hill-climb metrics collector config (#1222)
+    "cron": "0 2 * * *",                  // override daily sweep schedule (default: daily)
+    "windowDays": 7,                      // rolling window for ratio metrics (default 7)
+    "minRunsPerWindow": 20,               // below this, snapshot is flagged `insufficientData` (default 20)
+    "excludeAgents": ["agentId"]          // agent ids excluded from the metrics pass
+  }
 }
 ```
 

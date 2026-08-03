@@ -26,6 +26,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
+const { buildAssistModelOptions } = require('./assist-model-options');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
@@ -8151,6 +8152,21 @@ app.get('/api/llm-endpoints', (req, res) => {
   // this same endpoint.
   const scope = getScope(req);
   res.json(listLlmEndpoints().filter(ep => visibleCredential(scope, ep)).map(maskLlmEndpoint));
+});
+
+// Selection options for the global assist model selector (#1210). Distinct from
+// GET /api/llm-endpoints (the management list, visibleCredential-filtered): this
+// is filtered by assistSelectableEndpoint — membership-based, any role, so a
+// plain Team Member sees the providers their team may bill AI helpers against —
+// and masked to just what the picker needs (never a token, never a baseUrl).
+// `envFallbackActive` flags the bootstrap case (no providers registered anywhere
+// + ANTHROPIC_BASE_URL set), where the selector shows a read-only ".env" chip.
+// Session-gated by the /api auth mount.
+app.get('/api/assist/model-options', (req, res) => {
+  const scope = getScope(req);
+  res.json(buildAssistModelOptions(scope, listLlmEndpoints(), {
+    envBaseUrl: process.env.ANTHROPIC_BASE_URL || '',
+  }));
 });
 
 // Read-only view of the ANTHROPIC_* variables from `.env`, surfaced as a

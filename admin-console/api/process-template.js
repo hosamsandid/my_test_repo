@@ -541,7 +541,16 @@ function emptyDraftBundle(name) {
 // empty result falls back to `process`.
 const DRAFT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 function slugifyDraft(name) {
-  const base = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  // Collapse non-`[a-z0-9-]` runs to `-`, then trim leading/trailing `-` with a
+  // linear char scan rather than `/^-+|-+$/g` — the anchored `-+$` alternative is
+  // polynomial-ReDoS on a long run of `-` (CodeQL js/polynomial-redos). Behaviour
+  // is byte-identical: trim both ends, then 48-char cap.
+  const collapsed = String(name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  let start = 0;
+  let end = collapsed.length;
+  while (start < end && collapsed.charCodeAt(start) === 45) start += 1; // 45 === '-'
+  while (end > start && collapsed.charCodeAt(end - 1) === 45) end -= 1;
+  const base = collapsed.slice(start, end).slice(0, 48);
   return base || 'process';
 }
 

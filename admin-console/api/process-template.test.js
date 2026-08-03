@@ -17,6 +17,17 @@ test('slugifyDraft normalizes name → slug (unchanged rules)', () => {
   assert.equal(slugifyDraft('x'.repeat(60)).length, 48);
 });
 
+test('slugifyDraft trims dash runs linearly (no polynomial ReDoS)', () => {
+  // Interior dashes are preserved; only leading/trailing runs are trimmed.
+  assert.equal(slugifyDraft('---a---b---'), 'a---b');
+  assert.equal(slugifyDraft('-'.repeat(100)), 'process'); // all dashes → empty → fallback
+  // A long run of '-' followed by a non-match used to trigger quadratic backtracking
+  // on `/^-+|-+$/g`; the linear scan returns promptly regardless of length.
+  const start = Date.now();
+  assert.equal(slugifyDraft(`${'-'.repeat(100000)}x`), 'x');
+  assert.ok(Date.now() - start < 500, 'slugifyDraft must stay linear on long dash runs');
+});
+
 test('deriveUniqueDraftId derives a fresh slug when nothing is taken', () => {
   assert.equal(deriveUniqueDraftId('Q3 Roadmap', { exists: existsIn(new Set()) }), 'q3-roadmap');
 });

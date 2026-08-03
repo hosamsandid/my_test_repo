@@ -385,7 +385,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       {editTrigger && (
         <SidePanel open onClose={closeEdits} title="Edit input" width="520px">
           <TriggerForm agentId={node.id} ops={ops} initialValues={editTrigger} saving={savingEdit}
-            onSave={saveTriggerEdit} onCancel={closeEdits} />
+            labels={labels} onSave={saveTriggerEdit} onCancel={closeEdits} />
         </SidePanel>
       )}
 

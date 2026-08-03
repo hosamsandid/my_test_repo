@@ -1,19 +1,29 @@
 # Team wizard × Flow Designer — process-first team creation (#419–#424, #428)
 
+> **Update (#1190): the "Compose a process" option and the Flow-Weaver backend
+> were removed.** The stage-column composer, the custom-role dialog, and the
+> deterministic `POST /api/process/weave` engine (`admin-console/api/flow-weaver.js`)
+> no longer exist. The Process step now offers **three** entries — *Use a
+> template*, *Describe the flow* (Flow Copilot, #1047/#1070), and *Start blank in
+> the canvas*. Sections below that describe the composer/weaver are retained only
+> as history and marked accordingly; the template registry (#419) and catalog v2
+> (#420) survive because they still back the template gallery and the
+> wiring-suggestion feature.
+
 The Team-Setup wizard and the Flow Designer used to be two separate worlds that
 both fed `POST /api/teams`: the wizard picked *flat role lists* from the
 agent-template catalog (hard-wired to the dispatcher pattern), while the
 Process Canvas offered full free-form flow authoring with no guidance and no
 gap protection. This feature line is the bridge: **one artifact — a
-`processTemplateVersion: 1` bundle — with three entry levels**, all feeding the
+`processTemplateVersion: 1` bundle — with several entry paths**, all feeding the
 existing materialisation pipeline. There is deliberately no second
 materialisation path.
 
-| Level | For whom | UX |
+| Entry | For whom | UX |
 |---|---|---|
-| **1 — Template** | "just get me started" | Gallery of curated process templates + saved drafts → one click → team |
-| **2 — Composition** | "I want *my* process" | Stages + 1–3 roles per stage from the catalog → the **Flow-Weaver** wires everything |
-| **3 — Free-form** | "I want full control" | Custom roles (LLM-assisted) + fine-tuning in the Flows canvas (draft round-trip) |
+| **Template** | "just get me started" | Gallery of curated process templates + saved drafts → one click → team |
+| **Describe the flow** | "describe it in words" | Plain-language description → the Flow Copilot (`POST /api/process/copilot`) generates a validated bundle |
+| **Start blank** | "I want full control" | Empty draft + free-form authoring in the Flows canvas (draft round-trip) |
 
 ## Building blocks
 
@@ -37,61 +47,38 @@ pattern with human gates on every stage boundary.
 
 ### 2. Catalog v2 — typed ports on agent templates (#420)
 
-Agent templates gain an additive, backwards-compatible composition surface so
-the weaver can bind them into any process (see
-`docs/process-template-format.md` → *Catalog v2* for the schema):
+Agent templates carry an additive, backwards-compatible composition surface
+(see `docs/process-template-format.md` → *Catalog v2* for the schema). It
+originally let the Flow-Weaver bind roles into a process; with the weaver
+removed (#1190) it now backs the **wiring-suggestion** feature
+(`POST /api/agent-ports/suggest`, `port-suggestion.js`) used by the Flow Editor
+and the Add-role dialog:
 
 - `patternRole`: `scout | author | companion | intake | standalone` — the
   role's place in the per-stage pattern
   **Scout (gap + evidence) → Author → Companion (review, feedback routing, escalation)**.
-- `stageAffinity`: grouping hint for the wizard picker.
+- `stageAffinity`: grouping hint.
 - `ports.consumes` with abstract slots (`stage-entry`, `stage-author`) and
   `ports.produces` (defaulting from the `github` flags).
 - Trigger-level `intrinsic: true`: part of the role's essence (Issue Triage's
-  `issues.opened`, self-curation crons) — kept by the weaver. Non-intrinsic
-  triggers (the dispatcher's `assigned:{{agentId}}` wiring) are dropped when
-  composing; the legacy roles-array path is unaffected.
-- Generic pattern trio ships as catalog entries `scout`, `stage-author`,
-  `stage-companion` (`category: "pattern"`), with `{{stageName}}` tokens
-  resolved at weave time.
+  `issues.opened`, self-curation crons). The legacy roles-array path is
+  unaffected.
 
 Normalisation: `admin-console/api/catalog-ports.js`.
 
-### 3. Flow-Weaver (#421)
+### 3. Flow-Weaver (#421) — REMOVED (#1190)
 
-`admin-console/api/flow-weaver.js` — a **deterministic, pure** wiring engine
-(deliberately not an LLM: wiring must be reproducible and guaranteeable; the
-LLM only drafts prompts/suggestions).
+> The deterministic wiring engine (`admin-console/api/flow-weaver.js`) and its
+> `POST /api/process/weave` route were removed with the "Compose a process"
+> option. The description below is kept only as history.
 
-Input: ordered stages, each with selected roles (catalog templates or inline
-custom roles). Output: a complete bundle plus `notes[]` explaining every
-applied gap rule. Exposed as `POST /api/process/weave`
-(`{ name, stages: [{ name, roles: [{templateId}|{inline:true,…}] }], options }`).
-
-Wiring rules:
-
-1. **Stage chain** — the exit of stage *n* (a hand-over issue) feeds the entry
-   of the next consuming stage via an issue channel labelled
-   `<prefix(n)>:approved`, **human-gated by default**
-   (`options.humanGates[stageName] = false` opts a boundary out).
-2. **Intra-stage pattern** — Scout → `<prefix>:author-go` → Author → PR channel
-   → Companion; escalation loop Author → `<prefix>:escalate` → Companion →
-   `<prefix>:author-go`. Every Author gets a rework-on-review trigger, every
-   Companion the human-feedback trigger (`from: humans`).
-3. **Gap rules** (the "no gaps, no stalling" guarantee):
-   - no Companion → review/feedback/escalation duties merge into the Author's
-     prompt (marker-delimited *Wiring notes* block); no escalate loop.
-   - no Scout → the readiness check becomes the Author's step 1.
-   - the stage exit needs an issue producer: Companions (and, without one,
-     Authors) gain `producesIssue` + the hand-over duty **only when a
-     downstream stage consumes it**; intake roles' issues *are* the hand-over.
-   - passive stages (standalone roles only) are skipped by the chain; later
-     stages connect around them.
-   - per-invocation roles get auto-staggered weekly self-curation crons.
-4. **Contract:** the woven bundle validates and renders with **zero error and
-   zero warning lints** (info allowed) — asserted across all pattern
-   combinations in `flow-weaver.test.js`. The lints are thereby not just
-   diagnostics but the weaver's acceptance criterion.
+It was a **deterministic, pure** wiring engine (deliberately not an LLM: wiring
+must be reproducible and guaranteeable) that took ordered stages with selected
+roles and produced a complete bundle plus `notes[]` explaining every applied
+gap rule: a human-gated stage chain (`<prefix>:approved` issue channels), an
+intra-stage Scout → Author → Companion pattern with escalation/rework loops, and
+gap rules that merged missing duties into the Author so the woven bundle always
+rendered **lint-clean**.
 
 ### 4. Wizard Process step (#422, moved to the front by #428)
 
@@ -102,37 +89,25 @@ steps qualify it: **Process → Working Environment → Team → Knowledge
 (optional) → Review** (#428; before that, Process was step 4 and the
 blank-canvas exit threw away the configuration entered in steps 1–3):
 
-- Three entry cards: *Use a template* / *Compose a process* / *Start blank in
+- Three entry cards: *Use a template* / *Describe the flow* / *Start blank in
   the canvas* (creates an empty draft, jumps to `/flows?proc=draft:<id>` —
-  loss-free, since as step 1 nothing has been entered yet).
-- **Name binding:** the team name isn't known while weaving (it is entered two
-  steps later), so the woven bundle carries a placeholder name; the wizard
-  overwrites `bundle.name` with the team name at submit time, so the
+  loss-free, since as step 1 nothing has been entered yet). *(The former
+  *Compose a process* card + composer were removed by #1190.)*
+- **Describe the flow** (#1070): a plain-language description is streamed to the
+  Flow Copilot (`POST /api/process/copilot`, the same endpoint the Flows editor
+  panel uses); an `ok:true` bundle lands on the form, an unappliable one keeps
+  the form untouched and surfaces the error lints for the user to refine.
+- **Name binding:** the team name isn't known while the bundle is selected (it
+  is entered two steps later), so the bundle carries a placeholder name; the
+  wizard overwrites `bundle.name` with the team name at submit time, so the
   materialised bundle name always equals the team name.
-- Composer: stage columns (add/remove/reorder), Scout/Author/Companion slot
-  dropdowns filtered by `patternRole`, additional intake/standalone roles,
-  per-stage human-gate toggle. Every change re-weaves (debounced) via
-  `POST /api/process/weave`.
 - Inline **flow preview** (SVG: stage columns, channel + label edges, human
   gates) plus **authoritative lint badges** from `POST /api/flows/graph`;
-  error lints block submission. Weaver `notes` are shown as
-  "auto-compensations" so the user sees what the gap rules did.
-- Exits: **Create team** (bundle → `POST /api/teams/stream`, which now has
-  full `processTemplate`/`customRoles` parity with `POST /api/teams`) and
-  **Save as draft** (→ canvas fine-tuning; materialise later via the existing
-  round-trip).
+  error lints block submission.
+- Exits: **Create team** (bundle → `POST /api/teams/stream`, which has full
+  `processTemplate` parity with `POST /api/teams`) and **Save as draft** (→
+  canvas fine-tuning; materialise later via the existing round-trip).
 - Review step renders the final graph + role list grouped by stage.
-
-### 5. Custom roles (#423)
-
-"＋ Custom role" per stage column: name + notes → LLM-drafted prompt
-(`POST /api/agent-prompt/generate`) and a suggested wiring surface
-(`POST /api/agent-ports/suggest` → patternRole / sessionPolicy / produce
-flags; one stateless LLM call via `resolveGenerationTarget`, keyword heuristic
-in `admin-console/api/port-suggestion.js` as offline fallback). Suggestions are
-**never applied silently** — the dialog shows them as editable fields. A
-confirmed custom role rides the weave request inline and is wired exactly like
-a catalog role.
 
 ## Create-only wizard & the legacy roles path
 
@@ -150,9 +125,8 @@ a catalog role.
 - `POST /api/teams` (and `/stream`) continue to accept plain `roles` +
   `customRoles` for API compatibility — the retirement is UI-only.
 
-## Follow-ups (deliberately out of scope)
+## Follow-ups (obsolete after #1190)
 
-- Dispatcher pattern as a weaver *block* (multi-instance roles + coordinator
-  workflow inside a composed process).
-- "Promote custom role to catalog" (analogous to skill promotion, #306/#173).
-- Stage-affine skill packs per role (`skillsOverride` slots exist).
+The original follow-ups (a dispatcher *weaver block*, "promote custom role to
+catalog", stage-affine skill packs) all presupposed the Compose/Flow-Weaver
+path and are moot now that it has been removed.

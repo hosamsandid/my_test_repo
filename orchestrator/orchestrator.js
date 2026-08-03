@@ -12185,6 +12185,65 @@ async function main() {
   };
   const reconcileTimer = setInterval(runSkillReconcile, RECONCILE_INTERVAL_MS);
   if (typeof reconcileTimer.unref === "function") reconcileTimer.unref();
+
+  // ============================================================
+  // Hill-climbing loop Phase 1 (#1221): scheduled flow-anomaly-sweep persistence.
+  // The live GET .../flow-anomalies endpoint computes and discards; recurrence
+  // detection (the hill-climber) and the flow-reconciliation Phase-4 responder's
+  // "third sighting" ladder both need history. An hourly timer (poller cadence
+  // class) re-runs the same sweep per Agent Team and appends one JSONL line to
+  // /workspace/teams/<teamId>/hill-climb/anomaly-history.jsonl, then prunes lines
+  // past the retention window (default 90 days). Skipped during maintenance mode
+  // (same gate as the endpoint — the sweep is a poll). Best-effort: a failed sweep
+  // records an errors-only line and never throws out of the timer; a team with no
+  // repos/tokens produces no file and no errors.
+  // ============================================================
+  const anomalyHistory = require("./anomaly-history");
+  const HILL_CLIMB_ANOMALY_INTERVAL_MS = Math.max(
+    60_000,
+    Number(process.env.HILL_CLIMB_ANOMALY_INTERVAL_MS) || 60 * 60 * 1000,
+  );
+  let anomalyHistoryBusy = false;
+  const runAnomalyHistorySweep = async () => {
+    if (anomalyHistoryBusy) return; // overlap guard — a slow sweep must not stack
+    anomalyHistoryBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // maintenance suppresses scheduled sweeps
+      let teamIds;
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[Orchestrator] anomaly-history: team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        let result = null;
+        try {
+          result = await computeTeamFlowAnomalies(teamId);
+        } catch (err) {
+          // A sweep that threw outright still records an errors-only line so the
+          // gap is visible in history — never let it escape the timer.
+          anomalyHistory.record(teamId, anomalyHistory.buildHistoryEntry({ errors: [err.message] }));
+          anomalyHistory.pruneOldEntries(teamId);
+          continue;
+        }
+        // A team with no repos/tokens resolved produces no file and no errors.
+        if ((result.repos || []).length === 0 && (result.errors || []).length === 0) continue;
+        anomalyHistory.record(teamId, anomalyHistory.buildHistoryEntry(result));
+        anomalyHistory.pruneOldEntries(teamId);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] anomaly-history sweep failed: ${err.message}`);
+    } finally {
+      anomalyHistoryBusy = false;
+    }
+  };
+  const anomalyHistoryTimer = setInterval(runAnomalyHistorySweep, HILL_CLIMB_ANOMALY_INTERVAL_MS);
+  if (typeof anomalyHistoryTimer.unref === "function") anomalyHistoryTimer.unref();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

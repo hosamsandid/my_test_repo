@@ -306,7 +306,7 @@ function buildProcessGraph(agents, options) {
   // touchpoint. First matching human in `humans[]` order wins; a label emitted
   // by two humans yields both gate edges (so `humanEmitters` keeps a list).
   const humanEmitters = new Map();        // label -> [humanId, ...]
-  const humanLabelConsumer = new Map();   // brake label -> humanId
+  const humanLabelConsumer = new Map();   // consumed label -> humanId (brake #987 / plain-label delivery #1197)
   const humanArtifactConsumer = new Map();// `${producerId}|${pr|issue}` -> humanId
   for (const h of humanRoles) {
     for (const e of h.emits) {
@@ -594,7 +594,9 @@ function buildProcessGraph(agents, options) {
   };
   for (const [label, emitters] of emitIndex) {
     if (isHumanGate(label) || isBrake(label)) continue;
-    if (!allListenKeys.has(label)) {
+    // A named human role that `consumes` this plain label receives it as a
+    // delivery (#1197, drawn below) — that is a real consumer, not a dead end.
+    if (!allListenKeys.has(label) && !humanLabelConsumer.has(label)) {
       for (const s of emitters) {
         const oc = ocOf(label, s);
         const marker = oc ? markerOf(s, oc) : null;
@@ -620,6 +622,25 @@ function buildProcessGraph(agents, options) {
     for (const s of emitters) {
       const oc = ocOf(label, s);
       edges.push({ from: s, to: boundHuman, label, kind: 'brake', handoff: 'human', ...(oc ? { outcome: oc } : {}) });
+    }
+  }
+
+  // Label deliveries to a person (#1197): an agent sets a PLAIN label (not a
+  // human gate, not a brake) that a named human role `consumes` — the person is
+  // notified / acts on the label. It is a delivery/touchpoint, NOT a gate and
+  // NOT a brake, so it never blocks the flow. Drawn only to a BOUND human role
+  // (an unconsumed plain label stays a normal agent→agent or dead-end edge).
+  // Tagged `handoff: 'human'` like the brake edge but WITHOUT `brake`, so the
+  // renderer styles it as a plain delivery. A label an agent listens on too
+  // (fan-out to both an agent and a person) still draws its agent edges above.
+  for (const [label, emitters] of emitIndex) {
+    if (isHumanGate(label) || isBrake(label)) continue;
+    const boundHuman = humanLabelConsumer.get(label) || null;
+    if (!boundHuman) continue;
+    for (const s of emitters) {
+      if (s === boundHuman) continue;
+      const oc = ocOf(label, s);
+      edges.push({ from: s, to: boundHuman, label, kind: 'label', handoff: 'human', ...(oc ? { outcome: oc } : {}) });
     }
   }
 
@@ -721,6 +742,11 @@ function computeHumanTouchpoints(nodes, edges, humanIds) {
     // Artifact deliveries: human reviews/merges the PR or issue.
     if (e.kind === 'delivery' && e.from) {
       add({ type: 'delivery', artifact: e.artifact, agentId: e.from, ...roleOf(e.to) });
+    }
+    // Label deliveries (#1197): an agent sets a plain label the person is
+    // notified on — a delivery touchpoint (they receive it; no gate, no brake).
+    if (e.kind === 'label' && e.handoff === 'human' && e.from && e.to) {
+      add({ type: 'delivery', label: e.label, agentId: e.from, ...(e.outcome ? { outcome: e.outcome } : {}), ...roleOf(e.to) });
     }
   }
   // Gated channels (`gate: 'human'`) never appear as gate listener edges in

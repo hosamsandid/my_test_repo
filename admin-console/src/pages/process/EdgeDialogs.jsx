@@ -601,18 +601,31 @@ export function CreateChannelDialog({ from, to, artifact: artifact0, lockArtifac
  * outcomes; an optional inline "on approval, wake…" section completes the
  * full S3 triangle (consumer + gate label → engine wireReviewGate) in this
  * one dialog — the two-drag path stays available and converges (§4.5). */
-export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, peers = [], initialArtifact = null, onBack, onClose, onDone }) {
+export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps, humanOps, fromNode, peers = [], initialArtifact = null, initialLabel = '', labels = [], onBack, onClose, onDone }) {
   const outputs = (fromNode && Array.isArray(fromNode.outputs) ? fromNode.outputs : [])
     .map(a => ((a && (a.name || a.path)) ? { key: a.name || a.path } : null)).filter(Boolean);
+  // #1197: dragging a `setLabel` outcome onto a person offers — and defaults to —
+  // the label that outcome SETS: the person consumes it (a touchpoint on the
+  // label). Without this, a label-only outcome had no correct target and the
+  // dialog silently defaulted to "Pull request", contradicting the drawn edge.
+  const labelName = String(initialLabel || '').trim();
+  const labelOption = labelName
+    ? { id: `label:${labelName}`, title: `Label · ${labelName}`,
+        desc: `${toName || to} is notified when \`${labelName}\` is set.` }
+    : null;
   const options = [
+    // The label target leads (AC6: prefer the explicit label signal), mirroring
+    // wireConsumerSpec — PR/Issue/file review targets stay available below.
+    ...(labelOption ? [labelOption] : []),
     { id: 'pr', title: 'Pull request', desc: `${fromName || from} opens a PR that ${toName || to} reviews / merges.` },
     { id: 'issue', title: 'Issue', desc: `${fromName || from} opens an issue that ${toName || to} reviews.` },
     ...outputs.map(o => ({ id: `file:${o.key}`, title: `Output · ${o.key}`, desc: `${toName || to} reads the ${o.key} artifact.` })),
   ];
-  // Dragging an agent's typed openPr/openIssue outcome onto a person preselects
-  // the matching review target (#1035); the generic ● port passes none.
+  // Preselect: the label the outcome sets wins (#1197); else the typed
+  // openPr/openIssue artifact (#1035); else the first option.
   const [choice, setChoice] = useState(
-    (initialArtifact === 'pr' || initialArtifact === 'issue') ? initialArtifact : options[0].id,
+    labelOption ? labelOption.id
+      : ((initialArtifact === 'pr' || initialArtifact === 'issue') ? initialArtifact : options[0].id),
   );
   // Optional S3 completion (§4.3): on approval, wake a consumer via a gate label.
   const [wakeTo, setWakeTo] = useState('');
@@ -621,15 +634,25 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
   const [error, setError] = useState(null);
   const agentPeers = peers.filter(p => p && p.kind !== 'human' && p.id !== from);
   const isArtifactChoice = choice === 'pr' || choice === 'issue';
+  const isLabelChoice = choice.startsWith('label:');
+  const chosenLabel = isLabelChoice ? choice.slice('label:'.length) : '';
+  // Flag-based classification (#928) — a flagged label wires the person as its
+  // gate/brake owner (the consume drives the brake hand-off / gate binding in
+  // the graph builder); an unflagged label is a plain delivery that never blocks.
+  const labelIsGate = isLabelChoice && isGateLabel(labels, chosenLabel);
+  const labelIsBrake = isLabelChoice && isBrakeLabel(labels, chosenLabel);
 
   async function submit() {
     setSaving(true); setError(null);
     try {
-      const entry = isArtifactChoice
-        ? { artifact: choice, from }
-        : { artifact: 'file', name: choice.slice('file:'.length) };
+      const entry = isLabelChoice
+        ? { label: chosenLabel }
+        : (isArtifactChoice
+          ? { artifact: choice, from }
+          : { artifact: 'file', name: choice.slice('file:'.length) });
       // With a consumer + gate label the engine wires the whole triangle;
-      // otherwise just the delivery (the two-gesture path, §5 path B).
+      // otherwise just the delivery (the two-gesture path, §5 path B). A label
+      // target is always a plain consume — no PR/Issue delivery is created (AC2).
       await submitAgentToPerson({ ops, humanOps }, {
         from, human: to, entry,
         ...(isArtifactChoice && wakeTo ? { wake: { to: wakeTo, gateLabel } } : {}),
@@ -644,12 +667,19 @@ export function AgentToPersonDialog({ from, to, fromName, toName, ops = liveOps,
         <strong>{toName || to}</strong> (a person) reviews something <strong>{fromName || from}</strong> produces.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <Field label="What does this person review?">
+        <Field label="What does this person receive?">
           <select value={choice} onChange={e => setChoice(e.target.value)} style={input}>
             {options.map(o => <option key={o.id} value={o.id}>{o.title}</option>)}
           </select>
           <small style={small}>{options.find(o => o.id === choice)?.desc}</small>
         </Field>
+        {isLabelChoice && (labelIsGate || labelIsBrake) && (
+          <div style={{ ...small, padding: 'var(--eb-space-2)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-status-warning)' }}>
+            <code>{chosenLabel}</code> is configured as a {labelIsGate ? 'human gate' : 'brake'} —
+            wiring <strong>{toName || to}</strong> to it makes them its {labelIsGate ? 'gate' : 'brake'} owner
+            (the {labelIsGate ? 'approval' : 'decision'} point). Plain labels are a notification only.
+          </div>
+        )}
         {isArtifactChoice && agentPeers.length > 0 && (
           <Field label="On approval, wake… (optional)">
             <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
@@ -910,7 +940,55 @@ export function EditHandoffDialog(props) {
   if (on === 'event') return <EditEventDialog {...props} />;
   if (on === 'webhook') return <EditWebhookDialog {...props} />;
   if (on === 'review' || on === 'manual') return <ReadonlyEdgeDialog {...props} />;
+  // #1197: a plain label delivered to a named person (handoff:'human', NOT a
+  // brake) is the person consuming that label — there is no listening trigger to
+  // edit, so route it to its own small delivery editor rather than the
+  // agent→agent hand-off form (which would 404 on updateTrigger(to, undefined)).
+  if (on === 'label' && props.edge?.handoff === 'human' && !props.edge?.brake && props.humanOps) {
+    return <EditLabelDeliveryDialog {...props} ops={ops} />;
+  }
   return <EditLabelHandoff {...props} />;
+}
+
+/* ── Label delivery to a person (#1197) ─────────────────────────────────────
+ * An agent sets a plain label a named person `consumes` — a notification /
+ * touchpoint (they are told / act on it), not a gate and not a brake. There is
+ * no listening trigger behind this edge; the relationship lives entirely in the
+ * human's `consumes: [{ label }]`. So the editor just shows the relationship and
+ * offers to remove it (unwire the consume). Symmetric with how it was created
+ * (drag a setLabel outcome onto the person → AgentToPersonDialog). */
+function EditLabelDeliveryDialog({ edge, fromName, toName, humanOps, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const label = edge.label || '';
+  async function remove() {
+    setSaving(true); setError(null);
+    try {
+      await humanOps.unwireHumanConsume(edge.to, { label });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Label delivery" width="520px">
+      <p style={hint}>
+        <strong>{fromName || edge.from}</strong> sets <code>{label}</code> → 👤 <strong>{toName || edge.to}</strong> is notified.
+      </p>
+      <div style={{ ...small, padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', lineHeight: 1.6, color: 'var(--eb-text-secondary)' }}>
+        <strong>{toName || edge.to}</strong> consumes the <code>{label}</code> label as a touchpoint — they are
+        notified / act on it when <strong>{fromName || edge.from}</strong> sets it. It does not block the flow.
+        Editing what <strong>{fromName || edge.from}</strong> sets lives in its Outcomes; this edge only records
+        that the person receives the label.
+      </div>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+        <button onClick={remove} disabled={saving}
+          style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>
+          {saving ? 'Removing…' : 'Remove delivery'}
+        </button>
+        <button onClick={onClose} disabled={saving} style={ghost}>Close</button>
+      </div>
+    </SidePanel>
+  );
 }
 
 /* ── Review gate — one editable object (#1005, §4.4) ────────────────────────

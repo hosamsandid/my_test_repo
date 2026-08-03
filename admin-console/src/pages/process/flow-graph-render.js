@@ -387,6 +387,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     state.actors = allNodes.filter(n => n && n.kind === 'actor' && n.actor !== 'timer');
     state.actorsById = {};
     state.actors.forEach(a => { state.actorsById[a.id] = a; });
+    // #1197: a human's label consume renders as a brake decision only when the
+    // label is flagged `brake`; an unflagged label is a plain notification (they
+    // are told when it is set). Flag-based, never name-based (#928).
+    state.brakeLabels = new Set((Array.isArray(g.labels) ? g.labels : [])
+      .filter(l => l && l.brake).map(l => l.name));
     const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
     // An artifact is keyed by its logical name when it has one, else its path
     // (#382) — matching the backend. The physical path becomes a display `hint`.
@@ -1171,7 +1176,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         const parts = [];
         for (const e of bp._emits) parts.push(chip(`↦ ${e}`, `applies label “${e}” (a gate)`, '#6d28d9'));
         for (const c of bp._consumes) {
-          if (c && c.label) parts.push(chip(`⏸ ${c.label}`, `decides on brake “${c.label}”`, '#6d28d9'));
+          if (c && c.label) {
+            const isBrake = state.brakeLabels && state.brakeLabels.has(c.label);
+            parts.push(isBrake
+              ? chip(`⏸ ${c.label}`, `decides on brake “${c.label}”`, '#6d28d9')
+              : chip(`⇤ ${c.label}`, `notified when “${c.label}” is set`, '#6d28d9'));
+          }
           else if (c && (c.artifact === 'pr' || c.artifact === 'issue')) parts.push(chip(`⇤ ${c.artifact} · ${c.from}`, `reviews ${c.artifact} from ${c.from}`, '#6d28d9'));
           else if (c && c.artifact === 'file') parts.push(chip(`⇤ ${c.name}`, `reads output ${c.name}`, '#6d28d9'));
         }
@@ -1876,6 +1886,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
             // it here mis-routes the click to the agent→agent EditChannelDialog,
             // whose channel ops don't touch bundle.humans (silent no-op remove).
             ...(e.audience ? { audience: e.audience } : {}),
+            // #1197: a label delivered to a named person (handoff:'human', no
+            // listening trigger) routes to its own delivery editor, not the
+            // agent→agent hand-off editor. Carry `brake` so a brake hand-off is
+            // still distinguished from a plain-label delivery downstream.
+            ...(e.handoff ? { handoff: e.handoff } : {}),
+            ...(e.brake ? { brake: true } : {}),
             ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });

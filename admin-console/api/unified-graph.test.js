@@ -773,6 +773,27 @@ test('#987: no humans[] is byte-identical to omitting the option', () => {
   assert.deepEqual(withEmpty, without);
 });
 
+test('#1197: a plain label a human consumes maps to an on:label handoff:human delivery edge (no gate/brake)', () => {
+  const g = buildUnifiedGraph(
+    [{ id: 'reworker', emits: ['ready-for-review'], triggers: [] }],
+    undefined,
+    {
+      labels: [{ name: 'ready-for-review', humanGate: false, brake: false }],
+      humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'ready-for-review' }] }],
+    },
+  );
+  const e = findEdge(g, x => x.label === 'ready-for-review' && x.to === 'lead');
+  assert.ok(e, 'the delivery edge reaches the named person');
+  assert.equal(e.on, 'label');
+  assert.equal(e.from, 'reworker');
+  assert.equal(e.handoff, 'human');
+  assert.ok(!e.gate, 'a plain-label delivery is not an approval gate');
+  assert.ok(!e.brake, 'a plain-label delivery is not a brake');
+  assert.ok(!e.triggerId, 'the emit-side delivery has no listening trigger');
+  assert.ok(g.nodes.some(n => n.id === 'lead' && n.kind === 'human'));
+  assert.ok(g.humanTouchpoints.some(t => t.type === 'delivery' && t.label === 'ready-for-review' && t.role === 'lead'));
+});
+
 test('#1004: a marked output artifact is an endpoint — no unconsumed-output lint', () => {
   const mk = (out) => buildUnifiedGraph([
     { id: 'analyst', outputs: [out], triggers: [] },

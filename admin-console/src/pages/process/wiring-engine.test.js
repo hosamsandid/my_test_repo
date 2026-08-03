@@ -143,6 +143,23 @@ test('wireHumanDelivery: PR/issue ensures the producer outcome, file does not; m
   assert.deepEqual(state.humans[0].consumes, [{ artifact: 'issue', from: 'ba' }]);
 });
 
+test('#1197: wireHumanDelivery with a {label} entry records a plain consume, no producer outcome, idempotent + unwire', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireHumanDelivery(ctx, { human: 'p', entry: { label: 'ready-for-review' } });
+    await wireHumanDelivery(ctx, { human: 'p', entry: { label: 'ready-for-review' } }); // re-run: dedup
+  });
+  // A label consume is NOT a PR/issue delivery — the producer gets no openPr/openIssue outcome.
+  assert.equal(state.roles.ba.github, null);
+  assert.ok(!state.roles.ba.outcomes, 'no artifact outcome is forced for a label-only delivery');
+  assert.deepEqual(state.humans[0].consumes, [{ label: 'ready-for-review' }]);
+
+  const after = await onBoth(async (ctx) => {
+    await wireHumanDelivery(ctx, { human: 'p', entry: { label: 'ready-for-review' } });
+    await unwireHumanDelivery(ctx, { human: 'p', entry: { label: 'ready-for-review' } });
+  });
+  assert.equal(after.humans[0]?.consumes, undefined);
+});
+
 // ── human gate ──────────────────────────────────────────────────────────────
 
 test('wireHumanGate: kind defaults from what the person reviews; idempotent; emit recorded', async () => {

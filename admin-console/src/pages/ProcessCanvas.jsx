@@ -874,6 +874,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           fromNode={(displayGraph?.nodes || []).find(n => n.id === outcomeConnect.from) || null}
           peers={displayGraph?.nodes || []}
           initialArtifact={outcomeConnect.outcome?.artifact || null}
+          initialLabel={outcomeConnect.outcome?.label || ''}
+          labels={displayGraph?.labels || []}
           onClose={() => setOutcomeConnect(null)}
           onDone={() => { setOutcomeConnect(null); afterEdit(); }}
         />
@@ -1378,9 +1380,12 @@ function LintsPanel({ lints, onFocus }) {
 const TOUCHPOINT_TEXT = {
   injection: (t, name) => <>Human applies <code>{t.label || t.artifact}</code> → wakes <strong>{name}</strong></>,
   decision: (t, name) => <><strong>{name}</strong> pauses on <code>{t.label}</code> — human decides</>,
-  delivery: (t, name) => t.artifact === 'file'
-    ? <><strong>{name}</strong> delivers <code>{t.name}</code> to a person</>
-    : <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
+  delivery: (t, name) => t.label
+    // #1197: a plain label the person is notified on (a touchpoint, not a gate).
+    ? <><strong>{name}</strong> sets <code>{t.label}</code> — a person is notified</>
+    : t.artifact === 'file'
+      ? <><strong>{name}</strong> delivers <code>{t.name}</code> to a person</>
+      : <><strong>{name}</strong> delivers a {t.artifact === 'issue' ? 'issue' : 'pull request'} for human review</>,
 };
 // Friendly, action-oriented headings for the raw touchpoint types (#1127) —
 // "INJECTION/DECISION/DELIVERY" read as jargon; say what the person actually does.

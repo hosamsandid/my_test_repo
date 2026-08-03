@@ -1321,3 +1321,76 @@ test('#1174: a transport-internal listener projects transport onto its edge and 
   const nb = g.nodes.find(n => n.id === 'b');
   assert.equal(nb.triggers.find(t => t.id === 't').transport, 'internal');
 });
+
+// ── #1197: a plain label a person consumes is a delivery, not a gate/brake ────
+
+test('#1197: a plain label consumed by a human draws a delivery edge (kind label, handoff human, no brake) + touchpoint', () => {
+  const g = buildProcessGraph([
+    { id: 'reworker', emits: ['ready-for-review'], triggers: [] },
+  ], {
+    // ready-for-review carries NO gate/brake flag — a plain label.
+    labels: [{ name: 'ready-for-review', humanGate: false, brake: false }],
+    humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'ready-for-review' }] }],
+  });
+  const e = g.edges.find(x => x.label === 'ready-for-review' && x.from === 'reworker');
+  assert.ok(e, 'the plain label is delivered, not dropped as a dead end');
+  assert.equal(e.kind, 'label');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.to, 'lead');
+  assert.ok(!e.brake, 'a plain-label delivery is NOT a brake');
+  assert.ok(!e.deadEnd);
+  // No blocking classification: the label is not turned into a gate/brake.
+  assert.ok(!lintCodes(g).includes('dead-end-emitter'));
+  assert.ok(!lintCodes(g).includes('outcome-without-consumer'));
+  assert.ok(!lintCodes(g).includes('gate-violation'));
+  // Enumerated as a delivery touchpoint bound to the named role.
+  const tp = g.humanTouchpoints.find(t => t.type === 'delivery' && t.label === 'ready-for-review');
+  assert.ok(tp, 'a label delivery is a human touchpoint');
+  assert.equal(tp.agentId, 'reworker');
+  assert.equal(tp.role, 'lead');
+});
+
+test('#1197: an OUTCOME setting a plain label a human consumes carries its outcome id (no dead-end)', () => {
+  const g = buildProcessGraph([
+    { id: 'reworker', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'send-for-review', title: 'Send for review', actions: [{ type: 'setLabel', label: 'ready-for-review' }] },
+    ] } },
+  ], { humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'ready-for-review' }] }] });
+  assert.ok(!lintCodes(g).includes('outcome-without-consumer'));
+  const e = g.edges.find(x => x.label === 'ready-for-review' && x.from === 'reworker');
+  assert.equal(e.kind, 'label');
+  assert.equal(e.handoff, 'human');
+  assert.equal(e.to, 'lead');
+  assert.equal(e.outcome, 'send-for-review');
+});
+
+test('#1197: a brake a human consumes stays a brake (not the plain-label path); an unconsumed plain label still dead-ends', () => {
+  const brake = buildProcessGraph([
+    { id: 'reworker', emits: ['needs-decision'], triggers: [] },
+  ], {
+    labels: [{ name: 'needs-decision', brake: true }],
+    humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'needs-decision' }] }],
+  });
+  const be = brake.edges.find(x => x.label === 'needs-decision' && x.from === 'reworker');
+  assert.equal(be.kind, 'brake', 'a flagged brake keeps its brake classification');
+  assert.equal(be.to, 'lead');
+  // Only one edge for the label — the plain-label loop must skip brakes (no dup).
+  assert.equal(brake.edges.filter(x => x.label === 'needs-decision' && x.from === 'reworker').length, 1);
+
+  const unconsumed = buildProcessGraph([
+    { id: 'reworker', emits: ['ready-for-review'], triggers: [] },
+  ], { labels: [{ name: 'ready-for-review', humanGate: false, brake: false }] });
+  assert.ok(lintCodes(unconsumed).includes('dead-end-emitter'),
+    'a plain label nobody consumes still reads as a dead end');
+});
+
+test('#1197: a plain label consumed by a person AND listened on by an agent draws both edges', () => {
+  const g = buildProcessGraph([
+    { id: 'reworker', emits: ['ready-for-review'], triggers: [] },
+    { id: 'reviewer', triggers: [{ id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ], { humans: [{ id: 'lead', name: 'Tech Lead', consumes: [{ label: 'ready-for-review' }] }] });
+  assert.ok(g.edges.some(e => e.from === 'reworker' && e.to === 'reviewer' && e.kind === 'agent' && !e.handoff),
+    'the agent listener edge is still drawn');
+  assert.ok(g.edges.some(e => e.from === 'reworker' && e.to === 'lead' && e.handoff === 'human'),
+    'the person delivery edge is also drawn');
+});

@@ -1,6 +1,6 @@
 # Assist Model Selection — global, team-scoped model-provider selector for cross-cutting AI helpers
 
-Status: in progress — Phase 1 shipped (#1210 `assistSelectableEndpoint` + `GET /api/assist/model-options`; #1211 `resolveAssistTarget` enforcement + provenance; #1212 header selector UI in review); Phase 2 §4.6 team-derived `assistLlmEndpointId` + `_synthesizeSkillMd` binding for curator auto-promotion/distillation shipped in #1213; domain-bootstrap pass-through (#1214) pending
+Status: in progress — Phase 1 shipped (#1210 `assistSelectableEndpoint` + `GET /api/assist/model-options`; #1211 `resolveAssistTarget` enforcement + provenance; #1212 header selector UI + `ModelSelectionProvider` + `X-Assist-Model` transport); Phase 2 §4.6 shipped — team-derived `assistLlmEndpointId` + `_synthesizeSkillMd` binding for curator auto-promotion/distillation (#1213) and domain-bootstrap pass-through with user selection forwarded through the console proxy, token resolved locally in the orchestrator (#1214). Phase 3 (cross-tab sync, per-feature override, assist-spend rollup) not yet ticketed.
 
 ## 1. Problem
 

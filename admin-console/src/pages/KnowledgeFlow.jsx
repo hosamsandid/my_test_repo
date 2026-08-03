@@ -1137,9 +1137,12 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
 
   // Post an op. `reload:false` (bootstrap) skips onChanged since nothing is persisted.
   // Returns the parsed response so callers can read `proposed`/`fallback`.
+  // `assistFetch` injects the header-selected assist model (#1214: the `bootstrap`
+  // op runs an LLM synthesis in the orchestrator, so it must carry the selection;
+  // the other ops are deterministic and ignore the header server-side).
   const post = useCallback((body, { reload = true } = {}) => {
     setBusy(true); setErr('');
-    return fetch('/api/knowledge/domains', {
+    return assistFetch('/api/knowledge/domains', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ teamId, ...body }),
     }).then(r => r.json().catch(() => ({}))).then((out) => {

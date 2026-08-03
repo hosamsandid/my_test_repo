@@ -46,6 +46,9 @@ test('buildLoopSummaryModel: verify variants (AC4)', () => {
   assert.deepEqual(
     buildLoopSummaryModel({ verify: { selfGraded: true } }).verify,
     { kind: 'self', label: 'Verification', value: 'Self-graded' });
+  assert.deepEqual(
+    buildLoopSummaryModel({ verify: { flow: true } }).verify,
+    { kind: 'flow', label: 'Verification', value: 'Flow hand-off (downstream QS chain)' });
   // Absent verify ⇒ explicit self-graded, never blank.
   assert.deepEqual(
     buildLoopSummaryModel({}).verify,

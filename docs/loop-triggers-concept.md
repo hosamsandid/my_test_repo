@@ -94,6 +94,9 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
     "command": "npm run lint && npm test",   // must exit 0 for the iteration to COUNT
     // OR delegate to a different agent/role instead of a command:
     "agentId": "team-x-code-reviewer"
+    // OR hand off to the flow — no inline gate, the wired downstream QS chain
+    // verifies each iteration's hand-off (PR / label) asynchronously:
+    // "flow": true
   },
 
   // --- pacing ---
@@ -129,6 +132,17 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
   iteration's prompt (principle #3). Reuse `_run_pre_check` for the command form;
   the agent form posts the artifact to a second agent and waits — this is exactly
   our existing reviewer-role / `ace:quality-gate` pattern, just wired as loop backpressure.
+- **Flow hand-off (`verify: {flow: true}`).** When the loop is the *start of a wired
+  QS chain* (the iteration ends by opening a PR / setting a label that the team's
+  reviewer triggers already listen to), an inline verifier would make the same
+  reviewer check the work twice — once as loop backpressure, once via its own flow
+  trigger. `{"flow": true}` skips the inline gate: the iteration counts on
+  completion, and verification happens downstream through the flow (failures come
+  back on the flow's own rework path, e.g. `revisions-required` → reworker, not as
+  loop feedback). Honoured for team agents too — the separation principle still
+  holds (a *different*, explicitly wired consumer checks the work), and the
+  delegation is authored, never silent. Rendered as `→ flow` on the stop-contract
+  badge and in trigger summaries.
 - **Separate-verifier default is enforced for team agents (decided).** When a loop
   agent belongs to a team and the author leaves `verify` empty, the system
   **pre-fills a *different* sibling role** as the verifier (never the worker itself) —

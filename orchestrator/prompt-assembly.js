@@ -131,7 +131,10 @@ const TRIGGER_SECTION =
   "gate that must pass for an iteration's work to count; a failed check is fed back " +
   "into the next iteration's prompt. Give it exactly one of: `{\"command\": \"<sh>\"}` " +
   "(exit-code gate), `{\"agentId\": \"<other-agent>\"}` (a *different* agent reviews and " +
-  "returns a verdict), or `{\"selfGraded\": true}` (explicit opt-out — self-checking, " +
+  "returns a verdict), `{\"flow\": true}` (no inline gate — each iteration ends in a " +
+  "hand-off (PR / label) and the flow's wired downstream QS chain verifies it there; " +
+  "use this when the loop starts a review pipeline, so the same reviewer doesn't check " +
+  "the work twice), or `{\"selfGraded\": true}` (explicit opt-out — self-checking, " +
   "only for standalone agents). If you are a team agent and leave `verify` empty or " +
   "self-graded, the system re-fills a sibling reviewer role for you — the separation " +
   "can't be silently removed.\n" +

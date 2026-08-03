@@ -515,11 +515,13 @@ function generateSecret() {
 }
 
 // Derive the loop verifier editor mode from a persisted `verify` value.
-// `{ agentId }` → 'agent', `{ command }` → 'command', anything else → 'none'.
+// `{ agentId }` → 'agent', `{ command }` → 'command', `{ flow: true }` →
+// 'flow' (hand-off to the wired downstream QS chain), anything else → 'none'.
 function deriveVerifyMode(verify) {
   if (verify && typeof verify === 'object') {
     if (verify.agentId) return 'agent';
     if (verify.command) return 'command';
+    if (verify.flow === true) return 'flow';
   }
   return 'none';
 }
@@ -784,12 +786,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         const untilCmd = form.untilCommand.trim();
         if (untilCmd) body.until = { command: untilCmd };
       }
-      // verify: command form / agent form / omitted. A team agent's blank
-      // verifier is (re-)enforced to a sibling server-side (concept §4.6).
+      // verify: command form / agent form / flow hand-off / omitted. A team
+      // agent's blank verifier is (re-)enforced to a sibling server-side
+      // (concept §4.6); the flow form is an explicit delegation to the wired
+      // downstream QS chain, honoured as authored.
       if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
         body.verify = { command: form.verifyCommand.trim() };
       } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
         body.verify = { agentId: form.verifyAgentId.trim() };
+      } else if (form.verifyMode === 'flow') {
+        body.verify = { flow: true };
       }
       // Token budget + min-gap resolve from their presets (or the advanced raw
       // fields) back to the exact wire numbers; `undefined` omits the field.
@@ -918,6 +924,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               <option value="none">No one{isTeamLoopAgent ? ' (a teammate is assigned automatically)' : ' (the agent judges itself)'}</option>
               <option value="command">A command must pass each try</option>
               <option value="agent">Another agent reviews each try</option>
+              <option value="flow">The flow checks the hand-off (downstream QS chain)</option>
             </select>
 
             {form.verifyMode === 'command' && (
@@ -953,7 +960,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               )
             )}
 
-            {isTeamLoopAgent && (
+            {form.verifyMode === 'flow' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                No inline check between tries: each try ends by handing its work to
+                the flow (opening a PR, setting a label), and the reviewers wired
+                downstream verify it there. Use this when the loop is the start of a
+                QS chain — otherwise the same reviewer would check the work twice.
+              </div>
+            )}
+
+            {isTeamLoopAgent && form.verifyMode !== 'flow' && (
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Team agents must not grade their own work — a separate teammate is
                 assigned automatically and re-applied on save even if left blank.

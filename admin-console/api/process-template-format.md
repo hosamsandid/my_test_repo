@@ -84,7 +84,7 @@ role's `{{vars}}` and the target repo are applied per member.
       "emits": ["dispatch"],                       // labels this person applies (implicitly gates)
       "consumes": [                                // what lands with the person
         { "artifact": "issue", "from": "business-analyst" }, // an issue they review
-        { "label": "human-decision-required" },              // a brake they decide on
+        { "label": "human-decision-required" },              // a brake they decide on (or a plain notification if not flagged brake)
         { "artifact": "file", "name": "risk-report" }        // a data-flow output they read
       ]
     }
@@ -194,7 +194,7 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
 - **GitHub channels (#380) are declarative ports.** `github.{producesPr,producesIssue}`
   marks what a role opens (drives the node badge/ports and appends the producer
   instruction block to its prompt at materialise). A consumer's `channels` entry
-  `{artifact, from, label?, gate?}` declares *A opens a PR/issue that wakes B* —
+  `{artifact, from, label?, gate?, transport?}` declares *A opens a PR/issue that wakes B* —
   optionally only when `label` is present, and `gate: "human"` means a **human**
   applies that label (the inline approval gate on the edge). At materialise (and
   on live edits, via `reconcileTeamGithubChannels`) `expandGithubChannels` derives
@@ -209,6 +209,13 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   beside a derived one — raise the advisory `duplicate-listener` lint. This
   supersedes the old `kind: "pr-review"` construct; legacy `pr-review` roles are
   normalised onto channels on import (`normalizeLegacyReview`).
+  **`transport: 'internal'` (#1194):** a labelled, non-human channel port may carry
+  `transport: 'internal'` to opt its derived `<artifact>.labeled` listener into direct
+  delivery (poller-excluded, woken by `aee-emit`). Listeners over a consolidated
+  `(artifact, label)` group go internal only when **every** contributing channel opted
+  in — a lone poller producer keeps the whole listener on the poller. Unlabelled
+  channels (`*.opened`) and `gate: 'human'` channels stay poller-delivered. Concept:
+  `docs/internal-channels-concept.md` §4.6.
 - **Gate-ness is configuration, not a naming convention (#928).** `labels[]` is
   the authoritative registry: `humanGate: true` makes a label a human approval
   gate, `brake: true` makes it pause the loop — whatever the label is *called*.
@@ -230,8 +237,8 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   byte-identical when only `humans[]` changes). A label a human `emits` is
   *implicitly a gate* (an agent emitting it is a `gate-violation`); its `consumes`
   bind the generic-`@human` gate/brake/delivery touchpoints (#981) to the named
-  node — `{ label }` a brake they decide on, `{ artifact:'pr'|'issue', from }` an
-  artifact they review, `{ artifact:'file', name }` a data-flow output they read.
+  node — `{ label }` a brake they decide on **or** (when the label is not flagged `brake`) a plain delivery — they are notified when the label is set (a touchpoint, no blocking); `{ artifact:'pr'|'issue', from }` an
+  artifact they review; `{ artifact:'file', name }` a data-flow output they read.
   First matching human in `humans[]` order wins a binding; a label emitted by two
   humans draws both edges. The generic `@human` hub is GONE (#987 supersedes the
   #981 actor): a gate/brake/delivery with no human role wired stays UNBOUND — its

@@ -1067,7 +1067,7 @@ class LoopRunner(unittest.IsolatedAsyncioTestCase):
         trigger = self._loop_trigger(maxIterations=3)  # no `until` → runs to cap
         seen_ctx = []
 
-        async def fake_execute(trig, ctx=None, loop_sink=None):
+        async def fake_execute(trig, ctx=None, loop_sink=None, **_kw):
             seen_ctx.append(ctx)
 
         with patch.object(scheduler, "_execute", AsyncMock(side_effect=fake_execute)), \
@@ -1251,6 +1251,17 @@ class VerifySpecValidation(unittest.TestCase):
             {"maxIterations": 5, "verify": {"selfGraded": True}})
         self.assertTrue(ok)
 
+    def test_flow_form_ok(self):
+        ok, _ = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"flow": True}})
+        self.assertTrue(ok)
+
+    def test_flow_combined_with_agent_rejected(self):
+        ok, reason = entrypoint._validate_loop_trigger(
+            {"maxIterations": 5, "verify": {"flow": True, "agentId": "rev"}})
+        self.assertFalse(ok)
+        self.assertIn("exactly one", reason)
+
     def test_empty_verify_object_rejected(self):
         ok, reason = entrypoint._validate_loop_trigger(
             {"maxIterations": 5, "verify": {}})
@@ -1380,6 +1391,21 @@ class ResolveLoopVerify(unittest.TestCase):
         self.assertEqual(plan["mode"], "agent")
         self.assertEqual(plan["agentId"], "some-other")
         self.assertEqual(plan["source"], "authored")
+
+    def test_authored_flow_handoff_honoured_on_team_agent(self):
+        # {"flow": true} delegates verification to the downstream flow QS
+        # chain — no sibling is enforced even for a team agent (the wired
+        # reviewer would otherwise run twice: inline gate + its own trigger).
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"flow": True}}, "dev", is_team=True,
+            roster=[{"agentId": "rev", "role": "reviewer"}])
+        self.assertEqual(plan["mode"], "flow")
+        self.assertEqual(plan["source"], "authored-flow")
+
+    def test_authored_flow_handoff_honoured_standalone(self):
+        plan = entrypoint._resolve_loop_verify(
+            {"verify": {"flow": True}}, "solo", is_team=False, roster=[])
+        self.assertEqual(plan["mode"], "flow")
 
     def test_team_empty_verify_enforces_sibling(self):
         plan = entrypoint._resolve_loop_verify(

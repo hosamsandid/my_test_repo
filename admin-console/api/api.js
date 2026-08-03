@@ -6858,6 +6858,20 @@ function safeTeamSkillDir(teamId, name) {
   return dir;
 }
 
+// Global-pool skill dir with the CodeQL-legible containment guard — the twin of
+// safeTeamSkillDir for the global tier. A raw path.join(POOL_DIR,'skills',name)
+// with only a SKILL_NAME_RE guard is functionally safe but is NOT recognised by
+// CodeQL js/path-injection as a traversal barrier; the path.relative idiom is.
+// Returns null on an invalid or escaping name.
+function safeGlobalSkillDir(name) {
+  if (!SKILL_NAME_RE.test(name || '')) return null;
+  const base = path.resolve(POOL_DIR, 'skills');
+  const dir = path.resolve(base, name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
 // List team skills, optionally filtered to one team. Each is tagged with its
 // owning teamId so the UI (and a future membership filter, #302) can scope it.
 function listTeamSkills(filterTeamId) {
@@ -6967,8 +6981,8 @@ function gatherSkillCopies(name, scope) {
   const copies = [];
   if (!SKILL_NAME_RE.test(String(name || ''))) return copies;
 
-  const globalDir = path.join(POOL_DIR, 'skills', name);
-  if (fs.existsSync(path.join(globalDir, 'SKILL.md'))) {
+  const globalDir = safeGlobalSkillDir(name);
+  if (globalDir && fs.existsSync(path.join(globalDir, 'SKILL.md'))) {
     let origin = null;
     try { const man = skillManifest.readManifest(globalDir); origin = man && man.origin; } catch { /* none */ }
     const d = skillDriftSummary(globalDir, origin);
@@ -6988,7 +7002,10 @@ function gatherSkillCopies(name, scope) {
   for (const agentId of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
     if (!visibleAgent(scope, cfg)) continue;
-    const dir = path.join(AGENTS_DIR, agentId, 'skills', name);
+    const agentSkillsBase = path.resolve(AGENTS_DIR, agentId, 'skills');
+    const dir = path.resolve(agentSkillsBase, name);
+    const drel = path.relative(agentSkillsBase, dir);
+    if (drel.startsWith('..') || path.isAbsolute(drel)) continue;
     if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
     lazyStampAgentSkill(dir, agentId);
     const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
@@ -7121,8 +7138,9 @@ app.get('/api/skills/:name/lineage', (req, res) => {
     if (!visibleTeam(scope, qTeamId)) return res.status(404).json({ error: 'Skill not found' });
     viewed = { tier: 'team', teamId: qTeamId };
   } else {
+    viewedDir = safeGlobalSkillDir(name);
+    if (!viewedDir) return res.status(400).json({ error: 'Invalid skill name' });
     viewed = { tier: 'global' };
-    viewedDir = path.join(POOL_DIR, 'skills', name);
   }
   if (!fs.existsSync(path.join(viewedDir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
 

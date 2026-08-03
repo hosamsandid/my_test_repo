@@ -10,6 +10,7 @@ import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import AccentureLogo from './AccentureLogo';
+import AssistModelSelector from './AssistModelSelector';
 import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
@@ -393,6 +394,7 @@ export default function Shell({ children }) {
             {breadcrumbFor(location.pathname)}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+            <AssistModelSelector />
             <button
               onClick={toggleLightDark}
               title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}

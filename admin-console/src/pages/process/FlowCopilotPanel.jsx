@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { Sparkles, X, Send, Loader2, Check, AlertTriangle, Boxes, RefreshCw } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import { UNAUTHORIZED_EVENT } from '../../auth/AuthContext';
+import { assistHeaders, notifyAssistError } from '../../context/assist-transport.js';
 import {
   STARTER_PROMPTS,
   toApiMessages,
@@ -107,12 +108,13 @@ export default function FlowCopilotPanel({
       try {
         res = await fetch('/api/process/copilot', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...assistHeaders() },
           body: JSON.stringify({ messages: toApiMessages(history), bundle }),
         });
         if (!res.ok) {
           if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
           const errBody = await res.json().catch(() => null);
+          if (errBody && errBody.code) notifyAssistError(errBody.code);
           setMessages(ms => [...ms, {
             id: nextId(), role: 'error', retryText: trimmed,
             ...copilotErrorInfo(res.status, errBody && errBody.error),

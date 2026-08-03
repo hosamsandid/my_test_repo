@@ -7,6 +7,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | Page | Route | Purpose |
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
+| **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, and import agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
@@ -16,7 +17,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
 | **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
-| **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
+| **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
 

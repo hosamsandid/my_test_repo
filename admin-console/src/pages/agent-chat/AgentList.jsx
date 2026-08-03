@@ -447,6 +447,13 @@ const STATUS_DOT = {
   unread:  { color: 'var(--eb-status-success)', label: 'New message',       pulse: false },
   active:  { color: 'var(--eb-status-info)',    label: 'Active session',    pulse: false },
   idle:    { color: 'var(--eb-text-muted)',     label: 'Waiting for input', pulse: false },
+  // #1119 — 'disabled' (intentionally off, one-click enable to chat) and
+  // 'offline' (container not running — a real problem) used to collapse into a
+  // single red "Unavailable" dot, so the user couldn't tell which action was
+  // required. They now render as two distinct dots with actionable tooltips.
+  disabled: { color: 'var(--eb-status-warning)', label: 'Disabled — enable it to chat',   pulse: false },
+  offline:  { color: 'var(--eb-status-error)',   label: 'Offline — container not running', pulse: false },
+  // Kept as a fallback for any unrecognised state (see STATUS_DOT lookup below).
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
 
@@ -456,8 +463,12 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
   const [hovered, setHovered] = useState(false);
 
   // The "mark as unread" button is shown on hover when the agent is not
-  // already unread and not in an error/offline state.
-  const canMarkUnread = onMarkAsUnread && activityState !== 'unread' && activityState !== 'problem';
+  // already unread and not in a disabled/offline/error state.
+  const canMarkUnread = onMarkAsUnread
+    && activityState !== 'unread'
+    && activityState !== 'disabled'
+    && activityState !== 'offline'
+    && activityState !== 'problem';
   const canMove = !indent && (onMoveUp || onMoveDown);
 
   return (

@@ -119,7 +119,7 @@ export default function AgentChat() {
   const manuallyUnreadRef = useRef(new Set());
 
   // Map agentId -> effective display state
-  // ('busy'|'unread'|'idle'|'problem')
+  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline')
   const [agentStatuses, setAgentStatuses] = useState({});
   const statusTimerRef = useRef(null);
   useEffect(() => {
@@ -141,8 +141,15 @@ export default function AgentChat() {
           const map = {};
           for (const { id, activityState, lastResponseAt, hasSession } of list) {
             let effective;
-            if (activityState === 'disabled' || activityState === 'offline') {
-              effective = 'problem';
+            if (activityState === 'disabled') {
+              // Intentionally turned off — a one-click enable brings it back.
+              // Kept distinct from 'offline' so the list can tell the user
+              // whether they need to just enable the agent or investigate a
+              // down container (#1119).
+              effective = 'disabled';
+            } else if (activityState === 'offline') {
+              // Container is not running / crashed — a real problem to look at.
+              effective = 'offline';
             } else if (activityState === 'busy') {
               effective = 'busy';
             } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {

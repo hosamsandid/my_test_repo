@@ -3041,7 +3041,13 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
 // acting human (skillActor), so history is attributed to the person.
 function captureAuthoredPromptEdit(id, { field, oldContent, newContent, req, action = 'edited', note }) {
   try {
-    const agentDir = path.join(AGENTS_DIR, id);
+    // Containment: every caller AGENT_ID_RE-validates `id`, which already
+    // excludes traversal, but CodeQL doesn't model the regex as a sanitiser once
+    // the value travels through a call — re-check with path.relative before fs.
+    const agentsBaseDir = path.resolve(AGENTS_DIR);
+    const agentDir = path.resolve(agentsBaseDir, id);
+    const rel = path.relative(agentsBaseDir, agentDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
     const existing = promptHistory.readPromptHistory(agentDir);
     const next = promptHistory.stampPromptHistory(existing, {
       field,
@@ -3069,17 +3075,29 @@ function resolveAuthoredPrompt(id, cfg) {
   }
   // Prefer the materialized AGENT-PROMPT.md (the byte-exact authored text); fall
   // back to config.systemPrompt when the file isn't there yet.
-  let content = '';
-  try { content = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); }
-  catch { content = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : ''; }
+  const fallback = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
+  // Containment re-check (see captureAuthoredPromptEdit) — `id` is AGENT_ID_RE-
+  // validated upstream; confirm the resolved dir stays under AGENTS_DIR for CodeQL.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  let content = fallback;
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    try { content = fs.readFileSync(path.join(agentDir, 'AGENT-PROMPT.md'), 'utf8'); }
+    catch { content = fallback; }
+  }
   return { field: 'systemPrompt', content };
 }
 
 app.get('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   let content = '';
   try { content = fs.readFileSync(promptPath, 'utf8'); } catch { /* file may not exist yet */ }
   res.json({ content });
@@ -3088,7 +3106,10 @@ app.get('/api/agents/:id/prompt', (req, res) => {
 app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): a prompt edit is a management action, not
   // a visibility one — require team-admin rights over the agent's owning team.
@@ -3123,7 +3144,10 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
 app.get('/api/agents/:id/prompt-history', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   const existing = promptHistory.readPromptHistory(agentDir);
@@ -3140,7 +3164,10 @@ app.get('/api/agents/:id/prompt-history', (req, res) => {
 app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
   const { id, version } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   const existing = promptHistory.readPromptHistory(agentDir);
   const entry = promptHistory.findVersion(existing, version);
@@ -3155,7 +3182,10 @@ app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
 app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (req, res) => {
   const { id, version } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });

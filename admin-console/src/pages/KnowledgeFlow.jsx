@@ -3971,18 +3971,48 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
   const [storeError, setStoreError] = useState('');
   const [ack, setAck] = useState(false);
 
+  /* ── Assist synthesis provider (#1213) ── */
+  // The team agent's own model-options carries the set of providers usable by
+  // this team plus the currently-selected `assistLlmEndpointId`. oauth-token
+  // seats are filtered out — they cannot back server-side synthesis calls.
+  const [assistEndpoints, setAssistEndpoints] = useState([]);
+  const [assistEndpointId, setAssistEndpointId] = useState('');
+  const [assistBusy, setAssistBusy] = useState(false);
+
   useEffect(() => {
     let alive = true;
     Promise.all([
       fetch('/api/ssh-keys').then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/github-tokens').then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([keys, toks]) => {
+      fetch(`/api/agents/${encodeURIComponent(teamId)}/model-options`).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([keys, toks, mo]) => {
       if (!alive) return;
       setSshKeys(Array.isArray(keys) ? keys : []);
       setTokens(Array.isArray(toks) ? toks : []);
+      if (mo) {
+        setAssistEndpoints((mo.endpoints || []).filter(e => e && e.authType !== 'oauth-token'));
+        setAssistEndpointId(mo.assistLlmEndpointId || '');
+      }
     });
     return () => { alive = false; };
-  }, []);
+  }, [teamId]);
+
+  const saveAssist = (nextId) => {
+    setAssistBusy(true);
+    setAssistEndpointId(nextId); // optimistic
+    fetch(`/api/agents/${encodeURIComponent(teamId)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assistLlmEndpointId: nextId || null }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        feedback('ok', nextId ? 'Assist provider saved.' : 'Assist provider cleared — synthesis uses the platform default.');
+        onChanged && onChanged();
+      })
+      .catch(e => feedback('error', `Not saved: ${e.message}`))
+      .finally(() => setAssistBusy(false));
+  };
 
   // Did the effective location actually change? (drives the AC-5 confirmation.)
   const origBranch = initial.branch || KB_DEFAULT_BRANCH;
@@ -4056,6 +4086,36 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
               {label}{days === 60 ? ' · default' : ''}
             </Chip>
           ))}
+        </div>
+      </PanelSection>
+
+      {/* Assist model (#1213) — the provider the team's AUTONOMOUS synthesis
+          (curator auto-promotion + skill distillation) bills against. These runs
+          have no user session, so the console's per-user assist selector can't
+          apply; the choice is team-derived here instead. Unset → platform
+          default (.env). oauth-token seats never appear (not billable). */}
+      <PanelSection
+        title="Assist model"
+        blurb="Which registered Model Provider this team’s automatic knowledge synthesis is billed against — when the curator promotes converged lessons into a skill, or re-distills one. These runs happen on their own, with no person driving them, so they can’t use the per-user model picker in the header. Leave it on the platform default unless this team’s AI spend must be attributed to a specific provider key.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', maxWidth: 460 }}>
+          <label style={lbl}>Provider</label>
+          <select
+            value={assistEndpointId}
+            disabled={assistBusy}
+            onChange={e => saveAssist(e.target.value)}
+            style={inp}>
+            <option value="">Platform default (.env)</option>
+            {assistEndpoints.map(ep => (
+              <option key={ep.id} value={ep.id}>
+                {ep.name || ep.id}{ep.defaultModelId ? ` · ${ep.defaultModelId}` : ''}
+              </option>
+            ))}
+          </select>
+          {assistEndpoints.length === 0 && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              No selectable providers for this team yet — synthesis uses the platform default. Register an api-key Model Provider for this team to choose one.
+            </div>
+          )}
         </div>
       </PanelSection>
 

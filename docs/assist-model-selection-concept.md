@@ -1,6 +1,6 @@
 # Assist Model Selection — global, team-scoped model-provider selector for cross-cutting AI helpers
 
-Status: in progress — §4.1 (`assistSelectableEndpoint`) + §4.2 (`GET /api/assist/model-options`) shipped in #1210; rest of Phase 1 pending (#1211 enforcement, #1212 header UI)
+Status: in progress — Phase 1 shipped (#1210 `assistSelectableEndpoint` + `GET /api/assist/model-options`; #1211 `resolveAssistTarget` enforcement + provenance; #1212 header selector UI in review); Phase 2 §4.6 team-derived `assistLlmEndpointId` + `_synthesizeSkillMd` binding for curator auto-promotion/distillation shipped in #1213; domain-bootstrap pass-through (#1214) pending
 
 ## 1. Problem
 

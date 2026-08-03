@@ -51,13 +51,13 @@ The optional **label suffix** field is for when you are running two or more team
 
 ## Step 4: Knowledge (slide 5)
 
-Screenshot: wizard Knowledge step — skills picker, read-only MCP list, autonomy level selector.
+Screenshot: wizard Knowledge step — skills picker, read-only MCP list, "Advanced: knowledge learning" disclosure (collapsed by default).
 
 The fourth step is Knowledge — and it's explicitly optional. This is where we decide what the team knows and how it learns.
 
-There are three parts to it. First, the initial team skills: skills are curated capability packs from the pool — think COBOL analysis, JCL conversion, and so on for the mainframe-migration domain. Whatever we pick here is placed on the team as a whole, and every member inherits it automatically. Second, the knowledge sources: these are MCP servers the team can query at runtime — a wiki, a vector store, a graph database. These are inherited from the working environment, so they're shown here read-only; to change them you'd edit the environment.
+There are two immediately visible parts and one advanced section. First, the initial team skills: skills are curated capability packs from the pool — think COBOL analysis, JCL conversion, and so on for the mainframe-migration domain. Whatever we pick here is placed on the team as a whole, and every member inherits it automatically. Second, the knowledge sources: these are MCP servers the team can query at runtime — a wiki, a vector store, a graph database. These are inherited from the working environment, so they're shown here read-only; to change them you'd edit the environment.
 
-The third part is the most interesting: how the team learns and shares knowledge. Agents in the Agent Studio don't just execute — they accumulate lessons over time and can share them across the team. Here you set the autonomy level: at the lower levels, learnings are proposed and a human reviews them before they become shared team knowledge; at the highest level, the team curates and promotes its own knowledge automatically, closing the loop without a human in it. These are just sensible defaults every team starts on, and you can change all of them later on the Knowledge page — so for the demo we can simply accept the defaults and continue.
+The learning configuration is collapsed behind an **"Advanced: knowledge learning"** disclosure (closed by default, with the one-liner "Controls how much the team auto-learns from its work — defaults are fine to start"). Expanding it reveals the autonomy level and promotion gates: at the lower levels, learnings are proposed and a human reviews them before they become shared team knowledge; at the highest level, the team curates and promotes its own knowledge automatically, closing the loop without a human in it. These are just sensible defaults every team starts on, and you can change all of them later on the Knowledge page — so for the demo we can simply accept the defaults and continue.
 
 ## Step 5: Review & create (slide 6)
 

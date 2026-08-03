@@ -75,6 +75,7 @@ export function summarizeLoopTrigger(trigger) {
   if (v && typeof v === 'object') {
     if (v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
     else if (v.command && String(v.command).trim()) parts.push(`✓ ${String(v.command).trim()}`);
+    else if (v.flow === true) parts.push('→ flow');
   }
   return parts.length ? parts.join(' · ') : 'loop';
 }
@@ -96,7 +97,8 @@ function compactTokens(n) {
 // string), not the raw trigger's `{ command | agentId | selfGraded }`. Surfaces
 // the three loop-defining facts (concept §4.5): budget (`≤N iter`, optional
 // token cap), stop condition (`until: <cmd>`) and verifier (`✓ <role>` for an
-// agent verifier, `✓ check` for a command verifier, `✓ self` when self-graded).
+// agent verifier, `✓ check` for a command verifier, `✓ self` when self-graded,
+// `→ flow` when verification is delegated to the downstream QS chain).
 // Returns a string (never blank — falls back to "loop").
 export function summarizeLoopEdge(loop) {
   if (!loop || typeof loop !== 'object') return 'loop';
@@ -112,6 +114,7 @@ export function summarizeLoopEdge(loop) {
     if (v.mode === 'agent' && v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
     else if (v.mode === 'command') parts.push('✓ check');
     else if (v.mode === 'self-graded') parts.push('✓ self');
+    else if (v.mode === 'flow') parts.push('→ flow');
   }
   return parts.length ? parts.join(' · ') : 'loop';
 }

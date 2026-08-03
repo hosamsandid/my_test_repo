@@ -139,7 +139,9 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     minGapSeconds: initial?.minGapSeconds != null ? String(initial.minGapSeconds) : '',
     untilCommand:  (initial?.until && typeof initial.until === 'object' && initial.until.command) || '',
     verifyMode:    (initial?.verify && typeof initial.verify === 'object')
-      ? (initial.verify.agentId ? 'agent' : initial.verify.command ? 'command' : 'none')
+      ? (initial.verify.agentId ? 'agent'
+        : initial.verify.command ? 'command'
+        : initial.verify.flow === true ? 'flow' : 'none')
       : 'none',
     verifyCommand: (initial?.verify && typeof initial.verify === 'object' && initial.verify.command) || '',
     verifyAgentId: (initial?.verify && typeof initial.verify === 'object' && initial.verify.agentId) || '',
@@ -190,6 +192,8 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         body.verify = { command: form.verifyCommand.trim() };
       } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
         body.verify = { agentId: form.verifyAgentId.trim() };
+      } else if (form.verifyMode === 'flow') {
+        body.verify = { flow: true };
       }
       const mt = Number(form.maxTokens);
       if (form.maxTokens.trim() && Number.isFinite(mt) && mt > 0) body.maxTokens = mt;
@@ -305,7 +309,16 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
               <option value="none">No verifier (self-graded)</option>
               <option value="command">Command — must exit 0 for the iteration to count</option>
               <option value="agent">Agent — a separate role grades the work</option>
+              <option value="flow">Flow — the downstream QS chain checks each hand-off</option>
             </select>
+            {form.verifyMode === 'flow' && (
+              <div style={fieldHintStyle}>
+                No inline gate between iterations — each iteration hands its work to
+                the flow (PR / label) and the reviewers wired downstream verify it
+                there. Use when the loop starts a QS chain, so the same reviewer
+                does not check the work twice.
+              </div>
+            )}
             {form.verifyMode === 'command' && (
               <div style={{ marginTop: 'var(--eb-space-2)' }}>
                 <FormInput label="" value={form.verifyCommand} onChange={v => update('verifyCommand', v)} placeholder="e.g. npm run lint && npm test" />

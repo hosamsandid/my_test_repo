@@ -137,6 +137,13 @@ test('summarizeLoopTrigger: command-form verifier and bare loop fallback', () =>
   assert.equal(summarizeLoopTrigger(null), 'loop');
 });
 
+test('summarizeLoopTrigger: flow hand-off verifier renders "→ flow"', () => {
+  assert.equal(
+    summarizeLoopTrigger({ maxIterations: 10, verify: { flow: true } }),
+    '≤10 iter · → flow',
+  );
+});
+
 test('summarizeLoopEdge: budget + until + agent verifier from the redacted edge summary (#936 AC2)', () => {
   // The graph-edge summary carries verify as { mode, agentId? } — never the
   // raw command string (redacted by process-graph triggerView).
@@ -157,6 +164,13 @@ test('summarizeLoopEdge: self-graded verifier renders "✓ self"; token budget c
   assert.equal(
     summarizeLoopEdge({ maxIterations: 3, maxTokens: 500_000, verify: { mode: 'self-graded' } }),
     '≤3 iter · ≤500k tok · ✓ self',
+  );
+});
+
+test('summarizeLoopEdge: flow hand-off verifier renders "→ flow"', () => {
+  assert.equal(
+    summarizeLoopEdge({ maxIterations: 10, verify: { mode: 'flow' } }),
+    '≤10 iter · → flow',
   );
 });
 

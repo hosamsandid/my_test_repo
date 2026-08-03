@@ -36,6 +36,9 @@ function buildVerifyRow(v) {
     if (v.command && String(v.command).trim()) {
       return { kind: 'command', label: 'Verified by command', value: String(v.command).trim() };
     }
+    if (v.flow === true) {
+      return { kind: 'flow', label: 'Verification', value: 'Flow hand-off (downstream QS chain)' };
+    }
   }
   return { kind: 'self', label: 'Verification', value: 'Self-graded' };
 }

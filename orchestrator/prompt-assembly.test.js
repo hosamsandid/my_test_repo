@@ -178,9 +178,11 @@ test('the injected Trigger-management block documents the loop trigger and its s
   assert.ok(auto.includes('until.command'));
   assert.ok(auto.includes('maxTokens'));
   assert.ok(/done|exhausted|paused/.test(auto));
-  // Separate-verifier ("don't grade your own work") rule.
+  // Separate-verifier ("don't grade your own work") rule, incl. the flow
+  // hand-off form (verification delegated to the wired downstream QS chain).
   assert.ok(/Don't grade your own work/i.test(auto));
   assert.ok(auto.includes('selfGraded'));
+  assert.ok(auto.includes('{"flow": true}'));
   // A non-autonomous agent never sees any of it (no Trigger section at all).
   const dm = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: false });
   assert.ok(!dm.includes('**Loop (loop):**'));

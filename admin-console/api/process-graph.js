@@ -197,6 +197,10 @@ function triggerView(t) {
         v.verify = { mode: 'command' };
       } else if (typeof t.verify.agentId === 'string' && t.verify.agentId.trim()) {
         v.verify = { mode: 'agent', agentId: t.verify.agentId };
+      } else if (t.verify.flow === true) {
+        // Flow hand-off: verification is delegated to the wired downstream
+        // QS chain (no inline gate) — the badge renders it as `→ flow`.
+        v.verify = { mode: 'flow' };
       } else if (t.verify.selfGraded === true) {
         v.verify = { mode: 'self-graded' };
       }

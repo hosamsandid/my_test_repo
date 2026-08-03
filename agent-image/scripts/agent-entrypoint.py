@@ -3316,12 +3316,17 @@ def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
 def _validate_verify_spec(verify) -> tuple[bool, str]:
     """Validate a loop trigger's optional ``verify`` block (#933, concept §4.2).
 
-    A verifier takes exactly one of three shapes:
+    A verifier takes exactly one of four shapes:
 
     - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
       ``_run_pre_check``).
     - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
       agent and block on its verdict.
+    - ``{"flow": true}`` — hand-off to the flow: no inline gate, verification
+      happens downstream through the team's wired QS chain (the reviewer the
+      loop's own hand-off — PR / label — wakes anyway). Honoured for team
+      agents: the separation still holds, it is just asynchronous, and choosing
+      it is explicit — so it never counts as *silently* removing the verifier.
     - ``{"selfGraded": true}`` — an explicit "no separate verifier" opt-out
       (permitted for standalone agents; a team agent's empty/self-graded verify
       is re-enforced to a sibling at resolve time — the separation can never be
@@ -3335,18 +3340,22 @@ def _validate_verify_spec(verify) -> tuple[bool, str]:
     cmd = verify.get("command")
     agent_id = verify.get("agentId")
     self_graded = verify.get("selfGraded")
+    flow = verify.get("flow")
     forms = sum(1 for present in (
-        cmd is not None, agent_id is not None, self_graded is True) if present)
+        cmd is not None, agent_id is not None, self_graded is True,
+        flow is True) if present)
     if forms == 0:
-        return False, "verify must set one of command, agentId or selfGraded"
+        return False, "verify must set one of command, agentId, flow or selfGraded"
     if forms > 1:
-        return False, "verify must set exactly one of command, agentId or selfGraded"
+        return False, "verify must set exactly one of command, agentId, flow or selfGraded"
     if cmd is not None and not (isinstance(cmd, str) and cmd.strip()):
         return False, "verify.command must be a non-empty string"
     if agent_id is not None and not (isinstance(agent_id, str) and agent_id.strip()):
         return False, "verify.agentId must be a non-empty string"
     if self_graded is not None and not isinstance(self_graded, bool):
         return False, "verify.selfGraded must be a boolean"
+    if flow is not None and not isinstance(flow, bool):
+        return False, "verify.flow must be a boolean"
     env = verify.get("env")
     if env is not None and not isinstance(env, dict):
         return False, "verify.env must be an object"
@@ -3439,7 +3448,7 @@ def _resolve_loop_verify(trigger: dict, agent_id: str, *, is_team: bool,
 
     Returns a plan the runner acts on::
 
-        {"mode": "command"|"agent"|"self-graded",
+        {"mode": "command"|"agent"|"flow"|"self-graded",
          "command": <str>, "env": <dict>,        # mode == command
          "agentId": <str>,                        # mode == agent
          "source": <str>, "note": <str>}          # provenance / human-readable
@@ -3462,6 +3471,18 @@ def _resolve_loop_verify(trigger: dict, agent_id: str, *, is_team: bool,
                 "source": "authored",
                 "note": f"agent verifier (authored): {verify['agentId']}"}
 
+    # 3. Authored flow hand-off — honoured for team AND standalone agents.
+    # No inline gate: each iteration ends in the loop's own hand-off (PR /
+    # label) and the flow's wired downstream QS chain verifies asynchronously —
+    # the same reviewer would otherwise run twice (inline verifier + its own
+    # flow trigger). The separation principle holds because a *different*,
+    # explicitly wired consumer still checks the work; it is just not loop
+    # backpressure. Explicitly authored, so it is never a silent removal.
+    if verify and verify.get("flow") is True:
+        return {"mode": "flow", "source": "authored-flow",
+                "note": "verification delegated to the downstream flow "
+                        "(wired QS chain verifies each hand-off)"}
+
     # Below here: no usable authored verifier (empty, self-graded ack, or an
     # agentId that illegally pointed at the worker).
 
@@ -3481,7 +3502,7 @@ def _resolve_loop_verify(trigger: dict, agent_id: str, *, is_team: bool,
         return {"mode": "self-graded", "source": "team-no-sibling",
                 "note": "team has no sibling to verify — self-graded (no separation possible)"}
 
-    # 3. Standalone agent: self-graded is allowed (explicit ack or default).
+    # 4. Standalone agent: self-graded is allowed (explicit ack or default).
     src = "standalone-ack" if (verify and verify.get("selfGraded")) else "standalone-default"
     return {"mode": "self-graded", "source": src,
             "note": "self-graded (standalone agent, no forced verifier)"}
@@ -4649,6 +4670,14 @@ class TriggerScheduler:
                 verdict = "passed" if outcome == "done" else "not met"
                 lines.append(f"- Stop check (`until`): {verdict} (no output)")
 
+        # Flow hand-off: no inline gate ran, but the outcome should say where
+        # verification actually happens so "0 blocked iterations" is not read
+        # as "unverified".
+        if isinstance(verify_plan, dict) and verify_plan.get("mode") == "flow":
+            lines.append(
+                "- Verification: delegated to the downstream flow — each "
+                "iteration's hand-off is checked by the wired QS chain.")
+
         # Verifier gate summary (#933) — only when a real gate was in effect.
         if isinstance(verify_plan, dict) and verify_plan.get("mode") in ("command", "agent"):
             lines.append(f"- Verifier: {verify_plan.get('note') or verify_plan.get('mode')}")
@@ -4702,6 +4731,7 @@ class TriggerScheduler:
         has_authored = bool(
             verify and (
                 verify.get("command")
+                or verify.get("flow") is True
                 or (verify.get("agentId") and verify.get("agentId") != self._agent_id)
             )
         )
@@ -4733,6 +4763,8 @@ class TriggerScheduler:
 
         - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
         - ``agent``   → delegate to a different agent and block on its verdict.
+        - ``flow``    → no inline gate; the downstream flow QS chain verifies
+          each hand-off asynchronously.
         - ``self-graded`` → no gate; the iteration always counts.
         """
         mode = plan.get("mode")

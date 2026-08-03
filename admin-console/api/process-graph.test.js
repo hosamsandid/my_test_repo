@@ -789,6 +789,13 @@ test('triggerView: loop carries the verifier shape but never the command/env (#9
   assert.deepEqual(gAgent.nodes[0].triggers[0].verify,
     { mode: 'agent', agentId: 'team-x-reviewer' });
 
+  const gFlow = buildProcessGraph([
+    { id: 'dev', role: 'agent', triggers: [{
+      id: 'l', type: 'loop', maxIterations: 5, verify: { flow: true },
+    }] },
+  ]);
+  assert.deepEqual(gFlow.nodes[0].triggers[0].verify, { mode: 'flow' });
+
   const gNone = buildProcessGraph([
     { id: 'dev', role: 'agent', triggers: [{ id: 'l', type: 'loop', maxIterations: 5 }] },
   ]);

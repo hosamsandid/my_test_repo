@@ -235,11 +235,13 @@ and the analyst is told the sample size — cards on thin evidence must say so.
 
 ## 8. Rollout
 
-1. **Phase 1 — measure**: collector + scheduled anomaly-sweep persistence + metrics tiles. No
-   LLM, no cards. Value on day one: the first cross-log run ledger the platform has.
+1. **Phase 1 — measure** *(shipped — #1221/#1222/#1223)*: collector + scheduled anomaly-sweep
+   persistence + metrics tiles. No LLM, no cards.
 2. **Phase 2 — propose**: analyst + cards at autonomy 1/2, apply via existing choke-points.
-   Depends on #990 (prompt history) being shipped for the prompt-improvement class; other classes
-   don't wait for it.
+   **Apply endpoint live (#1225):** `trigger-hygiene` is the first wired class (deterministic
+   heuristic, existing `DELETE /api/agents/:id/triggers/:tid` choke-point); `prompt-improvement`,
+   `flow-wiring`, `threshold-tuning`, and `knowledge-handoff` apply paths land as follow-ups on
+   the same engine. `prompt-improvement` also depends on #990 (prompt history) for its undo path.
 3. **Phase 3 — validate**: before/after comparison, `validated`/`regressed` verdicts, rollback
    cards.
 4. **Phase 4 — restricted autonomy 3**: auto-apply for `threshold-tuning` only, hard-gated until

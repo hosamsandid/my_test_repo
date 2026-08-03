@@ -36,6 +36,7 @@ const githubEventLog = require("./github-event-log");
 const hillClimbMetrics = require("./hill-climb-metrics");
 const hillClimbSweep = require("./hill-climb-sweep");
 const hillClimbCards = require("./hill-climb-cards");
+const hillClimbApply = require("./hill-climb-apply");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -1491,6 +1492,32 @@ function dismissHillClimbCard(teamId, cardId, { now = Date.now() } = {}) {
   card.updatedAt = new Date(now).toISOString();
   writeHillClimbCards(teamId, cards);
   return card;
+}
+
+// Record an APPLIED card (hill-climbing loop Phase 2b, #1225). The console runs
+// the actual mutation through the existing audited choke-point (as the acting
+// human); this endpoint only stamps the outcome onto the card so #1226 can
+// measure it across the config boundary. Gated: autonomy < 2 refuses (apply is
+// a level-2 action even via a direct call), and only an OPEN card can be applied
+// (an already-applied/dismissed card is left untouched). The applied patch
+// carries the apply timestamp, the config-version reference, the baseline
+// metrics snapshot, the undo payload the console gathered before mutating, and a
+// one-window cooldown (so a re-detected finding can't bump the applied card and
+// contaminate its own measurement). Returns { ok, code?, card? }.
+function applyHillClimbCard(teamId, cardId, { now = Date.now(), appliedBy = null, undo = null, configVersionRef = null } = {}) {
+  const { autonomy, windowDays } = hillClimbCardConfig(teamId);
+  if (!hillClimbApply.canApplyAtAutonomy(autonomy)) {
+    return { ok: false, code: "autonomy-locked", autonomy };
+  }
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return { ok: false, code: "card-not-found" };
+  if (card.status !== "open") return { ok: false, code: "card-not-open", status: card.status };
+  const snapshot = readLatestHillClimbSnapshot(teamId);
+  const patch = hillClimbApply.buildAppliedPatch(card, { now, appliedBy, snapshot, undo, configVersionRef, windowDays });
+  Object.assign(card, patch);
+  writeHillClimbCards(teamId, cards);
+  return { ok: true, card };
 }
 
 // Run one hill-climb pass for a team behind the per-team single-flight lock —
@@ -12142,7 +12169,10 @@ async function main() {
       try {
         const cfg = loadAgentConfig(teamId);
         if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
-        return sendJson(res, 200, { teamId, cards: readHillClimbCards(teamId) });
+        // `autonomy` rides along so the console can gate the Apply action (#1225)
+        // before it runs any mutation, without a second round-trip.
+        const { autonomy } = hillClimbCardConfig(teamId);
+        return sendJson(res, 200, { teamId, autonomy, cards: readHillClimbCards(teamId) });
       } catch (err) {
         console.error(`[Orchestrator] hill-climb cards error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
@@ -12198,6 +12228,43 @@ async function main() {
         console.error(`[Orchestrator] hill-climb card dismiss error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/apply — record an
+    // APPLIED card (hill-climbing loop Phase 2b, #1225). The console has already
+    // run the card's declared apply path through the existing audited choke-point
+    // (as the acting human); this only stamps the outcome onto the card so #1226
+    // can measure it. Autonomy < 2 refuses (apply is a level-2 action even via a
+    // direct call), and only an open card can be applied. Body: { appliedBy?,
+    // undo?, configVersionRef? } gathered console-side before the mutation.
+    const hillClimbApplyMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/apply$/);
+    if (hillClimbApplyMatch) {
+      const teamId = decodeURIComponent(hillClimbApplyMatch[1]);
+      const cardId = decodeURIComponent(hillClimbApplyMatch[2]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const result = applyHillClimbCard(teamId, cardId, {
+            appliedBy: body.appliedBy || null,
+            undo: body.undo || null,
+            configVersionRef: body.configVersionRef || null,
+          });
+          if (!result.ok) {
+            const status = result.code === 'card-not-found' ? 404
+              : result.code === 'autonomy-locked' ? 403
+              : 409;
+            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
+          }
+          return sendJson(res, 200, { teamId, card: result.card });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb card apply error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned

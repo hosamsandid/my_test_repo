@@ -42,6 +42,7 @@ const agentTemplateStore = require('./agent-templates-store');
 const { runCopilot, sanitizeCopilotHistory } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
+const hillClimbApplyGuard = require('./hill-climb-apply-guard');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
@@ -3652,6 +3653,23 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   res.json(triggers[idx]);
 });
 
+// The trigger-delete choke-point, factored so both the DELETE route and the
+// hill-climb applier (#1225) run the exact same write + reconcile. Returns the
+// removed trigger object (or null if it wasn't present) so a caller can retain
+// it (the applier keeps the deleted trigger JSON as its undo payload). Throws on
+// a write failure.
+async function deleteAgentTrigger(id, triggerId) {
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
+  const removed = triggers.find(t => t && t.id === triggerId) || null;
+  const filtered = triggers.filter(t => t.id !== triggerId);
+  await putTriggers(id, filtered);
+  // Consumer write (#1007) — a trigger write changes who consumes its siblings'
+  // labels, so re-render the team's Outcomes blocks.
+  await reconcileTeamOutcomesForAgent(id);
+  return removed;
+}
+
 app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -3665,16 +3683,11 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   // Config-write authorization (#989): triggers are agent config — gate on
   // team-admin management rights, not visibility.
   if (denyUnlessCanManageAgent(req, res, agentDir)) return;
-  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-  const triggers = Array.isArray(cur) ? cur : [];
-  const filtered = triggers.filter(t => t.id !== triggerId);
   try {
-    await putTriggers(id, filtered);
+    await deleteAgentTrigger(id, triggerId);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
-  // Consumer write (#1007) — see the POST handler.
-  await reconcileTeamOutcomesForAgent(id);
   res.status(204).end();
 });
 
@@ -6147,6 +6160,115 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/dismiss', apiLimiter, asyn
     return res.status(resp.status).json(data);
   } catch (err) {
     return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/apply — the gated applier
+// (#1225, concept §3.3). Runs a card's declared apply path through an existing
+// audited console choke-point *as the acting human* (this endpoint is itself a
+// mutating /api call, so `audit.auditMutations` records it under req.user; for a
+// prompt change the choke-point also stamps `.aee/prompt-history.json`), then
+// asks the orchestrator to record the applied card (timestamp + config-version
+// reference + baseline snapshot + undo payload) for #1226 to measure.
+//
+// Gates, all server-side so a direct API call can't bypass them: autonomy 2
+// required (0/1 deny); only an open card applies; only executable classes apply
+// (trigger-hygiene is wired first — DELETE /api/agents/:id/triggers/:tid); the
+// trigger guard rejects intrinsic/derived/human-gate triggers; and a card whose
+// target trigger changed since detection is refused with 409 stale-card.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+
+  // 1) Pull the card + the team's autonomy from the store (the orchestrator is
+  //    the authority on both).
+  let cards; let autonomy;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) return res.status(resp.status).json(data);
+    cards = Array.isArray(data.cards) ? data.cards : [];
+    autonomy = data.autonomy;
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const card = cards.find(c => c && c.id === cardId);
+  if (!card) return res.status(404).json({ error: 'card not found' });
+  // Autonomy 0/1 deny apply (not merely hide it).
+  if (!(autonomy >= 2)) {
+    return res.status(403).json({ error: 'autonomy-locked', code: 'autonomy-locked', autonomy });
+  }
+  if (card.status !== 'open') {
+    return res.status(409).json({ error: 'card-not-open', code: 'card-not-open', status: card.status });
+  }
+  if (!hillClimbApplyGuard.isExecutableClass(card.class)) {
+    return res.status(422).json({
+      error: 'card-not-applicable', code: 'card-not-applicable', class: card.class,
+      message: `apply for '${card.class}' cards is not wired yet — only trigger-hygiene applies in this release`,
+    });
+  }
+
+  // 2) trigger-hygiene apply path: DELETE /api/agents/:id/triggers/:tid.
+  const ref = hillClimbApplyGuard.parseTriggerRef(card);
+  if (!ref || !AGENT_ID_RE.test(ref.agentId)) {
+    return res.status(422).json({ error: 'card does not name a valid trigger', code: 'card-not-applicable' });
+  }
+  const agentDir = path.join(AGENTS_DIR, ref.agentId);
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  // The card's target must still be a live member of this team (else re-detect).
+  if (!agentCfg || (agentCfg.parentTeamId !== teamId && ref.agentId !== teamId)) {
+    return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: `agent '${ref.agentId}' is not a live member of this team — re-detect first` });
+  }
+  // Config-write authorization (#989): deleting a trigger is a management action.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
+
+  const triggers = readJsonFile(controlOrAgentPath(ref.agentId, 'triggers.json'), []);
+  const liveTrigger = (Array.isArray(triggers) ? triggers : []).find(t => t && t.id === ref.triggerId) || null;
+  // Staleness: the target trigger must still exist (AC 409 stale-card).
+  const staleReason = hillClimbApplyGuard.staleTriggerReason(card, liveTrigger);
+  if (staleReason) {
+    return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: staleReason });
+  }
+  // Guard: never delete an intrinsic/derived/human-gate trigger (AC).
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  const guardReason = hillClimbApplyGuard.triggerApplyGuardError(liveTrigger, {
+    humanGateLabels: hillClimbApplyGuard.humanGateLabelSet(teamCfg),
+  });
+  if (guardReason) {
+    return res.status(403).json({ error: 'protected-trigger', code: 'protected-trigger', reason: guardReason });
+  }
+
+  // 3) Execute the mutation through the shared choke-point (audited under
+  //    req.user via the mounted auditMutations middleware).
+  let deletedTrigger;
+  try {
+    deletedTrigger = await deleteAgentTrigger(ref.agentId, ref.triggerId);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not delete trigger: ${err.message}` });
+  }
+
+  // 4) Record the applied card (undo payload = the deleted trigger JSON).
+  const appliedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  const undo = { kind: 'restore-trigger', agentId: ref.agentId, trigger: deletedTrigger };
+  const configVersionRef = { kind: 'trigger-delete', agentId: ref.agentId, triggerId: ref.triggerId, at: new Date().toISOString() };
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appliedBy, undo, configVersionRef }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) {
+      // The mutation succeeded but the card couldn't be marked — surface it
+      // honestly so the operator knows the trigger is already gone.
+      return res.status(502).json({ error: 'applied-not-recorded', code: 'applied-not-recorded', applied: true, deletedTrigger, recordStatus: resp.status, recordError: data.error });
+    }
+    return res.status(200).json({ teamId, applied: true, card: data.card, deletedTrigger });
+  } catch (err) {
+    return res.status(502).json({ error: 'applied-not-recorded', code: 'applied-not-recorded', applied: true, deletedTrigger, recordError: err.message });
   }
 });
 

@@ -1,0 +1,95 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert');
+
+const {
+  isExecutableClass,
+  parseTriggerRef,
+  triggerApplyGuardError,
+  staleTriggerReason,
+  humanGateLabelSet,
+} = require('./hill-climb-apply-guard');
+
+const triggerCard = (over = {}) => ({
+  id: 'card-1',
+  class: 'trigger-hygiene',
+  object: { kind: 'trigger', id: 'agent-x/nightly' },
+  proposedChange: { action: 'delete-or-rescope', agentId: 'agent-x', triggerId: 'nightly' },
+  targetMetric: 'waste.wasteRuns',
+  status: 'open',
+  ...over,
+});
+
+test('isExecutableClass: only trigger-hygiene is wired in this ticket', () => {
+  assert.equal(isExecutableClass('trigger-hygiene'), true);
+  assert.equal(isExecutableClass('prompt-improvement'), false);
+  assert.equal(isExecutableClass('flow-wiring'), false);
+  assert.equal(isExecutableClass('threshold-tuning'), false);
+  assert.equal(isExecutableClass(undefined), false);
+});
+
+test('parseTriggerRef: prefers proposedChange, falls back to object id', () => {
+  assert.deepEqual(parseTriggerRef(triggerCard()), { agentId: 'agent-x', triggerId: 'nightly' });
+  assert.deepEqual(
+    parseTriggerRef({ object: { id: 'agent-y/some-trigger' }, proposedChange: {} }),
+    { agentId: 'agent-y', triggerId: 'some-trigger' },
+  );
+  // split on the first slash only (agent ids have no slash; tolerate one in the id)
+  assert.deepEqual(
+    parseTriggerRef({ object: { id: 'agent-z/a/b' } }),
+    { agentId: 'agent-z', triggerId: 'a/b' },
+  );
+  assert.equal(parseTriggerRef({ object: { id: 'no-slash' } }), null);
+  assert.equal(parseTriggerRef(null), null);
+});
+
+test('triggerApplyGuardError: protects intrinsic/derived/human-gate triggers', () => {
+  assert.equal(triggerApplyGuardError({ id: 't', type: 'cron' }), null, 'plain trigger is deletable');
+  assert.match(triggerApplyGuardError({ intrinsic: true }), /intrinsic/);
+  assert.match(triggerApplyGuardError({ dataFlow: true }), /data-flow|ports/);
+  assert.match(triggerApplyGuardError({ channel: true }), /channel|ports/);
+  assert.match(triggerApplyGuardError({ humanGate: true }), /human-gate/);
+  assert.equal(triggerApplyGuardError(null), 'trigger not found');
+});
+
+test('triggerApplyGuardError: rejects a listener for a human-gate label', () => {
+  const gate = new Set(['approved-for-dispatch']);
+  assert.match(
+    triggerApplyGuardError({ type: 'github-event', labelFilter: 'approved-for-dispatch' }, { humanGateLabels: gate }),
+    /human-gate label/,
+  );
+  assert.equal(
+    triggerApplyGuardError({ type: 'github-event', labelFilter: 'ready-for-review' }, { humanGateLabels: gate }),
+    null,
+  );
+  assert.match(
+    triggerApplyGuardError({ labelFilter: 'sec:approved' }, { humanGateLabels: ['sec:approved'] }),
+    /human-gate label/,
+  );
+});
+
+test('staleTriggerReason: stale when the live trigger is gone', () => {
+  assert.equal(staleTriggerReason(triggerCard(), { id: 'nightly', type: 'cron' }), null);
+  assert.match(staleTriggerReason(triggerCard(), null), /no longer exists|re-detect/);
+  assert.match(staleTriggerReason({ object: { id: 'no-slash' } }, { id: 'x' }), /concrete trigger/);
+});
+
+test('humanGateLabelSet: extracts only humanGate-flagged label names', () => {
+  const cfg = {
+    labels: [
+      { name: 'approved-for-dispatch', humanGate: true },
+      { name: 'ready-for-review', humanGate: false },
+      { name: 'sec:approved', humanGate: true, brake: false },
+      { name: '' , humanGate: true },
+      null,
+    ],
+  };
+  const s = humanGateLabelSet(cfg);
+  assert.equal(s.has('approved-for-dispatch'), true);
+  assert.equal(s.has('sec:approved'), true);
+  assert.equal(s.has('ready-for-review'), false);
+  assert.equal(s.size, 2);
+  assert.deepEqual([...humanGateLabelSet({})], []);
+  assert.deepEqual([...humanGateLabelSet(null)], []);
+});

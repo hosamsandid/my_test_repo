@@ -123,6 +123,12 @@ export default function ChatPanel({
   // reflect its lifecycle (it self-removes on any terminal outcome).
   const [loopDialogOpen, setLoopDialogOpen] = useState(false);
   const [activeLoop, setActiveLoop] = useState(null);
+  // Re-launch pre-fill (#1231): when a finished-loop record's "Start again"
+  // button is pressed, seed the launcher with that loop's settings. null = a
+  // blank launcher (the composer "+" path). A fresh loop is created on submit
+  // (the record's trigger id is never carried), so the original record stays
+  // unchanged.
+  const [relaunchValues, setRelaunchValues] = useState(null);
   // Live progress of the running loop (#1155): `{ iteration, maxIterations }`
   // or null (neutral running state), derived from the numbered `trigger.fired`
   // session-log rows at the same cadence as the trigger poll.
@@ -236,6 +242,7 @@ export default function ChatPanel({
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+            'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -327,6 +334,7 @@ export default function ChatPanel({
       body:     ev.content?.body || '',
       msgtype:  ev.content?.msgtype || 'm.text',
       'io.aee.trigger':  triggerMeta,
+      'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
     };
 
     // A trigger-started run always posts this notice before invoking Claude
@@ -436,6 +444,7 @@ export default function ChatPanel({
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+            'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -692,7 +701,26 @@ export default function ChatPanel({
 
   function handleLoopClick() {
     if (activeLoop) setShowStopLoopConfirm(true);
-    else setLoopDialogOpen(true);
+    else { setRelaunchValues(null); setLoopDialogOpen(true); }
+  }
+
+  // "Start again" on a finished-loop record (#1231): open the loop launcher
+  // pre-filled with that loop's config. Does NOT start the loop — the user
+  // confirms/edits in the dialog, exactly like a fresh launch. If a loop is
+  // already running the launcher can't open (the composer control is in Stop
+  // mode), so surface that rather than silently doing nothing.
+  function handleRelaunchLoop(values) {
+    if (activeLoop) {
+      setError('A loop is already running for this agent — stop it before starting another.');
+      return;
+    }
+    setRelaunchValues(values || null);
+    setLoopDialogOpen(true);
+  }
+
+  function closeLoopDialog() {
+    setLoopDialogOpen(false);
+    setRelaunchValues(null);
   }
 
   async function handleLaunchLoop(body) {
@@ -709,7 +737,7 @@ export default function ChatPanel({
         enabled: true,
         ...(roomId ? { roomId } : {}),
       });
-      setLoopDialogOpen(false);
+      closeLoopDialog();
       await refreshActiveLoop();
     } catch (err) {
       setError(`Could not start loop: ${err.message}`);
@@ -1247,7 +1275,7 @@ export default function ChatPanel({
                 transition: 'opacity 0.15s',
               }}
             >
-              <Message message={msg} agentUserId={agent.userId} />
+              <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
             </div>
           );
         })}
@@ -1324,7 +1352,11 @@ export default function ChatPanel({
 
       {/* Loop launcher (#1020): reuse the shared loop configuration form,
           pinned to a loop and started in one step ("Start loop"). */}
-      <SidePanel open={loopDialogOpen} onClose={() => setLoopDialogOpen(false)} title="Start a loop">
+      <SidePanel
+        open={loopDialogOpen}
+        onClose={closeLoopDialog}
+        title={relaunchValues ? 'Start loop again' : 'Start a loop'}
+      >
         {/* Loop-launcher explainer (#1120): a loop is one of the most
             consequential actions in the UI (repeated autonomous runs, token
             spend), so state plainly what it does and how it stops before the
@@ -1343,13 +1375,18 @@ export default function ChatPanel({
           passes.
         </p>
         <TriggerForm
+          // Remount on each open so the form re-seeds from the current
+          // pre-fill (fresh launch vs "Start again"): TriggerForm reads
+          // initialValues only in its useState initialiser.
+          key={relaunchValues ? 'relaunch' : 'fresh'}
           agentId={agent.id}
           saving={loopBusy}
           lockType="loop"
           allowLoopType
+          initialValues={relaunchValues || undefined}
           submitLabel="Start loop"
           onSave={handleLaunchLoop}
-          onCancel={() => setLoopDialogOpen(false)}
+          onCancel={closeLoopDialog}
         />
       </SidePanel>
 

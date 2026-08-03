@@ -4491,6 +4491,16 @@ class TriggerScheduler:
                         tokens_spent, max_tokens, backstop_tripped=True)
                     break
 
+                # The user pressed Stop (#1231): the in-flight iteration was
+                # aborted (SIGUSR1) — surfaced via the sink. Terminate as
+                # `stopped` so a persistent record is left (the finished-loop
+                # card), rather than silently re-arming. The aborted iteration
+                # is not counted (no verified work), so the record reads
+                # "stopped · <completed> of <cap>".
+                if sink.get("userAborted"):
+                    outcome = "stopped"
+                    break
+
                 iterations += 1
                 tokens_spent += int(sink.get("outputTokens", 0) or 0)
 
@@ -4547,11 +4557,18 @@ class TriggerScheduler:
                 if min_gap > 0:
                     await asyncio.sleep(min_gap)
         except asyncio.CancelledError:
-            # Shutdown / trigger removed mid-flight — not a terminal state, so
-            # no outcome DM and the loop is left to re-run on the next start.
+            # The runner task was cancelled. Two causes:
+            #  - container shutdown → not a terminal state; leave no record and
+            #    let the loop re-run on the next start (unchanged behaviour).
+            #  - the trigger was removed mid-flight (a user Stop that beat the
+            #    SIGUSR1 sink signal, or a disable) → treat as `stopped` (#1231)
+            #    so the finished loop still leaves a persistent, re-runnable
+            #    record. Best-effort: falls through to the post block below.
             # The `finally` still releases the workspace so queued work drains
             # even when the loop is stopped by the user (#1157 AC4).
-            return
+            if self._shutdown_event.is_set() or outcome:
+                return
+            outcome = "stopped"
         finally:
             # Release the workspace the instant the loop's work is done — before
             # the outcome DM below (a plain post that doesn't touch the
@@ -4636,6 +4653,7 @@ class TriggerScheduler:
             "done": "✅ **Loop done**",
             "exhausted": "🛑 **Loop exhausted**",
             "paused": "⏸️ **Loop paused**",
+            "stopped": "⏹️ **Loop stopped**",
         }.get(outcome, f"**Loop {outcome}**")
         desc = f" — {trigger['description']}" if trigger.get("description") else ""
         # Budget-aware report (#934): iterations used vs cap AND output tokens
@@ -4689,9 +4707,59 @@ class TriggerScheduler:
                 lines += ["", "Last verifier output:", "```", snippet, "```"]
 
         body = "\n".join(lines)
-        await self._send_formatted(room_id, body)
+        # Persist the loop's configuration + terminal outcome as a structured
+        # payload on this message (#1231). A launched loop self-removes on any
+        # terminal outcome, so its config (chiefly the full prompt) would
+        # otherwise vanish from the chat; carrying it here makes the finished
+        # loop reviewable in scrollback and re-runnable (the Admin Console
+        # renders a "Start again" card, pre-filling the loop launcher). Only the
+        # fields the loop-summary model / launcher understand are recorded, so
+        # the persisted record and the running card show the same configuration.
+        extra_content = {"io.aee.loop-record": self._loop_record_payload(
+            trigger, outcome, iterations)}
+        await self._send_formatted(room_id, body, extra_content=extra_content)
         print(f"[Runner:{self._agent_id}] loop {tid} → {outcome} "
               f"after {iterations} iteration(s)", file=sys.stderr)
+
+    @staticmethod
+    def _loop_record_payload(trigger: dict, outcome: str,
+                             iterations: int) -> dict:
+        """Structured, JSON-serialisable record of a finished loop (#1231).
+
+        Carries exactly the config fields the composer's loop-summary model and
+        the loop launcher form consume (`prompt`, `maxIterations`, `until`,
+        `maxTokens`, `minGapSeconds`, `verify`) plus the terminal outcome and the
+        number of iterations that ran — so the persisted card renders the same
+        configuration as the running "Loop running" card and the "Start again"
+        button can seed the launcher with an identical loop. Optional fields are
+        omitted when they were not configured (parity with the running card)."""
+        config: dict = {}
+        prompt = trigger.get("prompt")
+        if isinstance(prompt, str):
+            config["prompt"] = prompt
+        max_it = trigger.get("maxIterations")
+        if isinstance(max_it, int) and not isinstance(max_it, bool):
+            config["maxIterations"] = max_it
+        until = trigger.get("until")
+        if (isinstance(until, dict) and isinstance(until.get("command"), str)
+                and until["command"].strip()):
+            config["until"] = {"command": until["command"]}
+        max_tokens = trigger.get("maxTokens")
+        if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
+            config["maxTokens"] = max_tokens
+        gap = trigger.get("minGapSeconds")
+        if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > 0:
+            config["minGapSeconds"] = gap
+        verify = trigger.get("verify")
+        if isinstance(verify, dict):
+            config["verify"] = verify
+        return {
+            "triggerId": trigger.get("id"),
+            "description": trigger.get("description"),
+            "outcome": outcome,
+            "iterations": iterations,
+            "config": config,
+        }
 
     async def _post_loop_note(self, trigger: dict, body: str) -> None:
         """Best-effort progress DM into the loop's room (transparency).
@@ -5512,6 +5580,13 @@ class TriggerScheduler:
         try:
             await self._execute_inner(trigger, ctx, loop_sink)
         except Exception as exc:
+            # A user Stop aborts the in-flight iteration (#1231): surface it to
+            # the loop runner via the sink so the loop terminates with a
+            # `stopped` outcome (and leaves a persistent record) instead of
+            # silently swallowing the abort and re-arming. Inert for non-loop
+            # callers (loop_sink is None).
+            if loop_sink is not None and getattr(exc, "user_aborted", False):
+                loop_sink["userAborted"] = True
             print(f"[Runner:{self._agent_id}] Trigger {tid} error: {exc}",
                   file=sys.stderr)
         finally:
@@ -6329,20 +6404,27 @@ async def run_dm_listener() -> None:
             return False
         return user_id in members and sender in members
 
-    async def send_formatted(room_id: str, text: str) -> str:
+    async def send_formatted(room_id: str, text: str,
+                             extra_content: dict | None = None) -> str:
         try:
             html_body = md_lib.markdown(text)
         except Exception:
             html_body = text
+        content = {
+            "msgtype": "m.text",
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html_body,
+        }
+        # Optional structured payload merged onto the message content (e.g. the
+        # finished-loop record `io.aee.loop-record`, #1231) so the Admin Console
+        # can render a richer card while other Matrix clients still see `body`.
+        if isinstance(extra_content, dict):
+            content.update(extra_content)
         resp = await client.room_send(
             room_id=room_id,
             message_type="m.room.message",
-            content={
-                "msgtype": "m.text",
-                "body": text,
-                "format": "org.matrix.custom.html",
-                "formatted_body": html_body,
-            },
+            content=content,
         )
         return getattr(resp, "event_id", "")
 

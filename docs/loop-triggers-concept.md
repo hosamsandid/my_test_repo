@@ -153,8 +153,10 @@ per-invocation runner; it only adds **re-arm-on-completion + a stop contract**.
   build time:* the sibling-selection heuristic (prefer a `*-reviewer`/`quality-gate`
   role in the same team; if several, ask; if none, fall back to command/ack).
 - **Outcome report.** On any terminal state the loop posts a single summary to the
-  room: outcome (`done` / `exhausted` / `paused`), iterations used, tokens spent,
-  last verifier output. This gives agents the "completed" signal they lack today.
+  room: outcome (`done` / `exhausted` / `paused`, plus `stopped` when the user
+  presses Stop — #1231), iterations used, tokens spent, last verifier output. This
+  gives agents the "completed" signal they lack today. The same message also carries
+  a structured, persistent record of the finished loop's configuration (#1231, §4.6).
 
 ### 4.3 Reuse map (minimise new surface)
 
@@ -231,6 +233,30 @@ shared `TriggerForm` (the `loop` type + fields).
 *Deferred (not chosen now):* drawing an agent-form verifier as its own edge to the
 reviewer node. Revisit if `verify.agentId` becomes common — for the command-form
 verifier the badge is enough.
+
+#### Finished-loop record (#1231) — the counterpart of the running card
+
+The running-loop summary (#1155, `LoopSummaryCard`) is client-side state: it reads
+`ChatPanel.activeLoop` from the triggers poll, so it **unmounts the moment the
+launched loop self-removes** (§4.5). A finished loop then left no lasting trace —
+its full launch prompt was gone, so the user could neither review it nor re-run it.
+
+`_post_loop_outcome` therefore attaches a structured **`io.aee.loop-record`** payload
+to the terminal-outcome message it already posts (extended `send_formatted` — one
+message, not a second entry). The payload carries the loop's config (exactly the
+fields the running card's `buildLoopSummaryModel` and the launcher form read —
+`prompt`, `maxIterations`, `until`, `maxTokens`, `minGapSeconds`, `verify`) plus the
+terminal `outcome` and iterations-ran. Because it rides on a normal Matrix message it
+survives reload and appears in ordinary scrollback (mirrors the `io.aee.trigger`
+notice pattern). The Admin Console (`Message.jsx` → `LoopRecordCard`) renders it as the
+finished-loop card: same config fields as the running card, the outcome + "N of M"
+chip, the full prompt (expandable), and a **Start again** button that opens the loop
+launcher pre-filled with that loop's settings (`loopRecordToInitialValues`) — it does
+**not** start the loop; a fresh trigger id is minted on submit so the original record
+is unchanged. A user **Stop** now terminates the loop as `stopped` (surfaced from the
+in-flight iteration's abort via the loop sink, or the cancellation fallback) so a
+stopped loop leaves the same record. Pure helpers live in `loop-run-view.js`
+(`buildLoopRecordModel` / `loopRecordToInitialValues` / `loopOutcomeMeta`).
 
 ### 4.6 Decisions (resolved)
 

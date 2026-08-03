@@ -3549,7 +3549,13 @@ async function putTriggers(agentId, triggers) {
 app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check: AGENT_ID_RE already excludes traversal segments, but
+  // CodeQL doesn't recognise the regex as a sanitiser once the value is
+  // destructured. Re-anchor under AGENTS_DIR with path.relative.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): triggers are agent config — gate on
   // team-admin management rights, not visibility.
@@ -3594,7 +3600,12 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
 app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check (see POST handler): re-anchor under AGENTS_DIR so CodeQL
+  // sees the traversal barrier even after the id is destructured.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): triggers are agent config — gate on
   // team-admin management rights, not visibility.
@@ -3643,7 +3654,12 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
 app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check (see POST handler): re-anchor under AGENTS_DIR so CodeQL
+  // sees the traversal barrier even after the id is destructured.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   // Config-write authorization (#989): triggers are agent config — gate on
   // team-admin management rights, not visibility.

@@ -1325,6 +1325,23 @@ export default function ChatPanel({
       {/* Loop launcher (#1020): reuse the shared loop configuration form,
           pinned to a loop and started in one step ("Start loop"). */}
       <SidePanel open={loopDialogOpen} onClose={() => setLoopDialogOpen(false)} title="Start a loop">
+        {/* Loop-launcher explainer (#1120): a loop is one of the most
+            consequential actions in the UI (repeated autonomous runs, token
+            spend), so state plainly what it does and how it stops before the
+            form. */}
+        <p style={{
+          margin: '0 0 var(--eb-space-4)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          lineHeight: 1.5,
+        }}>
+          A loop re-runs this agent on the instruction below — each run starts
+          fresh — until a goal is reached, working on its own between runs. It
+          stops when the <strong>max iterations</strong> cap is hit, when the{' '}
+          <strong>stop condition</strong> passes, or when you press Stop; if a{' '}
+          <strong>verifier</strong> is set, each run only counts once that check
+          passes.
+        </p>
         <TriggerForm
           agentId={agent.id}
           saving={loopBusy}

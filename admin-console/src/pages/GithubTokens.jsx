@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -478,6 +479,15 @@ export default function GithubTokens() {
         {editTarget && (
           <ReassignPanel
             cred={editTarget}
+            secretHelp={(
+              <>
+                The token value can't be changed here — a token secret is set once, at creation.
+                {' '}<strong>To rotate an expiring or leaked token:</strong> create a new GitHub token,
+                then repoint the <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environment</Link>{' '}
+                to it. Any running agents in that environment are restarted so they pick up the new
+                token — in-flight work is interrupted, so rotate at a quiet moment.
+              </>
+            )}
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}

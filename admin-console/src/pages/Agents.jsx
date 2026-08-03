@@ -496,6 +496,36 @@ const ROLE_INFO = {
     ),
     when: 'Use when you have a Briefings repository (ACE) that you want to drive end-to-end through this console.',
   },
+  'team-member': {
+    icon: User,
+    title: 'Team Member',
+    short: 'One agent spawned from an Agent Team — most fields inherit from the team.',
+    body: (
+      <>
+        A single agent created with <strong>Add Member</strong> on an <strong>Agent Team</strong> card.
+        It is not created directly here: its system prompt, skills and MCP servers <em>inherit</em> from
+        the parent team unless you flip a field from <strong>Inherit</strong> to <strong>Custom</strong> to
+        override just that one. Its role, Working Environment and parent team are fixed at creation and
+        shown read-only — change the shared parts on the team, the per-member parts here.
+      </>
+    ),
+    when: 'You do not pick this role yourself — it is assigned when you add a member to a team.',
+  },
+  'bp-instance': {
+    icon: FileText,
+    title: 'Mission Agent (bp-instance)',
+    short: 'One agent per mission, managed by an Orchestrator from a BriefingPack.',
+    body: (
+      <>
+        A stub or materialised agent that an <strong>Orchestrator</strong> creates for a single mission it
+        found in an ACE (Agent Control Environment) BriefingPack. You do not create it directly: the
+        orchestrator lists one per mission and materialises it when the mission is dispatched. Its parent
+        orchestrator, mission ID and Mission Directory are inherited and shown read-only here — edit the
+        mission in its BriefingPack, not on this form.
+      </>
+    ),
+    when: 'You do not pick this role yourself — the orchestrator assigns it per mission.',
+  },
 };
 
 /* ── Role picker ───────────────────────────────────────────────────────
@@ -1273,6 +1303,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
           {agent.role}
         </div>
       </div>
+
+      <RoleDetailBanner role={agent.role} />
 
       <div>
         <div style={labelStyle}>Working Environment (read-only)</div>

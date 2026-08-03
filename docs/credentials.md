@@ -18,6 +18,8 @@ GitHub Personal Access Tokens (PATs) authorize the built-in GitHub poller to wat
 
 **Deleting a token:** Tokens can be deleted only when no Working Environment references them. The **Used by** column on the GitHub Tokens page shows which environments reference each token (count + hover tooltip); the delete dialog names any blocking environments as a bulleted list.
 
+**Editing / rotating a token:** The Edit panel can only rename a token and change its team ownership — the secret is create-only. To rotate an expiring or leaked token: create a new GitHub token, then repoint the Working Environment's "GitHub Token" field to the new one. Any agents running in that environment are restarted to pick up the new token — in-flight work is interrupted, so rotate at a quiet moment. Disabled agents pick up the fresh credential on their next enable.
+
 **Scope:** The token must have at minimum `repo` read access for the repositories you want to monitor. For writing commits and opening pull requests via `gh-as-agent`, it must also have `repo` write access and `workflow` access if Actions workflows are involved.
 
 **Using a token:** Assign a token to a Working Environment. All agents in that environment share the token for polling and for HTTPS GitHub repository access (cloning and the real-time repo-check probe) — they do not each need their own.

@@ -14,6 +14,7 @@ const {
   planBurstHandoffs,
   shouldFetchNextPage,
   prApiUrlToHtmlUrl,
+  labelFilterMatches,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
@@ -135,6 +136,64 @@ test("backfillHorizonStamps: guards non-arrays and missing stamp", () => {
   assert.deepEqual(backfillHorizonStamps(null, "2026-05-01T00:00:00Z"), { triggers: null, changed: false });
   const t = [{ id: "g1", type: "github-event" }];
   assert.deepEqual(backfillHorizonStamps(t, null), { triggers: t, changed: false });
+});
+
+// ── labelFilterMatches: recover wakes the Events API collapses ────────────────
+
+const labeledEvent = (attributed, currentLabels) => ({
+  type: "IssuesEvent",
+  payload: {
+    action: "labeled",
+    label: attributed ? { name: attributed } : undefined,
+    issue: { number: 1, labels: (currentLabels || []).map((name) => ({ name })) },
+  },
+});
+
+test("labelFilterMatches: matches the directly-attributed label", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ready", ["ready"]), "ready"), true);
+});
+
+test("labelFilterMatches: no filter fires on any label change", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["ux"]), null), true);
+});
+
+test("labelFilterMatches: recovers a collapsed multi-add — event attributed to 'ux', 'ready' also on the issue", () => {
+  // The reported bug: adding bug+ux+ready in one action surfaces labeled(ux);
+  // the 'ready' wake must still fire because 'ready' is on the issue now.
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["bug", "ux", "ready"]), "ready"), true);
+});
+
+test("labelFilterMatches: still drops a labeled event when the wanted label is truly absent", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["bug", "ux"]), "ready"), false);
+});
+
+test("labelFilterMatches: unlabeled matches only the removed label, not the current set", () => {
+  // On removal the wanted label is (correctly) gone from the current set; only
+  // the directly-named payload.label counts — no false-positive from siblings.
+  const unlabeled = {
+    type: "IssuesEvent",
+    payload: { action: "unlabeled", label: { name: "ready" }, issue: { number: 1, labels: [{ name: "bug" }] } },
+  };
+  assert.equal(labelFilterMatches(unlabeled, "ready"), true);
+  assert.equal(labelFilterMatches(unlabeled, "bug"), false); // 'bug' still present, but this event didn't touch it
+});
+
+test("labelFilterMatches: pull_request labeled honours the PR's current label set", () => {
+  const prLabeled = {
+    type: "PullRequestEvent",
+    payload: {
+      action: "labeled",
+      label: { name: "needs-review" },
+      pull_request: { number: 7, labels: [{ name: "needs-review" }, { name: "revisions-required" }] },
+    },
+  };
+  assert.equal(labelFilterMatches(prLabeled, "revisions-required"), true);
+});
+
+test("labelFilterMatches: tolerates a reduced payload with no labels array", () => {
+  const reduced = { type: "PullRequestEvent", payload: { action: "labeled", label: { name: "x" }, pull_request: { number: 7 } } };
+  assert.equal(labelFilterMatches(reduced, "x"), true); // attributed label still matches
+  assert.equal(labelFilterMatches(reduced, "y"), false); // no set to recover from — no crash
 });
 
 // ── passesHorizon (Baustein B): >= horizon − grace ────────────────────────────

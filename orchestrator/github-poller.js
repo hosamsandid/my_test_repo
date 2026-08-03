@@ -161,6 +161,36 @@ function conversationKey(ghEvent) {
   return ghEvent?.type || 'misc';
 }
 
+// Does a `*.labeled`/`*.unlabeled` event satisfy a subscriber's `labelFilter`?
+//
+// The naive check — `payload.label.name === wanted` — is INSUFFICIENT on the
+// Events API. Unlike webhooks (one `labeled` event per label), the Events API
+// COLLAPSES a multi-label change made in one action into a single `IssuesEvent`
+// whose `payload.label` names only ONE of the changed labels. So adding
+// `bug`+`ux`+`ready` at once surfaces e.g. `labeled(ux)` and the `ready` add is
+// never delivered as its own event — a `labelFilter: 'ready'` listener would
+// silently miss the wake (the reported bug: "reagiert nur auf das letzte Label").
+//
+// Fix: for a `labeled` event, ALSO honour the object's full current label set
+// (`payload.issue.labels` / `payload.pull_request.labels`, always present for
+// IssuesEvent; best-effort for the reduced PR payload). If the wake label is on
+// the object right now, the collapsed add included it — so fire. This is scoped
+// to `labeled` deliberately: on `unlabeled`, a removed label is (correctly)
+// absent from the current set, so we can only honour the directly-named
+// `payload.label` there. Collapsed *removals* are unrecoverable from the Events
+// API (no signal survives) — a known limitation; wakes are near-always on adds.
+function labelFilterMatches(ghEvent, wanted) {
+  if (!wanted) return true; // no filter → fire on any label change (legacy)
+  const p = ghEvent?.payload || {};
+  if (p.label?.name === wanted) return true; // the directly-attributed label
+  if (p.action === 'labeled') {
+    const container = p.issue || p.pull_request || {};
+    const labels = Array.isArray(container.labels) ? container.labels : [];
+    return labels.some((l) => (typeof l === 'string' ? l : l?.name) === wanted);
+  }
+  return false;
+}
+
 // Merged-PR detection for the PR-token-comment feature (#678). A merge is a
 // `PullRequestEvent` with `action: 'closed'` AND `pull_request.merged === true`
 // — a PR closed WITHOUT merging carries `merged: false` and must be ignored
@@ -673,15 +703,16 @@ class GitHubPoller {
           continue;
         }
 
-        // Label-name filter for *.labeled / *.unlabeled events. The action
-        // payload carries the affected label as `payload.label.name`. When
-        // the subscriber pinned a label name, drop everything that doesn't
-        // match — this is content routing (WHICH label), not a source filter,
-        // and is how label hand-offs (incl. human-approval gates) are wired.
+        // Label-name filter for *.labeled / *.unlabeled events. Content routing
+        // (WHICH label), not a source filter — how label hand-offs (incl.
+        // human-approval gates) are wired. Matches the directly-attributed
+        // `payload.label.name` OR, for a `labeled` event, any label in the
+        // object's current set — the latter recovers wakes the Events API loses
+        // when it collapses a multi-label change (see labelFilterMatches).
         // No-op for non-label events.
         if (sub.labelFilter) {
-          const labelName = ghEvent.payload?.label?.name;
-          if (labelName !== sub.labelFilter) {
+          if (!labelFilterMatches(ghEvent, sub.labelFilter)) {
+            const labelName = ghEvent.payload?.label?.name;
             console.log(
               `[GH-Poller] label-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
               `(label='${labelName ?? '?'}', want='${sub.labelFilter}')`,
@@ -1114,6 +1145,7 @@ module.exports = {
   prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
+  labelFilterMatches,
   detectMergedPrs,
   effectiveHorizon,
   backfillHorizonStamps,

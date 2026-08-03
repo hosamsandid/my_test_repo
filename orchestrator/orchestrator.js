@@ -222,10 +222,54 @@ function resolveLlmBindingForAgent(cfg, env) {
   return resolveLlmBinding(endpointId, env?.defaultModelId, { context: ctx });
 }
 
+// #1213: resolve the assist-synthesis binding for a team's autonomous synthesis
+// (curator auto-promotion, skill distillation). The team agent's optional
+// `assistLlmEndpointId` names the provider these session-less calls must bill
+// against; it is validated against the team's usable providers (non-oauth) the
+// same way `assistSelectableEndpoint` gates the console-side header selection.
+// Returns `{ baseUrl, token, model }` when set + usable, else null → the caller
+// falls back to the `.env` proxy exactly as before (unset, deleted id, oauth
+// seat, foreign team, or unreadable token all fail SOFT with a logged warning).
+// The token is read locally from `_keys/` and never leaves this process.
+function resolveAssistBindingForTeam(teamId) {
+  if (!teamId) return null;
+  let cfg = null;
+  try { cfg = loadAgentConfig(teamId); } catch { cfg = null; }
+  const endpointId = cfg && typeof cfg.assistLlmEndpointId === "string" ? cfg.assistLlmEndpointId.trim() : "";
+  if (!endpointId) return null; // unset → .env as today (no warning: the common case)
+  // Endpoints are scoped to the human tenant that owns the agents, mirroring
+  // spawn-binding + admin-console usableEndpointsForTeam (parentTeamId || teamId).
+  const tenant = (cfg && (cfg.parentTeamId || cfg.teamId)) || "default";
+  let index = null;
+  try { index = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8")); } catch { index = null; }
+  const pick = assistBinding.pickAssistEndpoint(index, endpointId, tenant);
+  if (!pick.ep) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} not usable (${pick.reason}) — falling back to .env`);
+    return null;
+  }
+  // Reuse resolveLlmBinding for the impure token read + model default; it never
+  // filters, so the usability decision above stays the single gate.
+  const bound = resolveLlmBinding(endpointId, null, { context: `assist team=${teamId}` });
+  if (!bound || bound.authType === "oauth-token" || !bound.baseUrl || !bound.token) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} unresolved (base/token/oauth) — falling back to .env`);
+    return null;
+  }
+  const model = bound.defaultModelId
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
+    || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || process.env.ANTHROPIC_MODEL;
+  if (!model) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} has no model — falling back to .env`);
+    return null;
+  }
+  return { baseUrl: bound.baseUrl, token: bound.token, model };
+}
+
 const { execFile, execFileSync } = require("child_process");
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
+const assistBinding = require("./assist-binding");
 const { reconcileSessionAppend } = require("./session-cursor");
 const {
   rotationConfig,
@@ -4497,6 +4541,7 @@ let orchestratorSingleton = null;
 
 async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now, capRemaining, excludeCanonicalIds } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, synthesizeSkills } = knowledgeCurationConfig(env);
   // #779: the per-pass cap is shared across auto-extend + convergence promotions +
@@ -4542,6 +4587,7 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
       request: knowledgeCurator.buildSkillSynthesisRequest(item.candidate),
       synthesize: synthesizeSkills,
       frontmatter: { name: item.draft.name, description: item.draft.description },
+      binding: assistSynthBinding, // #1213: team-billed provider (null → .env)
     });
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -4791,10 +4837,16 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
 // other concurrent request (the 'orchestrator unreachable: fetch failed' bug). It is
 // now an async `fetch` with an `AbortSignal` timeout, so the loop stays free while
 // the LLM is in flight and only THIS logical operation waits. Every caller awaits it.
-async function _synthesizeSkillMd(env, request) {
-  const base = process.env.ANTHROPIC_BASE_URL;
-  const token = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
-  const model = process.env.ANTHROPIC_SYNTHESIS_MODEL
+// #1213: an optional `binding` {baseUrl, token, model} (a team's
+// `assistLlmEndpointId`, resolved by resolveAssistBindingForTeam) overrides the
+// `.env` proxy so autonomous synthesis bills against the team's own provider.
+// Absent (or with any field missing) → the `.env` fallback, byte-identical to
+// before. The token stays in-process; only these three values ever reach fetch.
+async function _synthesizeSkillMd(env, request, binding) {
+  const base = (binding && binding.baseUrl) || process.env.ANTHROPIC_BASE_URL;
+  const token = (binding && binding.token) || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+  const model = (binding && binding.model)
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
     || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
     || process.env.ANTHROPIC_MODEL;
   if (!base || !token || !model || !request || !Array.isArray(request.messages)) return null;
@@ -4829,14 +4881,14 @@ async function _synthesizeSkillMd(env, request) {
 // synthesis (§3.3) when the team opted in. OFF (default) ⇒ the Phase-1 heuristic
 // draft verbatim (backward-compatible). ON ⇒ attempt LLM synthesis, else the
 // marked-un-synthesised fallback. Returns { skillMd, synthesised, note }.
-async function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter }) {
+async function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter, binding }) {
   // #805: the heuristic draft already carries frontmatter, so OFF is safe verbatim.
   // ON: hand the deterministic { name, description } to synthesisFallback so the LLM
   // output is guaranteed a valid frontmatter block (its own if present, else this).
   if (!synthesize) return { skillMd: heuristicMd, synthesised: null, note: null };
   const out = knowledgeCurator.synthesisFallback({
     heuristic: { name: null, skillMd: heuristicMd },
-    llmText: await _synthesizeSkillMd(env, request), // #855: async, non-blocking
+    llmText: await _synthesizeSkillMd(env, request, binding), // #855: async; #1213: team-billed binding
     frontmatter,
   });
   return {
@@ -4896,6 +4948,7 @@ function _readTeamSkillDoc(teamId, name) {
 // from the create-new auto-promotion path and debits the shared cap.
 async function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { convergenceThreshold, now, capRemaining } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, extendConfidenceFloor, synthesizeSkills } = knowledgeCurationConfig(env);
   const cap = Number.isInteger(capRemaining) ? Math.max(0, capRemaining) : maxAutoPromotionsPerPass;
@@ -4944,6 +4997,7 @@ async function autoExtendStep(teamId, env, clusters, candidates, existingSkills,
         request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.candidate),
         synthesize: true,
         frontmatter: { name: item.target.name, description: ext.description },
+        binding: assistSynthBinding, // #1213: team-billed provider (null → .env)
       })
       : { skillMd: ext.skillMd, synthesised: false, note: null };
     const synthesised = synth.synthesised === true;
@@ -5046,7 +5100,8 @@ async function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto
     domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
   } catch { domain = null; }
   const request = knowledgeDistillation.buildDistillationRequest(doc.skillMd, doc.provenance, { domain });
-  const llmText = await _synthesizeSkillMd(env, request); // #855: async, non-blocking
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider (null → .env)
+  const llmText = await _synthesizeSkillMd(env, request, assistSynthBinding); // #855: async, non-blocking
   const result = knowledgeDistillation.applyDistillation({
     skillMd: doc.skillMd, provenance: doc.provenance, llmText, by: auto ? "curator" : "operator", now: ts,
   });

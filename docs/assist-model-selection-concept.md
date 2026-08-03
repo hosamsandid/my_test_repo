@@ -1,6 +1,6 @@
 # Assist Model Selection — global, team-scoped model-provider selector for cross-cutting AI helpers
 
-Status: in progress — §4.1 (`assistSelectableEndpoint`) + §4.2 (`GET /api/assist/model-options`) shipped in #1210; §4.3–§4.5 header UI (`ModelSelectionProvider` + Shell control + `X-Assist-Model` transport) shipped in #1212; §4.5 server enforcement (`resolveAssistTarget` on the nine routes) in review (#1211); Phase 2 (#1213/#1214) pending
+Status: in progress — Phase 1 shipped (#1210 `assistSelectableEndpoint` + `GET /api/assist/model-options`; #1211 `resolveAssistTarget` enforcement + provenance; #1212 header selector UI in review); Phase 2 §4.6 team-derived `assistLlmEndpointId` + `_synthesizeSkillMd` binding for curator auto-promotion/distillation shipped in #1213; domain-bootstrap pass-through (#1214) pending
 
 ## 1. Problem
 
@@ -164,7 +164,7 @@ Curator auto-promotion (#10) and distillation (#11) run with **no user session**
 - `_synthesizeSkillMd(env, request)` grows an optional `binding` parameter `{ baseUrl, token, model }`; the three call sites pass the team-resolved binding when present.
 - Domain bootstrap (#12) *is* user-triggered (console proxy `POST /api/knowledge/domains {op:'bootstrap'}` → orchestrator internal). Phase 2 forwards the validated `endpointId`+`modelId` from the user's header selection through the proxy; the orchestrator reads the token locally from `_keys/` (the token itself never travels over the internal HTTP hop).
 
-Editing `assistLlmEndpointId` belongs on the team's settings surface (Teams page), Team-Admin-gated like other team config.
+Editing `assistLlmEndpointId` is exposed via the **Knowledge page's ConfigurePanel** (`KnowledgeFlow.jsx`, the autonomy/gates/storage slide-out — `GET /api/agents/:teamId/model-options` fetches the current value and the selectable providers; `PUT /api/agents/:teamId { assistLlmEndpointId }` persists it). Team-Admin-gated by the existing `canManageAgent` gate, same as other team-agent config on that panel.
 
 ## 5. Decided design points
 

@@ -1565,7 +1565,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -1606,6 +1606,35 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
     normHumans = normalizeHumans(humans || []);
+  }
+
+  // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
+  // Names the provider the orchestrator's autonomous synthesis (curator
+  // auto-promotion, skill distillation) bills against; `''`/`null` clears it
+  // (→ .env fallback). Validated here — up front, so a bad shape can't
+  // half-apply — against the team's USABLE providers (non-oauth), the same set
+  // usableEndpointsForTeam exposes to the console header selector. A stale/
+  // foreign/oauth id is rejected 400 rather than silently ignored.
+  let normAssistEndpointId; // undefined = untouched, null = clear
+  if (assistLlmEndpointId !== undefined) {
+    if (cfg.role !== 'team') {
+      return res.status(400).json({ error: 'assistLlmEndpointId is only settable on a team agent' });
+    }
+    if (assistLlmEndpointId === null || assistLlmEndpointId === '') {
+      normAssistEndpointId = null;
+    } else if (typeof assistLlmEndpointId !== 'string') {
+      return res.status(400).json({ error: 'assistLlmEndpointId must be a string endpoint id (or null to clear)' });
+    } else {
+      const tenant = agentTeamId(cfg);
+      const ep = usableEndpointsForTeam(tenant).find(e => e.id === assistLlmEndpointId);
+      if (!ep) {
+        return res.status(400).json({ error: `assistLlmEndpointId '${assistLlmEndpointId}' is not a provider usable by this team` });
+      }
+      if (ep.authType === 'oauth-token') {
+        return res.status(400).json({ error: 'assistLlmEndpointId cannot be an oauth-token provider (subscription seats are not billable for server-side synthesis)' });
+      }
+      normAssistEndpointId = assistLlmEndpointId;
+    }
   }
 
   // Config-write authorization (#989): editing an agent requires management
@@ -1857,6 +1886,15 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     if (normHumans && normHumans.length) fresh.humans = normHumans;
     else delete fresh.humans;
     humansChanged = JSON.stringify(fresh.humans || []) !== before;
+  }
+
+  // Assist synthesis provider, team-agent only (#1213) — validated into
+  // normAssistEndpointId above. Read by the orchestrator's
+  // resolveAssistBindingForTeam; null/'' clears it (→ .env). No runtime respawn:
+  // it is read fresh on each autonomous synthesis pass.
+  if (normAssistEndpointId !== undefined && fresh.role === 'team') {
+    if (normAssistEndpointId) fresh.assistLlmEndpointId = normAssistEndpointId;
+    else delete fresh.assistLlmEndpointId;
   }
 
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────
@@ -3278,6 +3316,9 @@ app.get('/api/agents/:id/model-options', (req, res) => {
     models:         endpoint?.models || [],
     // Curated set of providers this agent's team may switch to (never tokens).
     endpoints:      usableEndpointsForTeam(teamId).map(publicEndpointView),
+    // #1213: the team agent's assist-synthesis provider (curator promotion /
+    // distillation bill against it). Team-agent-only; null on other roles.
+    assistLlmEndpointId: cfg.role === 'team' ? (cfg.assistLlmEndpointId || null) : null,
     // Whether THIS caller may actually change the model/provider — a management
     // action (#989), so the picker is read-only for a plain Team Member.
     canSwitch:      canManageAgent(scope, agentMetaForScope(cfg)),

@@ -1548,8 +1548,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             />
             <IconButton
               icon={PowerOff}
-              label="Deactivate"
-              title="Deactivate — reset to stub state"
+              label="Reset to stub"
+              title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+              danger
               onClick={() => onDeactivate(agent)}
               disabled={busy}
             />
@@ -1730,8 +1731,9 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               />
               <IconButton
                 icon={PowerOff}
-                label="Deactivate"
-                title="Deactivate — reset to stub state"
+                label="Reset to stub"
+                title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+                danger
                 onClick={() => onDeactivate(agent)}
                 disabled={busyIds.has(agent.id)}
               />
@@ -1956,8 +1958,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           />
           <IconButton
             icon={PowerOff}
-            label="Deactivate"
-            title="Deactivate — reset to stub state"
+            label="Reset to stub"
+            title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+            danger
             onClick={() => onDeactivate(agent)}
             disabled={busy}
           />
@@ -2451,7 +2454,14 @@ export default function Agents() {
         <p style={{ margin: 0 }}>
           After creation the agent appears below as a card. <em>Active</em> agents are running and ready to chat;
           <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need
-          one click on <strong>Activate</strong> to come to life. You can edit, deactivate or delete each agent from its card.
+          one click on <strong>Activate</strong> to come to life.
+        </p>
+        <p style={{ margin: '8px 0 0' }}>
+          Three card actions do different things, from reversible to destructive: <strong>Disable</strong> (the toggle) simply
+          pauses the process and <em>keeps</em> the workspace — flip it back on to resume; <strong>Reset to stub</strong> (the
+          red power button) stops the agent and <em>wipes</em> its workspace — session history, cloned repos and any
+          in-workspace state are lost, though the stub config remains so it can be reactivated from scratch;
+          <strong> Delete</strong> removes the agent config entirely. Reach for Disable when you only want to pause.
         </p>
       </div>
 
@@ -2658,15 +2668,16 @@ export default function Agents() {
 
       <ConfirmDialog
         open={!!deactivateTarget}
-        title="Deactivate Agent"
+        title="Reset agent to stub?"
         message={
           `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
           `This stops the agent process and wipes the workspace. ` +
           `The stub config is kept so the agent can be reactivated later — but session history, ` +
-          `cloned repositories, and any in-workspace state will be lost.`
+          `cloned repositories, and any in-workspace state will be lost. ` +
+          `To pause without losing anything, cancel and use the Disable toggle instead.`
         }
         variant="danger"
-        confirmLabel="Deactivate"
+        confirmLabel="Reset to stub"
         onConfirm={handleDeactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
       />
@@ -2894,7 +2905,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
   if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Deactivate agent" style={{
+    <div role="dialog" aria-modal="true" aria-label="Reset agent to stub" style={{
       position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
     }}>
@@ -2907,7 +2918,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
           <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Deactivate "{name}"
+              Reset "{name}" to stub
             </h3>
             <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
               {parts.length > 0
@@ -2915,7 +2926,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
                 : 'This agent has active state. Choose how to proceed:'}
             </p>
             <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to deactivate fully once the agent is idle.</li>
+              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to reset once the agent is idle.</li>
               <li><strong>Hard stop</strong> — kill the process immediately, then wipe the workspace.</li>
             </ul>
           </div>
@@ -2937,7 +2948,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
             color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Hard stop + Deactivate</button>
+          }}>Hard stop + reset</button>
         </div>
       </div>
     </div>

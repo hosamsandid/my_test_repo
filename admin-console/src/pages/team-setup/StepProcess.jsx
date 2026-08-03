@@ -5,6 +5,7 @@ import {
   CheckCircle, Loader2, X, Save, Workflow, Sparkles,
 } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
+import { assistHeaders, notifyAssistError } from '../../context/assist-transport.js';
 import { computePreviewLayout, previewEdgesFromGraph, ellipsize, PREVIEW } from './flow-preview-layout';
 import { EDGE_STYLES } from '../process/flow-graph-render';
 import { copilotErrorInfo, consumeCopilotStream, phaseLabel } from '../process/flow-copilot-view';
@@ -474,11 +475,12 @@ function DescribeSection({ form, setForm, setBundle, previewGraph, lints, lintLo
       // no history) — editing the text and regenerating replaces the result.
       const res = await fetch('/api/process/copilot', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...assistHeaders() },
         body: JSON.stringify({ messages: [{ role: 'user', content: trimmed }] }),
       });
       if (!res.ok) {
         const b = await res.json().catch(() => null);
+        if (b && b.code) notifyAssistError(b.code);
         setGenError(copilotErrorInfo(res.status, b && b.error));
         return;
       }

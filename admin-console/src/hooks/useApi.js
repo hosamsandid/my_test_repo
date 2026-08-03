@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
+import { assistHeaders, notifyAssistError } from '../context/assist-transport.js';
 
 // A 401 means the session expired or was cleared — notify the AuthProvider so
 // the console drops back to the login screen instead of showing broken pages.
@@ -46,15 +47,27 @@ export function useApi(url) {
 }
 
 export async function apiCall(method, url, body) {
+  // Assist model selection (#1212): attach `X-Assist-Model: <endpointId>:<modelId>`
+  // when a selection is set. Non-assist routes ignore it, so it is free to send
+  // on every request and any future assist route inherits it for free.
   const res = await fetch(url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: {
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...assistHeaders(),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
     notifyIfUnauthorized(res.status);
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `HTTP ${res.status}`);
+    // 400 assist-model-not-selected / 403 assist-endpoint-not-permitted nudge
+    // the header picker open (and clear+refetch on 403) — see assist-transport.
+    if (err && err.code) notifyAssistError(err.code);
+    const e = new Error(err.error || `HTTP ${res.status}`);
+    e.status = res.status;
+    if (err && err.code) e.code = err.code;
+    throw e;
   }
   return res.status === 204 ? null : res.json();
 }

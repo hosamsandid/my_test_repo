@@ -16,6 +16,7 @@ import KnowledgeLearningSections, {
   AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
 } from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
+import { assistFetch } from '../context/assist-transport.js';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 import { summarizeActivation } from './knowledge-activation-view';
 import { rolloutStatus } from './skill-rollout-view';
@@ -418,7 +419,7 @@ export default function KnowledgeFlow() {
     for (let i = 0; i < 25; i++) {
       let d = null;
       try {
-        const r = await fetch('/api/knowledge/summaries/backfill', {
+        const r = await assistFetch('/api/knowledge/summaries/backfill', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ teamId }),
         });
@@ -1495,7 +1496,7 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
     const merge = mergeForDomain(planData && planData.merges, dom.domainId);
     if (!merge) { setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge: null, draft: '' }); return; }
     setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge, loading: true, draft: '' });
-    fetch('/api/skills/merge-draft', {
+    assistFetch('/api/skills/merge-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(merge),
     }).then(r => r.json().catch(() => ({}))).then((out) => {
@@ -4587,7 +4588,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const loadExtendDraft = (useLLM) => {
     if (!targetName) return;
     setBusy('draft'); setError('');
-    fetch('/api/knowledge/extend-draft', {
+    assistFetch('/api/knowledge/extend-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         team: teamId, tier: effectiveTo, targetName,
@@ -4606,7 +4607,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   useEffect(() => {
     if (!manual || mode !== 'create') return;
     setBusy('draft');
-    fetch('/api/knowledge/draft', {
+    assistFetch('/api/knowledge/draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds, heuristicOnly: true }),
     })
@@ -4633,11 +4634,11 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
     if (mode === 'extend') { loadExtendDraft(true); return; }
     setBusy('draft'); setError('');
     const req = manual
-      ? fetch('/api/knowledge/draft', {
+      ? assistFetch('/api/knowledge/draft', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds }),
         })
-      : fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
+      : assistFetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ team: teamId }),
         });

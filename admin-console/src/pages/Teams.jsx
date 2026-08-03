@@ -15,6 +15,10 @@ import { groupAgentsForOwnership } from './teams-ownership';
 const DEFAULT_TEAM_ID = 'default';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
 const ROLE_OPTIONS = ['team-admin', 'team-member'];
+const ROLE_HINTS = {
+  'team-admin': 'manages this team’s members and details',
+  'team-member': 'sees this team’s resources, no management',
+};
 
 const inputStyle = {
   width: '100%',
@@ -205,7 +209,7 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnl
                 <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{ROLE_LABELS[m.role] || m.role}</span>
               ) : (
                 <>
-                  <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} style={{ ...inputStyle, width: 'auto' }}>
+                  <select value={m.role} onChange={e => setRole(m.userId, e.target.value)} disabled={busy} title={`${ROLE_LABELS[m.role] || m.role} — ${ROLE_HINTS[m.role] || ''}`} style={{ ...inputStyle, width: 'auto' }}>
                     {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                   </select>
                   <IconButton icon={Trash2} label="Remove from team" danger onClick={() => removeMember(m.userId)} disabled={busy} />
@@ -221,12 +225,18 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnl
               <option value="">{candidateUsers.length ? 'Select a user to add…' : 'No more users — create one first'}</option>
               {candidateUsers.map(u => <option key={u.id} value={u.id}>{(u.displayName || u.subject)}{u.email ? ` — ${u.email}` : ''}</option>)}
             </select>
-            <select value={addRole} onChange={e => setAddRole(e.target.value)} style={{ ...inputStyle, width: 'auto' }}>
+            <select value={addRole} onChange={e => setAddRole(e.target.value)} title={`${ROLE_LABELS[addRole] || addRole} — ${ROLE_HINTS[addRole] || ''}`} style={{ ...inputStyle, width: 'auto' }}>
               {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
             </select>
             <button onClick={addMember} disabled={busy || !addUserId} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (busy || !addUserId) ? 0.6 : 1 }}>
               <UserPlus size={14} /> Add
             </button>
+          </div>
+        )}
+        {!readOnly && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+            <strong style={{ color: 'var(--eb-text-secondary)' }}>{ROLE_LABELS['team-admin']}</strong> — {ROLE_HINTS['team-admin']}.{' '}
+            <strong style={{ color: 'var(--eb-text-secondary)' }}>{ROLE_LABELS['team-member']}</strong> — {ROLE_HINTS['team-member']}.
           </div>
         )}
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>

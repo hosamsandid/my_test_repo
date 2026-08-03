@@ -10,7 +10,7 @@ Agents can be individually enabled/disabled from `/agents` (`AgentRow`'s `Toggle
 ## Scope
 
 - **In scope:** a team-wide disable/enable action in `Orchestrator`, exposed via new internal + public API routes, driven from a new control in `TeamCard` (`admin-console/src/pages/Agents.jsx`). While a team is disabled, its members' individual enable/disable toggle is inert (backend-rejected and UI-greyed).
-- **Not in scope:** the team agent (`role: team`) itself has no running process (per architecture docs) — disabling a team never touches a container for the team agent itself, only its members. The member's separate "Deactivate" (reset-to-stub) action is untouched by this feature.
+- **Not in scope:** the team agent (`role: team`) itself has no running process (per architecture docs) — disabling a team never touches a container for the team agent itself, only its members. The member's separate **Reset to stub** action is untouched by this feature.
 
 ## Data model
 
@@ -47,7 +47,7 @@ Member creation (Add Member wizard, and any other path that materializes a `team
 ### Member toggle lockout while team is disabled
 
 - **Backend:** `Orchestrator.enableAgent(id)` / `disableAgent(id, opts)` resolve the member's `parentTeamId` (existing `resolveAgentTeamId` helper) and, if that team's config has `enabled: false`, reject with a clear error (e.g. `409 { error: 'team-disabled', teamId }`) instead of performing the action. This covers `PUT /api/agents/:id` and the internal `/enable`/`/disable` routes — any caller, not just the Agents page.
-- **Frontend:** `AgentRow`'s `ToggleSwitch` is disabled/greyed for a member whose parent team is disabled, with a tooltip ("Team is disabled — enable the team first"). The "Deactivate" (reset-to-stub) icon button is **not** gated — it remains available regardless of team state.
+- **Frontend:** `AgentRow`'s `ToggleSwitch` is disabled/greyed for a member whose parent team is disabled, with a tooltip ("Team is disabled — enable the team first"). The **Reset to stub** icon button is **not** gated — it remains available regardless of team state.
 
 ## UI
 
@@ -68,6 +68,6 @@ Member creation (Add Member wizard, and any other path that materializes a `team
 ## Out of scope
 
 - Disabling the team agent's own "process" — it has none.
-- Locking the "Deactivate" (reset-to-stub) action on members while the team is disabled.
+- Locking the **Reset to stub** action on members while the team is disabled.
 - Any change to how a lone team-member is manually disabled/enabled when its team is enabled — that path is unchanged.
 - Bulk actions beyond enable/disable (e.g. bulk delete, bulk export) for teams.

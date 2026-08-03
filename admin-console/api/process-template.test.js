@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -782,6 +782,37 @@ test('validateProcessTemplate accepts a string stages array, rejects non-strings
 
 test('emptyDraftBundle seeds an empty stages array', () => {
   assert.deepEqual(emptyDraftBundle('x').stages, []);
+});
+
+// ─── hillClimb collector config round-trip (#1222) ───────────────────────────
+
+test('normalizeHillClimb keeps only known config keys and nulls an empty config', () => {
+  assert.deepEqual(
+    normalizeHillClimb({ cron: ' 0 3 * * * ', windowDays: 14, minRunsPerWindow: 5, excludeAgents: ['a', 'a', ' '] }),
+    { cron: '0 3 * * *', windowDays: 14, minRunsPerWindow: 5, excludeAgents: ['a'] },
+  );
+  // Snapshot / applied-card state deliberately never travels.
+  assert.deepEqual(normalizeHillClimb({ windowDays: 7, cards: [{ id: 'x' }], lastSnapshot: {} }), { windowDays: 7 });
+  assert.equal(normalizeHillClimb({}), null);
+  assert.equal(normalizeHillClimb({ windowDays: 0, minRunsPerWindow: -1 }), null);
+  assert.equal(normalizeHillClimb(null), null);
+  assert.equal(normalizeHillClimb([1, 2]), null);
+});
+
+test('buildProcessTemplate carries a normalized hillClimb and omits it when unset', () => {
+  const b = buildProcessTemplate({ name: 'p', roles: [], hillClimb: { windowDays: 30, minRunsPerWindow: 50, junk: true } });
+  assert.deepEqual(b.hillClimb, { windowDays: 30, minRunsPerWindow: 50 });
+  assert.equal('hillClimb' in buildProcessTemplate({ name: 'p', roles: [] }), false);
+  assert.equal('hillClimb' in buildProcessTemplate({ name: 'p', roles: [], hillClimb: {} }), false);
+});
+
+test('validateProcessTemplate accepts a well-formed hillClimb, rejects bad shapes', () => {
+  const base = { processTemplateVersion: 1, roles: [], gates: [], labels: [] };
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { cron: '0 3 * * *', windowDays: 7, minRunsPerWindow: 20, excludeAgents: ['x'] } }, { allowEmptyRoles: true }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: [] }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { windowDays: 0 } }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { minRunsPerWindow: -1 } }, { allowEmptyRoles: true }).ok, false);
+  assert.equal(validateProcessTemplate({ ...base, hillClimb: { excludeAgents: [1] } }, { allowEmptyRoles: true }).ok, false);
 });
 
 // #522: the default (unnamed) draft is labelled with the standardised "Flow"

@@ -4,11 +4,13 @@ Agent Studio supports **Model Context Protocol (MCP)** servers, which extend Cla
 
 ## How it works
 
-MCP servers are configured in the Claude settings file (`.claude/settings.json`) inside each agent's workspace. The Admin Console's **MCP Servers** page (`/mcp`) reads and displays the configured servers for inspection — it shows which servers are registered and their connection details.
+MCP servers follow a three-part model: **servers** describe how to launch a backend and use `${credential}` as a placeholder in their `env`/`headers` template to mark where a secret goes; **credentials** carry the raw secrets (stored separately at `/workspace/mcp-credentials/_keys/`); a **Working Environment** pairs a server with a credential. At workspace seed time the orchestrator substitutes `${credential}` with the bound credential's secret and writes the merged stanza into each agent's own `.claude/settings.json`.
+
+The Admin Console's **MCP Servers** page (`/mcp`) lists the registered servers. The **Credential** column shows **required** for any server whose template references `${credential}` — this status is derived automatically from the server's template (field `requiresCredential`). A *required* server must have a credential bound in the Working Environment before agents can use it.
 
 ## Configuring an MCP server
 
-Edit `.claude/settings.json` in the agent's workspace directly (use the Workspace Browser in Agent Chat or upload a modified file). The format follows the standard Claude Code MCP configuration:
+Register the server via the **MCP Servers** admin page, then bind it to a Working Environment (with an optional credential). The server template format for stdio servers follows the standard Claude Code MCP configuration:
 
 ```json
 {

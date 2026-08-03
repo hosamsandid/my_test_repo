@@ -33,7 +33,7 @@ const { buildProcessGraph } = require('./process-graph');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
@@ -5962,6 +5962,42 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
+// snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
+// the Improvements panel (#1223) renders the metric tiles from this.
+app.get('/api/teams/:teamId/hill-climb/metrics', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/metrics`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/run — manual metrics pass (#1222). Same
+// code path as the daily scheduled pass; a run while one is already in flight
+// returns 409 pass-running. Team-scoped + audited (mutating write).
+app.post('/api/teams/:teamId/hill-climb/run', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/run`, {
+      method: 'POST',
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/members — running/busy/trigger state for every
 // member, feeding the team-wide disable/enable preview dialog.
 app.get('/api/teams/:teamId/members', apiLimiter, async (req, res) => {
@@ -6051,10 +6087,14 @@ app.get('/api/process/template', (req, res) => {
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
   let teamName = team;
   let teamStages = [];
+  let teamHillClimb = null;
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
     if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
+    // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
+    // (in buildProcessTemplate) drops applied-card/snapshot state so only config travels.
+    teamHillClimb = teamCfg?.hillClimb || null;
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -6095,6 +6135,8 @@ app.get('/api/process/template', (req, res) => {
     // Named human roles (#987) round-trip with the bundle so an exported team
     // re-materialises its human boxes and Edit-as-draft carries them.
     humans: teamHumansRegistry(team),
+    // Hill-climb collector config (#1222) rides along on the team agent.
+    hillClimb: teamHillClimb,
   }));
 });
 
@@ -10462,6 +10504,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
 
   // Label-suffix stamping (#902): one-shot rename applied to the member array
   // + bundle label registry before any agent is created. No-op when labelSuffix
@@ -10688,6 +10734,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           ...(bundleStages.length ? { stages: bundleStages } : {}),
           // Named human roles (#987) — held on the team agent like stages/labels.
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Authoritative gate/brake label registry (#928): the live graph has no
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
@@ -10996,6 +11044,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
   const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
 
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
@@ -11235,6 +11287,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleStages.length ? { stages: bundleStages } : {}),
           // Named human roles (#987) — held on the team agent like stages/labels.
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),

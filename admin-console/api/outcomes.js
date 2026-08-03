@@ -52,8 +52,16 @@ function forbiddenOutcomeLabel(label, sources) {
 // Lower-case, collapse non-`[a-z0-9-]` runs to `-`, trim, fall back to `outcome`.
 // (Authored options carry their own author-given ids; this never touches them.)
 function slugifyOutcome(label) {
-  const base = String(label == null ? '' : label)
-    .toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  const collapsed = String(label == null ? '' : label)
+    .toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  // Trim leading/trailing `-` with a linear scan rather than `/^-+|-+$/g`: the
+  // anchored `-+$` alternative backtracks quadratically on a long run of `-`
+  // (js/polynomial-redos). char code 45 === '-'; output is byte-identical.
+  let start = 0;
+  let end = collapsed.length;
+  while (start < end && collapsed.charCodeAt(start) === 45) start++;
+  while (end > start && collapsed.charCodeAt(end - 1) === 45) end--;
+  const base = collapsed.slice(start, end);
   return base || 'outcome';
 }
 

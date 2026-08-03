@@ -84,4 +84,4 @@ The loop posts a summary and stops when it reaches any terminal state:
 
 ### Admin Console
 
-The **Start a loop** dialog in Agent Chat (right-rail trigger editor) exposes all fields. Core settings (number of tries, who checks the work) are always visible; the stop condition, token budget, and gap options live under **Advanced settings**.
+The **Start a loop** dialog opens from the **loop icon** (`<Repeat/>`) in the chat composer (bottom-left of the message input area in Agent Chat). A hint in the composer helper line — " · runs a loop until a goal is met" — names the icon so it is discoverable without prior context. Core settings (number of tries, who checks the work) are always visible; the stop condition, token budget, and gap options live under **Advanced settings**.

@@ -151,6 +151,37 @@ export const WORK_ITEM_TILE_HELP = {
     'Average output (generated) tokens per attributed work item. Unattributed tokens are excluded.',
 };
 
+// Plain-language help for the Statistics-tab summary tiles (#1151). The tiles
+// otherwise show a bare number and a class name ("Cache write"/"Cache read")
+// that only means something if you already know the provider's prompt-cache
+// model. Keys mirror the tile ids: the two totals plus the four TOKEN_CLASSES.
+export const STAT_TILE_HELP = {
+  total:
+    'Sum of all token classes (input, output, cache write and cache read) across every agent run in this period.',
+  invocations:
+    'Number of model calls (agent runs) that produced these tokens in this period.',
+  input:
+    'Prompt tokens sent to the model — the conversation, instructions and context the agent reads in.',
+  output:
+    'Tokens the model generated in its replies.',
+  cacheCreationInput:
+    'Cache write — input tokens written into the provider prompt cache on first use. Charged once, then cheap to re-read on later runs.',
+  cacheReadInput:
+    'Cache read — input tokens served from the provider prompt cache instead of being re-sent in full, so a repeated context costs less than the first time.',
+};
+
+// Help for the work-item attribution signal shown as "Signals" (table column)
+// and "Tier" (per-run detail) — the raw labels flow/created/event/branch
+// (TIER_LABEL) carry no meaning on their own (#1151). One string serves both
+// surfaces so the definition never drifts between them.
+export const TIER_SIGNAL_HELP =
+  'Attribution confidence — how the tokens for a run were tied to this work item, strongest signal first: flow (the run was wired into the flow that owns the work item), created (the run created the linked issue or PR), event (the run reacted to a GitHub issue/PR event), branch (matched only by branch name). Higher tiers are more certain.';
+
+// Page-wide reminder that every figure on this page is a raw token count, not
+// money (#1151). Previously this caveat lived only in the export-button title.
+export const COST_NOTE =
+  'Figures are token counts, not costs — apply your provider per-model pricing separately.';
+
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server

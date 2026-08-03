@@ -33,6 +33,8 @@ const {
 const knowledgeSync = require("./knowledge-sync");
 const flowEmit = require("./flow-emit");
 const githubEventLog = require("./github-event-log");
+const hillClimbMetrics = require("./hill-climb-metrics");
+const hillClimbSweep = require("./hill-climb-sweep");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -286,6 +288,7 @@ function resolveAssistBindingFromSelection(endpointId, modelId) {
 }
 
 const { execFile, execFileSync } = require("child_process");
+const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
@@ -1241,6 +1244,191 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
     model,
     anomalies,
   };
+}
+
+// ============================================================
+// Hill-climbing loop Phase 1 (#1222): per-team run-metrics collector.
+// Concept `docs/hill-climbing-agent-concept.md` §3.1/§4/§7. The deterministic
+// side lives in the pure `hill-climb-metrics.js` + `hill-climb-sweep.js`
+// (golden-fixture tested); this function is the I/O adapter that reads the log
+// surfaces off disk and feeds them in. It performs NO GitHub calls — every
+// signal is log-driven (session JSONL, usage spool, anomaly-history, the
+// event-transparency log, audit / prompt-history) — so a scheduled pass and a
+// manual pass produce identical snapshots for identical inputs.
+// ============================================================
+const HILL_CLIMB_TEAMS_DIR = process.env.HILL_CLIMB_TEAMS_DIR || "/workspace/teams";
+// Per-team single-flight lock shared by the scheduled pass and the manual
+// endpoint (a manual POST while a pass runs → 409 pass-running).
+const _hillClimbInFlight = new Set();
+
+// Read + JSON-parse a JSONL file into an array of rows; [] on any failure.
+function _readJsonlRows(file) {
+  try {
+    const raw = fs.readFileSync(file, "utf8");
+    const out = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { out.push(JSON.parse(t)); } catch { /* skip malformed line */ }
+    }
+    return out;
+  } catch { return []; }
+}
+
+// All of one agent's session events across the live file + rotated archives.
+function _readAgentSessionEvents(id) {
+  const events = [];
+  try {
+    const dir = agentStatePath(id, "sessions");
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      for (const ev of _readJsonlRows(path.join(dir, f))) events.push(ev);
+    }
+  } catch { /* no session logs */ }
+  return events;
+}
+
+// Audit entries within the window (config-version boundary fallback when an
+// agent has no prompt-history). Newest-only read to bound the scan.
+function _readAuditEntriesSince(sinceMs) {
+  const dir = process.env.AUDIT_DIR || "/workspace/audit";
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue;
+      for (const e of _readJsonlRows(path.join(dir, f))) {
+        const t = e && e.ts ? Date.parse(e.ts) : NaN;
+        if (Number.isFinite(t) && (sinceMs == null || t >= sinceMs)) out.push(e);
+      }
+    }
+  } catch { /* no audit */ }
+  return out;
+}
+
+async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const hc = teamCfg.hillClimb && typeof teamCfg.hillClimb === "object" ? teamCfg.hillClimb : {};
+  const windowDays = Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7;
+  const minRunsPerWindow = Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0
+    ? hc.minRunsPerWindow : 20;
+  const excludeAgents = Array.isArray(hc.excludeAgents)
+    ? hc.excludeAgents.filter((s) => typeof s === "string") : [];
+  const fromMs = now - windowDays * 24 * 60 * 60 * 1000;
+
+  const auditEntries = _readAuditEntriesSince(fromMs);
+
+  // 1) Members of this team + their triggers/ports (dead-config + rework inputs).
+  const members = [];
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { continue; }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch { /* no triggers yet */ }
+    members.push({ id, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
+  }
+  const reworkTriggers = hillClimbSweep.reworkTriggerIds(members);
+
+  // 2) Per-member: session runs + token cost + config-version boundaries.
+  const runs = [];
+  const configBoundaries = {};
+  for (const m of members) {
+    const events = _readAgentSessionEvents(m.id);
+    const usageByCorr = hillClimbSweep.usageByCorrelation(_readJsonlRows(agentStatePath(m.id, "usage-spool.jsonl")));
+    const active = new Set();
+    try {
+      const reg = JSON.parse(fs.readFileSync(agentStatePath(m.id, "running-sessions.json"), "utf8"));
+      if (Array.isArray(reg)) for (const s of reg) if (s && s.correlationId) active.add(s.correlationId);
+    } catch { /* no active sessions */ }
+    for (const r of hillClimbSweep.runsFromSessionEvents(events, {
+      agentId: m.id, usageByCorr, reworkTriggerIds: reworkTriggers, activeCorrelationIds: active,
+    })) runs.push(r);
+    let promptHistory = null;
+    try {
+      promptHistory = JSON.parse(fs.readFileSync(agentStatePath(m.id, ".aee", "prompt-history.json"), "utf8"));
+    } catch { /* no prompt-history — audit fallback */ }
+    configBoundaries[m.id] = hillClimbSweep.configBoundariesForAgent(promptHistory, auditEntries, m.id);
+  }
+
+  // 3) Anomaly recurrence — read #1221's per-team history file by PATH (so this
+  //    feature doesn't hard-depend on that module being present); [] if absent.
+  let anomalyHistory = [];
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (seg) anomalyHistory = _readJsonlRows(path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "anomaly-history.jsonl"));
+
+  // 4) Waste signals from the (global) event-transparency log, scoped to team.
+  const teamAgentIds = new Set(members.map((m) => m.id));
+  const eventLogEntries = [];
+  try {
+    const dir = githubEventLog.EVENT_LOG_DIR;
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^github-events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue;
+      for (const e of _readJsonlRows(path.join(dir, f))) eventLogEntries.push(e);
+    }
+  } catch { /* no event log */ }
+  const waste = hillClimbSweep.wasteSignalsFromEventLog(eventLogEntries, fromMs, now, teamAgentIds);
+
+  const snapshot = hillClimbMetrics.computeHillClimbMetrics({
+    runs,
+    anomalyHistory,
+    configBoundaries,
+    triggerDefs: hillClimbSweep.triggerDefsFromMembers(members),
+    emitLabels: hillClimbSweep.emitLabelsFromMembers(members),
+    consumedLabels: hillClimbSweep.consumedLabelsFromMembers(members),
+    throttleDrops: waste.throttleDrops,
+    digestFolds: waste.digestFolds,
+  }, { now, windowDays, minRunsPerWindow, excludeAgents });
+
+  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot };
+}
+
+// Day-keyed snapshot path (same-day re-run overwrites). Traversal-guarded via
+// safeTeamSegment — the same guard the KB clone + anomaly-history file use.
+function hillClimbSnapshotPath(teamId, dateStr) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "metrics", `${dateStr}.json`);
+}
+function persistHillClimbSnapshot(teamId, snapshot, now = Date.now()) {
+  const p = hillClimbSnapshotPath(teamId, new Date(now).toISOString().slice(0, 10));
+  if (!p) return null;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(snapshot, null, 2));
+    return p;
+  } catch { return null; }
+}
+function readLatestHillClimbSnapshot(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  const dir = path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "metrics");
+  try {
+    const files = fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort();
+    if (!files.length) return null;
+    return JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), "utf8"));
+  } catch { return null; }
+}
+
+// Run one hill-climb pass for a team behind the per-team single-flight lock —
+// the SAME code path for the scheduled timer and the manual POST endpoint (AC:
+// manual and scheduled passes produce identical snapshots for identical inputs).
+// A manual run started while a pass is already in flight is refused so the
+// endpoint can answer 409 pass-running. Returns { ok:true, snapshot, path } or
+// { ok:false, reason:'pass-running' }.
+async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
+  if (_hillClimbInFlight.has(teamId)) return { ok: false, reason: "pass-running" };
+  _hillClimbInFlight.add(teamId);
+  try {
+    const snapshot = await computeTeamHillClimbMetrics(teamId, { now });
+    const savedPath = persistHillClimbSnapshot(teamId, snapshot, now);
+    return { ok: true, snapshot, path: savedPath };
+  } finally {
+    _hillClimbInFlight.delete(teamId);
+  }
 }
 
 // Enrich a token-usage record (#654) with the authoritative control-plane
@@ -5235,9 +5423,22 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
   return cand;
 }
 
+// #855-class fix: `git push` / `gh pr create` are network round-trips (SSH to
+// GitHub, HTTPS API) that routinely take many seconds — run synchronously they
+// park the single-threaded event loop and freeze every other request (admin
+// API, session-log pushes, poller). Async execFile keeps the loop free; the
+// per-checkout queue preserves the serialization the blocking calls provided
+// implicitly, so overlapping pushes to one repo clone still never interleave.
+const _repoGitQueue = agentGitOps.makeKeyedQueue();
+
+async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
+  const { stdout } = await execFileP(cmd, args, { cwd, env, timeout });
+  return stdout.toString();
+}
+
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
 // setUpstream? }. Throws caller-facing Errors (safe to return over the API).
-function agentGitPush(id, env, body = {}) {
+async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -5245,12 +5446,16 @@ function agentGitPush(id, env, body = {}) {
   });
   const req = agentGitOps.normalizePushRequest(body);
   const gitEnv = _buildAgentGitEnv(id, repo, env);
+  return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
+}
+
+async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
 
   let branch = req.branch;
   if (!branch) {
-    branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    branch = (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
     if (branch === "HEAD") {
       throw new Error("workspace is in detached HEAD — check out a branch before pushing");
     }
@@ -5264,7 +5469,7 @@ function agentGitPush(id, env, body = {}) {
   pushArgs.push(req.remote, branch);
 
   try {
-    const stdout = run(pushArgs);
+    const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
     // the correlationId↔branch binding corroborates the branch-tier (C) join if a
     // PR is later opened on this head another way. Best-effort, never blocks.
@@ -5302,7 +5507,7 @@ function agentGitPush(id, env, body = {}) {
 // Push the current branch, then open a PR via `gh`. `body` = { repo?, title,
 // body?, base?, head?, draft? }. Stamps the agent marker into the PR body so the
 // GitHub poller can attribute the resulting events (loop protection).
-function agentCreatePr(id, env, body = {}) {
+async function agentCreatePr(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -5317,10 +5522,14 @@ function agentCreatePr(id, env, body = {}) {
   }
 
   const gitEnv = _buildAgentGitEnv(id, repo, env);
-  const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  return _repoGitQueue(repo.repoPath, () => _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body));
+}
 
-  let head = body.head != null ? String(body.head) : run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
+  const run = (args, timeout = 30_000) =>
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
+
+  let head = body.head != null ? String(body.head) : (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head === "HEAD") {
     throw new Error("workspace is in detached HEAD — check out a branch before opening a PR");
   }
@@ -5331,7 +5540,7 @@ function agentCreatePr(id, env, body = {}) {
 
   // Ensure the branch exists on the remote before gh reads it.
   try {
-    run(["push", "--set-upstream", "origin", head]);
+    await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
     const detail = agentGitOps
       .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
@@ -5370,12 +5579,7 @@ function agentCreatePr(id, env, body = {}) {
     const ghArgs = ["pr", "create", "--title", title, "--body-file", tmp, "--head", head];
     if (base) ghArgs.push("--base", base);
     if (body.draft) ghArgs.push("--draft");
-    const out = execFileSync("gh", ghArgs, {
-      cwd: repo.repoPath,
-      env: gitEnv,
-      stdio: "pipe",
-      timeout: 30_000,
-    }).toString();
+    const out = await _execRepo("gh", ghArgs, { cwd: repo.repoPath, env: gitEnv });
     const url = (out.match(/https?:\/\/\S+/) || [])[0] || null;
     // PR-link record (#655 §4.2, tier A): the exact "which run created this PR"
     // fact. prNumber from the URL just parsed; closes[] for the artifact graph
@@ -5456,16 +5660,18 @@ function _resolveRepoCommentContext(repoFullName) {
 }
 
 // gh api helper bound to a token — no repo checkout needed (`gh api` works from
-// anywhere). Returns stdout string; throws on non-zero exit.
-function _ghApi(token, args, input) {
+// anywhere). Returns stdout string; throws on non-zero exit. Async for the same
+// reason as _execRepo above: a gh network round-trip must not park the loop.
+async function _ghApi(token, args, input) {
   const env = { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token };
-  return execFileSync("gh", ["api", ...args], {
+  const pending = execFileP("gh", ["api", ...args], {
     env,
-    stdio: input === undefined ? "pipe" : ["pipe", "pipe", "pipe"],
-    input,
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,
-  }).toString();
+  });
+  if (input !== undefined) pending.child.stdin.end(input);
+  const { stdout } = await pending;
+  return stdout.toString();
 }
 
 async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
@@ -5495,7 +5701,7 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
     // stable marker; PATCH if the content changed, skip if identical, else create.
     let existing = null;
     try {
-      const raw = _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
+      const raw = await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
       existing = prTokenComment.findExistingComment(JSON.parse(raw));
     } catch (err) {
       console.error(`[PR-token-comment] ${repoFullName}#${prNumber}: could not list comments: ${err.message}`);
@@ -5506,10 +5712,10 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
 
     if (existing) {
       if (typeof existing.body === "string" && existing.body.trim() === body.trim()) return; // no change
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: updated existing comment ${existing.id}`);
     } else {
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: posted token-usage comment`);
     }
   } catch (err) {
@@ -6415,6 +6621,13 @@ class Orchestrator {
         ...(Array.isArray(extra.humans) && extra.humans.length
           ? { humans: extra.humans.filter(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id.trim()) }
           : {}),
+        // Hill-climb collector config (#1222) — held on the team agent like
+        // `stages`/`labels`; carried through materialise so an exported+re-imported
+        // team keeps its collector config. Only the config keys travel (the admin
+        // console normalizes via normalizeHillClimb); snapshot/applied-card state
+        // is per-instance run history and never rides the bundle.
+        ...(extra.hillClimb && typeof extra.hillClimb === "object" && !Array.isArray(extra.hillClimb)
+          ? { hillClimb: extra.hillClimb } : {}),
         // Label suffix (#902): stored for extend-mode consistency checks and
         // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
         // stamped in the member configs.
@@ -10593,7 +10806,7 @@ async function main() {
       const id = decodeURIComponent((gitPushMatch || gitPrMatch)[1]);
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => {
         let parsed = {};
         try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
         try {
@@ -10604,7 +10817,7 @@ async function main() {
             return;
           }
           const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-          const result = gitPushMatch ? agentGitPush(id, env, parsed) : agentCreatePr(id, env, parsed);
+          const result = gitPushMatch ? await agentGitPush(id, env, parsed) : await agentCreatePr(id, env, parsed);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
@@ -11748,6 +11961,59 @@ async function main() {
       return;
     }
 
+    // GET /internal/teams/:teamId/hill-climb/metrics — the latest persisted
+    // metrics snapshot (hill-climbing loop Phase 1, #1222). Read-only; returns
+    // the most recent day-keyed snapshot or { snapshot: null } if the team has
+    // never had a pass. Never re-computes (that is the POST .../run path).
+    const hillClimbGetMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/metrics(?:\?.*)?$/);
+    if (hillClimbGetMatch) {
+      const teamId = decodeURIComponent(hillClimbGetMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') {
+          return sendJson(res, 404, { error: 'agent team not found' });
+        }
+        const snapshot = readLatestHillClimbSnapshot(teamId);
+        return sendJson(res, 200, { teamId, snapshot: snapshot || null });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb metrics error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/run — manual metrics pass (#1222).
+    // Same code path as the scheduled daily timer, behind the per-team
+    // single-flight lock: a manual run while a pass is already in flight is
+    // rejected 409 pass-running. Skipped during maintenance mode (same gate as
+    // the anomaly-history sweep). Overwrites the same-day snapshot.
+    const hillClimbRunMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/run$/);
+    if (hillClimbRunMatch) {
+      const teamId = decodeURIComponent(hillClimbRunMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, { teamId, maintenance: true, snapshot: null });
+          }
+          const out = await runHillClimbPass(teamId);
+          if (!out.ok) {
+            return sendJson(res, 409, { error: out.reason });
+          }
+          return sendJson(res, 200, { teamId, maintenance: false, snapshot: out.snapshot });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb run error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
     // skill (de)activation (phase 2): idempotent list edit on the team agent's
     // skills[] + additive file sync into every materialized member workspace.
@@ -11966,6 +12232,9 @@ async function main() {
           // For role: 'team' — label suffix (#902): stored for extend-mode
           // consistency and Flow-Editor dialog pre-fill.
           labelSuffix,
+          // For role: 'team' — hill-climb collector config (#1222): the run-metrics
+          // window/floor/cron/excludeAgents, round-tripped with the bundle.
+          hillClimb,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -12004,6 +12273,7 @@ async function main() {
         if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
+        if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
@@ -12269,6 +12539,56 @@ async function main() {
   };
   const anomalyHistoryTimer = setInterval(runAnomalyHistorySweep, HILL_CLIMB_ANOMALY_INTERVAL_MS);
   if (typeof anomalyHistoryTimer.unref === "function") anomalyHistoryTimer.unref();
+
+  // ============================================================
+  // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.
+  // Folds the team's log surfaces (session JSONL, usage spool, #1221's
+  // anomaly-history, the event-transparency log, audit / prompt-history) into the
+  // §4 run-metric catalog and persists one day-keyed snapshot per Agent Team at
+  // /workspace/teams/<teamId>/hill-climb/metrics/<date>.json (same-day re-run
+  // overwrites). Daily cadence (staggered like the curation crons), skipped during
+  // maintenance mode. Shares the per-team single-flight lock with the manual
+  // POST .../hill-climb/run endpoint (runHillClimbPass), so a scheduled and a
+  // manual pass never overlap and produce identical snapshots for identical
+  // inputs. Best-effort: a per-team failure is logged and never escapes the timer.
+  // ============================================================
+  const HILL_CLIMB_METRICS_INTERVAL_MS = Math.max(
+    60_000,
+    Number(process.env.HILL_CLIMB_METRICS_INTERVAL_MS) || 24 * 60 * 60 * 1000,
+  );
+  let hillClimbMetricsBusy = false;
+  const runHillClimbMetricsSweep = async () => {
+    if (hillClimbMetricsBusy) return; // overlap guard — a slow pass must not stack
+    hillClimbMetricsBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // maintenance suppresses scheduled passes
+      let teamIds;
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[Orchestrator] hill-climb metrics: team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await runHillClimbPass(teamId);
+        } catch (err) {
+          // Best-effort per team: a failed collection must not stop the others.
+          console.warn(`[Orchestrator] hill-climb metrics pass failed for ${teamId}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] hill-climb metrics sweep failed: ${err.message}`);
+    } finally {
+      hillClimbMetricsBusy = false;
+    }
+  };
+  const hillClimbMetricsTimer = setInterval(runHillClimbMetricsSweep, HILL_CLIMB_METRICS_INTERVAL_MS);
+  if (typeof hillClimbMetricsTimer.unref === "function") hillClimbMetricsTimer.unref();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

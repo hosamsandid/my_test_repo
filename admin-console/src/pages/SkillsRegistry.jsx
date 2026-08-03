@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, Link } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import { assistFetch } from '../context/assist-transport.js';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -1217,7 +1218,7 @@ function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
     setDrafting(true);
     setDraftError(null);
     try {
-      const res = await fetch('/api/skills/merge-draft', {
+      const res = await assistFetch('/api/skills/merge-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sources, target: target(), heuristicOnly: !!heuristicOnly }),

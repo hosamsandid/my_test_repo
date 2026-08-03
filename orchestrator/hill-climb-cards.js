@@ -34,7 +34,7 @@ const CARD_CLASSES = [
 // (a fresh finding bumps the open card's evidence rather than duplicating); the
 // terminal states are carried as the change-log ledger.
 const CARD_STATUSES = [
-  'open', 'applied', 'validated', 'neutral', 'regressed', 'dismissed', 'superseded',
+  'open', 'applied', 'validated', 'neutral', 'regressed', 'rolled-back', 'dismissed', 'superseded',
 ];
 
 const RISK_CLASSES = ['low', 'medium', 'high'];
@@ -326,8 +326,21 @@ function mergeCards(existingCards, incomingCards, opts = {}) {
         deferredCooldown += 1;
         continue;
       }
-      // Otherwise (validated/neutral/regressed/superseded, or applied past its
-      // cooldown): the loop may raise a fresh open card. Falls through to budget.
+      if (latest.status === 'regressed') {
+        // A verdict flipped this into a rollback card (#1226) — the human still
+        // has a rollback to click; don't duplicate the finding as a new card.
+        deferredCooldown += 1;
+        continue;
+      }
+      if (latest.status === 'rolled-back' && latest.cooldownUntil && Date.parse(latest.cooldownUntil) > now) {
+        // A rolled-back object re-enters detection only after a fresh window
+        // (#1226 cooldown interplay) — defer until the rollback's cooldown ends.
+        deferredCooldown += 1;
+        continue;
+      }
+      // Otherwise (validated/neutral/superseded, applied past its cooldown, or a
+      // rolled-back object past its fresh window): the loop may raise a fresh
+      // open card. Falls through to budget.
     }
     candidates.push(inc);
   }

@@ -3670,6 +3670,28 @@ async function deleteAgentTrigger(id, triggerId) {
   return removed;
 }
 
+// The trigger-restore choke-point, factored so the hill-climb rollback (#1226)
+// re-creates a retained trigger through the exact same write + reconcile as a
+// normal add. Re-inserts the trigger JSON verbatim (keeping its original id so a
+// rolled-back trigger-hygiene card restores the exact object that was deleted).
+// Idempotent: if a trigger with that id already exists it is left untouched.
+// Throws on a write failure. Returns the restored trigger (or the existing one).
+async function restoreAgentTrigger(id, trigger) {
+  if (!trigger || typeof trigger !== 'object' || !trigger.id) {
+    throw new Error('no retained trigger to restore');
+  }
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
+  const existing = triggers.find(t => t && t.id === trigger.id);
+  if (existing) return existing;
+  triggers.push(trigger);
+  await putTriggers(id, triggers);
+  // A restored listener is a CONSUMER write (#1007) — re-render the team's
+  // generated Outcomes blocks.
+  await reconcileTeamOutcomesForAgent(id);
+  return trigger;
+}
+
 app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -6269,6 +6291,96 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async 
     return res.status(200).json({ teamId, applied: true, card: data.card, deletedTrigger });
   } catch (err) {
     return res.status(502).json({ error: 'applied-not-recorded', code: 'applied-not-recorded', applied: true, deletedTrigger, recordError: err.message });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/rollback — the rollback
+// applier (#1226, concept §6). A regressed card carries a rollback plan; this
+// runs its undo path through the SAME existing audited console choke-point as
+// the apply (so `audit.auditMutations` records the reversal under req.user),
+// then asks the orchestrator to mark the card rolled-back with a fresh cooldown.
+// A rollback is always a human click — never auto-reverted (§6).
+//
+// Gates mirror the apply route, all server-side: autonomy 2 required (0/1 deny);
+// only a `regressed` card rolls back; only executable plan kinds run
+// (restore-trigger is wired first — re-creates the retained trigger JSON through
+// the trigger choke-point). Non-wired kinds (prompt-revert / restore-port /
+// restore-value) are refused rather than half-reverted, exactly as apply refuses
+// their apply paths.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/rollback', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+
+  // 1) Pull the card + autonomy from the store (the orchestrator is authority).
+  let cards; let autonomy;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) return res.status(resp.status).json(data);
+    cards = Array.isArray(data.cards) ? data.cards : [];
+    autonomy = data.autonomy;
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const card = cards.find(c => c && c.id === cardId);
+  if (!card) return res.status(404).json({ error: 'card not found' });
+  if (!(autonomy >= 2)) {
+    return res.status(403).json({ error: 'autonomy-locked', code: 'autonomy-locked', autonomy });
+  }
+  if (card.status !== 'regressed') {
+    return res.status(409).json({ error: 'card-not-regressed', code: 'card-not-regressed', status: card.status });
+  }
+  const plan = card.rollback && card.rollback.plan ? card.rollback.plan : null;
+  if (!plan || !plan.kind) {
+    return res.status(422).json({ error: 'no-rollback-plan', code: 'no-rollback-plan' });
+  }
+
+  // 2) Execute the rollback plan. Only restore-trigger is wired in this release
+  //    (mirrors the applier's executable-class discipline).
+  let undoResult = null;
+  if (plan.kind === 'restore-trigger') {
+    if (!plan.agentId || !AGENT_ID_RE.test(plan.agentId) || !plan.trigger || !plan.trigger.id) {
+      return res.status(422).json({ error: 'rollback-plan-incomplete', code: 'rollback-plan-incomplete' });
+    }
+    const agentDir = path.join(AGENTS_DIR, plan.agentId);
+    const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+    if (!agentCfg || (agentCfg.parentTeamId !== teamId && plan.agentId !== teamId)) {
+      return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: `agent '${plan.agentId}' is not a live member of this team` });
+    }
+    // Config-write authorization (#989): re-creating a trigger is a management action.
+    if (denyUnlessCanManageAgent(req, res, agentDir)) return;
+    try {
+      const restored = await restoreAgentTrigger(plan.agentId, plan.trigger);
+      undoResult = { kind: 'restore-trigger', agentId: plan.agentId, triggerId: restored.id };
+    } catch (err) {
+      return res.status(502).json({ error: `Could not restore trigger: ${err.message}` });
+    }
+  } else {
+    return res.status(422).json({
+      error: 'rollback-not-applicable', code: 'rollback-not-applicable', kind: plan.kind,
+      message: `rollback for '${plan.kind}' is not wired yet — only restore-trigger rolls back in this release`,
+    });
+  }
+
+  // 3) Record the rolled-back card (fresh cooldown so the object re-enters
+  //    detection only after a full window).
+  const rolledBackBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolledBackBy, undoResult }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) {
+      return res.status(502).json({ error: 'rolled-back-not-recorded', code: 'rolled-back-not-recorded', rolledBack: true, undoResult, recordStatus: resp.status, recordError: data.error });
+    }
+    return res.status(200).json({ teamId, rolledBack: true, card: data.card, undoResult });
+  } catch (err) {
+    return res.status(502).json({ error: 'rolled-back-not-recorded', code: 'rolled-back-not-recorded', rolledBack: true, undoResult, recordError: err.message });
   }
 });
 

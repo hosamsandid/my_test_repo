@@ -214,7 +214,8 @@ and the analyst is told the sample size — cards on thin evidence must say so.
 
 - `/workspace/teams/<teamId>/hill-climb/` — `metrics/<date>.json` (snapshots),
   `anomaly-history.jsonl` (§3.4), `cards.json` (statuses: `open` / `applied` / `validated` /
-  `neutral` / `regressed` / `dismissed` / `superseded`).
+  `neutral` / `regressed` / `rolled-back` / `dismissed` / `superseded`). An applied card carries a
+  `verdict` once measured (§6) and a `rollback` offer once it regresses.
 - Team-agent config: `hillClimb: { autonomy: 0|1|2, cron?, maxCardsPerPass?, minRunsPerWindow?,
   windowDays?, excludeAgents?: [] }` — carried on the team agent like `stages`/`labels`/
   `anomalyThresholds`, round-tripped through export/materialise/Edit-as-draft **except** any
@@ -222,8 +223,9 @@ and the analyst is told the sample size — cards on thin evidence must say so.
   **measurement window** (`windowDays`, default 7) is deliberately independent of the pass cadence
   — passes run daily over a rolling window, so a verdict always rests on a week of runs even
   though findings surface within a day.
-- API: `GET /internal/teams/:teamId/hill-climb/{metrics,cards}`, `POST .../cards/:id/{apply,dismiss}`
-  (proxied under `/api/teams/...`); `POST .../hill-climb/run` fires a **manual pass** — same code
+- API: `GET /internal/teams/:teamId/hill-climb/{metrics,cards}`, `POST .../cards/:id/{apply,dismiss,rollback}`
+  (proxied under `/api/teams/...`; `rollback` re-runs a regressed card's undo through the same
+  audited choke-point as its apply, then stamps a fresh cooldown — §6); `POST .../hill-climb/run` fires a **manual pass** — same code
   path as the daily schedule, guarded by a per-team single-flight lock (a second POST while a pass
   runs returns `409 pass-running`, mirroring the sweep's best-effort discipline) and audited like
   every mutating `/api` call.
@@ -242,8 +244,14 @@ and the analyst is told the sample size — cards on thin evidence must say so.
    heuristic, existing `DELETE /api/agents/:id/triggers/:tid` choke-point); `prompt-improvement`,
    `flow-wiring`, `threshold-tuning`, and `knowledge-handoff` apply paths land as follow-ups on
    the same engine. `prompt-improvement` also depends on #990 (prompt history) for its undo path.
-3. **Phase 3 — validate**: before/after comparison, `validated`/`regressed` verdicts, rollback
-   cards.
+3. **Phase 3 — validate** *(shipped, #1226 — backend)*: the daily pass runs a verdict step
+   (`hill-climb-verdict.js`) that compares each applied card's target metric before/after, but only
+   over a window lying entirely past the config boundary (never one spanning two versions);
+   improved → `validated`, regressed → a rollback card, neutral → `neutral` (finalised after two
+   windows), thin sample → `insufficient-data` (deferred, never guessed). A regressed card's
+   rollback re-runs its undo through the apply choke-points and re-arms a fresh detection window
+   (`rolled-back` + cooldown). The Improvements-panel verdict badges + rollback surfacing follow as
+   a frontend change once this backend and the #1223 panel are both on `main`.
 4. **Phase 4 — restricted autonomy 3**: auto-apply for `threshold-tuning` only, hard-gated until
    the Phase-3 verdict machinery has a full quarter of telemetry (the curator's decay-gate
    precedent).

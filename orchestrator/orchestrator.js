@@ -37,6 +37,7 @@ const hillClimbMetrics = require("./hill-climb-metrics");
 const hillClimbSweep = require("./hill-climb-sweep");
 const hillClimbCards = require("./hill-climb-cards");
 const hillClimbApply = require("./hill-climb-apply");
+const hillClimbVerdict = require("./hill-climb-verdict");
 const knowledgeFeed = require("./knowledge-feed");
 const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
@@ -1520,6 +1521,60 @@ function applyHillClimbCard(teamId, cardId, { now = Date.now(), appliedBy = null
   return { ok: true, card };
 }
 
+// The verdict step (hill-climbing loop Phase 3, #1226). For every `applied`
+// card whose full measurement window has elapsed AFTER the config boundary it
+// created, compare the declared target metric before/after and transition the
+// card: improved → validated, regressed → a rollback card, neutral → neutral
+// (finalised only after two windows), thin sample → insufficient-data (deferred,
+// never guessed). Pure logic in `hill-climb-verdict.js`; this reads/writes the
+// store. Runs every pass, independent of autonomy (measurement is honest
+// bookkeeping — it never mutates any agent config). Returns the verdict summary.
+function runVerdictStep(teamId, snapshot, { now = Date.now() } = {}) {
+  const { minRunsPerWindow, windowDays } = (() => {
+    const cfg = loadAgentConfig(teamId) || {};
+    const hc = cfg.hillClimb && typeof cfg.hillClimb === "object" ? cfg.hillClimb : {};
+    return {
+      minRunsPerWindow: Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0 ? hc.minRunsPerWindow : 20,
+      windowDays: Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7,
+    };
+  })();
+  const cards = readHillClimbCards(teamId);
+  if (!cards.some((c) => c && c.status === "applied")) return { transitioned: 0, verdicts: [] };
+  const out = hillClimbVerdict.applyVerdicts(cards, snapshot, { now, minRunsPerWindow, windowDays });
+  if (out.transitioned > 0) writeHillClimbCards(teamId, out.cards);
+  return { transitioned: out.transitioned, verdicts: out.verdicts };
+}
+
+// Record a ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
+// already executed the card's rollback plan through the same audited choke-point
+// as the apply (§3.3) — this only stamps the outcome so the object re-enters
+// detection after a fresh window (the cooldown the merge honours). Gated like
+// apply: autonomy < 2 refuses, and only a `regressed` card (one carrying a
+// rollback offer) can be rolled back. A rollback is always a human click, never
+// auto-reverted. Returns { ok, code?, card? }.
+function rollbackHillClimbCard(teamId, cardId, { now = Date.now(), rolledBackBy = null, undoResult = null } = {}) {
+  const { autonomy, windowDays } = hillClimbCardConfig(teamId);
+  if (!hillClimbApply.canApplyAtAutonomy(autonomy)) {
+    return { ok: false, code: "autonomy-locked", autonomy };
+  }
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return { ok: false, code: "card-not-found" };
+  if (card.status !== "regressed") return { ok: false, code: "card-not-regressed", status: card.status };
+  const nowIso = new Date(now).toISOString();
+  const days = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 7;
+  card.status = "rolled-back";
+  card.rolledBackAt = nowIso;
+  card.rolledBackBy = rolledBackBy ? String(rolledBackBy) : null;
+  card.updatedAt = nowIso;
+  // A fresh window before the same finding may be raised again (AC: a rolled-back
+  // object re-enters detection only after a fresh window).
+  card.cooldownUntil = new Date(now + days * 24 * 60 * 60 * 1000).toISOString();
+  if (undoResult != null) card.undoResult = undoResult;
+  writeHillClimbCards(teamId, cards);
+  return { ok: true, card };
+}
+
 // Run one hill-climb pass for a team behind the per-team single-flight lock —
 // the SAME code path for the scheduled timer and the manual POST endpoint (AC:
 // manual and scheduled passes produce identical snapshots for identical inputs).
@@ -1536,6 +1591,10 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
     const snapshot = await computeTeamHillClimbMetrics(teamId, { now });
     const savedPath = persistHillClimbSnapshot(teamId, snapshot, now);
     const { autonomy } = hillClimbCardConfig(teamId);
+    // Verdict step (#1226): measure already-applied changes across the config
+    // boundary BEFORE folding this pass's new findings, so a regressed card is
+    // flipped to a rollback card and its object is not re-raised as a duplicate.
+    const verdict = runVerdictStep(teamId, snapshot, { now });
     let merge = null;
     let digest = null;
     if (autonomy >= 1) {
@@ -1552,6 +1611,7 @@ async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
       path: savedPath,
       cards: merge ? merge.cards : [],
       merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected } : null,
+      verdict: { transitioned: verdict.transitioned, verdicts: verdict.verdicts },
       digest,
       autonomy,
     };
@@ -12261,6 +12321,42 @@ async function main() {
           return sendJson(res, 200, { teamId, card: result.card });
         } catch (err) {
           console.error(`[Orchestrator] hill-climb card apply error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/rollback — record a
+    // ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
+    // already executed the card's rollback plan through the existing audited
+    // choke-point (as the acting human); this only stamps the outcome + a fresh
+    // cooldown so the object re-enters detection after a full window. Autonomy
+    // < 2 refuses, and only a `regressed` card (one that carries a rollback
+    // offer) can be rolled back. Body: { rolledBackBy?, undoResult? }.
+    const hillClimbRollbackMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/rollback$/);
+    if (hillClimbRollbackMatch) {
+      const teamId = decodeURIComponent(hillClimbRollbackMatch[1]);
+      const cardId = decodeURIComponent(hillClimbRollbackMatch[2]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const result = rollbackHillClimbCard(teamId, cardId, {
+            rolledBackBy: body.rolledBackBy || null,
+            undoResult: body.undoResult || null,
+          });
+          if (!result.ok) {
+            const status = result.code === 'card-not-found' ? 404
+              : result.code === 'autonomy-locked' ? 403
+              : 409;
+            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
+          }
+          return sendJson(res, 200, { teamId, card: result.card });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb card rollback error for ${teamId}: ${err.message}`);
           return sendJson(res, 500, { error: err.message });
         }
       })();

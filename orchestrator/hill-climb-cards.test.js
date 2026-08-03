@@ -219,6 +219,29 @@ test('mergeCards raises a fresh card once the applied cooldown has expired', () 
   assert.equal(r.added, 1); // cooldown over → loop may raise again
 });
 
+test('mergeCards defers a re-detection while a rollback is pending (regressed)', () => {
+  const regressed = normalizeCard(goodCard(), { teamId: 'acme', now: 1000 }).card;
+  regressed.status = 'regressed';
+  const inc = normalizeCard(goodCard(), { teamId: 'acme', now: 2000 }).card;
+  const r = mergeCards([regressed], [inc], { now: 2000 });
+  assert.equal(r.added, 0, 'a rollback is pending — do not duplicate the finding');
+  assert.equal(r.deferredCooldown, 1);
+});
+
+test('mergeCards: a rolled-back object re-enters detection only after a fresh window (#1226 AC)', () => {
+  const rolledBack = normalizeCard(goodCard(), { teamId: 'acme', now: 1000 }).card;
+  rolledBack.status = 'rolled-back';
+  rolledBack.cooldownUntil = new Date(5000).toISOString();
+  const inc = normalizeCard(goodCard(), { teamId: 'acme', now: 2000 }).card;
+  // Within the fresh window → deferred, never re-raised.
+  const during = mergeCards([rolledBack], [inc], { now: 2000 });
+  assert.equal(during.added, 0);
+  assert.equal(during.deferredCooldown, 1);
+  // After the fresh window → the object may be detected again.
+  const after = mergeCards([rolledBack], [inc], { now: 9000 });
+  assert.equal(after.added, 1);
+});
+
 // ─── buildAnalystDigest + redactSecrets (AC: input contains no raw secrets) ────
 
 test('redactSecrets scrubs common credential shapes', () => {

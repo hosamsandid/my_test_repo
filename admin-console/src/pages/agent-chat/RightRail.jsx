@@ -13,6 +13,13 @@ import { apiCall } from '../../hooks/useApi';
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
 
+// The whole rail toggles with Cmd+Shift+L on macOS / Ctrl+Shift+L elsewhere
+// (handler in AgentChat.jsx). Detect the platform once so the visible hint and
+// the chevron tooltips name the modifier the user's keyboard actually has.
+const IS_MAC = typeof navigator !== 'undefined'
+  && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
+
 const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'knowledge'];
 
 /**
@@ -111,12 +118,12 @@ export default function RightRail({
   // the collapsed icon rail render it at different sizes — 13 inline next to a
   // label, 20 standalone to match the left nav's icon-only items.
   const tabs = useMemo(() => [
-    { key: 'sessions', Icon: Activity, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
-    { key: 'workspace', Icon: FolderTree, label: 'Workspace' },
-    { key: 'triggers', Icon: CalendarClock, label: 'Triggers' },
-    ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes' }] : []),
-    { key: 'prompt', Icon: FileText, label: 'Prompt' },
-    { key: 'knowledge', Icon: Brain, label: 'Knowledge' },
+    { key: 'sessions', Icon: Activity, label: 'Sessions', hint: 'Live and past runs — each session\'s log, cost and context usage', badge: sessionCount > 0 ? sessionCount : null },
+    { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
+    { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
+    ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
+    { key: 'prompt', Icon: FileText, label: 'Prompt', hint: 'Read-only preview of the composed system prompt' },
+    { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
   ], [sessionCount, showOutcomes]);
 
   // --- Overflow measurement ---------------------------------------------
@@ -239,6 +246,7 @@ export default function RightRail({
             key={t.key}
             Icon={t.Icon}
             label={t.label}
+            hint={t.hint}
             badge={t.badge ?? null}
             active={tab === t.key}
             onClick={() => setTab(t.key)}
@@ -294,6 +302,7 @@ export default function RightRail({
                     key={t.key}
                     Icon={t.Icon}
                     label={t.label}
+                    hint={t.hint}
                     badge={t.badge ?? null}
                     active={tab === t.key}
                     onClick={() => { setTab(t.key); setMenuOpen(false); }}
@@ -309,7 +318,7 @@ export default function RightRail({
         <button
           ref={closeRef}
           onClick={onClose}
-          title="Collapse panel (Cmd+Shift+L)"
+          title={`Collapse panel (${TOGGLE_SHORTCUT})`}
           aria-label="Collapse panel"
           style={{
             background: 'none',
@@ -380,6 +389,29 @@ export default function RightRail({
           <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>
       </div>
+
+      {/* Always-visible caption so the toggle shortcut is discoverable without
+          having to hover the collapse chevron (#1118). */}
+      <div style={{
+        flexShrink: 0,
+        padding: 'var(--eb-space-1) var(--eb-space-3)',
+        borderTop: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-text-muted)',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+        Press <kbd style={{
+          fontFamily: 'var(--eb-font-mono, monospace)',
+          fontSize: 'var(--eb-text-xs)',
+          padding: '0 4px',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          background: 'var(--eb-bg-app)',
+        }}>{TOGGLE_SHORTCUT}</kbd> to show or hide this panel
+      </div>
     </div>
   );
 }
@@ -415,7 +447,7 @@ function CollapsedRail({ tabs, activeTab, onExpandTo, onExpand }) {
         <button
           type="button"
           onClick={onExpand}
-          title="Expand panel (Cmd+Shift+L)"
+          title={`Expand panel (${TOGGLE_SHORTCUT})`}
           aria-label="Expand panel"
           style={{
             background: 'none',
@@ -434,14 +466,14 @@ function CollapsedRail({ tabs, activeTab, onExpandTo, onExpand }) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2) 0' }}>
-        {tabs.map(({ key, Icon, label, badge }) => {
+        {tabs.map(({ key, Icon, label, hint, badge }) => {
           const active = activeTab === key;
           return (
             <button
               key={key}
               type="button"
               onClick={() => onExpandTo(key)}
-              title={label}
+              title={hint ? `${label} — ${hint}` : label}
               aria-label={label}
               style={{
                 display: 'flex',
@@ -485,11 +517,12 @@ function CollapsedRail({ tabs, activeTab, onExpandTo, onExpand }) {
   );
 }
 
-function TabButton({ Icon, label, active, onClick, badge = null }) {
+function TabButton({ Icon, label, hint, active, onClick, badge = null }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={hint || label}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -516,12 +549,13 @@ function TabButton({ Icon, label, active, onClick, badge = null }) {
   );
 }
 
-function MenuItem({ Icon, label, active, onClick, badge = null }) {
+function MenuItem({ Icon, label, hint, active, onClick, badge = null }) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={onClick}
+      title={hint || label}
       style={{
         display: 'flex',
         alignItems: 'center',

@@ -265,6 +265,26 @@ function resolveAssistBindingForTeam(teamId) {
   return { baseUrl: bound.baseUrl, token: bound.token, model };
 }
 
+// #1214: resolve a synthesis binding from an assist selection (endpointId + model)
+// that the admin-console already validated against the caller's teams (the
+// `X-Assist-Model` header, `resolveAssistTarget`). Only the IDS travel the internal
+// HTTP hop — the token is read locally from `_keys/` here and never leaves this
+// process. Returns `{ baseUrl, token, model }` when usable, else null → the caller
+// falls back to the `.env` proxy (unset selection, deleted id, oauth seat, or an
+// unreadable token all fail SOFT). The console already gated team visibility, so
+// this only re-checks resolvability, mirroring resolveAssistBindingForTeam's tail.
+function resolveAssistBindingFromSelection(endpointId, modelId) {
+  if (!endpointId) return null; // no selection forwarded → .env as today
+  const bound = resolveLlmBinding(endpointId, modelId || null, { context: "assist domain-bootstrap" });
+  if (!bound || bound.authType === "oauth-token" || !bound.baseUrl || !bound.token) return null;
+  const model = bound.defaultModelId // resolveLlmBinding returns modelPin (the user's model) || endpoint default
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
+    || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || process.env.ANTHROPIC_MODEL;
+  if (!model) return null;
+  return { baseUrl: bound.baseUrl, token: bound.token, model };
+}
+
 const { execFile, execFileSync } = require("child_process");
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
@@ -4837,11 +4857,13 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
 // other concurrent request (the 'orchestrator unreachable: fetch failed' bug). It is
 // now an async `fetch` with an `AbortSignal` timeout, so the loop stays free while
 // the LLM is in flight and only THIS logical operation waits. Every caller awaits it.
-// #1213: an optional `binding` {baseUrl, token, model} (a team's
-// `assistLlmEndpointId`, resolved by resolveAssistBindingForTeam) overrides the
-// `.env` proxy so autonomous synthesis bills against the team's own provider.
-// Absent (or with any field missing) → the `.env` fallback, byte-identical to
-// before. The token stays in-process; only these three values ever reach fetch.
+// An optional `binding` {baseUrl, token, model} overrides the `.env` proxy so
+// synthesis bills against the chosen provider — a team's `assistLlmEndpointId`
+// (#1213, resolveAssistBindingForTeam) for curator auto-promotion/distillation,
+// or a user's console selection (#1214, resolveAssistBindingFromSelection) for
+// domain bootstrap. Absent (or with any field missing) → the `.env` fallback,
+// byte-identical to before. The token stays in-process; only these three values
+// ever reach fetch.
 async function _synthesizeSkillMd(env, request, binding) {
   const base = (binding && binding.baseUrl) || process.env.ANTHROPIC_BASE_URL;
   const token = (binding && binding.token) || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
@@ -10958,7 +10980,10 @@ async function main() {
               const req2 = knowledgeDomains.buildBootstrapRequest(
                 Array.isArray(p.lessons) ? p.lessons : [], { roles: teamSquadRoleTokens(teamId) },
               );
-              const text = await _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2); // #855: async, non-blocking
+              // #1214: bill against the user's header-selected provider (ids forwarded
+              // by the console proxy; token resolved locally). Unusable/absent → .env.
+              const binding = resolveAssistBindingFromSelection(String(p.assistEndpointId || ''), String(p.model || ''));
+              const text = await _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2, binding); // #855: async, non-blocking
               const llmProposed = knowledgeDomains.parseBootstrapResponse(text, { now });
               // `fallback` tells the UI the LLM target was unavailable/unusable and the
               // proposal is the deterministic role-seed instead (AC1 — visible fallback).

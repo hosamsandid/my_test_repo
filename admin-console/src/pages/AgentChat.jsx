@@ -33,7 +33,7 @@ function ResizeDivider({ onMouseDown, disabled = false }) {
       onMouseDown={disabled ? undefined : onMouseDown}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      title={disabled ? undefined : 'Ziehen zum Anpassen der Breite'}
+      title={disabled ? undefined : 'Drag to resize'}
       style={{
         width: 12,
         flexShrink: 0,

@@ -535,7 +535,7 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         {hovered && canMarkUnread && (
           <span
             role="button"
-            title="Als ungelesen markieren"
+            title="Mark as unread"
             onClick={e => { e.stopPropagation(); onMarkAsUnread(); }}
             style={{
               display: 'flex',

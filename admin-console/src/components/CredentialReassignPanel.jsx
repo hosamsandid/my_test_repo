@@ -11,6 +11,10 @@ import { normalizeCredential, ownershipPayload } from '../pages/credential-scope
 //
 // `onSave` receives { name, ...ownershipPayload } (ownership omitted for a
 // non-reassigning caller so the server keeps the existing assignment).
+//
+// `secretHelp` (optional ReactNode) is rendered under the Name field — used to
+// explain that the secret is create-only and how to rotate it (e.g. the GitHub
+// Tokens page surfaces the rotation-via-environment + agent-respawn note there).
 
 const labelStyle = {
   fontSize: 'var(--eb-text-sm)',
@@ -31,7 +35,7 @@ const inputStyle = {
   boxSizing: 'border-box',
 };
 
-export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, adminTeamIds = [], canReassign, onSave, onCancel, saving, error }) {
+export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, adminTeamIds = [], canReassign, onSave, onCancel, saving, error, secretHelp }) {
   const norm = normalizeCredential(cred || {});
   const [name, setName] = useState(cred?.name || '');
   const [ownership, setOwnership] = useState({
@@ -64,6 +68,17 @@ export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, 
         <div style={labelStyle}>Name</div>
         <input value={name} onChange={e => setName(e.target.value)} style={inputStyle} />
       </div>
+
+      {secretHelp && (
+        <div style={{
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+          lineHeight: 1.5,
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)',
+        }}>{secretHelp}</div>
+      )}
 
       {canReassign ? (
         <CredentialOwnership

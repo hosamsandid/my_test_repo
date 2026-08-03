@@ -598,9 +598,7 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
         {form.processBundle && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
             <div style={compactLabelStyle}>
-              {/* Composed bundles are woven before the team name exists (#428) —
-                  show the name the materialised bundle will carry. */}
-              Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
+              Process: {form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
             </div>
             <BundleFlowPreview bundle={form.processBundle} />
             <LintBadges lints={form.processLints} loading={false} />
@@ -797,14 +795,12 @@ export default function TeamSetup() {
       review: KNOWLEDGE_LEARNING_DEFAULTS.review,
       gates: { ...KNOWLEDGE_LEARNING_DEFAULTS.gates },
     },
-    // Process step (#422): the selected/woven process-template bundle drives
+    // Process step (#422): the selected process-template bundle drives
     // team creation.
-    processMode: null,        // null | 'template' | 'compose'
+    processMode: null,        // null | 'template' | 'describe'
     processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
     processBundle: null,      // processTemplateVersion-1 bundle
-    weaveNotes: [],           // gap-rule explanations from the Flow-Weaver
     processLints: null,       // authoritative lints for the current bundle
-    composerStages: [],       // composer state
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
@@ -863,7 +859,7 @@ export default function TeamSetup() {
   function validateStep() {
     if (step === 0) {
       if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
-        return 'Pick a process template or compose a process first';
+        return 'Pick a process template or describe a flow first';
       }
       if ((form.processLints || []).some(l => l.severity === 'error')) {
         return 'The process has wiring errors — fix them before continuing';
@@ -943,8 +939,8 @@ export default function TeamSetup() {
     // defaults (no behaviour change vs today's wizard, AC-4).
     if (form.knowledgeConfig) body.knowledgeConfig = form.knowledgeConfig;
     // Ship the Process step's bundle (#422). With Process as step 1 the team
-    // name isn't known at weave time — bind the bundle name to the team name at
-    // submit time instead (#428).
+    // name isn't known when the bundle is selected — bind the bundle name to
+    // the team name at submit time instead (#428).
     if (form.processBundle) {
       body.processTemplate = { ...form.processBundle, name: form.teamName.trim() || form.processBundle.name };
     }

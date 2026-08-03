@@ -37,7 +37,6 @@ const { listProcessTemplates, loadProcessTemplate } = require('./process-templat
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
-const { weaveProcess } = require('./flow-weaver');
 const { runCopilot, sanitizeCopilotHistory } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
@@ -6026,44 +6025,6 @@ app.get('/api/process/template', (req, res) => {
   }));
 });
 
-/* ─── Flow-Weaver (#421) ────────────────────────────────────────────────
- * Deterministic wiring engine: ordered stages + selected roles → a complete,
- * gap-free process-template bundle (pure builder in flow-weaver.js). Roles are
- * referenced by catalog template id ({ templateId }) or supplied inline
- * ({ inline: true, ... } — #423). Returns { bundle, notes } where notes lists
- * every applied gap rule so the wizard can explain the compensation. */
-app.post('/api/process/weave', (req, res) => {
-  const body = req.body || {};
-  const stagesIn = Array.isArray(body.stages) ? body.stages : null;
-  if (!stagesIn) return res.status(400).json({ error: 'stages must be an array' });
-  const stages = [];
-  for (const s of stagesIn) {
-    const roles = [];
-    for (const r of (s && Array.isArray(s.roles) ? s.roles : [])) {
-      if (r && typeof r.templateId === 'string') {
-        const t = loadAgentTemplate(r.templateId);
-        if (!t) return res.status(400).json({ error: `Unknown role template: ${r.templateId}` });
-        roles.push(t);
-      } else if (r && r.inline === true) {
-        roles.push(r);
-      } else {
-        return res.status(400).json({ error: 'each role needs { templateId } or { inline: true, ... }' });
-      }
-    }
-    stages.push({ name: s && s.name, prefix: s && s.prefix, roles });
-  }
-  try {
-    const { bundle, notes } = weaveProcess({
-      name: typeof body.name === 'string' && body.name.trim() ? body.name : 'Woven process',
-      stages,
-      options: body.options,
-    });
-    res.json({ bundle, notes });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
 /* ─── Flow Copilot (#1068/#1070, spec #1047) ────────────────────────────
  * Natural-language flow generation/revision. Stateless: the client resends the
  * conversation + current bundle each turn; generate → sanitize → STRICT
@@ -9927,8 +9888,9 @@ app.get('/api/agent-templates', (_req, res) => {
       // seeded default — can be reset to default).
       origin,
       defaultEnabled: t.defaultEnabled !== false,
-      // Catalog v2 (#420): the normalised composition surface for the wizard's
-      // stage picker + the Flow-Weaver (patternRole / stageAffinity / ports).
+      // Catalog v2 (#420): the normalised composition surface (patternRole /
+      // stageAffinity / ports) consumed by the wiring-suggestion feature
+      // (port-suggestion.js) and the Flow Editor.
       ...normalizeTemplatePorts(t),
       triggerSummary: (t.triggers || []).map(tr => ({
         id: tr.id,

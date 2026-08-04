@@ -1183,50 +1183,86 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
 }
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
-// Read-only host-folder context mount (#1283). A self-contained control: unlike
-// the rest of the edit form (one PUT on Save), a mount change is baked at
-// container spawn time and re-provisions the agent, so it saves immediately via
-// its own PATCH endpoint and reports the respawn outcome. Availability is
-// local/self-hosted only — the capability probe disables the control (with an
+// Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
+// control: unlike the rest of the edit form (one PUT on Save), a mount change is
+// baked at container spawn time and re-provisions the agent, so it saves
+// immediately via its own PATCH endpoint and reports the respawn outcome. Each
+// folder gets a distinct, stable in-container path — a single legacy folder at
+// the bare `/context`, additional folders at `/context/<slug>` (the slug is
+// derived from the folder's basename server-side and de-duplicated). Availability
+// is local/self-hosted only — the capability probe disables the control (with an
 // explanation) on the hosted stack (AC8).
 function ContextMountControl({ agent }) {
   const { data: capability } = useApi('/api/context-mount/capability');
   const supported = capability ? !!capability.supported : null; // null = still loading
   const mountPath = (capability && capability.mountPath) || '/context';
 
-  const [pathVal, setPathVal] = useState(agent.contextMount || '');
-  const [saved, setSaved] = useState(agent.contextMount || '');
-  // Read-write opt-in (#1289). Read-only is the default; the flag is only
-  // meaningful when a path is set.
-  const [rw, setRw] = useState(agent.contextMountRw === true);
-  const [savedRw, setSavedRw] = useState(agent.contextMountRw === true);
+  // Initial rows: the multi-folder field when present, else the legacy single
+  // folder, else empty. `slug`/`name` are carried (hidden) so a re-save keeps a
+  // folder's in-container path stable even if the host path is repointed.
+  const initialRows = () => {
+    if (Array.isArray(agent.contextMounts) && agent.contextMounts.length) {
+      return agent.contextMounts.map(m => ({
+        path: m.path || '',
+        name: m.name || '',
+        slug: m.slug || null,
+        readWrite: m.readWrite === true,
+        target: m.slug ? `${mountPath}/${m.slug}` : null,
+      }));
+    }
+    if (agent.contextMount) {
+      return [{ path: agent.contextMount, name: '', slug: null, readWrite: agent.contextMountRw === true, target: mountPath }];
+    }
+    return [];
+  };
+  const snapshot = (rs) => JSON.stringify(rs.map(r => ({ path: (r.path || '').trim(), readWrite: !!r.readWrite })));
+
+  const [rows, setRows] = useState(initialRows);
+  const [saved, setSaved] = useState(() => snapshot(initialRows()));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
 
-  const dirty = pathVal.trim() !== saved || rw !== savedRw;
+  const dirty = snapshot(rows) !== saved;
+  const disabled = busy || supported === null;
 
-  async function save(nextPath, nextRw) {
+  const updateRow = (i, patch) => setRows(rs => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addRow = () => setRows(rs => [...rs, { path: '', name: '', slug: null, readWrite: false, target: null }]);
+  const removeRow = (i) => setRows(rs => rs.filter((_, idx) => idx !== i));
+
+  async function persist(nextRows) {
     setBusy(true); setMsg(''); setErr('');
     try {
-      const body = { path: nextPath ? nextPath : null, readWrite: !!nextRw };
-      const res = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/context-mount`, body);
-      const applied = res && res.contextMount ? res.contextMount : '';
-      const appliedRw = !!(res && res.readWrite);
-      setPathVal(applied);
-      setSaved(applied);
-      setRw(appliedRw);
-      setSavedRw(appliedRw);
-      if (!applied) {
-        setMsg('Context folder cleared. ' + (res && res.respawned ? 'Agent re-provisioned.' : 'Takes effect on the next start.'));
+      const mounts = nextRows
+        .map(r => ({
+          path: (r.path || '').trim(),
+          readWrite: !!r.readWrite,
+          ...(r.name ? { name: r.name } : {}),
+          ...(r.slug ? { slug: r.slug } : {}),
+        }))
+        .filter(m => m.path);
+      const res = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/context-mount`, { mounts });
+      const applied = Array.isArray(res && res.mounts) ? res.mounts : [];
+      const appliedRows = applied.map(m => ({
+        path: m.hostPath || '',
+        name: m.name || '',
+        slug: m.slug || null,
+        readWrite: m.readWrite === true,
+        target: m.target || null,
+      }));
+      setRows(appliedRows);
+      setSaved(snapshot(appliedRows));
+      const n = appliedRows.length;
+      if (!n) {
+        setMsg('Context folders cleared. ' + (res && res.respawned ? 'Agent re-provisioned.' : 'Takes effect on the next start.'));
       } else {
-        const mode = appliedRw ? 'read-write' : 'read-only';
+        const suffix = n === 1 ? 'folder' : 'folders';
         setMsg(res && res.respawned
-          ? `Mounted at ${mountPath} (${mode}). Agent re-provisioned.`
-          : `Saved (${mode}). Takes effect the next time the agent starts.`);
+          ? `${n} ${suffix} mounted under ${mountPath}. Agent re-provisioned.`
+          : `Saved ${n} ${suffix}. Takes effect the next time the agent starts.`);
       }
     } catch (e) {
-      setErr((e && e.message) || 'Could not update the context folder');
+      setErr((e && e.message) || 'Could not update the context folders');
     } finally {
       setBusy(false);
     }
@@ -1234,14 +1270,14 @@ function ContextMountControl({ agent }) {
 
   return (
     <div>
-      <div style={labelStyle}>Host context folder</div>
+      <div style={labelStyle}>Host context folders</div>
       <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-        Expose a folder from the host machine to this agent as live context.
-        Its current contents appear inside the agent at <code>{mountPath}</code>; changes the
-        host makes to the folder are reflected on the agent's next access. By default the
-        folder is <strong>read-only</strong>; enable read-write below to let the agent create,
-        modify and delete files in it — those changes land on the host. Saving re-provisions
-        the agent's container.
+        Expose one or more folders from the host machine to this agent as live context.
+        Each folder's current contents appear inside the agent under <code>{mountPath}</code>
+        {' '}at its own path; changes the host makes are reflected on the agent's next access.
+        By default each folder is <strong>read-only</strong>; tick read-write to let the agent
+        create, modify and delete files in it — those changes land on the host. Saving
+        re-provisions the agent's container.
       </div>
       {supported === false ? (
         <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)' }}>
@@ -1250,32 +1286,56 @@ function ContextMountControl({ agent }) {
         </div>
       ) : (
         <>
-          <input
-            type="text"
-            value={pathVal}
-            onChange={e => setPathVal(e.target.value)}
-            placeholder="/absolute/path/on/the/host"
-            disabled={busy || supported === null}
-            style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-          />
-          <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', cursor: (busy || supported === null) ? 'default' : 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={rw}
-              onChange={e => setRw(e.target.checked)}
-              disabled={busy || supported === null}
-            />
-            <span style={helpTextStyle}>
-              Mount read-write — let the agent write back to the host folder (off by default).
-            </span>
-          </label>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
-            <SecondaryBtn onClick={() => save(pathVal.trim(), rw)} style={{ opacity: (busy || !dirty) ? 0.6 : 1, pointerEvents: (busy || !dirty) ? 'none' : 'auto' }}>
+          {rows.length === 0 && (
+            <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)', fontStyle: 'italic' }}>
+              No folders attached. Add one below.
+            </div>
+          )}
+          {rows.map((row, i) => (
+            <div key={i} style={{ marginBottom: 'var(--eb-space-3)', paddingBottom: 'var(--eb-space-2)', borderBottom: '1px solid var(--eb-border-default)' }}>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={row.path}
+                  onChange={e => updateRow(i, { path: e.target.value })}
+                  placeholder="/absolute/path/on/the/host"
+                  disabled={disabled}
+                  style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)', flex: '1 1 auto', minWidth: 0 }}
+                />
+                <SecondaryBtn
+                  onClick={() => removeRow(i)}
+                  title="Remove this folder"
+                  style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto', flex: '0 0 auto' }}
+                >
+                  Remove
+                </SecondaryBtn>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-1)', cursor: disabled ? 'default' : 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={row.readWrite}
+                  onChange={e => updateRow(i, { readWrite: e.target.checked })}
+                  disabled={disabled}
+                />
+                <span style={helpTextStyle}>Mount read-write — let the agent write back to this folder (off by default).</span>
+              </label>
+              {row.target && (
+                <div style={{ ...helpTextStyle, marginTop: 'var(--eb-space-1)' }}>
+                  Mounts at <code>{row.target}</code>
+                </div>
+              )}
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+            <SecondaryBtn onClick={addRow} style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto' }}>
+              + Add folder
+            </SecondaryBtn>
+            <SecondaryBtn onClick={() => persist(rows)} style={{ opacity: (disabled || !dirty) ? 0.6 : 1, pointerEvents: (disabled || !dirty) ? 'none' : 'auto' }}>
               {busy ? 'Saving…' : 'Save & re-provision'}
             </SecondaryBtn>
-            {saved && (
-              <SecondaryBtn onClick={() => { setPathVal(''); setRw(false); save('', false); }} style={{ opacity: busy ? 0.6 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
-                Clear
+            {rows.length > 0 && (
+              <SecondaryBtn onClick={() => { setRows([]); persist([]); }} style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto' }}>
+                Clear all
               </SecondaryBtn>
             )}
           </div>

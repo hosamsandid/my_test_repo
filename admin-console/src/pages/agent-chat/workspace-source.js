@@ -1,16 +1,20 @@
-// Pure helpers for the two sources the workspace tree can show (#1286):
+// Pure helpers for the sources the workspace tree can show (#1286):
 //
 //   • the agent's workspace — /workspace/agents/<id>/, served from the pool
 //     volume this container can read directly;
-//   • the read-only host context folder (#1283) — mounted at /context INSIDE
-//     the agent's container and readable only through it.
+//   • the host context folder(s) (#1283, multiple folders #1290) — bind-mounted
+//     INSIDE the agent's container and readable only through it.
 //
-// Both are rendered by one tree, so every node needs a key that says which
-// source it belongs to. Workspace keys are ordinary relative paths ('' is the
-// root, 'memory/log.md' a file). Context keys carry a LEADING SLASH ('/context',
-// '/context/docs/note.md') — a relative workspace path can never start with one,
-// so the two namespaces cannot collide even if the agent really does have a
-// folder called `context`.
+// All are rendered by one tree, so every node needs a key that says which source
+// it belongs to. Workspace keys are ordinary relative paths ('' is the root,
+// 'memory/log.md' a file). Context keys carry a LEADING SLASH — the mount root
+// key ('/context', or '/context/<slug>' for a folder in a multi-folder set) and
+// its descendants ('/context/docs/note.md', '/context/<slug>/a.txt'). A relative
+// workspace path can never start with one, so the two namespaces cannot collide
+// even if the agent really does have a folder called `context`. The path passed
+// to the browse API is the key with the leading `/context` stripped — for a
+// multi-folder root that leaves `<slug>/…`, which the browse program resolves
+// under /context with no per-folder branch (#1290).
 //
 // React-free so it can be unit-tested with plain `node --test`.
 
@@ -48,29 +52,50 @@ export function workspaceUrl(agentId, key, kind) {
   return `/api/agents/${encodeURIComponent(agentId)}/${base}/${kind}?path=${encodeURIComponent(rel)}`;
 }
 
-// The virtual root entry for the mounted folder, shaped like any other listing
-// item so the tree renders it with no special case beyond its `key`.
-export function contextRootItem(status) {
+// The virtual root entry for one mounted folder, shaped like any other listing
+// item so the tree renders it with no special case beyond its `key`. Accepts a
+// mount entry `{ name, hostPath, key, readWrite }` (from status.mounts) — or a
+// legacy `{ hostPath }` / null, which resolves to the bare `/context` root. The
+// bare root keeps the display name `context` for continuity (#1286); a
+// multi-folder root shows its label (#1290).
+export function contextRootItem(mount) {
+  const key = (mount && mount.key) ? mount.key : CONTEXT_ROOT_KEY;
+  const name = key === CONTEXT_ROOT_KEY
+    ? CONTEXT_ROOT_NAME
+    : ((mount && (mount.name || mount.slug)) || key.slice(CONTEXT_ROOT_KEY.length + 1) || CONTEXT_ROOT_NAME);
   return {
-    name: CONTEXT_ROOT_NAME,
+    name,
     type: 'dir',
     size: 0,
     mtime: 0,
     hidden: false,
-    key: CONTEXT_ROOT_KEY,
+    key,
     readOnly: true,
-    hostPath: (status && status.hostPath) || null,
+    hostPath: (mount && mount.hostPath) || null,
+    readWrite: !!(mount && mount.readWrite),
   };
 }
 
-// Prepend the context root to the workspace root listing when the agent has a
-// mount. Returns the input untouched otherwise (and for every other directory),
-// so an agent without a mount sees exactly today's tree.
+// Prepend one read-only context root PER mounted folder to the workspace root
+// listing when the agent has any (#1290 AC3). Uses status.mounts when present
+// (one entry per folder), else falls back to the legacy single `/context` root
+// synthesised from status.hostPath. Returns the input untouched when there is no
+// mount (and for every other directory), so an agent without a mount sees exactly
+// today's tree. Idempotent: a root already in the list is not added again.
 export function withContextRoot(items, status) {
   const list = Array.isArray(items) ? items : [];
   if (!status || !status.enabled) return list;
-  if (list.some(i => i && i.key === CONTEXT_ROOT_KEY)) return list;
-  return [contextRootItem(status), ...list];
+  const mounts = (Array.isArray(status.mounts) && status.mounts.length)
+    ? status.mounts
+    : [{ key: CONTEXT_ROOT_KEY, hostPath: status.hostPath || null, readWrite: !!status.readWrite }];
+  const present = new Set(list.map(i => i && i.key));
+  const roots = [];
+  for (const m of mounts) {
+    const item = contextRootItem(m);
+    if (present.has(item.key) || roots.some(r => r.key === item.key)) continue;
+    roots.push(item);
+  }
+  return roots.length ? [...roots, ...list] : list;
 }
 
 // Child key for an item inside `parentKey`. Listing items from the context

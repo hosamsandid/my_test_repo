@@ -3,7 +3,7 @@
 const http = require('http');
 const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');
-const { buildContextMountSpec, CONTEXT_MOUNT_TARGET } = require('./context-mount');
+const { buildContextMountSpecs } = require('./context-mount');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
@@ -512,7 +512,7 @@ async function reseedPerAgentVolume(id, paths) {
   return { reseeded: valid };
 }
 
-function spawnContainer({ id, env, contextMount, contextMountRw }) {
+function spawnContainer({ id, env, contextMounts }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -632,22 +632,23 @@ function spawnContainer({ id, env, contextMount, contextMountRw }) {
         no_new_privileges: true,
         remove: true,
       };
-      // Host-folder context mount (#1283). An admin may point this agent at one
-      // host directory, bind-mounted at the fixed `/context` target — READ-ONLY
-      // by default, or READ-WRITE when `contextMountRw` is set (#1289). The path
-      // is validated at the API layer AND re-checked here (fail-closed):
-      // buildContextMountSpec returns null for anything that doesn't pass, so a
-      // bad value simply produces no mount rather than a dangerous one.
-      // Local/podman only — the API gate keeps `contextMount` off config in
-      // non-local (hosted) environments. `mounts[]` is the libpod OCI bind
-      // array, distinct from the named-volume `volumes[]` above.
-      if (contextMount) {
-        const spec = buildContextMountSpec(contextMount, { readWrite: !!contextMountRw });
-        if (spec) {
-          createBody.mounts = [spec];
-          console.log(`[spawn-container] ${id} -> ${contextMountRw ? 'read-write' : 'read-only'} context mount ${spec.source} at ${CONTEXT_MOUNT_TARGET}`);
-        } else {
-          console.warn(`[spawn-container] ${id} -> ignoring invalid contextMount '${contextMount}'`);
+      // Host-folder context mount(s) (#1283, multiple folders #1290). An admin
+      // may point this agent at one or more host directories, each bind-mounted
+      // at a distinct target — a single legacy folder at the fixed `/context`,
+      // additional folders at `/context/<slug>` — READ-ONLY by default or
+      // READ-WRITE per folder (#1289). Paths are validated at the API layer AND
+      // re-checked here (fail-closed): buildContextMountSpecs drops any entry
+      // that doesn't pass, so one bad folder produces no mount rather than a
+      // dangerous one and never blocks the others. Local/podman only — the API
+      // gate keeps these off config in non-local (hosted) environments.
+      // `mounts[]` is the libpod OCI bind array, distinct from the named-volume
+      // `volumes[]` above.
+      const contextSpecs = buildContextMountSpecs(contextMounts);
+      if (contextSpecs.length) {
+        createBody.mounts = contextSpecs;
+        for (const spec of contextSpecs) {
+          const mode = spec.options.includes('rw') ? 'read-write' : 'read-only';
+          console.log(`[spawn-container] ${id} -> ${mode} context mount ${spec.source} at ${spec.destination}`);
         }
       }
       if (Object.keys(resourceLimits).length) createBody.resource_limits = resourceLimits;

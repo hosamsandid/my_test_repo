@@ -72,6 +72,50 @@ test('the virtual root is never added twice', () => {
   assert.deepEqual(withContextRoot(once, status), once);
 });
 
+test('one root per folder is prepended for a multi-folder mount (#1290 AC3)', () => {
+  const items = [{ name: 'memory', type: 'dir' }];
+  const status = {
+    enabled: true,
+    mounts: [
+      { name: 'Requirements', key: '/context/requirements', hostPath: '/host/req', readWrite: false },
+      { name: 'Design', key: '/context/design', hostPath: '/host/design', readWrite: true },
+    ],
+  };
+  const withRoots = withContextRoot(items, status);
+  assert.equal(withRoots.length, 3);
+  assert.equal(withRoots[0].key, '/context/requirements');
+  assert.equal(withRoots[0].name, 'Requirements');
+  assert.equal(withRoots[0].readWrite, false);
+  assert.equal(withRoots[1].key, '/context/design');
+  assert.equal(withRoots[1].name, 'Design');
+  assert.equal(withRoots[1].readWrite, true);
+  assert.equal(withRoots[2], items[0]);
+});
+
+test('multi-folder roots route each to their own subtree via the slug', () => {
+  // A /context/<slug> key strips to `<slug>` for the browse API — no per-folder
+  // branch needed on the server.
+  assert.equal(contextRelOf('/context/requirements'), 'requirements');
+  assert.equal(contextRelOf('/context/design/spec.pdf'), 'design/spec.pdf');
+  assert.equal(
+    workspaceUrl('a1', '/context/requirements', 'tree'),
+    '/api/agents/a1/context/tree?path=requirements',
+  );
+  assert.equal(isReadOnlyKey('/context/design/spec.pdf'), true);
+});
+
+test('multi-folder roots are never added twice (idempotent)', () => {
+  const status = {
+    enabled: true,
+    mounts: [
+      { name: 'A', key: '/context/a', hostPath: '/host/a' },
+      { name: 'B', key: '/context/b', hostPath: '/host/b' },
+    ],
+  };
+  const once = withContextRoot([{ name: 'memory', type: 'dir' }], status);
+  assert.deepEqual(withContextRoot(once, status), once);
+});
+
 test('child keys inherit their source from the parent', () => {
   assert.equal(childKey('', { name: 'memory' }), 'memory');
   assert.equal(childKey('memory', { name: 'log.md' }), 'memory/log.md');

@@ -12,6 +12,7 @@ const {
   interactionNote,
   workingEnvironmentSection,
   contextMountSection,
+  contextMountsSection,
   blueprintSection,
   envHasRepository,
   hasSkillGrant,
@@ -201,6 +202,64 @@ test('assembleClaudeMd threads contextMountRw through to the section', () => {
     contextMount: '/host/data', contextMountRw: true,
   });
   assert.ok(md.includes(contextMountSection('/host/data', true)));
+});
+
+// ---- multiple host folders (#1290) -----------------------------------------
+
+test('contextMountsSection enumerates every folder with its target and mode (AC4)', () => {
+  const s = contextMountsSection([
+    { path: '/host/req', target: '/context/requirements' },
+    { path: '/host/design', target: '/context/design', readWrite: true },
+  ]);
+  assert.ok(s.startsWith('## Context Folders'));
+  assert.ok(s.includes('`/context/requirements`'));
+  assert.ok(s.includes('/host/req'));
+  assert.ok(s.includes('`/context/design`'));
+  assert.ok(s.includes('/host/design'));
+  // The read-only folder is told it cannot write; the read-write one is not.
+  assert.match(s, /`\/context\/requirements`.*read-only.*cannot write/);
+  assert.match(s, /`\/context\/design`.*read-write.*written straight back/);
+});
+
+test('contextMountsSection is empty for an empty / invalid list', () => {
+  assert.strictEqual(contextMountsSection([]), '');
+  assert.strictEqual(contextMountsSection(null), '');
+  assert.strictEqual(contextMountsSection([{ target: '/context/x' }]), ''); // no path → filtered out
+});
+
+test('assembleClaudeMd: multi-folder contextMounts renders the enumerated section', () => {
+  const mounts = [
+    { path: '/host/req', target: '/context/requirements' },
+    { path: '/host/design', target: '/context/design', readWrite: true },
+  ];
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMounts: mounts });
+  const order = md.split('\n').filter(l => l.startsWith('## ')).map(l => l.replace('## ', ''));
+  assert.ok(order.includes('Context Folders'));
+  assert.strictEqual(order.indexOf('Context Folders'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes(contextMountsSection(mounts)));
+  assert.ok(!md.includes('Read-only Context Folder'));
+});
+
+test('assembleClaudeMd: a single resolved folder at bare /context is byte-identical to the single-folder section (AC9/AC7)', () => {
+  const viaList = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMounts: [{ path: '/host/data', target: '/context', readWrite: false }],
+  });
+  const viaLegacy = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMount: '/host/data',
+  });
+  assert.strictEqual(viaList, viaLegacy);
+  assert.ok(viaList.includes('## Read-only Context Folder'));
+});
+
+test('assembleClaudeMd: a single folder at a /context/<slug> target uses the enumerated section', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMounts: [{ path: '/host/req', target: '/context/requirements' }],
+  });
+  assert.ok(md.includes('## Context Folders'));
+  assert.ok(md.includes('`/context/requirements`'));
+  assert.ok(!md.includes('## Read-only Context Folder'));
 });
 
 // ---- unified Memory System variant (unification Phase 2) --------------------

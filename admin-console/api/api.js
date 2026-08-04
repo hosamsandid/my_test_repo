@@ -30,7 +30,13 @@ const { buildAssistModelOptions } = require('./assist-model-options');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
-const { validateHostMountPath, CONTEXT_MOUNT_TARGET } = require('./context-mount');
+const {
+  validateHostMountPath,
+  CONTEXT_MOUNT_TARGET,
+  MAX_CONTEXT_MOUNTS,
+  normalizeContextMountsInput,
+  resolveContextMounts,
+} = require('./context-mount');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
@@ -3532,6 +3538,21 @@ function isLocalContextMountEnv() {
   return rt !== 'kubernetes' && rt !== 'k8s';
 }
 
+// Shape an agent config's resolved context folders for the API (#1290). One
+// entry per mounted folder — legacy single folder and multi-folder alike —
+// carrying the browse `key` (its in-container target, which the workspace
+// browser uses to key each read-only root). Empty for an agent with no mount.
+function shapeContextMounts(cfg) {
+  return resolveContextMounts(cfg || {}).map((m) => ({
+    name: m.name,
+    hostPath: m.path,
+    slug: m.slug,
+    target: m.target,
+    key: m.target,
+    readWrite: m.readWrite === true,
+  }));
+}
+
 // Whether the read-only host-folder context mount is offered in this
 // environment, plus the fixed in-container target. The UI reads this to disable
 // the control (with an explanation) on the hosted stack (AC8).
@@ -3566,6 +3587,38 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'A team agent hosts no container; set the context mount on its members instead' });
   }
 
+  // Multi-folder path (#1290): a `mounts` array supersedes the single-path body.
+  // Each entry is validated + given a stable slug by the pure normalizer; the
+  // whole legacy single-folder shape is dropped so the two never coexist on disk.
+  if (req.body && Array.isArray(req.body.mounts)) {
+    const norm = normalizeContextMountsInput(req.body.mounts);
+    if (!norm.ok) return res.status(400).json({ error: norm.error, code: 'invalid-host-path' });
+    let changed = false;
+    if (norm.mounts.length === 0) {
+      // Empty array → clear every folder (back to no external context).
+      if ('contextMounts' in cfg || 'contextMount' in cfg || 'contextMountRw' in cfg) {
+        delete cfg.contextMounts;
+        delete cfg.contextMount;
+        delete cfg.contextMountRw;
+        changed = true;
+      }
+    } else {
+      cfg.contextMounts = norm.mounts;
+      // Never keep the legacy single-folder keys alongside the array.
+      delete cfg.contextMount;
+      delete cfg.contextMountRw;
+      changed = true;
+    }
+    if (changed) writeJsonAtomic(cfgPath, cfg);
+    // Rebuild the prompt before the respawn so the new container starts with the
+    // enumerated Context Folders section already in its CLAUDE.md (or without it
+    // when cleared) — the agent is never told about a folder it cannot read.
+    const reason = norm.mounts.length ? 'context-mount-changed' : 'context-mount-cleared';
+    if (changed) await rebuildAgentPromptBestEffort(id, reason);
+    const respawned = changed ? await respawnAgentBestEffort(id, reason) : false;
+    return res.json({ mounts: shapeContextMounts(cfg), mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  }
+
   const hostPath = req.body ? req.body.path : undefined;
   // Read-write opt-in (#1289): strictly boolean-true enables it; anything else
   // (absent / false / non-boolean) stays read-only, the safe default.
@@ -3573,9 +3626,10 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
   // null / '' / undefined → clear the mount (back to no external context).
   if (hostPath === null || hostPath === undefined || hostPath === '') {
     let changed = false;
-    if ('contextMount' in cfg || 'contextMountRw' in cfg) {
+    if ('contextMount' in cfg || 'contextMountRw' in cfg || 'contextMounts' in cfg) {
       delete cfg.contextMount;
       delete cfg.contextMountRw;
+      delete cfg.contextMounts;
       writeJsonAtomic(cfgPath, cfg);
       changed = true;
     }
@@ -3583,7 +3637,7 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
     // the mount, so the agent is never told about a folder it cannot read.
     if (changed) await rebuildAgentPromptBestEffort(id, 'context-mount-cleared');
     const respawned = changed ? await respawnAgentBestEffort(id, 'context-mount-cleared') : false;
-    return res.json({ contextMount: null, readWrite: false, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+    return res.json({ contextMount: null, readWrite: false, mounts: [], mountPath: CONTEXT_MOUNT_TARGET, respawned });
   }
 
   if (typeof hostPath !== 'string') {
@@ -3598,13 +3652,16 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
   // from it) stays byte-identical to a pre-#1289 agent (AC7).
   if (readWrite) cfg.contextMountRw = true;
   else delete cfg.contextMountRw;
+  // A single-path write is the legacy shape → never leave a multi-folder array
+  // behind (switching from many folders back to one clears the rest).
+  delete cfg.contextMounts;
   writeJsonAtomic(cfgPath, cfg);
   // Tell the agent the folder exists (#1286) — a mount nobody documented is a
   // mount nobody uses. Rebuilt before the respawn so the new container starts
   // with the section already in its CLAUDE.md.
   await rebuildAgentPromptBestEffort(id, 'context-mount-changed');
   const respawned = await respawnAgentBestEffort(id, 'context-mount-changed');
-  res.json({ contextMount: v.path, readWrite, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  res.json({ contextMount: v.path, readWrite, mounts: shapeContextMounts(cfg), mountPath: CONTEXT_MOUNT_TARGET, respawned });
 });
 
 /* ─── Browsing the context mount (#1286) ─────────────────────────────────
@@ -3639,11 +3696,17 @@ app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
   if (!cfgPath) return res.status(404).json({ error: 'Agent not found' });
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const hostPath = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
+  // #1290: one entry per mounted folder (legacy single folder and multi-folder
+  // alike). `mounts` drives one read-only root per folder in the workspace
+  // browser; the top-level `hostPath`/`readWrite` mirror the first folder for
+  // backward compatibility with any older caller.
+  const mounts = shapeContextMounts(cfg);
+  const first = mounts[0] || null;
   res.json({
-    enabled: !!hostPath,
-    hostPath: hostPath || null,
-    readWrite: !!hostPath && cfg.contextMountRw === true,
+    enabled: mounts.length > 0,
+    mounts,
+    hostPath: first ? first.hostPath : null,
+    readWrite: !!(first && first.readWrite),
     mountPath: CONTEXT_MOUNT_TARGET,
     supported: isLocalContextMountEnv(),
   });

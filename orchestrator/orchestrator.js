@@ -74,6 +74,10 @@ const {
   statusForBrowseCode,
   sortContextItems,
 } = require("./context-browse");
+// Resolve an agent config to the ordered list of host folders to mount (#1290,
+// generalising #1283's single folder) — handles both the multi-folder field and
+// the legacy single-folder fields.
+const { resolveContextMounts } = require("./context-mount");
 const { execInAgentContainer } = require("./container-exec");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
@@ -473,18 +477,15 @@ function startAgentProcess(config) {
     }
   }
 
-  // Host-folder context mount (#1283). Applied only on the podman runtime;
-  // buildContextMountSpec (in spawn-container) re-validates the path fail-closed,
-  // so a stale/invalid value produces no mount. Read-only by default; mounted
-  // read-write only when the per-agent `contextMountRw` opt-in is set (#1289) —
-  // undefined when there is no mount at all, so the read-only spawn path is
-  // byte-identical to before.
-  const contextMount = (CONTEXT_MOUNT_RUNTIME_OK && typeof config.contextMount === 'string' && config.contextMount.trim())
-    ? config.contextMount.trim()
-    : undefined;
-  const contextMountRw = contextMount ? (config.contextMountRw === true) : undefined;
+  // Host-folder context mount(s) (#1283, multiple folders #1290). Applied only
+  // on the podman runtime; buildContextMountSpecs (in spawn-container) re-validates
+  // each path fail-closed, so a stale/invalid value produces no mount. Each
+  // folder is read-only by default and read-write only when its per-folder
+  // opt-in is set (#1289). resolveContextMounts returns [] when there is no
+  // mount at all, so the no-mount spawn path is byte-identical to before (AC9).
+  const contextMounts = CONTEXT_MOUNT_RUNTIME_OK ? resolveContextMounts(config) : [];
 
-  const child = spawnContainer({ id, env: childEnv, contextMount, contextMountRw });
+  const child = spawnContainer({ id, env: childEnv, contextMounts });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -1016,17 +1017,15 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // Seeding runs before every saveAgentPrompt call in all paths, so the
   // on-disk checkout the gate reads is the live truth here.
   const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-  // #1286: an agent with a read-only host-folder mount (#1283) is told the
-  // folder exists. Read from the same config the spawn path mounts from, so
-  // the prompt can never claim a `/context` the container doesn't have.
-  const contextMount = (cfg && typeof cfg.contextMount === "string") ? cfg.contextMount.trim() : "";
-  // #1289: read-write only when the per-agent opt-in is set — same config field
-  // the spawn path builds the bind option from, so prompt and mount agree.
-  const contextMountRw = !!(contextMount && cfg && cfg.contextMountRw === true);
+  // #1286: an agent with host-folder mount(s) (#1283, multiple #1290) is told
+  // each folder exists. Resolved from the same config the spawn path mounts
+  // from, so the prompt can never claim a folder the container doesn't have —
+  // each entry carries its in-container target and read/write mode (#1289).
+  const contextMounts = resolveContextMounts(cfg || {});
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMount, contextMountRw }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
 }
 
@@ -1890,11 +1889,11 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
     knowledgeDigestRef: opts.knowledgeDigestRef || null,
-    // Host path of the context mount (#1283), when the agent has one — gates the
-    // Context Folder section (#1286). `contextMountRw` (#1289) picks the section's
-    // access-mode wording so it never tells a read-write mount it is read-only.
-    contextMount: opts.contextMount || null,
-    contextMountRw: opts.contextMountRw === true,
+    // Resolved list of host-folder mounts (#1283 single, #1290 multiple), when
+    // the agent has any — gates + populates the Context Folder section (#1286),
+    // enumerating each folder with its in-container path and access mode (#1289).
+    // Empty → the section is absent (byte-identical to a no-mount agent).
+    contextMounts: Array.isArray(opts.contextMounts) ? opts.contextMounts : [],
   });
 }
 
@@ -9682,12 +9681,10 @@ async function main() {
         // runtime resolves via _memory_model_unified().
         const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
         // Same gate as the seed path (#1286): the section appears iff the agent
-        // actually carries a mount.
-        const contextMount = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
-        // #1289: same access-mode flag the seed/spawn paths use, so preview is
-        // byte-identical to the seeded prompt for a read-write mount too.
-        const contextMountRw = !!(contextMount && cfg.contextMountRw === true);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMount, contextMountRw });
+        // actually carries mount(s). Resolved list (#1290) carries each folder's
+        // target + access mode (#1289), so preview is byte-identical to seeded.
+        const contextMounts = resolveContextMounts(cfg);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMounts });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
@@ -9702,7 +9699,7 @@ async function main() {
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
             hasSkills: skills.length > 0,
             hasKnowledgeDigest: !!knowledgeDigestRef,
-            hasContextMount: !!contextMount,
+            hasContextMount: contextMounts.length > 0,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },
@@ -9750,8 +9747,12 @@ async function main() {
       (async () => {
         const cfg = loadAgentConfig(id);
         if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
-        const hostPath = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
-        if (!hostPath) {
+        // #1290: an agent has a context surface iff it has at least one folder
+        // (multi-folder field or the legacy single-folder field). The browse
+        // program lists under /context, and each folder's target (`/context` or
+        // `/context/<slug>`) is a real path there, so a `<slug>/…` rel resolves
+        // with no per-folder branch here.
+        if (resolveContextMounts(cfg).length === 0) {
           return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
         }
         const rel = normalizeContextRel(new URL(req.url, 'http://localhost').searchParams.get('path') || '');

@@ -70,7 +70,7 @@ story end to end and are the closest thing to a user manual.
 | [credentials.md](credentials.md) | Registering SSH keys and GitHub tokens, and why both exist |
 | [model-providers.md](model-providers.md) | Connecting an LLM endpoint; API-key vs. Claude-subscription auth |
 | [mcp-servers.md](mcp-servers.md) | Connecting live knowledge sources via MCP |
-| [context-mount.md](context-mount.md) | Giving one agent live, read-only access to a host folder (local env, admin-only) |
+| [context-mount.md](context-mount.md) | Giving agents live access to one or more host folders, read-only by default (local env, admin-only) |
 | [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) | **"My agent doesn't answer"** — the runbook. Start here when something is broken |
 | [collaboration-mode-faq.md](collaboration-mode-faq.md) | **Collaboration-mode FAQ** — the common questions about running Agent Studio with a team (concurrency, shared knowledge, credentials, access control), with resolutions and known gaps |
 | [guides/ace-plugin-installation.md](guides/ace-plugin-installation.md) | Installing the ACE plugin (only needed for Briefing-Pack agents) |

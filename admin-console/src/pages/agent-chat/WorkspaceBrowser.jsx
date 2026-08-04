@@ -12,7 +12,7 @@ import {
 import DiffView from './DiffView';
 import { isImageData, imageSrcUrl } from './workspace-image';
 import {
-  CONTEXT_ROOT_KEY, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
+  isContextKey, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
 } from './workspace-source';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
@@ -922,8 +922,8 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               onRequestDelete={onRequestDelete}
               dnd={readOnly ? null : dnd}
               agentId={agentId}
-              chip={childRel === CONTEXT_ROOT_KEY
-                ? { label: 'host · read-only', title: item.hostPath ? `${item.hostPath} (read-only)` : 'Read-only host folder' }
+              chip={(item.key && isContextKey(item.key))
+                ? { label: 'host · read-only', title: item.hostPath ? `${item.hostPath} (host folder, browsed read-only)` : 'Host folder (browsed read-only)' }
                 : null}
             />
           );

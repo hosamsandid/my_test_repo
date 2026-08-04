@@ -274,6 +274,12 @@ function workingEnvironmentSection(env, skills = []) {
   return `## Working Environment\n\n${parts.join("\n\n")}`;
 }
 
+// Fixed base target for the host-folder mount(s). The single/legacy folder sits
+// at exactly this path; multi-folder targets are `/context/<slug>` beneath it
+// (#1290). Kept local (a plain constant) so this pure module stays dependency-
+// free — it must equal CONTEXT_MOUNT_TARGET in context-mount.js.
+const CONTEXT_MOUNT_TARGET = "/context";
+
 // Host-folder context mount (#1283, documented to the agent in #1286). Gated on
 // the agent actually having a mount: without one the section is absent entirely,
 // so an agent that has no `/context` is never told about a path it lacks.
@@ -317,6 +323,38 @@ function contextMountSection(hostPath, readWrite = false) {
     "- You **cannot write there**, and nothing in it is part of your workspace or any " +
     "repository. To keep or process something, copy it into your workspace first.\n" +
     "- Cite what you used by its path under `/context` so a human can find the same file."
+  );
+}
+
+// Multiple host-folder mounts (#1290). When an agent carries more than one folder
+// (or a single folder mounted at a `/context/<slug>` target rather than the bare
+// legacy `/context`), the section ENUMERATES every folder with its in-container
+// path and access mode (AC4), so the agent knows exactly where each lives and
+// whether it may write. `mounts` is the resolved list from resolveContextMounts:
+// [{ path, name, target, readWrite }]. Empty → no section (the caller gates on
+// this too). A single legacy folder at bare `/context` is rendered by
+// contextMountSection instead, so this never changes that byte-identical output.
+function contextMountsSection(mounts) {
+  const list = Array.isArray(mounts) ? mounts.filter((m) => m && m.path) : [];
+  if (!list.length) return "";
+  const lines = list.map((m) => {
+    const target = m.target || CONTEXT_MOUNT_TARGET;
+    const host = String(m.path).trim();
+    if (m.readWrite === true) {
+      return `- \`${target}\` — **read-write** (host location: \`${host}\`). ` +
+        "Files you create or change here are written straight back to the host folder, so write deliberately.";
+    }
+    return `- \`${target}\` — **read-only** (host location: \`${host}\`). You cannot write here.`;
+  });
+  return (
+    `## Context Folders\n\n` +
+    "Folders from the host machine are mounted into your container, each at its own " +
+    "path below. Each is a **live view** of the host folder — it always shows the " +
+    "folder's current contents, so re-read it rather than relying on what it contained " +
+    "in an earlier run. **Nothing in these folders is part of your workspace or any " +
+    "repository**: to keep or process something, copy it into your workspace first, and " +
+    "cite what you use by its path so a human can find the same file.\n\n" +
+    lines.join("\n")
   );
 }
 
@@ -450,7 +488,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // Knowledge section `@`-imports the generated digest (Memory/Knowledge
 // unification, Phase 1). Callers pass it only when the agent's KB checkout is
 // actually provisioned, so the import never dangles.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false } = {}) {
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false, contextMounts = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -480,10 +518,26 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   // 4. Workspace (single home for the path rule)
   blocks.push(WORKSPACE_SECTION);
 
-  // 4b. Read-only context folder — only when one is actually mounted. Sits
-  //     next to the Workspace section because it is the other place on disk
-  //     the agent may read from, and it must not be confused with it.
-  const ctx = contextMountSection(contextMount, contextMountRw === true);
+  // 4b. Context folder(s) — only when at least one is actually mounted. Sits
+  //     next to the Workspace section because it is the other place on disk the
+  //     agent may read from, and it must not be confused with it.
+  //     • A single legacy folder at the bare `/context` target (the #1283/#1289
+  //       single-folder case, whether passed as `contextMount`/`contextMountRw`
+  //       or as a one-element resolved list) → the byte-identical single-folder
+  //       section.
+  //     • Anything else (multiple folders, or one folder at a `/context/<slug>`
+  //       target) → the enumerated multi-folder section (#1290).
+  const resolvedMounts = Array.isArray(contextMounts) && contextMounts.length
+    ? contextMounts
+    : (contextMount
+        ? [{ path: contextMount, target: CONTEXT_MOUNT_TARGET, readWrite: contextMountRw === true }]
+        : []);
+  let ctx = "";
+  if (resolvedMounts.length === 1 && (resolvedMounts[0].target || CONTEXT_MOUNT_TARGET) === CONTEXT_MOUNT_TARGET) {
+    ctx = contextMountSection(resolvedMounts[0].path, resolvedMounts[0].readWrite === true);
+  } else if (resolvedMounts.length) {
+    ctx = contextMountsSection(resolvedMounts);
+  }
   if (ctx) blocks.push(ctx);
 
   // 5. Response Formatting
@@ -605,6 +659,7 @@ module.exports = {
   interactionNote,
   workingEnvironmentSection,
   contextMountSection,
+  contextMountsSection,
   blueprintSection,
   envHasRepository,
   hasSkillGrant,

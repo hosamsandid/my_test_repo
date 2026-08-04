@@ -77,8 +77,18 @@ const {
 // Resolve an agent config to the ordered list of host folders to mount (#1290,
 // generalising #1283's single folder) — handles both the multi-folder field and
 // the legacy single-folder fields.
-const { resolveContextMounts } = require("./context-mount");
-const { execInAgentContainer } = require("./container-exec");
+const { resolveContextMounts, CONTEXT_MOUNT_TARGET } = require("./context-mount");
+const {
+  buildDeleteArgv,
+  buildMoveArgv,
+  buildPrepareUploadArgv,
+  statusForWriteCode,
+  sanitizeUploadName,
+  CONTEXT_UPLOAD_MAX_BYTES,
+  WRITE_TIMEOUT_MS,
+} = require("./context-write");
+const { buildTar } = require("./tar-single");
+const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -97,6 +107,47 @@ const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
 const pendingQueue = require("./pending-queue");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
+
+// ── Read-write context mount helpers (writing into a mounted host folder) ──
+// A caller path is RELATIVE to /context. For a single legacy folder the mount
+// target is exactly /context, so everything belongs to it; for a multi-folder
+// set each target is /context/<slug>, so the rel's first segment names the
+// folder. Returns the matching resolved mount (carrying `readWrite`) or null —
+// the route refuses a write that resolves to no mount or to a read-only one.
+function resolveContextMountForRel(mounts, rel) {
+  if (!Array.isArray(mounts) || mounts.length === 0) return null;
+  const clean = String(rel == null ? '' : rel).replace(/^\/+/, '');
+  for (const m of mounts) {
+    if (!m || typeof m.target !== 'string') continue;
+    if (m.target === CONTEXT_MOUNT_TARGET) return m; // legacy single folder
+    const slug = m.target.slice(CONTEXT_MOUNT_TARGET.length + 1); // strip "/context/"
+    if (!slug) continue;
+    if (clean === slug || clean.startsWith(slug + '/')) return m;
+  }
+  return null;
+}
+
+// Run one context WRITE_PROGRAM exec and parse it. Resolves { ok:true, result }
+// or { ok:false, status, error, code } — never throws for an expected failure,
+// mirroring the browse path so the route stays free of exit-code archaeology.
+async function runContextWriteExec(id, argv) {
+  let out;
+  try {
+    out = await execInAgentContainer(id, argv, { timeoutMs: WRITE_TIMEOUT_MS, maxBytes: 256 * 1024 });
+  } catch (err) {
+    const code = err && err.code ? err.code : 'exec-failed';
+    const status = code === 'no-container' ? 409 : code === 'timeout' ? 504 : 502;
+    const error = code === 'no-container'
+      ? 'The agent is not running, so its context folder cannot be modified'
+      : `Modifying the context folder failed (${code})`;
+    return { ok: false, status, error, code };
+  }
+  const parsed = parseBrowseOutput(out.stdout);
+  if (!parsed.ok) {
+    return { ok: false, status: statusForWriteCode(parsed.code), error: parsed.error, code: parsed.code };
+  }
+  return { ok: true, result: parsed.result };
+}
 
 // ============================================================
 // Config
@@ -9797,6 +9848,136 @@ async function main() {
       })().catch((err) => {
         console.error(`[Orchestrator] context browse error for ${id}: ${err.message}`);
         sendJson(res, 500, { error: 'context browse failed' });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: DELETE a file/dir inside a mounted folder ──
+    // The mount lives only in the agent's container, so the mutation runs there.
+    // Guarded twice like browsing (request-side path normalise + in-container
+    // realpath containment), plus a per-mount readWrite gate here and the kernel
+    // EROFS backstop on a read-only bind mount.
+    const contextDeleteMatch = req.method === 'DELETE' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/file(\?.*)?$/);
+    if (contextDeleteMatch) {
+      const id = decodeURIComponent(contextDeleteMatch[1]);
+      (async () => {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+        const mounts = resolveContextMounts(cfg);
+        if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+        const rel = normalizeContextRel(new URL(req.url, 'http://localhost').searchParams.get('path') || '');
+        if (!rel.ok) return sendJson(res, 400, { error: rel.error, code: 'invalid-path' });
+        if (!rel.rel) return sendJson(res, 400, { error: 'refusing to delete the mount root', code: 'invalid-path' });
+        const mount = resolveContextMountForRel(mounts, rel.rel);
+        if (!mount) return sendJson(res, 404, { error: 'not found', code: 'not-found' });
+        if (!mount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+        const r = await runContextWriteExec(id, buildDeleteArgv(rel.rel));
+        if (!r.ok) return sendJson(res, r.status, { error: r.error, code: r.code });
+        return sendJson(res, 200, r.result);
+      })().catch((err) => {
+        console.error(`[Orchestrator] context delete error for ${id}: ${err.message}`);
+        sendJson(res, 500, { error: 'context delete failed' });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: MOVE (rename/relocate) within ONE folder ──
+    // Source and destination directory must belong to the SAME read-write mount;
+    // a cross-folder or workspace↔context move is not a rename (different
+    // filesystems) and is refused here (and never offered by the UI).
+    const contextMoveMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/move$/);
+    if (contextMoveMatch) {
+      const id = decodeURIComponent(contextMoveMatch[1]);
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', () => {
+        (async () => {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+          const mounts = resolveContextMounts(cfg);
+          if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+          let parsed;
+          try { parsed = JSON.parse(body || '{}'); } catch { return sendJson(res, 400, { error: 'invalid JSON body', code: 'bad-body' }); }
+          const from = normalizeContextRel(parsed.from || '');
+          const toDir = normalizeContextRel(parsed.toDir || '');
+          if (!from.ok) return sendJson(res, 400, { error: from.error, code: 'invalid-path' });
+          if (!toDir.ok) return sendJson(res, 400, { error: toDir.error, code: 'invalid-path' });
+          if (!from.rel) return sendJson(res, 400, { error: 'refusing to move the mount root', code: 'invalid-path' });
+          const srcMount = resolveContextMountForRel(mounts, from.rel);
+          const dstMount = resolveContextMountForRel(mounts, toDir.rel);
+          if (!srcMount || !dstMount) return sendJson(res, 404, { error: 'not found', code: 'not-found' });
+          if (srcMount.target !== dstMount.target) {
+            return sendJson(res, 400, { error: 'cannot move between different context folders', code: 'cross-folder' });
+          }
+          if (!srcMount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+          const r = await runContextWriteExec(id, buildMoveArgv(from.rel, toDir.rel));
+          if (!r.ok) return sendJson(res, r.status, { error: r.error, code: r.code });
+          return sendJson(res, 200, r.result);
+        })().catch((err) => {
+          console.error(`[Orchestrator] context move error for ${id}: ${err.message}`);
+          sendJson(res, 500, { error: 'context move failed' });
+        });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: UPLOAD one file into a mounted folder ──
+    // Body is the raw file bytes (octet-stream); `path` is the target directory
+    // and `name` the (possibly folder-upload) relative file path. `prepare-upload`
+    // validates + de-duplicates the name in-container, then the bytes go in via
+    // the libpod archive endpoint (the only ARG_MAX/stdin-free write channel).
+    const contextUploadMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/upload(\?.*)?$/);
+    if (contextUploadMatch) {
+      const id = decodeURIComponent(contextUploadMatch[1]);
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const chunks = [];
+      let total = 0;
+      let tooBig = false;
+      req.on('data', (c) => {
+        if (tooBig) return;
+        total += c.length;
+        if (total > CONTEXT_UPLOAD_MAX_BYTES) { tooBig = true; chunks.length = 0; return; }
+        chunks.push(c);
+      });
+      req.on('end', () => {
+        (async () => {
+          if (tooBig) return sendJson(res, 413, { error: 'file too large', code: 'too-large' });
+          const cfg = loadAgentConfig(id);
+          if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+          const mounts = resolveContextMounts(cfg);
+          if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+          const dir = normalizeContextRel(params.get('path') || '');
+          if (!dir.ok) return sendJson(res, 400, { error: dir.error, code: 'invalid-path' });
+          const mount = resolveContextMountForRel(mounts, dir.rel);
+          if (!mount) return sendJson(res, 404, { error: 'target directory not found', code: 'not-found' });
+          if (!mount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+          const name = sanitizeUploadName(params.get('name') || '');
+          if (!name) return sendJson(res, 400, { error: 'invalid filename', code: 'invalid-path' });
+          // Validate the target dir + resolve a collision-free entry name.
+          const prep = await runContextWriteExec(id, buildPrepareUploadArgv(dir.rel, name));
+          if (!prep.ok) return sendJson(res, prep.status, { error: prep.error, code: prep.code });
+          const buf = Buffer.concat(chunks);
+          let tar;
+          try {
+            tar = buildTar([{ name: prep.result.entry, body: buf }]);
+          } catch (err) {
+            return sendJson(res, 400, { error: `could not package the upload (${err.message})`, code: 'bad-entry' });
+          }
+          try {
+            await putArchiveToAgentContainer(id, prep.result.base, tar, { timeoutMs: WRITE_TIMEOUT_MS });
+          } catch (err) {
+            const code = err && err.code ? err.code : 'exec-failed';
+            const status = code === 'no-container' ? 409 : code === 'read-only' ? 403 : code === 'denied' ? 403 : code === 'timeout' ? 504 : 502;
+            return sendJson(res, status, { error: `upload failed (${code})`, code });
+          }
+          return sendJson(res, 200, { uploaded: [{ name: prep.result.entry, size: buf.length }] });
+        })().catch((err) => {
+          console.error(`[Orchestrator] context upload error for ${id}: ${err.message}`);
+          sendJson(res, 500, { error: 'context upload failed' });
+        });
       });
       return;
     }

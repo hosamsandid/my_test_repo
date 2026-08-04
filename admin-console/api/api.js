@@ -14670,6 +14670,96 @@ app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdPa
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
+/* ─── Read-write context mount: write proxies ───────────────────────────
+ * The host-folder mount lives only inside the agent container, so — exactly
+ * like the read-only browse proxies above — these forward to the orchestrator,
+ * which performs the mutation there. `path` here is the path RELATIVE to the
+ * mount root (the browser strips the leading `/context` before calling). The
+ * orchestrator enforces the per-mount readWrite gate and containment; a
+ * read-only mount is refused (403) both there and by the kernel.               */
+const CONTEXT_ORCH_URL = () => process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+// Delete a file or directory inside a read-write context folder.
+app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/file`
+              + `?path=${encodeURIComponent(relPath)}`;
+    const r = await fetch(url, { method: 'DELETE' });
+    const body = await r.json().catch(() => ({}));
+    res.status(r.status).json(body);
+  } catch (err) {
+    console.error(`[api] context delete ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Modifying the context folder failed' });
+  }
+});
+
+// Move (rename/relocate) an entry within ONE read-write context folder. Body:
+//   { from: "<rel path>", toDir: "<rel dir path>" } — both relative to the mount.
+app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const from = typeof req.body?.from === 'string' ? req.body.from : '';
+  const toDir = typeof req.body?.toDir === 'string' ? req.body.toDir : '';
+  try {
+    const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/move`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, toDir }),
+    });
+    const body = await r.json().catch(() => ({}));
+    res.status(r.status).json(body);
+  } catch (err) {
+    console.error(`[api] context move ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Modifying the context folder failed' });
+  }
+});
+
+// Upload one or more files into a read-write context folder. The multipart body
+// is parsed here (same multer config + 50 MB cap as the workspace upload); each
+// file is then streamed to the orchestrator as a raw octet-stream (no base64
+// inflation) which packages it into the container via the archive endpoint.
+app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, uploadFiles, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relDir = typeof req.body.path === 'string' ? req.body.path : '';
+  const rawRelPaths = req.body.relativePaths;
+  const relPaths = Array.isArray(rawRelPaths) ? rawRelPaths : (rawRelPaths != null ? [rawRelPaths] : []);
+  if (!Array.isArray(req.files) || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+  const uploaded = [];
+  const errors = [];
+  for (let i = 0; i < req.files.length; i++) {
+    const file = req.files[i];
+    const name = (typeof relPaths[i] === 'string' && relPaths[i]) ? relPaths[i] : file.originalname;
+    try {
+      const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/upload`
+                + `?path=${encodeURIComponent(relDir)}&name=${encodeURIComponent(name)}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': file.buffer.length },
+        body: file.buffer,
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        errors.push({ name, error: body?.error || `HTTP ${r.status}` });
+        continue;
+      }
+      for (const u of (body.uploaded || [])) uploaded.push(u);
+    } catch (err) {
+      errors.push({ name, error: err.message });
+    }
+  }
+  if (uploaded.length === 0 && errors.length > 0) {
+    return res.status(502).json({ error: 'All uploads failed', details: errors });
+  }
+  res.json({ uploaded, ...(errors.length ? { errors } : {}) });
+});
+
 // Return a filename that doesn't yet exist in `dir`, appending " (n)" before
 // the extension on collision so a second upload of `report.pdf` becomes
 // `report (2).pdf` rather than clobbering the first. The " ()" chars are within

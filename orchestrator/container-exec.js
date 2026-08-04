@@ -193,10 +193,75 @@ async function execInAgentContainer(agentId, argv, opts = {}) {
   return execInContainer(cid, argv, opts);
 }
 
+// Extract a tar archive into a container directory over libpod
+// (`PUT /containers/{id}/archive?path=<dir>`) — the `podman cp` mechanism. This
+// is the ONLY write channel that bypasses ARG_MAX (argv) and this module's
+// deliberate stdin-less exec, and it stays byte-exact (no base64 inflation).
+//
+// `containerPath` must be a directory that already exists in the container (the
+// caller resolves + validates it first). Extraction refuses on a read-only bind
+// mount (EROFS) — surfaced here as `read-only` — which is the kernel backstop
+// under the control-plane's per-mount readWrite gate.
+function putArchiveToContainer(containerId, containerPath, tarBuffer, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    const q = `path=${encodeURIComponent(containerPath)}`;
+    let settled = false;
+    const req = http.request({
+      socketPath: PODMAN_SOCK,
+      path: `/v4.0.0/libpod/containers/${containerId}/archive?${q}`,
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/x-tar',
+        'Content-Length': Buffer.byteLength(tarBuffer),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        if (settled) return;
+        settled = true;
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve({ status: res.statusCode });
+          return;
+        }
+        // Map the libpod error. A read-only mount / permission problem comes
+        // back as a 4xx/5xx with a message mentioning read-only or permission.
+        const msg = String(data || '').toLowerCase();
+        const code = /read-only|read only|erofs/.test(msg) ? 'read-only'
+                   : /permission|eacces|eperm/.test(msg) ? 'denied'
+                   : res.statusCode === 404 ? 'not-found'
+                   : 'exec-failed';
+        reject(new ContainerExecError(`archive put failed (status ${res.statusCode})`, code));
+      });
+      res.on('error', (err) => {
+        if (!settled) { settled = true; reject(new ContainerExecError(err.message, 'exec-failed')); }
+      });
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      if (!settled) { settled = true; reject(new ContainerExecError('timed out', 'timeout')); }
+    });
+    req.on('error', (err) => {
+      if (!settled) { settled = true; reject(new ContainerExecError(err.message, 'exec-failed')); }
+    });
+    req.write(tarBuffer);
+    req.end();
+  });
+}
+
+async function putArchiveToAgentContainer(agentId, containerPath, tarBuffer, opts = {}) {
+  const cid = await findAgentContainerId(agentId);
+  if (!cid) throw new ContainerExecError('agent container is not running', 'no-container');
+  return putArchiveToContainer(cid, containerPath, tarBuffer, opts);
+}
+
 module.exports = {
   ContainerExecError,
   findAgentContainerId,
   execInContainer,
   execInAgentContainer,
+  putArchiveToContainer,
+  putArchiveToAgentContainer,
   demuxAttachStream,
 };

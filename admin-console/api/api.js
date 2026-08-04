@@ -3501,6 +3501,26 @@ async function respawnAgentBestEffort(id, reason) {
   }
 }
 
+// Ask the orchestrator to rebuild an agent's CLAUDE.md after a config change
+// the prompt is gated on (#1286: the `/context` section appears iff a mount is
+// set). Best-effort — the config write has already succeeded either way.
+async function rebuildAgentPromptBestEffort(id, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-rebuild`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) return false;
+    const body = await r.json().catch(() => ({}));
+    return Boolean(body && body.rebuilt);
+  } catch (err) {
+    console.error(`[api] prompt rebuild ${id} failed: ${err.message}`);
+    return false;
+  }
+}
+
 /* ─── Read-only host-folder context mount (#1283) ───────────────────────── */
 
 // The mount is a LOCAL/self-hosted-only feature: a host bind-mount has no
@@ -3555,6 +3575,9 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
       writeJsonAtomic(cfgPath, cfg);
       changed = true;
     }
+    // Drop the `/context` section from the prompt before the container loses
+    // the mount, so the agent is never told about a folder it cannot read.
+    if (changed) await rebuildAgentPromptBestEffort(id, 'context-mount-cleared');
     const respawned = changed ? await respawnAgentBestEffort(id, 'context-mount-cleared') : false;
     return res.json({ contextMount: null, mountPath: CONTEXT_MOUNT_TARGET, respawned });
   }
@@ -3567,8 +3590,152 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
 
   cfg.contextMount = v.path;
   writeJsonAtomic(cfgPath, cfg);
+  // Tell the agent the folder exists (#1286) — a mount nobody documented is a
+  // mount nobody uses. Rebuilt before the respawn so the new container starts
+  // with the section already in its CLAUDE.md.
+  await rebuildAgentPromptBestEffort(id, 'context-mount-changed');
   const respawned = await respawnAgentBestEffort(id, 'context-mount-changed');
   res.json({ contextMount: v.path, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+});
+
+/* ─── Browsing the context mount (#1286) ─────────────────────────────────
+ * The mounted host folder is visible only inside the agent's container, so
+ * these routes are pure proxies onto the orchestrator's read-only browse
+ * endpoints — this container never touches the container engine for agent
+ * data, and there is deliberately no write counterpart to any of them.
+ */
+
+// One-shot call onto an orchestrator context-browse endpoint. Returns the
+// parsed body plus its status so each route can pass the orchestrator's honest
+// error (agent not running, path refused, folder unmounted) straight through.
+async function fetchContextBrowse(agentId, kind, relPath) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const url = `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/context/${kind}`
+            + `?path=${encodeURIComponent(relPath || '')}`;
+  const r = await fetch(url);
+  const body = await r.json().catch(() => ({}));
+  return { status: r.status, body };
+}
+
+// Whether this agent has a context folder at all — drives the virtual root in
+// the workspace browser. Read straight from config; no container involved, so
+// it answers the same for a stopped agent.
+app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  // Resolved through the canonical containment helper (realpath +
+  // path.relative), so the config read cannot leave the agents tree even if the
+  // id pattern ever loosens — the same barrier the workspace routes use.
+  const cfgPath = safeAgentPath(agentId, 'config.json');
+  if (!cfgPath) return res.status(404).json({ error: 'Agent not found' });
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const hostPath = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
+  res.json({
+    enabled: !!hostPath,
+    hostPath: hostPath || null,
+    mountPath: CONTEXT_MOUNT_TARGET,
+    supported: isLocalContextMountEnv(),
+  });
+});
+
+// Directory listing inside the mounted folder.
+app.get('/api/agents/:agentId/context/tree', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    const { status, body } = await fetchContextBrowse(agentId, 'tree', relPath);
+    res.status(status).json(body);
+  } catch (err) {
+    console.error(`[api] context tree ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+});
+
+// File content for the viewer. The orchestrator returns capped base64; the
+// binary / raster-image detection and the response shape are the SAME as the
+// workspace `/file` route, so the viewer needs no special case.
+app.get('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'file', relPath));
+  } catch (err) {
+    console.error(`[api] context file ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const probe = buf.slice(0, Math.min(buf.length, 8192));
+  const isBinary = probe.includes(0);
+  const imageType = isBinary ? detectRasterImageType(buf) : null;
+  res.json({
+    path: body.path || '',
+    size: typeof body.size === 'number' ? body.size : buf.length,
+    truncated: !!body.truncated,
+    binary: isBinary,
+    imageType,
+    content: isBinary ? null : buf.toString('utf8'),
+    mtime: typeof body.mtime === 'number' ? body.mtime : 0,
+    readOnly: true,
+  });
+});
+
+// Inline image bytes — same contract as the workspace `/image` route (supported
+// raster formats only, detected by magic bytes, never by extension).
+app.get('/api/agents/:agentId/context/image', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context image ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const contentType = imageContentType(detectRasterImageType(buf));
+  if (!contentType) return res.status(415).json({ error: 'unsupported image type' });
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', buf.length);
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(buf);
+});
+
+// Raw download. Capped by the orchestrator (the bytes travel base64 through an
+// exec pipe, not a file stream) — a file over the cap arrives truncated, so it
+// is refused outright rather than silently corrupted.
+app.get('/api/agents/:agentId/context/download', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context download ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  if (body.truncated) {
+    return res.status(413).json({
+      error: 'File is too large to download through the context folder',
+      code: 'too-large',
+    });
+  }
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const filename = path.basename(String(body.path || 'download'));
+  const encoded = encodeURIComponent(filename).replace(/'/g, '%27');
+  res.setHeader('Content-Disposition', `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Length', buf.length);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.end(buf);
 });
 
 /* ─── Agent Triggers ────────────────────────────────────────────────── */

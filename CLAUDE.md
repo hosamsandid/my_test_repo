@@ -34,7 +34,7 @@ orchestrator.js (control-plane container, no Matrix presence)
 
 - **Agents** are dynamically created Matrix users, each in its **own** Podman container (`as-agent:latest`), lifecycle-managed by the orchestrator. Configs persist in `/workspace/agents/<id>/` (`config.json` + `CLAUDE.md` + `AGENT-PROMPT.md`); DM room id in `dm-room.json` (created lazily by the console).
 - Each agent is bound to a **Working Environment** (below) defining what gets seeded into its workspace.
-- **Container-per-agent isolation** is three-way: per-agent **network**, per-agent **filesystem** via a SubPath mount of the pool volume (`AEE_WORKSPACE_ISOLATION`, default on), optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in).
+- **Container-per-agent isolation** is three-way: per-agent **network**, per-agent **filesystem** via a SubPath mount of the pool volume (`AEE_WORKSPACE_ISOLATION`, default on), optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in). Optionally a fourth: an admin can bind-mount one **read-only host folder** at `/context` inside the container (`contextMount` in `config.json`, podman/local only — see `docs/context-mount.md`).
 - **Agent runtime**: the container entrypoint `agent-image/scripts/agent-entrypoint.py` (+ `sase_lib.py`) — Matrix client + Claude CLI invocations + trigger scheduler.
 
 ### Teams (human collaboration & visibility scope)
@@ -255,7 +255,7 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
 | `Makefile` | Build/start targets (`up`, `down`, `logs`, `build`, `ps`, `seed-*`) |
 | `orchestrator/orchestrator.js` | Backend: agent lifecycle, container spawning, env-aware seeding, internal HTTP API |
-| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over libpod; network + FS SubPath + dedicated-volume isolation |
+| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over libpod; network + FS SubPath + dedicated-volume + optional read-only host-folder (`contextMount`) isolation |
 | `orchestrator/teams-store.js` | Source of truth for the human **Team** data model (pure factory) |
 | `orchestrator/skill-grants.js` | Source of truth for the team-owned skill grant (`effectiveSkills`) |
 | `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |

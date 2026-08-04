@@ -3636,7 +3636,12 @@ async function fetchContextBrowse(agentId, kind, relPath) {
 app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  // Resolved through the canonical containment helper (realpath +
+  // path.relative), so the config read cannot leave the agents tree even if the
+  // id pattern ever loosens — the same barrier the workspace routes use.
+  const cfgPath = safeAgentPath(agentId, 'config.json');
+  if (!cfgPath) return res.status(404).json({ error: 'Agent not found' });
+  const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const hostPath = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
   res.json({

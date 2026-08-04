@@ -274,6 +274,31 @@ function workingEnvironmentSection(env, skills = []) {
   return `## Working Environment\n\n${parts.join("\n\n")}`;
 }
 
+// Read-only host-folder context mount (#1283, documented to the agent in
+// #1286). Gated on the agent actually having a mount: without one the section
+// is absent entirely, so an agent that has no `/context` is never told about a
+// path it cannot read.
+//
+// The wording is deliberately about the two things an agent gets wrong on its
+// own: that the folder is LIVE (re-read it, don't cache what it said last run)
+// and that it is not part of any repository (copy before keeping).
+function contextMountSection(hostPath) {
+  const mount = typeof hostPath === "string" ? hostPath.trim() : "";
+  if (!mount) return "";
+  return (
+    `## Read-only Context Folder\n\n` +
+    "A folder from the host machine is mounted **read-only** at `/context` " +
+    `(host location: \`${mount}\`).\n\n` +
+    "- It is a **live view**, not a copy: it always shows the folder's current contents, " +
+    "so re-read it rather than relying on what it contained in an earlier run.\n" +
+    "- Read it whenever the task refers to material kept outside the repository — " +
+    "documents, exports, meeting notes, specifications.\n" +
+    "- You **cannot write there**, and nothing in it is part of your workspace or any " +
+    "repository. To keep or process something, copy it into your workspace first.\n" +
+    "- Cite what you used by its path under `/context` so a human can find the same file."
+  );
+}
+
 // Team-knowledge digest section (Memory/Knowledge unification, Phase 1).
 // Emits the native `@`-import of the generated knowledge-digest.md — the
 // guaranteed "knowledge is there at session start" injection path. Injected
@@ -404,7 +429,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // Knowledge section `@`-imports the generated digest (Memory/Knowledge
 // unification, Phase 1). Callers pass it only when the agent's KB checkout is
 // actually provisioned, so the import never dangles.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null } = {}) {
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -433,6 +458,12 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
 
   // 4. Workspace (single home for the path rule)
   blocks.push(WORKSPACE_SECTION);
+
+  // 4b. Read-only context folder — only when one is actually mounted. Sits
+  //     next to the Workspace section because it is the other place on disk
+  //     the agent may read from, and it must not be confused with it.
+  const ctx = contextMountSection(contextMount);
+  if (ctx) blocks.push(ctx);
 
   // 5. Response Formatting
   const fmt = take("Response Formatting");
@@ -552,6 +583,7 @@ module.exports = {
   buildMemoryHint,
   interactionNote,
   workingEnvironmentSection,
+  contextMountSection,
   blueprintSection,
   envHasRepository,
   hasSkillGrant,

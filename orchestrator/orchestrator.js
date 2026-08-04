@@ -60,6 +60,21 @@ const { resolveCloneTarget } = require("./clone-target");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
+// Browsing the read-only host-folder context mount (#1286): the pure path /
+// program / parsing rules, plus the one-shot exec that runs them where the
+// folder actually exists — inside the agent's own container.
+const {
+  CONTEXT_FILE_MAX_BYTES,
+  CONTEXT_DOWNLOAD_MAX_BYTES,
+  BROWSE_TIMEOUT_MS,
+  normalizeContextRel,
+  buildListArgv,
+  buildReadArgv,
+  parseBrowseOutput,
+  statusForBrowseCode,
+  sortContextItems,
+} = require("./context-browse");
+const { execInAgentContainer } = require("./container-exec");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -997,10 +1012,14 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // Seeding runs before every saveAgentPrompt call in all paths, so the
   // on-disk checkout the gate reads is the live truth here.
   const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
+  // #1286: an agent with a read-only host-folder mount (#1283) is told the
+  // folder exists. Read from the same config the spawn path mounts from, so
+  // the prompt can never claim a `/context` the container doesn't have.
+  const contextMount = (cfg && typeof cfg.contextMount === "string") ? cfg.contextMount.trim() : "";
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMount }),
   );
 }
 
@@ -1036,6 +1055,33 @@ async function reconcileAgentAutonomyPrompt(id, wasAutonomous) {
     return true;
   } catch (err) {
     console.warn(`[Orchestrator] autonomy reconcile ${id}: ${err.message}`);
+    return false;
+  }
+}
+
+// #1286: unconditional CLAUDE.md rebuild for an agent whose config changed in a
+// way the prompt is gated on but no prompt write covers — today the read-only
+// context mount (setting or clearing it must add/remove the `/context` section).
+// Sibling of reconcileAgentAutonomyPrompt, minus the flip check: the caller only
+// invokes it when the gating input actually changed. Best-effort — a rebuild
+// failure never fails the already-persisted config write.
+async function rebuildAgentPrompt(id, reason) {
+  try {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) return false;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+    const prompt = fs.existsSync(promptPath)
+      ? fs.readFileSync(promptPath, "utf8")
+      : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+    saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    // CLAUDE.md is re-read on every invocation, so this lands on the agent's
+    // next run; the mirror keeps an isolated volume in step.
+    await reseedAgent(id, ["CLAUDE.md"]);
+    console.log(`[Orchestrator] Rebuilt CLAUDE.md for ${id} (${reason || "config change"})`);
+    return true;
+  } catch (err) {
+    console.warn(`[Orchestrator] prompt rebuild ${id}: ${err.message}`);
     return false;
   }
 }
@@ -1837,6 +1883,9 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
     knowledgeDigestRef: opts.knowledgeDigestRef || null,
+    // Host path of the read-only context mount (#1283), when the agent has one
+    // — gates the Read-only Context Folder section (#1286).
+    contextMount: opts.contextMount || null,
   });
 }
 
@@ -9623,7 +9672,10 @@ async function main() {
         // unified memory hint all flip together — byte-identical to what the
         // runtime resolves via _memory_model_unified().
         const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef });
+        // Same gate as the seed path (#1286): the section appears iff the agent
+        // actually carries a mount.
+        const contextMount = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMount });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
@@ -9638,6 +9690,7 @@ async function main() {
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
             hasSkills: skills.length > 0,
             hasKnowledgeDigest: !!knowledgeDigestRef,
+            hasContextMount: !!contextMount,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },
@@ -9646,6 +9699,93 @@ async function main() {
         console.error(`[Orchestrator] prompt-preview error for ${id}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // Rebuild an agent's CLAUDE.md after a config change the prompt is gated on
+    // (#1286: setting/clearing the context mount). Idempotent and best-effort —
+    // it always answers 200 with what happened.
+    const promptRebuildMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/prompt-rebuild$/);
+    if (promptRebuildMatch) {
+      const id = decodeURIComponent(promptRebuildMatch[1]);
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', async () => {
+        let reason = 'config change';
+        try { reason = (JSON.parse(body || '{}').reason) || reason; } catch { /* keep default */ }
+        const rebuilt = await rebuildAgentPrompt(id, reason);
+        sendJson(res, 200, { rebuilt });
+      });
+      return;
+    }
+
+    // ── Read-only context-folder browsing (#1286) ─────────────────────────
+    // The host folder mounted by #1283 exists ONLY inside the agent's own
+    // container — the console reads the pool volume from its own container and
+    // has no view of it. So the listing/read runs where the folder actually is:
+    // a one-shot, read-only exec in that container. Guards, in order:
+    //   • the agent must actually carry a `contextMount` (else 404 — an agent
+    //     without one has no context surface at all);
+    //   • the requested path is normalised here (no traversal, no absolute
+    //     path) and re-checked inside the container by realpath containment,
+    //     which is what stops a symlink from reaching the rest of the host;
+    //   • only `list` and a capped `read` exist — there is no write mode.
+    const contextBrowseMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/(tree|file|download)(\?.*)?$/);
+    if (contextBrowseMatch) {
+      const id = decodeURIComponent(contextBrowseMatch[1]);
+      const kind = contextBrowseMatch[2];
+      (async () => {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+        const hostPath = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
+        if (!hostPath) {
+          return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+        }
+        const rel = normalizeContextRel(new URL(req.url, 'http://localhost').searchParams.get('path') || '');
+        if (!rel.ok) return sendJson(res, 400, { error: rel.error, code: 'invalid-path' });
+
+        const cap = kind === 'download' ? CONTEXT_DOWNLOAD_MAX_BYTES : CONTEXT_FILE_MAX_BYTES;
+        const argv = kind === 'tree' ? buildListArgv(rel.rel) : buildReadArgv(rel.rel, cap);
+        // Output budget: base64 inflates by 4/3, plus the JSON envelope.
+        const maxBytes = kind === 'tree' ? 16 * 1024 * 1024 : Math.ceil(cap * 1.4) + 64 * 1024;
+
+        let out;
+        try {
+          out = await execInAgentContainer(id, argv, { timeoutMs: BROWSE_TIMEOUT_MS, maxBytes });
+        } catch (err) {
+          const code = err && err.code ? err.code : 'exec-failed';
+          const status = code === 'no-container' ? 409
+                       : code === 'timeout' ? 504
+                       : code === 'too-large' ? 413
+                       : 502;
+          const message = code === 'no-container'
+            ? 'The agent is not running, so its context folder cannot be read'
+            : `Reading the context folder failed (${code})`;
+          console.warn(`[Orchestrator] context browse ${kind} for ${id}: ${err.message}`);
+          return sendJson(res, status, { error: message, code });
+        }
+
+        const parsed = parseBrowseOutput(out.stdout);
+        if (!parsed.ok) {
+          if (parsed.code === 'exec-failed') {
+            console.warn(`[Orchestrator] context browse ${kind} for ${id}: ${parsed.error} (exit ${out.exitCode}, stderr ${String(out.stderr).slice(0, 200)})`);
+          }
+          return sendJson(res, statusForBrowseCode(parsed.code), { error: parsed.error, code: parsed.code });
+        }
+        if (kind === 'tree') {
+          return sendJson(res, 200, {
+            path: parsed.result.path || '',
+            items: sortContextItems(parsed.result.items),
+            truncated: !!parsed.result.truncated,
+          });
+        }
+        return sendJson(res, 200, parsed.result);
+      })().catch((err) => {
+        console.error(`[Orchestrator] context browse error for ${id}: ${err.message}`);
+        sendJson(res, 500, { error: 'context browse failed' });
+      });
+      return;
     }
 
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);

@@ -76,6 +76,12 @@ export function buildBadges(role, meta = {}) {
   if (meta.hasSkills) {
     out.push({ label: 'skills', title: 'One or more skills are granted and seeded into this agent.' });
   }
+  if (meta.hasContextMount) {
+    out.push({
+      label: 'context folder',
+      title: 'A host folder is mounted read-only at /context; the prompt tells the agent it is there.',
+    });
+  }
   if (meta.blueprintInstance) {
     out.push({
       label: 'from template',

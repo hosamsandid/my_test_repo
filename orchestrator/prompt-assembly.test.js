@@ -11,6 +11,7 @@ const {
   buildMemoryHint,
   interactionNote,
   workingEnvironmentSection,
+  contextMountSection,
   blueprintSection,
   envHasRepository,
   hasSkillGrant,
@@ -122,6 +123,43 @@ test('without knowledgeDigestRef no digest import appears (autonomy 0 / no KB)',
   const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
   assert.ok(!md.includes('@knowledge-digest.md'));
   assert.ok(!md.includes('Team Knowledge (digest)'));
+});
+
+// ---- read-only host context folder (#1283 mount, #1286 prompt block) --------
+
+test('contextMount emits the Read-only Context Folder section next to Workspace', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/SharePointSync/ProjectX',
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Read-only Context Folder'));
+  assert.strictEqual(order.indexOf('Read-only Context Folder'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes('`/context`'));
+  assert.ok(md.includes('/host/SharePointSync/ProjectX'));
+  // The two things an agent gets wrong on its own.
+  assert.match(md, /live view/i);
+  assert.match(md, /cannot write/i);
+});
+
+test('without a contextMount the prompt never mentions /context (byte-identical to before)', () => {
+  const without = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(!without.includes('/context'));
+  assert.ok(!without.includes('Read-only Context Folder'));
+  // An empty / whitespace-only value is the same as no mount at all.
+  for (const empty of [null, '', '   ', undefined]) {
+    assert.strictEqual(
+      assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMount: empty }),
+      without,
+    );
+  }
+});
+
+test('contextMountSection is gated on a non-empty host path', () => {
+  assert.strictEqual(contextMountSection(''), '');
+  assert.strictEqual(contextMountSection(null), '');
+  assert.strictEqual(contextMountSection('  '), '');
+  assert.ok(contextMountSection('/host/data').startsWith('## Read-only Context Folder'));
 });
 
 // ---- unified Memory System variant (unification Phase 2) --------------------

@@ -1568,7 +1568,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, memberOrder, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -1866,19 +1866,6 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (stages !== undefined && fresh.role === 'team') {
     fresh.stages = Array.isArray(stages)
       ? [...new Set(stages.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
-      : [];
-  }
-
-  // Member display order, team-agent only (#1279). The up/down arrow controls
-  // on the Agents-page team view persist the visual order of a team's member
-  // agents here — an array of member agent ids. Purely declarative (display
-  // order only): it does not touch member ids, triggers, materialisation order
-  // or any routing state. Trimmed + de-duplicated, order preserved; an empty
-  // array clears the custom order (the view falls back to alphabetical).
-  // Ignored for non-team agents.
-  if (memberOrder !== undefined && fresh.role === 'team') {
-    fresh.memberOrder = Array.isArray(memberOrder)
-      ? [...new Set(memberOrder.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
       : [];
   }
 

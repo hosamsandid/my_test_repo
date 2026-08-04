@@ -33,9 +33,13 @@ function loadOrder() {
     return {
       groups: Array.isArray(parsed.groups) ? parsed.groups : [],
       singles: Array.isArray(parsed.singles) ? parsed.singles : [],
+      // Per-group member order, keyed by `<kind>:<id>` → ordered member ids.
+      members: (parsed.members && typeof parsed.members === 'object' && !Array.isArray(parsed.members))
+        ? parsed.members
+        : {},
     };
   } catch {
-    return { groups: [], singles: [] };
+    return { groups: [], singles: [], members: {} };
   }
 }
 function saveOrder(order) {
@@ -181,7 +185,17 @@ export default function AgentList({
 
   const groupKey = g => `${g.kind}:${g.id}`;
 
-  const orderedGroups  = applyStoredOrder(rawGroups,  sidebarOrder.groups,  groupKey);
+  // Groups keep their stored order; within each group its members (children)
+  // keep their own stored order on top of the alphabetical baseline.
+  const orderedGroups = applyStoredOrder(rawGroups, sidebarOrder.groups, groupKey)
+    .map(group => ({
+      ...group,
+      children: applyStoredOrder(
+        group.children,
+        sidebarOrder.members[groupKey(group)] || [],
+        a => a.id,
+      ),
+    }));
   const orderedSingles = applyStoredOrder(rawSingles, sidebarOrder.singles, a => a.id);
 
   // Arrows are only shown when the full unfiltered list is visible so that
@@ -208,6 +222,22 @@ export default function AgentList({
     const newKeys = [...keys];
     [newKeys[idx], newKeys[newIdx]] = [newKeys[newIdx], newKeys[idx]];
     setSidebarOrder(prev => ({ ...prev, singles: newKeys }));
+  }
+
+  // Reorder a member (child agent) within its team/orchestrator group. Order is
+  // persisted per group in the same localStorage record as the group order.
+  function moveMember(group, agent, direction) {
+    const key = groupKey(group);
+    const sourceGroup = orderedGroups.find(g => groupKey(g) === key);
+    if (!sourceGroup) return;
+    const keys = sourceGroup.children.map(a => a.id);
+    const idx = keys.indexOf(agent.id);
+    if (idx === -1) return;
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= keys.length) return;
+    const newKeys = [...keys];
+    [newKeys[idx], newKeys[newIdx]] = [newKeys[newIdx], newKeys[idx]];
+    setSidebarOrder(prev => ({ ...prev, members: { ...prev.members, [key]: newKeys } }));
   }
 
   const visibleGroups = orderedGroups
@@ -251,6 +281,8 @@ export default function AgentList({
           statuses={statuses}
           onMoveUp={canReorder && i > 0 ? () => moveGroup(group, -1) : null}
           onMoveDown={canReorder && i < visibleGroups.length - 1 ? () => moveGroup(group, 1) : null}
+          canReorderMembers={canReorder}
+          onMoveMember={moveMember}
         />
       ))}
 
@@ -297,6 +329,8 @@ function GroupSection({
   statuses,
   onMoveUp,
   onMoveDown,
+  canReorderMembers,
+  onMoveMember,
 }) {
   const Icon = group.kind === 'team' ? Users : Layers;
   const count = group.children.length + (group.header ? 1 : 0);
@@ -321,7 +355,7 @@ function GroupSection({
           activityState={statuses[group.header.id] || 'idle'}
         />
       )}
-      {!collapsed && group.children.map(agent => (
+      {!collapsed && group.children.map((agent, ci) => (
         <AgentRow
           key={agent.id}
           agent={agent}
@@ -330,6 +364,8 @@ function GroupSection({
           onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(agent.id) : null}
           activityState={statuses[agent.id] || 'idle'}
           indent
+          onMoveUp={canReorderMembers && onMoveMember && ci > 0 ? () => onMoveMember(group, agent, -1) : null}
+          onMoveDown={canReorderMembers && onMoveMember && ci < group.children.length - 1 ? () => onMoveMember(group, agent, 1) : null}
         />
       ))}
     </>
@@ -469,7 +505,7 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
     && activityState !== 'disabled'
     && activityState !== 'offline'
     && activityState !== 'problem';
-  const canMove = !indent && (onMoveUp || onMoveDown);
+  const canMove = onMoveUp || onMoveDown;
 
   return (
     <button

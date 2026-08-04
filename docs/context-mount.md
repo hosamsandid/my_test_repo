@@ -86,10 +86,13 @@ The folder is always at `/context`, so a prompt can rely on it:
 > Read the latest requirements from `/context` and summarise what changed since last week.
 
 **The agent is told about it automatically** (#1286). When an agent carries a mount, its
-seeded `CLAUDE.md` gains a **Read-only Context Folder** section naming the path, the host
+seeded `CLAUDE.md` gains a **Context Folder** section naming the path, the host
 location, and the two things an agent otherwise gets wrong: the folder is a *live view*
 (re-read it, don't trust what it said last run) and it is *not part of any repository*
-(copy before keeping). An agent without a mount never sees the section — the block is
+(copy before keeping). The section is **access-mode aware** (#1289): a read-only mount is
+headed *Read-only Context Folder* and told it cannot write; a read-write mount (`contextMountRw`)
+is headed *Host Context Folder* and told its writes flow back to the host folder — so the agent
+never declines to write to a folder the admin made writable. An agent without a mount never sees the section — the block is
 gated in `prompt-assembly.js` exactly like Git/Skills/Trigger-management, and the Prompt
 tab shows a `context folder` badge when it is active. Setting or clearing the mount
 rebuilds and reseeds `CLAUDE.md` before the respawn, so the prompt and the container
@@ -164,7 +167,7 @@ reads and writes).
 | **Config** | `contextMount` (absolute host path string) is persisted on the agent's `config.json`; `contextMountRw: true` is added only when read-write is enabled (a read-only mount carries no flag, so its config is byte-identical to a pre-#1289 agent). |
 | **API** | `PATCH /api/agents/:id/context-mount` validates the path, writes config (including the `readWrite` flag), rebuilds the prompt and best-effort respawns the agent. `GET /api/context-mount/capability` tells the UI whether the feature is offered here. Both admin-gated / local-gated. |
 | **Provisioning** | `startAgentProcess` reads `config.contextMount` + `config.contextMountRw` (podman runtime only) and passes them to `spawnContainer`, which adds the bind mount at `/context` in the requested access mode. Mounts are baked at container-create time, so a change requires a respawn. |
-| **Prompt** | `prompt-assembly.js` emits the gated **Read-only Context Folder** section; `POST /internal/agents/:id/prompt-rebuild` rebuilds + reseeds `CLAUDE.md` when the mount is set or cleared. |
+| **Prompt** | `prompt-assembly.js` emits the gated **Context Folder** section (headed *Read-only Context Folder* or, for `contextMountRw`, *Host Context Folder* with write-back wording — #1289); `POST /internal/agents/:id/prompt-rebuild` rebuilds + reseeds `CLAUDE.md` when the mount is set or cleared. |
 | **Browsing** | `GET /api/agents/:id/context/{status,tree,file,image,download}` → `/internal/agents/:id/context/*` → a one-shot read-only exec in the agent's container (`container-exec.js`) running the `list`/`read` program from the pure `context-browse.js`. |
 
 ## Known limits (v1)

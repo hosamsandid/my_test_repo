@@ -1,13 +1,13 @@
-# Read-only host-folder context mount
+# Host-folder context mount
 
-*Give one agent live, read-only access to a folder on the host machine.*
+*Give one agent live access to a folder on the host machine — read-only by default,
+or read-write when explicitly enabled.*
 
 ## What it is
 
 An admin can point an agent at a **single directory on the host** — for example a
 SharePoint folder that a background sync keeps up to date on your local disk. That
-directory is bind-mounted **read-only** into the agent's container at a fixed,
-documented path:
+directory is bind-mounted into the agent's container at a fixed, documented path:
 
 ```
 /context
@@ -18,25 +18,66 @@ ordinary files under `/context` — no more uploading the same files into the ch
 every time they change. Because the mount is live, whatever your sync writes to
 the folder on the host is immediately available to the agent on its next access.
 
+By default the mount is **read-only**. An admin may instead enable **read-write**
+(#1289), so the agent can create, modify and delete files under `/context` and those
+changes land on the host folder — e.g. dropping a generated summary into the synced
+folder so it propagates to colleagues. Read-only stays the default and read-write is
+a deliberate, per-agent opt-in (see [Read-write access](#read-write-access-1289) below).
+
 Scope is deliberately small and safe:
 
-- **read-only** — the agent can read the files but cannot create, modify or delete them;
+- **read-only by default**, read-write only when explicitly enabled per agent;
 - **admin-only** — only someone with management rights over the agent's team can set it;
 - **one folder per agent** — multiple mounts are a possible follow-up;
 - **local / self-hosted only** — it is unavailable on the hosted (GKE/IAP) stack.
 
 ## How to set it
 
-1. Open the **Agents** page, edit the agent, and find **Read-only context folder**.
-2. Enter an absolute host path (e.g. `/home/me/SharePointSync/ProjectX`) and click
-   **Save & re-provision**.
+1. Open the **Agents** page, edit the agent, and find **Host context folder**.
+2. Enter an absolute host path (e.g. `/home/me/SharePointSync/ProjectX`). Leave
+   **Mount read-write** unchecked for read-only access (the default), or check it to
+   let the agent write back to the folder. Click **Save & re-provision**.
 3. The agent's container is re-created so the mount takes effect. The panel reports
-   whether the re-provision happened.
+   whether the re-provision happened, and in which access mode.
 
 To remove it, click **Clear**.
 
 On the hosted stack the control is shown but disabled, with an explanation — a host
 bind-mount has no meaning there.
+
+## Read-write access (#1289)
+
+Read-write is **off by default** — an agent without it explicitly enabled behaves
+exactly as a read-only mount, and an agent with no mount at all is completely
+unaffected. When enabled:
+
+- the bind mount is created `rw` (instead of `ro`); the SELinux relabel `z` still
+  applies, so the agent may both read *and* write on Fedora-family hosts;
+- the agent can create, modify and delete files under `/context`, and the changes
+  are observable on the host folder;
+- changing the option re-provisions the agent's container (like setting or clearing
+  the path), because the access mode is baked at container-create time.
+
+**Trust boundary is unchanged.** Read-write carries the same gates as the read-only
+mount: **admin-only** and **local / self-hosted only**. It is a per-agent opt-in on
+top of an already-scoped feature.
+
+### Risks — read before enabling
+
+- **The agent can delete or overwrite host files.** Everything under the folder is
+  writable by the agent, including files your background sync (SharePoint, OneDrive,
+  …) also writes. There is **no conflict resolution or locking** against the host
+  sync touching the same file concurrently — last writer wins.
+- **Write-through to the cloud is the host's own sync**, not this feature. A file the
+  agent writes propagates only if and when the host's background sync uploads it.
+- **Online-only / not-materialised files** (e.g. an un-downloaded OneDrive placeholder)
+  may fail to write, just as they may fail to read — behaviour is no worse than, and
+  consistent with, the read-only path.
+- **Host path not writeable by the container's UID** surfaces as a normal write error
+  to the agent, not a silent failure.
+
+Because of the above, keep the exposed folder scoped to exactly what the agent needs
+to write, and prefer read-only whenever the workflow only reads.
 
 ## Using it from an agent / a prompt
 
@@ -111,16 +152,18 @@ The validator is the pure module `orchestrator/context-mount.js` (unit-tested;
 duplicated byte-identically at `admin-console/api/context-mount.js` because the two
 container images ship disjoint file sets). The mount is applied in
 `orchestrator/spawn-container.js` as a libpod OCI bind mount with options
-`ro,z` — the `z` relabels for SELinux so the mount works on Fedora-family hosts
-without breaking container startup.
+`ro,z` — or `rw,z` when read-write is enabled (`buildContextMountSpec(path,
+{ readWrite })`). Either way the `z` relabels for SELinux so the mount works on
+Fedora-family hosts without breaking container startup (the relabel permits both
+reads and writes).
 
 ## How it is wired
 
 | Layer | What happens |
 |---|---|
-| **Config** | `contextMount` (absolute host path string) is persisted on the agent's `config.json`. |
-| **API** | `PATCH /api/agents/:id/context-mount` validates the path, writes config, rebuilds the prompt and best-effort respawns the agent. `GET /api/context-mount/capability` tells the UI whether the feature is offered here. Both admin-gated / local-gated. |
-| **Provisioning** | `startAgentProcess` reads `config.contextMount` (podman runtime only) and passes it to `spawnContainer`, which adds the read-only bind mount at `/context`. Mounts are baked at container-create time, so a change requires a respawn. |
+| **Config** | `contextMount` (absolute host path string) is persisted on the agent's `config.json`; `contextMountRw: true` is added only when read-write is enabled (a read-only mount carries no flag, so its config is byte-identical to a pre-#1289 agent). |
+| **API** | `PATCH /api/agents/:id/context-mount` validates the path, writes config (including the `readWrite` flag), rebuilds the prompt and best-effort respawns the agent. `GET /api/context-mount/capability` tells the UI whether the feature is offered here. Both admin-gated / local-gated. |
+| **Provisioning** | `startAgentProcess` reads `config.contextMount` + `config.contextMountRw` (podman runtime only) and passes them to `spawnContainer`, which adds the bind mount at `/context` in the requested access mode. Mounts are baked at container-create time, so a change requires a respawn. |
 | **Prompt** | `prompt-assembly.js` emits the gated **Read-only Context Folder** section; `POST /internal/agents/:id/prompt-rebuild` rebuilds + reseeds `CLAUDE.md` when the mount is set or cleared. |
 | **Browsing** | `GET /api/agents/:id/context/{status,tree,file,image,download}` → `/internal/agents/:id/context/*` → a one-shot read-only exec in the agent's container (`container-exec.js`) running the `list`/`read` program from the pure `context-browse.js`. |
 

@@ -473,14 +473,18 @@ function startAgentProcess(config) {
     }
   }
 
-  // Read-only host-folder context mount (#1283). Applied only on the podman
-  // runtime; buildContextMountSpec (in spawn-container) re-validates the path
-  // fail-closed, so a stale/invalid value produces no mount.
+  // Host-folder context mount (#1283). Applied only on the podman runtime;
+  // buildContextMountSpec (in spawn-container) re-validates the path fail-closed,
+  // so a stale/invalid value produces no mount. Read-only by default; mounted
+  // read-write only when the per-agent `contextMountRw` opt-in is set (#1289) —
+  // undefined when there is no mount at all, so the read-only spawn path is
+  // byte-identical to before.
   const contextMount = (CONTEXT_MOUNT_RUNTIME_OK && typeof config.contextMount === 'string' && config.contextMount.trim())
     ? config.contextMount.trim()
     : undefined;
+  const contextMountRw = contextMount ? (config.contextMountRw === true) : undefined;
 
-  const child = spawnContainer({ id, env: childEnv, contextMount });
+  const child = spawnContainer({ id, env: childEnv, contextMount, contextMountRw });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>

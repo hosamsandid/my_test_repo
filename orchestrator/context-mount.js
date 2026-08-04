@@ -4,7 +4,8 @@
 // read-only host-folder mount (#1283).
 //
 // An admin may point one agent at a single host directory that is bind-mounted
-// READ-ONLY into that agent's container at a fixed, documented path (`/context`).
+// into that agent's container at a fixed, documented path (`/context`) —
+// READ-ONLY by default, or READ-WRITE when the per-agent opt-in is set (#1289).
 // This module is dependency-free and unit-tested (`node --test
 // orchestrator/context-mount.test.js`) — same discipline as process-template.js.
 // It owns ONLY the string-level policy (validate a host path, shape the libpod
@@ -104,18 +105,21 @@ function validateHostMountPath(input) {
 // runtime-spec Mount (`{ destination, type, source, options }`), which
 // serializes lowercase — distinct from the capitalized NamedVolume shape
 // (`{ Name, Dest, SubPath }`) used by the `volumes` array in the same createBody.
-// Read-only (AC4) + SELinux relabel `z` so the mount works on Fedora-family
-// (SELinux-enforcing) hosts without breaking container startup (AC9). Returns
-// null when the path is invalid (caller should have validated first — this is a
-// fail-closed second gate).
-function buildContextMountSpec(hostPath) {
+// Access mode is `ro` by default and `rw` when `readWrite` is set (#1289) —
+// read-only stays the default so an agent without the opt-in behaves exactly as
+// before. Either way the SELinux relabel `z` is applied so the mount works on
+// Fedora-family (SELinux-enforcing) hosts without breaking container startup;
+// `z` relabels the source for both read and write, so it is correct for the
+// read-write case too. Returns null when the path is invalid (caller should have
+// validated first — this is a fail-closed second gate).
+function buildContextMountSpec(hostPath, { readWrite = false } = {}) {
   const v = validateHostMountPath(hostPath);
   if (!v.ok) return null;
   return {
     type: 'bind',
     source: v.path,
     destination: CONTEXT_MOUNT_TARGET,
-    options: ['ro', 'z'],
+    options: [readWrite ? 'rw' : 'ro', 'z'],
   };
 }
 

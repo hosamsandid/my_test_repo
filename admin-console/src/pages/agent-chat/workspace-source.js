@@ -35,11 +35,72 @@ export function contextRelOf(key) {
   return String(key).slice(CONTEXT_ROOT_KEY.length).replace(/^\/+/, '');
 }
 
-// The context folder is read-only end-to-end: no upload, no delete, no move,
-// and no API route that could perform one. The UI must not offer the actions at
-// all — an action that always fails is worse than an absent one.
-export function isReadOnlyKey(key) {
-  return isContextKey(key);
+// The mounts an agent has, normalised to `[{ key, readWrite, hostPath }]` — one
+// per folder. Uses status.mounts when present (multi-folder, #1290), else the
+// legacy single `/context` root synthesised from the top-level status fields.
+// Empty when the agent has no mount.
+export function contextMounts(status) {
+  if (!status || !status.enabled) return [];
+  if (Array.isArray(status.mounts) && status.mounts.length) {
+    return status.mounts.map((m) => ({
+      key: (m && m.key) || CONTEXT_ROOT_KEY,
+      readWrite: !!(m && m.readWrite),
+      hostPath: (m && m.hostPath) || null,
+    }));
+  }
+  return [{ key: CONTEXT_ROOT_KEY, readWrite: !!status.readWrite, hostPath: status.hostPath || null }];
+}
+
+// The mount a context key belongs to (its root or any descendant), or null for
+// a workspace key / an unknown context key. Longest matching root wins so a
+// `/context/<slug>` mount is preferred over a legacy `/context` if both appear.
+export function mountForKey(key, status) {
+  if (!isContextKey(key)) return null;
+  const k = String(key);
+  let best = null;
+  for (const m of contextMounts(status)) {
+    if (k === m.key || k.startsWith(m.key + '/')) {
+      if (!best || m.key.length > best.key.length) best = m;
+    }
+  }
+  return best;
+}
+
+// Whether a key is read-only for WRITING. Workspace keys are always writable.
+// A context key is writable only when it belongs to a read-write mount; when the
+// mount status is unknown (status omitted) a context key is treated read-only —
+// fail-closed, so a caller that forgot to thread status never enables a write.
+export function isReadOnlyKey(key, status) {
+  if (!isContextKey(key)) return false;
+  const mount = mountForKey(key, status);
+  return !(mount && mount.readWrite);
+}
+
+// Whether `a` and `b` live in the same writable source, so a drag-move between
+// them is a plain rename (one filesystem) rather than a cross-source copy. True
+// for two workspace keys (today's behaviour) or two keys under the SAME
+// read-write context mount; never across workspace↔context or two mounts.
+export function sameWritableSource(a, b, status) {
+  const aCtx = isContextKey(a);
+  const bCtx = isContextKey(b);
+  if (aCtx !== bCtx) return false;
+  if (!aCtx) return true; // both workspace
+  const ma = mountForKey(a, status);
+  const mb = mountForKey(b, status);
+  return !!(ma && mb && ma.key === mb.key && ma.readWrite);
+}
+
+// The write API base + path for a key. Workspace keys keep today's
+// `/workspace/...` routes with their bare relative path; context keys route to
+// `/context/...` with the path RELATIVE to the mount root (leading `/context`
+// stripped). Callers append `/file`, `/move` or `/upload`.
+export function writeApiBase(agentId, key) {
+  const base = isContextKey(key) ? 'context' : 'workspace';
+  return `/api/agents/${encodeURIComponent(agentId)}/${base}`;
+}
+
+export function apiRelOf(key) {
+  return isContextKey(key) ? contextRelOf(key) : String(key == null ? '' : key);
 }
 
 // Endpoint for a tree key. `kind` is one of 'tree' | 'file' | 'download' |

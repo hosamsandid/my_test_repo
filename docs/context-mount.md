@@ -82,6 +82,14 @@ rest read-only. When enabled for a folder:
   applies, so the agent may both read *and* write on Fedora-family hosts;
 - the agent can create, modify and delete files under that folder's path, and the
   changes are observable on the host folder;
+- **the console workspace browser** gains upload, delete and drag-move for that
+  folder's subtree (a read-only folder stays browse-only). The mutation runs inside
+  the agent's container — the console proxies `DELETE/POST /api/agents/:id/context/{file,move,upload}`
+  to the orchestrator, which runs a containment-checked `WRITE_PROGRAM`
+  (`orchestrator/context-write.js`) for delete/move and streams upload bytes in via
+  the libpod archive endpoint. A drag-move is a rename within **one** folder; the
+  mount root itself is never deletable. The kernel EROFS on a read-only bind mount is
+  the ultimate backstop, so a write can never land on a folder mounted `ro`;
 - changing the option re-provisions the agent's container (like adding or removing a
   folder), because the access mode is baked at container-create time.
 

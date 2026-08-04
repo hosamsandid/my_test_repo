@@ -13,10 +13,26 @@ import DiffView from './DiffView';
 import { isImageData, imageSrcUrl } from './workspace-image';
 import {
   isContextKey, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
+  mountForKey, sameWritableSource, writeApiBase, apiRelOf,
 } from './workspace-source';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
 const MODE_KEY = 'agentChat.workspaceMode';
+
+// Chip for a mounted host-folder root (#1283/#1289). The label reflects the
+// mount's ACCESS MODE — how the agent sees the folder — so a read-write mount
+// no longer masquerades as read-only. The console itself always browses the
+// folder read-only (there is no write route into the container's mount), which
+// the tooltip keeps honest.
+function contextChip(item) {
+  const rw = !!(item && item.readWrite);
+  const label = rw ? 'host · read-write' : 'host · read-only';
+  const mode = rw
+    ? 'host folder, read-write for the agent; browsed read-only here'
+    : 'host folder, read-only';
+  const title = item && item.hostPath ? `${item.hostPath} (${mode})` : `Host folder (${mode})`;
+  return { label, title };
+}
 
 /**
  * Read-only workspace browser for an agent.
@@ -202,13 +218,16 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadStatus('uploading');
     setUploadMessage('');
     const form = new FormData();
-    form.append('path', uploadDir);
+    // uploadDir is a tree key — a workspace path, or a `/context…` key for a
+    // read-write mount. Route + relativise accordingly (apiRelOf strips the
+    // leading `/context` for the mount browse API).
+    form.append('path', apiRelOf(uploadDir));
     for (const f of files) {
       form.append('files', f);
       form.append('relativePaths', isFolder && f.webkitRelativePath ? f.webkitRelativePath : '');
     }
     try {
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/upload`, {
+      const r = await fetch(`${writeApiBase(agentId, uploadDir)}/upload`, {
         method: 'POST',
         body: form,
       });
@@ -248,14 +267,14 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadMessage('');
   }, []);
 
-  // Opens the delete-confirmation dialog for one file or directory. Nothing
-  // under the read-only context mount is deletable — the rows don't offer the
+  // Opens the delete-confirmation dialog for one file or directory. A key under
+  // a read-only context mount is never deletable — the rows don't offer the
   // action, and this refuses it even if something else calls in.
   const requestDelete = useCallback((relPath, type, name) => {
-    if (isReadOnlyKey(relPath)) return;
+    if (isReadOnlyKey(relPath, contextStatus)) return;
     setDeleteError('');
     setDeleteTarget({ path: relPath, type, name });
-  }, []);
+  }, [contextStatus]);
 
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget || !agentId) return;
@@ -263,7 +282,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setDeleteError('');
     try {
       const r = await fetch(
-        `/api/agents/${encodeURIComponent(agentId)}/workspace/file?path=${encodeURIComponent(deleteTarget.path)}`,
+        `${writeApiBase(agentId, deleteTarget.path)}/file?path=${encodeURIComponent(apiRelOf(deleteTarget.path))}`,
         { method: 'DELETE' },
       );
       const j = await r.json().catch(() => ({}));
@@ -291,15 +310,17 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   const canDropInto = useCallback((targetDir) => {
     if (!dragItem) return false;
     const src = dragItem.path;
-    // The context mount is read-only: never a drop target, never a drag source.
-    if (isReadOnlyKey(targetDir) || isReadOnlyKey(src)) return false;
+    // A move is a plain rename within ONE filesystem — allowed only between two
+    // workspace keys or two keys under the SAME read-write context mount. This
+    // rules out read-only mounts, cross-folder and workspace↔context drags.
+    if (!sameWritableSource(src, targetDir, contextStatus)) return false;
     if (targetDir === parentOf(src)) return false;          // already there
     if (dragItem.type === 'dir') {
       if (targetDir === src) return false;                   // into itself
       if (targetDir.startsWith(src + '/')) return false;     // into own descendant
     }
     return true;
-  }, [dragItem]);
+  }, [dragItem, contextStatus]);
 
   const performMove = useCallback(async (targetDir) => {
     const item = dragItem;
@@ -309,10 +330,12 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     const from = item.path;
     const movedName = from.includes('/') ? from.slice(from.lastIndexOf('/') + 1) : from;
     try {
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/move`, {
+      // from and targetDir share a source (canDropInto), so either both route to
+      // /workspace or both to /context with mount-relative paths.
+      const r = await fetch(`${writeApiBase(agentId, from)}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, toDir: targetDir }),
+        body: JSON.stringify({ from: apiRelOf(from), toDir: apiRelOf(targetDir) }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
@@ -686,8 +709,12 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   const cache  = dirCache.get(relPath);
   const indent = depth * 12;
   const [hovered, setHovered] = useState(false);
-  // Directories under the context mount carry no write actions at all.
-  const readOnly = isReadOnlyKey(relPath);
+  // Read-only mounts carry no write actions. A read-write mount's ROOT node is a
+  // valid upload/drop target but is never itself a drag source or deletable —
+  // that would remove the bind-mount point, not a file in it.
+  const readOnly = isReadOnlyKey(relPath, contextStatus);
+  const mount = mountForKey(relPath, contextStatus);
+  const isMountRoot = !!(mount && mount.key === relPath);
 
   const Caret = isOpen ? ChevronDown : ChevronRight;
   const FolderIcon = isOpen ? FolderOpen : Folder;
@@ -715,8 +742,8 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
               source for moving this directory. */}
           <button
             type="button"
-            draggable={!!dnd && !readOnly}
-            onDragStart={dnd && !readOnly ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'dir'); } : undefined}
+            draggable={!!dnd && !readOnly && !isMountRoot}
+            onDragStart={dnd && !readOnly && !isMountRoot ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'dir'); } : undefined}
             onDragEnd={dnd ? dnd.onDragEnd : undefined}
             onClick={() => onToggleDir(relPath)}
             style={{
@@ -797,8 +824,9 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
             <Upload size={11} />
           </button>
           )}
-          {/* Per-directory delete icon — visible on hover */}
-          {!readOnly && (
+          {/* Per-directory delete icon — visible on hover. Hidden on the mount
+              root: you can delete files IN it, not the mount point itself. */}
+          {!readOnly && !isMountRoot && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onRequestDelete(relPath, 'dir', name); }}
@@ -904,7 +932,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
     <div>
       {items.map(item => {
         const childRel = childKey(relPath, item);
-        const readOnly = isReadOnlyKey(childRel);
+        const readOnly = isReadOnlyKey(childRel, contextStatus);
         if (item.type === 'dir') {
           return (
             <DirNode
@@ -923,7 +951,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               dnd={readOnly ? null : dnd}
               agentId={agentId}
               chip={(item.key && isContextKey(item.key))
-                ? { label: 'host · read-only', title: item.hostPath ? `${item.hostPath} (host folder, browsed read-only)` : 'Host folder (browsed read-only)' }
+                ? contextChip(item)
                 : null}
             />
           );

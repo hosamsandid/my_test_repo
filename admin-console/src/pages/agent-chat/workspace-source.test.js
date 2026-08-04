@@ -10,6 +10,11 @@ import {
   contextRootItem,
   withContextRoot,
   childKey,
+  contextMounts,
+  mountForKey,
+  sameWritableSource,
+  writeApiBase,
+  apiRelOf,
 } from './workspace-source.js';
 
 test('context keys are exactly the mount root and its descendants', () => {
@@ -123,4 +128,77 @@ test('child keys inherit their source from the parent', () => {
   assert.equal(childKey('/context/docs', { name: 'note.md' }), '/context/docs/note.md');
   // An item carrying its own key (the virtual root) wins over derivation.
   assert.equal(childKey('', contextRootItem(null)), CONTEXT_ROOT_KEY);
+});
+
+/* ─── Read-write mount awareness (write support) ────────────────────────── */
+
+const RO_STATUS = {
+  enabled: true,
+  mounts: [{ key: '/context', hostPath: '/host/docs', readWrite: false }],
+};
+const RW_STATUS = {
+  enabled: true,
+  mounts: [{ key: '/context', hostPath: '/host/docs', readWrite: true }],
+};
+const MULTI_STATUS = {
+  enabled: true,
+  mounts: [
+    { key: '/context/read', hostPath: '/host/ro', readWrite: false },
+    { key: '/context/edit', hostPath: '/host/rw', readWrite: true },
+  ],
+};
+
+test('isReadOnlyKey is mount-aware: RW mount keys are writable', () => {
+  // Workspace keys are always writable.
+  assert.equal(isReadOnlyKey('memory/log.md', RW_STATUS), false);
+  // A read-write mount → its keys are writable.
+  assert.equal(isReadOnlyKey('/context', RW_STATUS), false);
+  assert.equal(isReadOnlyKey('/context/a/b.txt', RW_STATUS), false);
+  // A read-only mount → read-only.
+  assert.equal(isReadOnlyKey('/context/a.txt', RO_STATUS), true);
+  // Fail-closed: no status → a context key is read-only.
+  assert.equal(isReadOnlyKey('/context/a.txt'), true);
+});
+
+test('isReadOnlyKey resolves per-folder in a multi-folder set', () => {
+  assert.equal(isReadOnlyKey('/context/read/x.txt', MULTI_STATUS), true);
+  assert.equal(isReadOnlyKey('/context/edit/x.txt', MULTI_STATUS), false);
+});
+
+test('contextMounts falls back to legacy top-level fields', () => {
+  const legacy = { enabled: true, hostPath: '/host/legacy', readWrite: true };
+  assert.deepEqual(contextMounts(legacy), [
+    { key: '/context', readWrite: true, hostPath: '/host/legacy' },
+  ]);
+  assert.deepEqual(contextMounts({ enabled: false }), []);
+  assert.deepEqual(contextMounts(null), []);
+});
+
+test('mountForKey finds the owning mount, null for workspace/unknown', () => {
+  assert.equal(mountForKey('memory/log.md', RW_STATUS), null);
+  assert.equal(mountForKey('/context/edit/a.txt', MULTI_STATUS).key, '/context/edit');
+  assert.equal(mountForKey('/context/read', MULTI_STATUS).key, '/context/read');
+});
+
+test('sameWritableSource gates drag-move to one filesystem', () => {
+  // Two workspace keys → always allowed.
+  assert.equal(sameWritableSource('a/x.txt', 'b', RW_STATUS), true);
+  // Same RW mount → allowed.
+  assert.equal(sameWritableSource('/context/a.txt', '/context/sub', RW_STATUS), true);
+  // Same RO mount → refused.
+  assert.equal(sameWritableSource('/context/a.txt', '/context/sub', RO_STATUS), false);
+  // Cross-source (workspace ↔ context) → refused.
+  assert.equal(sameWritableSource('a/x.txt', '/context/sub', RW_STATUS), false);
+  // Two different mounts → refused even if both writable.
+  assert.equal(sameWritableSource('/context/read/x', '/context/edit', MULTI_STATUS), false);
+});
+
+test('writeApiBase + apiRelOf route to the right endpoint and relativise', () => {
+  assert.equal(writeApiBase('a1', 'memory/log.md'), '/api/agents/a1/workspace');
+  assert.equal(writeApiBase('a1', '/context/docs/n.md'), '/api/agents/a1/context');
+  // Workspace keys pass through unchanged; context keys drop the /context prefix.
+  assert.equal(apiRelOf('memory/log.md'), 'memory/log.md');
+  assert.equal(apiRelOf('/context/docs/n.md'), 'docs/n.md');
+  assert.equal(apiRelOf('/context'), '');
+  assert.equal(apiRelOf('/context/edit/a.txt'), 'edit/a.txt');
 });

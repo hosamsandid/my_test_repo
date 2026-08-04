@@ -87,6 +87,11 @@ Consequences worth knowing:
 - **Downloads are capped at 25 MB.** The bytes travel base64-encoded through the exec
   pipe, not as a file stream; a larger file is refused outright rather than silently
   truncated. The viewer keeps the same 512 KB read cap as the workspace browser.
+- **Online-only (cloud placeholder) files cannot be read** — by the browser *or* by the
+  agent. A OneDrive/iCloud file that the host has not downloaded lists with its real name
+  and size but fails to open from inside the container (`EDEADLK`); the browser reports
+  *"file is online-only on the host and was not downloaded"* instead of a generic error.
+  The fix is on the host: mark the folder **Always keep on this device**.
 - **Containment is enforced twice.** The request-side guard refuses `..`, absolute paths
   and control characters; inside the container every path is resolved with `realpath` and
   must stay under `/context`. A symlink pointing outside the folder is *listed* (so the
@@ -134,6 +139,8 @@ without breaking container startup.
   stricter: it refuses to follow a symlink out of `/context`.
 - **Browsing needs a running agent** and reads through an exec, so a very large folder
   lists more slowly than the workspace tree, and downloads are capped at 25 MB.
+- **Cloud-sync placeholders are unreadable** for the agent as well as the console (see
+  above) — if the mount points at a OneDrive/iCloud folder, keep it available offline.
 
 Precedent: this generalises the commented `${ACE_REPO_PATH}:/ace` bind-mount in
 `docker-compose.yml` to be per-agent, read-only, and configurable from the console.

@@ -152,7 +152,13 @@ const BROWSE_PROGRAM = [
   '            mtime = int(os.path.getmtime(target) * 1000)',
   '        except PermissionError:',
   '            fail("permission denied", "denied")',
-  '        except OSError:',
+  '        except OSError as exc:',
+  '            # A cloud-sync placeholder (OneDrive/iCloud "online-only" file)',
+  '            # exists and stats fine but cannot be hydrated from inside the',
+  '            # container — the kernel answers EDEADLK/EAGAIN. Report that as',
+  '            # its own state: the fix is on the host, not here.',
+  '            if getattr(exc, "errno", 0) in (11, 35):',
+  '                fail("file is online-only on the host and was not downloaded", "not-materialised")',
   '            fail("read failed", "io-error")',
   '        emit({"path": rel, "size": size, "read": len(data), "truncated": size > len(data),',
   '              "mtime": mtime, "encoding": "base64",',
@@ -209,6 +215,10 @@ function statusForBrowseCode(code) {
       return 400;
     case 'denied':
       return 403;
+    // The file is there but the host never downloaded it — not our failure,
+    // and not a 404 either: it exists and will read fine once materialised.
+    case 'not-materialised':
+      return 409;
     case 'not-found':
     case 'not-mounted':
       return 404;

@@ -294,6 +294,13 @@ const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
+// Read-only host-folder context mount (#1283) is a LOCAL/self-hosted-only
+// feature: a host bind-mount only makes sense on the podman runtime, never on
+// the hosted Kubernetes backend. The API layer already keeps `contextMount` off
+// config in non-local environments; this is the provisioning-side backstop.
+const CONTEXT_MOUNT_RUNTIME_OK =
+  String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase() !== "kubernetes" &&
+  String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase() !== "k8s";
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
 const assistBinding = require("./assist-binding");
 const { reconcileSessionAppend } = require("./session-cursor");
@@ -451,7 +458,14 @@ function startAgentProcess(config) {
     }
   }
 
-  const child = spawnContainer({ id, env: childEnv });
+  // Read-only host-folder context mount (#1283). Applied only on the podman
+  // runtime; buildContextMountSpec (in spawn-container) re-validates the path
+  // fail-closed, so a stale/invalid value produces no mount.
+  const contextMount = (CONTEXT_MOUNT_RUNTIME_OK && typeof config.contextMount === 'string' && config.contextMount.trim())
+    ? config.contextMount.trim()
+    : undefined;
+
+  const child = spawnContainer({ id, env: childEnv, contextMount });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>

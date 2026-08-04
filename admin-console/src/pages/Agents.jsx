@@ -1185,6 +1185,89 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
 }
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
+// Read-only host-folder context mount (#1283). A self-contained control: unlike
+// the rest of the edit form (one PUT on Save), a mount change is baked at
+// container spawn time and re-provisions the agent, so it saves immediately via
+// its own PATCH endpoint and reports the respawn outcome. Availability is
+// local/self-hosted only — the capability probe disables the control (with an
+// explanation) on the hosted stack (AC8).
+function ContextMountControl({ agent }) {
+  const { data: capability } = useApi('/api/context-mount/capability');
+  const supported = capability ? !!capability.supported : null; // null = still loading
+  const mountPath = (capability && capability.mountPath) || '/context';
+
+  const [pathVal, setPathVal] = useState(agent.contextMount || '');
+  const [saved, setSaved] = useState(agent.contextMount || '');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+
+  const dirty = pathVal.trim() !== saved;
+
+  async function save(nextPath) {
+    setBusy(true); setMsg(''); setErr('');
+    try {
+      const body = { path: nextPath ? nextPath : null };
+      const res = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/context-mount`, body);
+      const applied = res && res.contextMount ? res.contextMount : '';
+      setPathVal(applied);
+      setSaved(applied);
+      if (!applied) {
+        setMsg('Context folder cleared. ' + (res && res.respawned ? 'Agent re-provisioned.' : 'Takes effect on the next start.'));
+      } else {
+        setMsg(res && res.respawned
+          ? `Mounted at ${mountPath} (read-only). Agent re-provisioned.`
+          : `Saved. Takes effect the next time the agent starts.`);
+      }
+    } catch (e) {
+      setErr((e && e.message) || 'Could not update the context folder');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={labelStyle}>Read-only context folder</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        Expose a folder from the host machine to this agent as live, read-only context.
+        Its current contents appear inside the agent at <code>{mountPath}</code>; changes the
+        host makes to the folder are reflected on the agent's next access. Saving re-provisions
+        the agent's container.
+      </div>
+      {supported === false ? (
+        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)' }}>
+          Not available in this environment — host-folder mounts are offered only on the
+          local / self-hosted stack.
+        </div>
+      ) : (
+        <>
+          <input
+            type="text"
+            value={pathVal}
+            onChange={e => setPathVal(e.target.value)}
+            placeholder="/absolute/path/on/the/host"
+            disabled={busy || supported === null}
+            style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
+          />
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+            <SecondaryBtn onClick={() => save(pathVal.trim())} style={{ opacity: (busy || !dirty) ? 0.6 : 1, pointerEvents: (busy || !dirty) ? 'none' : 'auto' }}>
+              {busy ? 'Saving…' : 'Save & re-provision'}
+            </SecondaryBtn>
+            {saved && (
+              <SecondaryBtn onClick={() => { setPathVal(''); save(''); }} style={{ opacity: busy ? 0.6 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+                Clear
+              </SecondaryBtn>
+            )}
+          </div>
+          {msg && <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{msg}</div>}
+          {err && <div role="alert" style={{ ...helpTextStyle, color: 'var(--eb-status-error)' }}>{err}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
   // `agent.skillsOverride` absent === inheriting from the parent team.
@@ -1448,6 +1531,12 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             customMultiline
           />
         </>
+      )}
+
+      {agent.role !== 'team' && (
+        <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <ContextMountControl agent={agent} />
+        </div>
       )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>

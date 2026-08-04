@@ -30,6 +30,7 @@ const { buildAssistModelOptions } = require('./assist-model-options');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
+const { validateHostMountPath, CONTEXT_MOUNT_TARGET } = require('./context-mount');
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
@@ -3512,6 +3513,76 @@ async function respawnAgentBestEffort(id, reason) {
     return false;
   }
 }
+
+/* ─── Read-only host-folder context mount (#1283) ───────────────────────── */
+
+// The mount is a LOCAL/self-hosted-only feature: a host bind-mount has no
+// meaning behind IAP/GKE, and the Kubernetes runtime has no host to mount from.
+// The provisioning side (orchestrator) mirrors this guard on the podman runtime.
+function isLocalContextMountEnv() {
+  if (process.env.IAP_AUDIENCE) return false;
+  const rt = String(process.env.AEE_CONTAINER_RUNTIME || 'podman').toLowerCase();
+  return rt !== 'kubernetes' && rt !== 'k8s';
+}
+
+// Whether the read-only host-folder context mount is offered in this
+// environment, plus the fixed in-container target. The UI reads this to disable
+// the control (with an explanation) on the hosted stack (AC8).
+app.get('/api/context-mount/capability', (req, res) => {
+  res.json({ supported: isLocalContextMountEnv(), mountPath: CONTEXT_MOUNT_TARGET });
+});
+
+// Set / clear the agent's read-only host-folder context mount. Like the provider
+// override, the mount is baked at container spawn time, so a change requires a
+// one-agent respawn — done best-effort after the config write (AC6). Guards:
+//   • local/self-hosted only — 400 in the hosted (IAP/k8s) environment (AC8)
+//   • the caller must have management rights over the agent's owning team (#989)
+//   • the host path must pass basic server-side validation (AC7)
+// A `team` agent hosts no container, so a mount there is meaningless → 400.
+app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!isLocalContextMountEnv()) {
+    return res.status(400).json({
+      error: 'Host-folder context mounts are only available in the local / self-hosted environment',
+      code: 'context-mount-unsupported',
+    });
+  }
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (cfg.role === 'team') {
+    return res.status(400).json({ error: 'A team agent hosts no container; set the context mount on its members instead' });
+  }
+
+  const hostPath = req.body ? req.body.path : undefined;
+  // null / '' / undefined → clear the mount (back to no external context).
+  if (hostPath === null || hostPath === undefined || hostPath === '') {
+    let changed = false;
+    if ('contextMount' in cfg) {
+      delete cfg.contextMount;
+      writeJsonAtomic(cfgPath, cfg);
+      changed = true;
+    }
+    const respawned = changed ? await respawnAgentBestEffort(id, 'context-mount-cleared') : false;
+    return res.json({ contextMount: null, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  }
+
+  if (typeof hostPath !== 'string') {
+    return res.status(400).json({ error: 'path must be a string host directory (or null to clear)' });
+  }
+  const v = validateHostMountPath(hostPath);
+  if (!v.ok) return res.status(400).json({ error: v.error, code: 'invalid-host-path' });
+
+  cfg.contextMount = v.path;
+  writeJsonAtomic(cfgPath, cfg);
+  const respawned = await respawnAgentBestEffort(id, 'context-mount-changed');
+  res.json({ contextMount: v.path, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+});
 
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 

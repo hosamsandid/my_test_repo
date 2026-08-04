@@ -3901,9 +3901,9 @@ class TriggerScheduler:
         conv = entry.get("convKey") or "?"
 
         lines = [
-            f"⚠️ **Event-Burst geklammert** — {count} GitHub-Events auf "
-            f"`{conv}` in einem Poll-Zyklus. Statt {count} Einzel-Sessions "
-            f"fasse ich sie hier zusammen und starte **keinen** automatischen Lauf.",
+            f"⚠️ **Event burst clamped** — {count} GitHub events on "
+            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"instead of starting **{count}** separate sessions.",
             "",
         ]
         # Render oldest-first; cap the visible lines so a large burst doesn't
@@ -3915,15 +3915,15 @@ class TriggerScheduler:
             if ev.get("eventId"):
                 parts.append(f"({ev.get('eventId')})")
             if ev.get("actor"):
-                parts.append(f"von {ev.get('actor')}")
+                parts.append(f"by {ev.get('actor')}")
             if ev.get("createdAt"):
-                parts.append(f"um {ev.get('createdAt')}")
+                parts.append(f"at {ev.get('createdAt')}")
             lines.append("- " + " ".join(parts))
         hidden = len(events) - len(shown)
         if hidden > 0:
-            lines.append(f"- … und {hidden} weitere")
+            lines.append(f"- … and {hidden} more")
         lines.append("")
-        lines.append("Schau bei Bedarf selbst im Repo nach.")
+        lines.append("Check the repo directly if you need more detail.")
 
         body = "\n".join(lines)
         try:
@@ -4083,19 +4083,19 @@ class TriggerScheduler:
         if decision.reason == "rate":
             window_min = max(1, int(round(snap["windowSec"] / 60)))
             detail = (
-                f"mehr als {snap['maxPerWindow']} getriggerte Sessions in "
-                f"{window_min} min gestartet"
+                f"more than {snap['maxPerWindow']} triggered sessions started "
+                f"in {window_min} min"
             )
         else:
             detail = (
-                f"bereits {snap['maxConcurrent']} getriggerte Sessions laufen "
-                f"parallel"
+                f"already {snap['maxConcurrent']} triggered sessions running "
+                f"concurrently"
             )
         body = (
-            f"⚠️ **Trigger-Backstop aktiv** — {detail}. Weitere getriggerte "
-            f"Läufe werden vorerst verworfen (Schutz gegen Runaway-Schleifen, "
-            f"#611). Ich melde das einmal und unterdrücke weitere Meldungen, "
-            f"bis sich die Lage entspannt."
+            f"⚠️ **Trigger backstop active** — {detail}. Further triggered "
+            f"runs will be dropped for now (runaway-loop protection, "
+            f"#611). Reporting once and suppressing further notices "
+            f"until the rate settles."
         )
         content = {
             "msgtype": "m.notice",

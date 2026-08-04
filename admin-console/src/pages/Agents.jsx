@@ -6,7 +6,6 @@ import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
   User, Users, Workflow, Info, Download, Upload, Copy,
-  ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
@@ -17,7 +16,6 @@ import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
-import { applyMemberOrder, orderAfterMove } from './member-order-ops.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -1613,26 +1611,15 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false, onMoveUp, onMoveDown, canMoveUp = false, canMoveDown = false }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
     depth: 0, ancestorMore: [], isLast: true, hasChildren: false, isCollapsed: false,
   };
-  // Reorder controls (#1279): shown only when a parent wires the move handlers
-  // (the team view). Alt+↑ / Alt+↓ move the focused row, mirroring the Agent
-  // Chat sidebar's keyboard reorder.
-  const reorderable = !!(onMoveUp || onMoveDown);
-  const handleKeyDown = (e) => {
-    if (!reorderable || !e.altKey) return;
-    if (e.key === 'ArrowUp' && canMoveUp && onMoveUp) { e.preventDefault(); onMoveUp(); }
-    else if (e.key === 'ArrowDown' && canMoveDown && onMoveDown) { e.preventDefault(); onMoveDown(); }
-  };
   return (
     <div
       className="eb-wrap-md"
-      tabIndex={reorderable ? 0 : undefined}
-      onKeyDown={reorderable ? handleKeyDown : undefined}
       style={{
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -1641,26 +1628,6 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         opacity: isStub ? 0.85 : 1,
       }}
     >
-      {reorderable && (
-        <span style={{ display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
-          <IconButton
-            icon={ArrowUp}
-            label="Move up"
-            title="Move up (Alt+↑)"
-            size={11}
-            disabled={busy || !canMoveUp || !onMoveUp}
-            onClick={() => onMoveUp && onMoveUp()}
-          />
-          <IconButton
-            icon={ArrowDown}
-            label="Move down"
-            title="Move down (Alt+↓)"
-            size={11}
-            disabled={busy || !canMoveDown || !onMoveDown}
-            onClick={() => onMoveDown && onMoveDown()}
-          />
-        </span>
-      )}
       {t.depth > 0 && (
         <TreeConnector ancestorMore={t.ancestorMore} isLast={t.isLast} />
       )}
@@ -1957,7 +1924,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onReorderMembers, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1968,19 +1935,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
     return next;
   });
 
-  // Apply the persisted per-team display order (#1279) on top of the parent's
-  // alphabetical baseline: pinned ids first (in stored order), the rest kept
-  // alphabetical. Reordering persists a full id list on the team agent.
-  const children = useMemo(
-    () => applyMemberOrder(agent.children || [], agent.memberOrder),
-    [agent.children, agent.memberOrder],
-  );
-  const reorderBusy = busyIds.has(agent.id);
-  const canReorder = typeof onReorderMembers === 'function' && children.length > 1;
-  const moveMember = (memberId, direction) => {
-    if (!canReorder || reorderBusy) return;
-    onReorderMembers(agent.id, orderAfterMove(children.map(c => c.id), memberId, direction));
-  };
+  const children = agent.children || [];
 
   return (
     <div style={{
@@ -2087,10 +2042,6 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               onDelete={onDeleteChild}
               onExport={onExport}
               onClone={onCloneChild}
-              onMoveUp={canReorder ? () => moveMember(child.id, -1) : undefined}
-              onMoveDown={canReorder ? () => moveMember(child.id, 1) : undefined}
-              canMoveUp={canReorder && !reorderBusy && idx > 0}
-              canMoveDown={canReorder && !reorderBusy && idx < children.length - 1}
             />
           ))
         )
@@ -2349,20 +2300,6 @@ export default function Agents() {
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
-    }
-  }
-
-  // Persist a team's member display order (#1279). Order lives on the team
-  // agent config (like `stages`); a metadata-only PUT, no respawn.
-  async function handleReorderMembers(teamId, memberOrder) {
-    markBusy(teamId, true);
-    try {
-      await apiCall('PUT', `/api/agents/${teamId}`, { memberOrder });
-      refetch();
-    } catch (e) {
-      setActionError(e.message);
-    } finally {
-      markBusy(teamId, false);
     }
   }
 
@@ -2737,7 +2674,6 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
               onCloneChild={a => openPanel('clone', a)}
-              onReorderMembers={handleReorderMembers}
             />
           ))}
           {leaves.map(a => (

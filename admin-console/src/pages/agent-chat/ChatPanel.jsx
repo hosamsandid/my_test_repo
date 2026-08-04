@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
@@ -1469,6 +1470,12 @@ function authTypeLabel(authType) {
   return authType === 'oauth-token' ? 'Subscription' : 'API key';
 }
 
+// Width of the provider popover. The popover is rendered into document.body
+// via a portal with position: fixed, so it is never clipped by the narrow
+// Chat column's overflow nor trapped beneath a neighbouring panel's stacking
+// context — it stays fully visible and on top at any column width (#1280).
+const PROVIDER_POP_WIDTH = 300;
+
 // Compact, always-visible Model-Provider indicator next to the model picker.
 // Shows which LLM endpoint + auth type the agent actually runs on (transparency)
 // and, on click, a popover with the full binding plus a per-agent provider
@@ -1476,12 +1483,29 @@ function authTypeLabel(authType) {
 function ProviderChip({ options, switching, disabled, onChange }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const popRef = useRef(null);
+  const [pos, setPos] = useState(null);
 
-  // Close on outside click / Escape.
+  // Anchor the fixed popover below the trigger, right-aligned to it, then clamp
+  // to the viewport so it can never overflow off-screen when the chat column is
+  // narrow or the trigger sits near the left edge.
+  const place = useCallback(() => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const maxLeft = window.innerWidth - PROVIDER_POP_WIDTH - 8;
+    const left = Math.max(8, Math.min(r.right - PROVIDER_POP_WIDTH, maxLeft));
+    setPos({ top: r.bottom + 4, left });
+  }, []);
+
+  // Close on outside click / Escape. The popover is portaled out of rootRef, so
+  // a click inside it must NOT count as "outside" — check popRef too.
   useEffect(() => {
     if (!open) return undefined;
     function onDocClick(e) {
-      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+      const inTrigger = rootRef.current && rootRef.current.contains(e.target);
+      const inPop = popRef.current && popRef.current.contains(e.target);
+      if (!inTrigger && !inPop) setOpen(false);
     }
     function onKey(e) { if (e.key === 'Escape') setOpen(false); }
     document.addEventListener('mousedown', onDocClick);
@@ -1491,6 +1515,19 @@ function ProviderChip({ options, switching, disabled, onChange }) {
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
+
+  // Keep the fixed popover glued to the trigger while it's open, across window
+  // resizes and scrolls (either would otherwise leave it stranded).
+  useEffect(() => {
+    if (!open) { setPos(null); return undefined; }
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [open, place]);
 
   if (!options) return null;
 
@@ -1510,6 +1547,7 @@ function ProviderChip({ options, switching, disabled, onChange }) {
   return (
     <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen(o => !o)}
         title="This agent's Model Provider — click for details & switch"
@@ -1538,14 +1576,16 @@ function ProviderChip({ options, switching, disabled, onChange }) {
         <ChevronDown size={11} />
       </button>
 
-      {open && (
+      {open && pos && createPortal(
         <div
+          ref={popRef}
           style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            right: 0,
-            zIndex: 50,
-            minWidth: 280,
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            zIndex: 1000,
+            width: PROVIDER_POP_WIDTH,
+            boxSizing: 'border-box',
             padding: 12,
             background: 'var(--eb-bg-elevated)',
             border: '1px solid var(--eb-border-default)',
@@ -1610,7 +1650,8 @@ function ProviderChip({ options, switching, disabled, onChange }) {
               {switching && ' Restarting…'}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -3567,11 +3567,15 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
   }
 
   const hostPath = req.body ? req.body.path : undefined;
+  // Read-write opt-in (#1289): strictly boolean-true enables it; anything else
+  // (absent / false / non-boolean) stays read-only, the safe default.
+  const readWrite = !!(req.body && req.body.readWrite === true);
   // null / '' / undefined → clear the mount (back to no external context).
   if (hostPath === null || hostPath === undefined || hostPath === '') {
     let changed = false;
-    if ('contextMount' in cfg) {
+    if ('contextMount' in cfg || 'contextMountRw' in cfg) {
       delete cfg.contextMount;
+      delete cfg.contextMountRw;
       writeJsonAtomic(cfgPath, cfg);
       changed = true;
     }
@@ -3579,7 +3583,7 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
     // the mount, so the agent is never told about a folder it cannot read.
     if (changed) await rebuildAgentPromptBestEffort(id, 'context-mount-cleared');
     const respawned = changed ? await respawnAgentBestEffort(id, 'context-mount-cleared') : false;
-    return res.json({ contextMount: null, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+    return res.json({ contextMount: null, readWrite: false, mountPath: CONTEXT_MOUNT_TARGET, respawned });
   }
 
   if (typeof hostPath !== 'string') {
@@ -3589,13 +3593,18 @@ app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
   if (!v.ok) return res.status(400).json({ error: v.error, code: 'invalid-host-path' });
 
   cfg.contextMount = v.path;
+  // Persist the access-mode flag only when read-write is on: a read-only mount
+  // carries no `contextMountRw` key, so its config (and the container spec built
+  // from it) stays byte-identical to a pre-#1289 agent (AC7).
+  if (readWrite) cfg.contextMountRw = true;
+  else delete cfg.contextMountRw;
   writeJsonAtomic(cfgPath, cfg);
   // Tell the agent the folder exists (#1286) — a mount nobody documented is a
   // mount nobody uses. Rebuilt before the respawn so the new container starts
   // with the section already in its CLAUDE.md.
   await rebuildAgentPromptBestEffort(id, 'context-mount-changed');
   const respawned = await respawnAgentBestEffort(id, 'context-mount-changed');
-  res.json({ contextMount: v.path, mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  res.json({ contextMount: v.path, readWrite, mountPath: CONTEXT_MOUNT_TARGET, respawned });
 });
 
 /* ─── Browsing the context mount (#1286) ─────────────────────────────────
@@ -3634,6 +3643,7 @@ app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
   res.json({
     enabled: !!hostPath,
     hostPath: hostPath || null,
+    readWrite: !!hostPath && cfg.contextMountRw === true,
     mountPath: CONTEXT_MOUNT_TARGET,
     supported: isLocalContextMountEnv(),
   });

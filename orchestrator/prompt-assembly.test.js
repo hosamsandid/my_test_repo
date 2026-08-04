@@ -162,6 +162,47 @@ test('contextMountSection is gated on a non-empty host path', () => {
   assert.ok(contextMountSection('/host/data').startsWith('## Read-only Context Folder'));
 });
 
+// #1289: a read-write mount must NOT be told the folder is read-only — otherwise
+// an agent following its own prompt declines to write even when the admin enabled it.
+test('contextMountRw emits write-aware wording, never the read-only prohibition', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/SharePointSync/ProjectX', contextMountRw: true,
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Host Context Folder'));
+  assert.ok(!order.includes('Read-only Context Folder'));
+  assert.strictEqual(order.indexOf('Host Context Folder'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes('`/context`'));
+  assert.ok(md.includes('/host/SharePointSync/ProjectX'));
+  assert.match(md, /read-write/i);
+  assert.match(md, /can write/i);
+  // The read-only prohibition must be gone in RW mode.
+  assert.ok(!/cannot write/i.test(md));
+});
+
+test('contextMountSection wording is access-mode aware; read-only default is unchanged', () => {
+  const ro = contextMountSection('/host/data');
+  const rw = contextMountSection('/host/data', true);
+  // Read-only default stays byte-identical whether the flag is omitted or false (AC7).
+  assert.strictEqual(contextMountSection('/host/data', false), ro);
+  assert.ok(ro.startsWith('## Read-only Context Folder'));
+  assert.match(ro, /cannot write/i);
+  assert.ok(rw.startsWith('## Host Context Folder'));
+  assert.match(rw, /can write/i);
+  assert.ok(!/cannot write/i.test(rw));
+});
+
+// AC7: a read-write agent's assembled prompt still matches contextMountSection's
+// RW output exactly — the flag is threaded end to end, not dropped mid-pipeline.
+test('assembleClaudeMd threads contextMountRw through to the section', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/data', contextMountRw: true,
+  });
+  assert.ok(md.includes(contextMountSection('/host/data', true)));
+});
+
 // ---- unified Memory System variant (unification Phase 2) --------------------
 
 test('knowledgeDigestRef swaps the Memory System section to the unified variant', () => {

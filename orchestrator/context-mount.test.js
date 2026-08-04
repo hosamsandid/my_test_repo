@@ -104,6 +104,24 @@ test('buildContextMountSpec: read-only + SELinux relabel at the fixed target', (
   assert.strictEqual(CONTEXT_MOUNT_TARGET, '/context');
 });
 
+test('buildContextMountSpec: read-write opt-in flips the access mode, keeps the relabel (#1289)', () => {
+  const spec = buildContextMountSpec('/home/alice/ctx', { readWrite: true });
+  assert.deepStrictEqual(spec, {
+    type: 'bind',
+    source: '/home/alice/ctx',
+    destination: '/context',
+    options: ['rw', 'z'],
+  });
+});
+
+test('buildContextMountSpec: read-write defaults off — byte-identical to before (#1289 AC7)', () => {
+  const roDefault = buildContextMountSpec('/home/alice/ctx');
+  assert.deepStrictEqual(roDefault.options, ['ro', 'z']);
+  // An explicit readWrite:false and an empty opts object both stay read-only.
+  assert.deepStrictEqual(buildContextMountSpec('/home/alice/ctx', { readWrite: false }).options, ['ro', 'z']);
+  assert.deepStrictEqual(buildContextMountSpec('/home/alice/ctx', {}).options, ['ro', 'z']);
+});
+
 test('buildContextMountSpec: uses the normalized source path', () => {
   assert.strictEqual(buildContextMountSpec('/home//alice/ctx/').source, '/home/alice/ctx');
 });

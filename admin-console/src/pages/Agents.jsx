@@ -1196,26 +1196,34 @@ function ContextMountControl({ agent }) {
 
   const [pathVal, setPathVal] = useState(agent.contextMount || '');
   const [saved, setSaved] = useState(agent.contextMount || '');
+  // Read-write opt-in (#1289). Read-only is the default; the flag is only
+  // meaningful when a path is set.
+  const [rw, setRw] = useState(agent.contextMountRw === true);
+  const [savedRw, setSavedRw] = useState(agent.contextMountRw === true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
 
-  const dirty = pathVal.trim() !== saved;
+  const dirty = pathVal.trim() !== saved || rw !== savedRw;
 
-  async function save(nextPath) {
+  async function save(nextPath, nextRw) {
     setBusy(true); setMsg(''); setErr('');
     try {
-      const body = { path: nextPath ? nextPath : null };
+      const body = { path: nextPath ? nextPath : null, readWrite: !!nextRw };
       const res = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/context-mount`, body);
       const applied = res && res.contextMount ? res.contextMount : '';
+      const appliedRw = !!(res && res.readWrite);
       setPathVal(applied);
       setSaved(applied);
+      setRw(appliedRw);
+      setSavedRw(appliedRw);
       if (!applied) {
         setMsg('Context folder cleared. ' + (res && res.respawned ? 'Agent re-provisioned.' : 'Takes effect on the next start.'));
       } else {
+        const mode = appliedRw ? 'read-write' : 'read-only';
         setMsg(res && res.respawned
-          ? `Mounted at ${mountPath} (read-only). Agent re-provisioned.`
-          : `Saved. Takes effect the next time the agent starts.`);
+          ? `Mounted at ${mountPath} (${mode}). Agent re-provisioned.`
+          : `Saved (${mode}). Takes effect the next time the agent starts.`);
       }
     } catch (e) {
       setErr((e && e.message) || 'Could not update the context folder');
@@ -1226,11 +1234,13 @@ function ContextMountControl({ agent }) {
 
   return (
     <div>
-      <div style={labelStyle}>Read-only context folder</div>
+      <div style={labelStyle}>Host context folder</div>
       <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-        Expose a folder from the host machine to this agent as live, read-only context.
+        Expose a folder from the host machine to this agent as live context.
         Its current contents appear inside the agent at <code>{mountPath}</code>; changes the
-        host makes to the folder are reflected on the agent's next access. Saving re-provisions
+        host makes to the folder are reflected on the agent's next access. By default the
+        folder is <strong>read-only</strong>; enable read-write below to let the agent create,
+        modify and delete files in it — those changes land on the host. Saving re-provisions
         the agent's container.
       </div>
       {supported === false ? (
@@ -1248,12 +1258,23 @@ function ContextMountControl({ agent }) {
             disabled={busy || supported === null}
             style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
           />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', cursor: (busy || supported === null) ? 'default' : 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={rw}
+              onChange={e => setRw(e.target.checked)}
+              disabled={busy || supported === null}
+            />
+            <span style={helpTextStyle}>
+              Mount read-write — let the agent write back to the host folder (off by default).
+            </span>
+          </label>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
-            <SecondaryBtn onClick={() => save(pathVal.trim())} style={{ opacity: (busy || !dirty) ? 0.6 : 1, pointerEvents: (busy || !dirty) ? 'none' : 'auto' }}>
+            <SecondaryBtn onClick={() => save(pathVal.trim(), rw)} style={{ opacity: (busy || !dirty) ? 0.6 : 1, pointerEvents: (busy || !dirty) ? 'none' : 'auto' }}>
               {busy ? 'Saving…' : 'Save & re-provision'}
             </SecondaryBtn>
             {saved && (
-              <SecondaryBtn onClick={() => { setPathVal(''); save(''); }} style={{ opacity: busy ? 0.6 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
+              <SecondaryBtn onClick={() => { setPathVal(''); setRw(false); save('', false); }} style={{ opacity: busy ? 0.6 : 1, pointerEvents: busy ? 'none' : 'auto' }}>
                 Clear
               </SecondaryBtn>
             )}

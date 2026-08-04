@@ -274,17 +274,38 @@ function workingEnvironmentSection(env, skills = []) {
   return `## Working Environment\n\n${parts.join("\n\n")}`;
 }
 
-// Read-only host-folder context mount (#1283, documented to the agent in
-// #1286). Gated on the agent actually having a mount: without one the section
-// is absent entirely, so an agent that has no `/context` is never told about a
-// path it cannot read.
+// Host-folder context mount (#1283, documented to the agent in #1286). Gated on
+// the agent actually having a mount: without one the section is absent entirely,
+// so an agent that has no `/context` is never told about a path it lacks.
 //
-// The wording is deliberately about the two things an agent gets wrong on its
-// own: that the folder is LIVE (re-read it, don't cache what it said last run)
-// and that it is not part of any repository (copy before keeping).
-function contextMountSection(hostPath) {
+// Access-mode aware (#1289): a read-write mount (`contextMountRw`) is told it may
+// write back to the host folder; a read-only mount (the default) is told it
+// cannot. Emitting read-only wording for a read-write mount would make the agent
+// decline to write even when the admin enabled it — so the mode must be threaded
+// through from config (the same flag the container spec is built from), never
+// assumed. The read-only branch is byte-identical to pre-#1289 (AC7).
+//
+// The wording is otherwise about the two things an agent gets wrong on its own:
+// that the folder is LIVE (re-read it, don't cache what it said last run) and
+// that it is not part of any repository (copy before keeping).
+function contextMountSection(hostPath, readWrite = false) {
   const mount = typeof hostPath === "string" ? hostPath.trim() : "";
   if (!mount) return "";
+  if (readWrite) {
+    return (
+      `## Host Context Folder\n\n` +
+      "A folder from the host machine is mounted **read-write** at `/context` " +
+      `(host location: \`${mount}\`).\n\n` +
+      "- It is a **live view**, not a copy: it always shows the folder's current contents, " +
+      "so re-read it rather than relying on what it contained in an earlier run.\n" +
+      "- Read it whenever the task refers to material kept outside the repository — " +
+      "documents, exports, meeting notes, specifications.\n" +
+      "- You **can write there**: files you create or change under `/context` are written " +
+      "straight back to the host folder and become visible to whoever syncs it, so write " +
+      "deliberately. Nothing in it is part of your workspace or any repository.\n" +
+      "- Cite what you used (or wrote) by its path under `/context` so a human can find the same file."
+    );
+  }
   return (
     `## Read-only Context Folder\n\n` +
     "A folder from the host machine is mounted **read-only** at `/context` " +
@@ -429,7 +450,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // Knowledge section `@`-imports the generated digest (Memory/Knowledge
 // unification, Phase 1). Callers pass it only when the agent's KB checkout is
 // actually provisioned, so the import never dangles.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null } = {}) {
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -462,7 +483,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   // 4b. Read-only context folder — only when one is actually mounted. Sits
   //     next to the Workspace section because it is the other place on disk
   //     the agent may read from, and it must not be confused with it.
-  const ctx = contextMountSection(contextMount);
+  const ctx = contextMountSection(contextMount, contextMountRw === true);
   if (ctx) blocks.push(ctx);
 
   // 5. Response Formatting

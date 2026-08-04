@@ -473,14 +473,18 @@ function startAgentProcess(config) {
     }
   }
 
-  // Read-only host-folder context mount (#1283). Applied only on the podman
-  // runtime; buildContextMountSpec (in spawn-container) re-validates the path
-  // fail-closed, so a stale/invalid value produces no mount.
+  // Host-folder context mount (#1283). Applied only on the podman runtime;
+  // buildContextMountSpec (in spawn-container) re-validates the path fail-closed,
+  // so a stale/invalid value produces no mount. Read-only by default; mounted
+  // read-write only when the per-agent `contextMountRw` opt-in is set (#1289) —
+  // undefined when there is no mount at all, so the read-only spawn path is
+  // byte-identical to before.
   const contextMount = (CONTEXT_MOUNT_RUNTIME_OK && typeof config.contextMount === 'string' && config.contextMount.trim())
     ? config.contextMount.trim()
     : undefined;
+  const contextMountRw = contextMount ? (config.contextMountRw === true) : undefined;
 
-  const child = spawnContainer({ id, env: childEnv, contextMount });
+  const child = spawnContainer({ id, env: childEnv, contextMount, contextMountRw });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -1016,10 +1020,13 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // folder exists. Read from the same config the spawn path mounts from, so
   // the prompt can never claim a `/context` the container doesn't have.
   const contextMount = (cfg && typeof cfg.contextMount === "string") ? cfg.contextMount.trim() : "";
+  // #1289: read-write only when the per-agent opt-in is set — same config field
+  // the spawn path builds the bind option from, so prompt and mount agree.
+  const contextMountRw = !!(contextMount && cfg && cfg.contextMountRw === true);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMount }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMount, contextMountRw }),
   );
 }
 
@@ -1883,9 +1890,11 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
     knowledgeDigestRef: opts.knowledgeDigestRef || null,
-    // Host path of the read-only context mount (#1283), when the agent has one
-    // — gates the Read-only Context Folder section (#1286).
+    // Host path of the context mount (#1283), when the agent has one — gates the
+    // Context Folder section (#1286). `contextMountRw` (#1289) picks the section's
+    // access-mode wording so it never tells a read-write mount it is read-only.
     contextMount: opts.contextMount || null,
+    contextMountRw: opts.contextMountRw === true,
   });
 }
 
@@ -9675,7 +9684,10 @@ async function main() {
         // Same gate as the seed path (#1286): the section appears iff the agent
         // actually carries a mount.
         const contextMount = typeof cfg.contextMount === 'string' ? cfg.contextMount.trim() : '';
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMount });
+        // #1289: same access-mode flag the seed/spawn paths use, so preview is
+        // byte-identical to the seeded prompt for a read-write mount too.
+        const contextMountRw = !!(contextMount && cfg.contextMountRw === true);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMount, contextMountRw });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,

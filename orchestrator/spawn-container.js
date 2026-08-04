@@ -3,6 +3,7 @@
 const http = require('http');
 const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');
+const { buildContextMountSpec, CONTEXT_MOUNT_TARGET } = require('./context-mount');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
@@ -511,7 +512,7 @@ async function reseedPerAgentVolume(id, paths) {
   return { reseeded: valid };
 }
 
-function spawnContainer({ id, env }) {
+function spawnContainer({ id, env, contextMount }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -631,6 +632,23 @@ function spawnContainer({ id, env }) {
         no_new_privileges: true,
         remove: true,
       };
+      // Read-only host-folder context mount (#1283). An admin may point this
+      // agent at one host directory, bind-mounted READ-ONLY at the fixed
+      // `/context` target. The path is validated at the API layer AND re-checked
+      // here (fail-closed): buildContextMountSpec returns null for anything that
+      // doesn't pass, so a bad value simply produces no mount rather than a
+      // dangerous one. Local/podman only — the API gate keeps `contextMount` off
+      // config in non-local (hosted) environments. `mounts[]` is the libpod
+      // OCI bind array, distinct from the named-volume `volumes[]` above.
+      if (contextMount) {
+        const spec = buildContextMountSpec(contextMount);
+        if (spec) {
+          createBody.mounts = [spec];
+          console.log(`[spawn-container] ${id} -> read-only context mount ${spec.source} at ${CONTEXT_MOUNT_TARGET}`);
+        } else {
+          console.warn(`[spawn-container] ${id} -> ignoring invalid contextMount '${contextMount}'`);
+        }
+      }
       if (Object.keys(resourceLimits).length) createBody.resource_limits = resourceLimits;
       return libpodRequest('POST', '/containers/create', createBody);
     })

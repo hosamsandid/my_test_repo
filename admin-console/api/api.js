@@ -5562,10 +5562,8 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     dstDir = safeTeamSkillDir(teamId, v.name);
     if (!dstDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
   } else {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    dstDir = path.resolve(poolSkillsBaseDir, v.name);
-    const rel = path.relative(poolSkillsBaseDir, dstDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid skill name' });
+    dstDir = safeGlobalSkillDir(v.name);
+    if (!dstDir) return res.status(400).json({ error: 'Invalid skill name' });
   }
   const dstExists = fs.existsSync(path.join(dstDir, 'SKILL.md'));
   const wp = skillTransfer.planSkillWrite({ onCollision: req.body.overwrite ? 'overwrite' : 'reject', exists: dstExists });
@@ -6281,10 +6279,8 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
     srcDir = safeTeamSkillDir(v.sourceTeamId, v.name);
     if (!srcDir) return res.status(400).json({ error: 'invalid source team or skill name' });
   } else {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    srcDir = path.resolve(poolSkillsBaseDir, v.name);
-    const rel = path.relative(poolSkillsBaseDir, srcDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'invalid skill name' });
+    srcDir = safeGlobalSkillDir(v.name);
+    if (!srcDir) return res.status(400).json({ error: 'invalid skill name' });
   }
   const srcSkill = path.join(srcDir, 'SKILL.md');
   if (!fs.existsSync(srcSkill)) return res.status(404).json({ error: `skill '${v.name}' not found in the ${v.from} source` });
@@ -7408,10 +7404,8 @@ function resolveExtendTarget(teamId, tier, name) {
     dir = safeTeamSkillDir(teamId, name);
     if (!dir) return { error: 'Invalid team id or skill name' };
   } else if (tier === 'global') {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    dir = path.resolve(poolSkillsBaseDir, name);
-    const rel = path.relative(poolSkillsBaseDir, dir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return { error: 'Invalid skill name' };
+    dir = safeGlobalSkillDir(name);
+    if (!dir) return { error: 'Invalid skill name' };
   } else {
     return { error: 'invalid tier' };
   }

@@ -1975,21 +1975,20 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
                 continue
             fpath = project_root / a["path"]
             # Containment: reject artifact paths that resolve outside the
-            # project root before any filesystem access. os.path.commonpath
-            # equality is a CodeQL-recognised path barrier (unlike a bare
-            # str.startswith prefix test, which sibling dirs sharing a prefix
-            # can bypass). The resolved path is used for every fs operation.
-            root_resolved = project_root.resolve()
-            full = fpath.resolve()
-            try:
-                contained = (
-                    os.path.commonpath([str(root_resolved), str(full)])
-                    == str(root_resolved)
-                )
-            except ValueError:
-                contained = False
-            if not contained:
+            # project root before any filesystem access. os.path.realpath
+            # normalises the path (following symlinks, stripping ``..``) and
+            # is a CodeQL-recognised sanitizer; the direct ``== root`` /
+            # ``startswith(root + os.sep)`` guard condition keeps prefix-sibling
+            # safety (``/proj-evil`` is rejected) that a bare startswith(root)
+            # loses. The normalised path is used for every fs operation.
+            root_resolved = os.path.realpath(project_root)
+            full_real = os.path.realpath(fpath)
+            if not (
+                full_real == root_resolved
+                or full_real.startswith(root_resolved + os.sep)
+            ):
                 continue
+            full = Path(full_real)
             exists = full.exists()
             is_dir = full.is_dir() if exists else False
             if not exists and on_branch:

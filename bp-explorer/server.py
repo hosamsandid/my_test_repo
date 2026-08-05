@@ -1731,10 +1731,14 @@ async def monitor_bp_completion(
             # the prior failure mode.
             root_resolved = os.path.realpath(workspace)
             script_real = os.path.realpath(workspace / "scripts" / "bp-transition.py")
-            transition_script = Path(script_real)
-            if script_real.startswith(root_resolved + os.sep) and transition_script.exists():
+            # Keep the guarded, realpath-normalised STRING all the way through to
+            # the fs check and the subprocess: wrapping it in Path() before the
+            # barrier gives CodeQL a second tainted value the startswith guard
+            # does not cover (alert #580). os.path.isfile + create_subprocess_exec
+            # both take the string directly, so no Path() wrapper is needed.
+            if script_real.startswith(root_resolved + os.sep) and os.path.isfile(script_real):
                 proc = await asyncio.create_subprocess_exec(
-                    "python3", str(transition_script),
+                    "python3", script_real,
                     "--workspace", str(workspace),
                     "--bp-id", bp_id,
                     "--action", "complete",

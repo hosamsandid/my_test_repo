@@ -12646,9 +12646,10 @@ app.post('/api/github/probe', heavyLimiter, async (req, res) => {
   if (!listGithubTokens().some(t => t.id === githubTokenId)) {
     return res.json({ ok: false, error: `GitHub token '${githubTokenId}' not found` });
   }
+  const safeTokenId = path.basename(githubTokenId);
   let token;
   try {
-    token = fs.readFileSync(path.join(GH_TOKENS_DIR, githubTokenId), 'utf8').trim();
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, safeTokenId), 'utf8').trim();
   } catch (err) {
     return res.json({ ok: false, error: `Cannot read token: ${err.message}` });
   }

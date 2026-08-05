@@ -1705,10 +1705,23 @@ async def monitor_bp_completion(
 @app.get("/api/workspace/tree")
 async def workspace_tree(root: str, path: str = ""):
     base = Path(root).resolve()
-    if not str(base).startswith("/workspace/agents/"):
+    agents_root = "/workspace/agents"
+    # Containment via os.path.commonpath (a CodeQL-recognised path barrier)
+    # rather than a bare str.startswith prefix test, which CodeQL does not
+    # model as a sanitizer and which is fooled by sibling dirs sharing a
+    # prefix (e.g. "/workspace/agents-evil" vs "/workspace/agents").
+    try:
+        base_ok = os.path.commonpath([agents_root, str(base)]) == agents_root
+    except ValueError:
+        base_ok = False
+    if not base_ok:
         raise HTTPException(status_code=403, detail="Access denied")
     target = (base / path).resolve()
-    if not str(target).startswith(str(base)):
+    try:
+        target_ok = os.path.commonpath([str(base), str(target)]) == str(base)
+    except ValueError:
+        target_ok = False
+    if not target_ok:
         raise HTTPException(status_code=403, detail="Path traversal denied")
     if not target.is_dir():
         raise HTTPException(status_code=404, detail="Directory not found")

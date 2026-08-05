@@ -1982,17 +1982,21 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
             fpath = project_root / a["path"]
             # Containment: reject artifact paths that resolve outside the
             # project root before any filesystem access. os.path.realpath
-            # normalises the path (following symlinks, stripping ``..``) and
-            # is a CodeQL-recognised sanitizer; the direct ``== root`` /
-            # ``startswith(root + os.sep)`` guard condition keeps prefix-sibling
-            # safety (``/proj-evil`` is rejected) that a bare startswith(root)
-            # loses. The normalised path is used for every fs operation.
+            # normalises the path (following symlinks, stripping ``..``); the
+            # single direct ``startswith(root + os.sep)`` check in the guard is
+            # the exact py/path-injection barrier CodeQL recognises. The prior
+            # ``full_real == root_resolved or full_real.startswith(...)``
+            # disjunction was functionally safe but NOT modelled as a sanitizer
+            # (the ``or`` with the equality branch stops the guarded value from
+            # flowing through a recognised barrier), so the fs sinks below stayed
+            # flagged. Output artifacts always carry a real sub-path (never the
+            # root itself), so the equality branch is dead here and dropping it
+            # is behaviour-safe while still rejecting prefix-siblings such as
+            # ``/proj-evil`` that a bare ``startswith(root)`` would accept. The
+            # normalised path is used for every fs operation.
             root_resolved = os.path.realpath(project_root)
             full_real = os.path.realpath(fpath)
-            if not (
-                full_real == root_resolved
-                or full_real.startswith(root_resolved + os.sep)
-            ):
+            if not full_real.startswith(root_resolved + os.sep):
                 continue
             full = Path(full_real)
             exists = full.exists()

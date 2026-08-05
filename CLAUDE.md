@@ -241,7 +241,7 @@ NDJSON stdout is parsed and written with wrapper events (`message.received`, `cl
 
 ### Agent Chat UI
 
-The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Under `admin-console/src/pages/`: `AgentChat.jsx` (top-level) + `agent-chat/` (`AgentList`, `ChatPanel` — backfill/pagination/optimistic-send/SSE tail/session toolbar; `Message` — markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` + `rehype-sanitize`; `MessageInput`; `RightRail` — tabbed, toggle `Cmd/Ctrl+Shift+L`; `SessionLogPanel`; `WorkspaceBrowser`) + `hooks/{useSSE,useColorScheme}.js`.
+The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Under `admin-console/src/pages/`: `AgentChat.jsx` (top-level) + `agent-chat/` (`AgentList` — left-rail list with arrow + drag&drop reordering; `agent-list-dnd.js` — pure `computeReorder`/`dropPosition` helpers (unit-tested, `admin-console-src` CI job); `ChatPanel` — backfill/pagination/optimistic-send/SSE tail/session toolbar; `Message` — markdown via `react-markdown` + `remark-gfm` + `rehype-pretty-code` + `rehype-sanitize`; `MessageInput`; `RightRail` — tabbed, toggle `Cmd/Ctrl+Shift+L`; `SessionLogPanel`; `WorkspaceBrowser`) + `hooks/{useSSE,useColorScheme}.js`.
 
 **DM rooms.** First open lazily POSTs `/api/matrix/agents/:id/dm`; server creates/reuses a 1:1 room, invites the admin, persists `dm-room.json`; subsequent loads short-circuit on that file. **Session log rendering**: SSE `/api/agents/:id/session/:roomId/stream` (`since=<byte-offset>` cursor); `correlationId` pairs log rows with bubbles (hover dims non-matching); adjacent `tool_use`/`tool_result` with the same `toolId` fold into one block.
 

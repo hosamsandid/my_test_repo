@@ -1719,19 +1719,20 @@ async def monitor_bp_completion(
 
         if status.get("exitedAt"):
             # 1. BP-Status → completed
-            transition_script = (workspace / "scripts" / "bp-transition.py").resolve()
-            # Containment: assert the fixed script path stays under the (already
-            # contained) project root with os.path.commonpath — a CodeQL-recognised
-            # path barrier — before the fs check and the subprocess invocation below.
-            root_resolved = workspace.resolve()
-            try:
-                contained = (
-                    os.path.commonpath([str(root_resolved), str(transition_script)])
-                    == str(root_resolved)
-                )
-            except ValueError:
-                contained = False
-            if contained and transition_script.exists():
+            # Containment: normalize the fixed script path with os.path.realpath,
+            # then assert it stays under the (already contained) project root with a
+            # single direct startswith prefix check — the barrier shape CodeQL models
+            # for py/path-injection. The script is a fixed strict subpath
+            # (scripts/bp-transition.py), never the root itself, so a plain startswith
+            # (no equality branch, no boolean-stored commonpath) fully covers
+            # containment before the fs check and the subprocess invocation below.
+            # This runs on a background asyncio task with no HTTP response context, so
+            # a containment breach is a silent skip (no HTTPException 403), preserving
+            # the prior failure mode.
+            root_resolved = os.path.realpath(workspace)
+            script_real = os.path.realpath(workspace / "scripts" / "bp-transition.py")
+            transition_script = Path(script_real)
+            if script_real.startswith(root_resolved + os.sep) and transition_script.exists():
                 proc = await asyncio.create_subprocess_exec(
                     "python3", str(transition_script),
                     "--workspace", str(workspace),

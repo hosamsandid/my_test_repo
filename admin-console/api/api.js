@@ -220,6 +220,19 @@ const globalApiLimiter = rateLimit({
 
 app.use('/api/', globalApiLimiter);
 
+// SPA fallback limiter — a SEPARATE instance again (the catch-all serves the
+// static index.html from disk, so CodeQL's js/missing-rate-limiting flags its
+// file-system access unless a limiter is attached; the global limiter above is
+// mounted only on /api/ and never sees these routes). Very generous: this is
+// the shell every browser navigation lands on for a single-user admin console.
+const spaLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
 // Audit trail (#305). Mounted before the auth wiring so it observes every
 // mutating /api request — including denied/unauthenticated ones — and reads the
 // acting human from req.user lazily at response-finish time. Best-effort: it can
@@ -15263,7 +15276,7 @@ app.all('/api/bp-explorer/*', async (req, res) => {
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 
-app.get('*', (req, res) => {
+app.get('*', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });

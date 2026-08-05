@@ -11364,18 +11364,34 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   }
 
   const envExists = !!loadEnvironment(envId);
+  // Containment check — teamAgentId (= teamId) and each memberId are
+  // TEAM_ID_RE/AGENT_ID_RE-validated, but CodeQL's js/path-injection query
+  // doesn't recognise the regex as a barrier; path.resolve + path.relative is
+  // the in-flow sanitiser it does recognise. Build every id-derived fs path
+  // from the contained dir.
+  const teamsAgentsRoot = path.resolve(AGENTS_DIR);
+  const teamAgentDir = path.resolve(teamsAgentsRoot, teamAgentId);
+  const teamAgentRel = path.relative(teamsAgentsRoot, teamAgentDir);
+  if (teamAgentRel.startsWith('..') || path.isAbsolute(teamAgentRel)) {
+    return res.status(400).json({ error: 'Invalid teamId path' });
+  }
   // Inspect the existing agent (if any) so we can distinguish "an actual
   // team blocks this id" from "some unrelated agent (orchestrator,
   // bp-instance, plain agent) blocks this id". The first case is a real
   // collision the user can resolve via extend; the second is an id
   // conflict and `mode: extend` would be a lie.
-  const existingTeamCfg = fs.existsSync(path.join(AGENTS_DIR, teamAgentId))
-    ? readJsonFile(path.join(AGENTS_DIR, teamAgentId, 'config.json'), null)
+  const existingTeamCfg = fs.existsSync(teamAgentDir)
+    ? readJsonFile(path.join(teamAgentDir, 'config.json'), null)
     : null;
   const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
   const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
   const existingMembers = planned
-    .filter(p => fs.existsSync(path.join(AGENTS_DIR, p.memberId)))
+    .filter(p => {
+      const memberDir = path.resolve(teamsAgentsRoot, p.memberId);
+      const memberRel = path.relative(teamsAgentsRoot, memberDir);
+      if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) return false;
+      return fs.existsSync(memberDir);
+    })
     .map(p => p.memberId);
 
   if (teamIdTakenByOther) {
@@ -11898,7 +11914,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // surface the real conflict).
   const agentsRoot = path.resolve(AGENTS_DIR);
   const teamAgentPath = path.resolve(agentsRoot, teamAgentId);
-  if (!(teamAgentPath === agentsRoot || teamAgentPath.startsWith(agentsRoot + path.sep))) {
+  const teamAgentRel = path.relative(agentsRoot, teamAgentPath);
+  if (teamAgentRel.startsWith('..') || path.isAbsolute(teamAgentRel)) {
     return fail(400, 'Invalid teamId path');
   }
   const existingTeamCfg = fs.existsSync(teamAgentPath)
@@ -11909,8 +11926,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const existingMembers = planned
     .filter((p) => {
       const memberPath = path.resolve(agentsRoot, p.memberId);
-      const inAgentsDir =
-        memberPath === agentsRoot || memberPath.startsWith(agentsRoot + path.sep);
+      const memberRel = path.relative(agentsRoot, memberPath);
+      const inAgentsDir = !memberRel.startsWith('..') && !path.isAbsolute(memberRel);
       if (!inAgentsDir) {
         fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
         return false;

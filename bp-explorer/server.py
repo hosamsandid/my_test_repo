@@ -1544,20 +1544,29 @@ def parse_mrp_structured(raw_text: str, bp_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def resolve_workspace(path: str) -> Path:
-    # Normalize the user-supplied path with os.path.realpath (removes ".."
-    # segments and follows symlinks) and then verify the normalized result stays
-    # under the agents root with a DIRECT str.startswith check in the guard.
-    # This is the exact barrier CodeQL models for py/path-injection: normalize,
-    # then prefix-check the normalized value in the branch condition. A prior
-    # form that stored an os.path.commonpath equality in a boolean variable and
-    # branched on it was NOT recognised as a barrier (the guarded value never
-    # flowed through a modelled sanitizer), so the sinks stayed flagged.
-    # The exact-match / trailing-os.sep test rejects prefix-siblings such as
-    # "/workspace/agents-evil" that a bare startswith("/workspace/agents") would
-    # accept.
-    agents_root = os.path.realpath("/workspace/agents")
+    # Normalize the untrusted path with os.path.realpath (removes ".." segments
+    # and follows symlinks), then containment-check with a SINGLE, direct
+    # str.startswith against a constant safe-root prefix — the exact shape from
+    # the py/path-injection query's own recommended remediation ("normalize the
+    # path ... then check that the normalized path starts with the root folder").
+    #
+    # This is the choke point for the `workspace` query parameter: every
+    # bp-explorer handler resolves it here, so sanitising `full` on this branch
+    # kills the taint for the whole family of downstream filesystem accesses.
+    #
+    # A prior form OR-ed `full == agents_root` with the startswith test and
+    # compared against an os.path.realpath()-computed (non-constant) root. CodeQL
+    # only models str.startswith as a path barrier guard when the safe (continue)
+    # branch is reachable *only* when the startswith holds; the `== ... or ...`
+    # disjunction made the continue branch reachable without startswith being
+    # true, so the guard was not recognised and `full` (and everything derived
+    # from it in the callers) stayed tainted. The trailing os.sep on the constant
+    # root keeps prefix-sibling safety ("/workspace/agents-evil" is rejected) — a
+    # valid workspace is always a strict subdirectory, so requiring the separator
+    # loses no real path.
+    agents_root = "/workspace/agents/"
     full = os.path.realpath(path)
-    if not (full == agents_root or full.startswith(agents_root + os.sep)):
+    if not full.startswith(agents_root):
         raise HTTPException(status_code=403, detail="Access denied")
     p = Path(full)
     briefings = p / "artifacts" / "briefings"

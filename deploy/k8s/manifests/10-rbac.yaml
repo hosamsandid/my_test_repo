@@ -1,8 +1,9 @@
 # RBAC for the container-runtime seam (orchestrator/spawn-kubernetes-pod.js):
 # the orchestrator creates one agent Pod per agent through the Kubernetes API.
 #
-# - orchestrator SA: namespaced pods CRUD + pods/log. Nothing cluster-scoped,
-#   no watch (the spawner polls).
+# - orchestrator SA: namespaced pods CRUD + pods/log + pods/exec. Nothing
+#   cluster-scoped, no watch (the spawner polls). pods/exec backs the
+#   context-mount browse/write transport (orchestrator/pod-exec.js, #1319).
 # - agent SA: identity only — automountServiceAccountToken: false means agent
 #   pods get NO Kubernetes API access at all.
 apiVersion: v1
@@ -30,6 +31,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # WebSocket exec (pod-exec.js) upgrades a GET, which the apiserver authorizes
+  # as the "get" verb; SPDY clients (kubectl) POST and need "create". Grant both
+  # so the transport choice never becomes an RBAC surprise.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

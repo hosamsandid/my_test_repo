@@ -2527,19 +2527,20 @@ async def serve_preview(
     elif filename.lower() not in allowed_names:
         raise HTTPException(status_code=403, detail=f"Preview not allowed for {filename}")
 
-    root_resolved = project_root.resolve()
-    full = (project_root / path).resolve()
-    # Containment check: reject any path that resolves outside project_root.
-    # os.path.commonpath equality is a robust barrier (unlike a bare
-    # str.startswith prefix test, which is fooled by sibling dirs sharing a
-    # prefix, e.g. "/workspace/agents/foo-evil" vs "/workspace/agents/foo").
-    try:
-        contained = os.path.commonpath([str(root_resolved), str(full)]) == str(root_resolved)
-    except ValueError:
-        # Raised when the paths are on different drives / have no common base.
-        contained = False
-    if not contained:
+    # Containment: normalize both the (already contained) project root and the
+    # user-supplied path with os.path.realpath and verify the target stays under
+    # the root with a DIRECT str.startswith check in the guard condition — the
+    # exact barrier CodeQL models for py/path-injection (normalize, then
+    # prefix-check the normalized value in the branch). A prior form stored an
+    # os.path.commonpath equality in a boolean variable and branched on it; that
+    # was functionally safe but NOT recognised as a barrier, so every downstream
+    # sink stayed flagged. The exact-match / trailing-os.sep test also rejects
+    # prefix-siblings such as "/root-evil" that a bare startswith(root) accepts.
+    root_resolved = os.path.realpath(project_root)
+    full_real = os.path.realpath(project_root / path)
+    if not (full_real == root_resolved or full_real.startswith(root_resolved + os.sep)):
         raise HTTPException(status_code=403, detail="Path outside project root")
+    full = Path(full_real)
 
     # --- Try local filesystem first ---
     if full.exists() and full.is_file():

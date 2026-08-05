@@ -14900,9 +14900,22 @@ app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, 
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
+  // #418/#419/#420 (js/path-injection): a bare AGENT_ID_RE match is not a
+  // CodeQL-recognised traversal barrier, so agentId still taints everything
+  // derived from the workspace root — targetDir (mkdirSync), the uniqueFileName
+  // existsSync probes, and destPath (writeFileSync). Contain it under AGENTS_DIR
+  // with the path.relative idiom so the resolved root is clean at every fs sink.
+  // The guard never trips for a regex-valid id (AGENT_ID_RE forbids '/' and '..').
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, agentId);
+  const relAgentDir = path.relative(agentsBaseDir, agentDir);
+  if (relAgentDir.startsWith('..') || path.isAbsolute(relAgentDir)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+
   let agentRoot;
   try {
-    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+    agentRoot = fs.realpathSync(agentDir);
   } catch {
     return res.status(404).json({ error: 'Agent workspace not found' });
   }

@@ -24,6 +24,7 @@ import {
   probeRequest,
 } from './llm-probe-state';
 import { groupAgentsByTeam } from './group-agents-by-team.js';
+import { describeSubmitState } from './model-provider-submit-state.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
 
@@ -286,9 +287,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const oauthTokenReady = (isEdit && wasOauth && endpoint.hasToken && !clearToken)
     || !!oauthFlowId
     || !!authToken.trim();
-  const canSubmit = name.trim() && ownershipReady && (isOauth
-    ? ((!requireCompliance || complianceOk) && oauthTokenReady)
-    : !!baseUrl.trim());
+  // Submit gate + the specific unmet requirements, derived in one pure place
+  // (model-provider-submit-state.js) so the disabled button and the "why is
+  // this disabled" hint can never disagree (#1302).
+  const { canSubmit, reasons: submitBlockers } = describeSubmitState({
+    name, ownershipReady, isOauth, requireCompliance, complianceOk,
+    oauthTokenReady, baseUrl,
+  });
   // Which credential a probe would use, and whether it may run at all —
   // resolved in one pure place (llm-probe-state.js) so the button state and the
   // request target cannot disagree. Notably, a completed-but-unsaved
@@ -521,16 +526,38 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
               </span>
             </div>
             {requireCompliance ? (
-              <label style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer' }}>
+              // AC2: the confirmation is a REQUIRED input, not part of the
+              // informational copy above — lift it into its own bordered,
+              // filled row with a "Required" badge and a highlighted border
+              // when still unticked, so it reads as something to act on (#1302).
+              <label style={{
+                display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+                cursor: 'pointer',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                background: 'var(--eb-bg-surface)',
+                border: `1px solid ${complianceOk ? 'var(--eb-status-success)' : 'var(--eb-status-error)'}`,
+                borderRadius: 'var(--eb-radius-md)',
+                color: 'var(--eb-text-primary)',
+              }}>
                 <input
                   type="checkbox"
                   checked={complianceOk}
                   onChange={e => setComplianceOk(e.target.checked)}
-                  style={{ marginTop: 3 }}
+                  aria-required="true"
+                  style={{ marginTop: 3, flexShrink: 0 }}
                 />
                 <span>
+                  <span style={{
+                    display: 'inline-block',
+                    fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+                    textTransform: 'uppercase', letterSpacing: '0.03em',
+                    color: 'var(--eb-status-error)', marginBottom: 'var(--eb-space-1)',
+                  }}>
+                    Required confirmation
+                  </span>
+                  <br />
                   I confirm that every agent using this provider runs exclusively for me, the owner of this
-                  Claude subscription (single-user operation). <span style={{ color: 'var(--eb-status-error)' }}>*</span>
+                  Claude subscription (single-user operation).
                 </span>
               </label>
             ) : (
@@ -780,18 +807,51 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
 
       <div style={{
         display: 'flex',
+        flexDirection: 'column',
         gap: 'var(--eb-space-2)',
         paddingTop: 'var(--eb-space-3)',
         borderTop: '1px solid var(--eb-border-default)',
       }}>
-        <button
-          onClick={submit}
-          disabled={saving || !canSubmit}
-          style={{ ...buttonPrimary, cursor: saving ? 'wait' : 'pointer', opacity: (saving || !canSubmit) ? 0.6 : 1 }}
-        >
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create provider'}
-        </button>
-        <button onClick={onCancel} style={buttonSecondary}>Cancel</button>
+        {/* AC1: when the button is disabled (and not merely saving), spell out
+            exactly which requirement is still unmet so the user isn't left
+            guessing why the form looks broken (#1302). */}
+        {!saving && submitBlockers.length > 0 && (
+          <div style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+          }}>
+            <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+            <span>
+              {isEdit ? 'Save changes' : 'Create provider'} is disabled until you:
+              <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+                {submitBlockers.map(r => (
+                  <li key={r.field}>{r.message}</li>
+                ))}
+              </ul>
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <button
+            onClick={submit}
+            disabled={saving || !canSubmit}
+            style={{
+              ...buttonPrimary,
+              cursor: saving ? 'wait' : (canSubmit ? 'pointer' : 'not-allowed'),
+              // AC4: a disabled button must not read as "active/clickable" — dim
+              // it hard and drop the primary fill so its state is unambiguous.
+              opacity: saving ? 0.6 : (canSubmit ? 1 : 0.45),
+              ...(!saving && !canSubmit ? {
+                background: 'var(--eb-bg-elevated)',
+                color: 'var(--eb-text-muted)',
+                border: '1px solid var(--eb-border-default)',
+              } : {}),
+            }}
+          >
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create provider'}
+          </button>
+          <button onClick={onCancel} style={buttonSecondary}>Cancel</button>
+        </div>
       </div>
     </div>
   );

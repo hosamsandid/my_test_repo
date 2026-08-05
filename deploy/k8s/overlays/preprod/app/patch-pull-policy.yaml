@@ -1,0 +1,4 @@
+# imagePullPolicy Never (kind side-loaded images) → Always (registry images).
+- op: replace
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: Always

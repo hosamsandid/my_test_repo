@@ -1,0 +1,7 @@
+# test (GKE) overlay — the original hosted environment, namespace agent-studio,
+# https://agent-studio.projectroots-acn.com. Core is the unmodified base; the
+# per-env differences (AR images, pull policy, ingress) live in app/.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/core

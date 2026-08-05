@@ -26,7 +26,7 @@
 //     per-agent PVCs belong to the k8s-at-scale concept, not this file.
 //   - per-agent network (Podman Seam #2): no-op — agent pods share the
 //     cluster network; segmentation is an operator-applied NetworkPolicy
-//     (none ships in deploy/k8s/manifests/ today — deliberate stance, agents
+//     (none ships in deploy/k8s/base/ today — deliberate stance, agents
 //     need orchestrator + conduwuit and the manifests target single-node
 //     local clusters).
 //   - context mounts (#1283/#1289/#1290): rendered as hostPath volumes, so

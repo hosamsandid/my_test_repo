@@ -1,0 +1,33 @@
+# preprod (GKE) overlay — AR images, imagePullPolicy Always, own ingress.
+# preprod deploys accept release tags (vX.Y.Z) only — enforced by the
+# deploy-gke workflow guard; set-images.sh pins the tag here exactly as for
+# test (newTag stays `latest` in git, never commit a pinned tag).
+#
+# K8s-local ingress object names (agent-studio-cert, agent-studio-frontend,
+# admin-console-backend) deliberately MATCH the test env — they are namespaced,
+# so there is no clash, and the backend-config annotation on the admin-console
+# Service (in base) is a string kustomize cannot rewrite. Only the GCP-global
+# values differ: the static-IP name and the certificate domain (ingress.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-studio-preprod
+resources:
+  - ../../../base/app
+  - ingress.yaml
+images:
+  - name: agent-studio-orchestrator
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-orchestrator
+    newTag: latest
+  - name: agent-studio-admin-console
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-admin-console
+    newTag: latest
+  - name: agent-studio-bp-explorer
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-bp-explorer
+    newTag: latest
+patches:
+  - path: patch-pull-policy.yaml
+    target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/name=agent-studio
+  - path: patch-agent-image.yaml
+  - path: patch-instance-id.yaml

@@ -1,0 +1,79 @@
+# Matrix homeserver — env mirrors the conduwuit service in docker-compose.yml.
+# The kind-up.sh bootstrap temporarily patches command/args with
+# `--execute "users create-user …"` (the k8s equivalent of setup.sh's compose
+# override) and reverts right after.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conduwuit
+  namespace: agent-studio
+  labels:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: conduwuit
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO volume + single writer: never two instances at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-studio
+      app.kubernetes.io/component: conduwuit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-studio
+        app.kubernetes.io/component: conduwuit
+    spec:
+      containers:
+        - name: conduwuit
+          image: ghcr.io/continuwuity/continuwuity:latest
+          ports:
+            - containerPort: 6167
+          env:
+            - name: CONTINUWUITY_SERVER_NAME
+              value: "local"
+            - name: CONTINUWUITY_DATABASE_PATH
+              value: /var/lib/continuwuity
+            - name: CONTINUWUITY_PORT
+              value: "6167"
+            - name: CONTINUWUITY_ADDRESS
+              value: 0.0.0.0
+            - name: CONTINUWUITY_ALLOW_REGISTRATION
+              value: "false"
+            - name: CONTINUWUITY_ALLOW_FEDERATION
+              value: "false"
+            - name: CONTINUWUITY_TRUSTED_SERVERS
+              value: "[]"
+            - name: CONTINUWUITY_MAX_REQUEST_SIZE
+              value: "20000000"
+            - name: CONTINUWUITY_NEW_USER_DISPLAYNAME_SUFFIX
+              value: ""
+            - name: TZ
+              value: Europe/Berlin
+          readinessProbe:
+            httpGet:
+              path: /_matrix/client/versions
+              port: 6167
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: conduwuit-db
+              mountPath: /var/lib/continuwuity
+      volumes:
+        - name: conduwuit-db
+          persistentVolumeClaim:
+            claimName: agent-studio-conduwuit-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conduwuit # DNS name must stay `conduwuit` — MATRIX_HOMESERVER default
+  namespace: agent-studio
+spec:
+  selector:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: conduwuit
+  ports:
+    - name: matrix
+      port: 6167
+      targetPort: 6167

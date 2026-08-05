@@ -1,0 +1,15 @@
+# Distinct instance id so preprod's container/pod labels (aee.instance) never
+# collide with test's in shared tooling — both envs run on the same cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: agent-studio
+spec:
+  template:
+    spec:
+      containers:
+        - name: orchestrator
+          env:
+            - name: AEE_INSTANCE_ID
+              value: agent-studio-preprod

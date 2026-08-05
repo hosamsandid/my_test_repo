@@ -1,0 +1,52 @@
+# preprod twin of overlays/test/app/ingress.yaml — same object names (they are
+# namespaced; see kustomization.yaml), different GCP-global values: static IP
+# agent-studio-preprod-ip and domain agent-studio-preprod.projectroots-acn.com
+# (both provisioned in infra/gcp/ingress.tf).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin-console
+  namespace: agent-studio-preprod
+  annotations:
+    # Static IP reserved in infra/gcp/ingress.tf.
+    kubernetes.io/ingress.global-static-ip-name: agent-studio-preprod-ip
+    # Google-managed TLS cert — provisioned automatically once the DNS A record
+    # for agent-studio-preprod.projectroots-acn.com resolves to the static IP.
+    networking.gke.io/managed-certificates: agent-studio-cert
+    networking.gke.io/v1beta1.FrontendConfig: agent-studio-frontend
+spec:
+  defaultBackend:
+    service:
+      name: admin-console
+      port:
+        number: 4000
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: agent-studio-cert
+  namespace: agent-studio-preprod
+spec:
+  domains:
+    - agent-studio-preprod.projectroots-acn.com
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: agent-studio-frontend
+  namespace: agent-studio-preprod
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+---
+# IAP — Google-managed OAuth (no client credentials required post-March 2026).
+# Access granted via roles/iap.httpsResourceAccessor in infra/gcp/ingress.tf.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: admin-console-backend
+  namespace: agent-studio-preprod
+spec:
+  iap:
+    enabled: true

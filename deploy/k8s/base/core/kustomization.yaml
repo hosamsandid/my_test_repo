@@ -1,0 +1,15 @@
+# Base "core" — everything that must exist BEFORE the agent-studio-env Secret
+# is created: namespace, RBAC, PVCs, and the Matrix homeserver. The up scripts
+# (kind-up.sh / gke-up.sh) apply an overlay's core/, run the Matrix admin
+# bootstrap, create the Secret, and only then apply app/ — that staged order is
+# why core and app are separate kustomizations (#1348).
+#
+# Never `kubectl apply -k` a base directly — always go through an overlay
+# (deploy/k8s/overlays/<env>/), which pins namespace, images and ingress.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 10-rbac.yaml
+  - 20-storage.yaml
+  - 30-conduwuit.yaml

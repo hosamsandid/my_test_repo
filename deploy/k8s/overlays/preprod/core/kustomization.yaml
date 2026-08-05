@@ -1,0 +1,13 @@
+# preprod (GKE) overlay — second hosted environment on the SAME cluster
+# (#1348, cost-driven), fully separated by namespace: own PVCs, own conduwuit
+# (own Matrix DB + tokens, .env.gke-preprod), own Secret, own ingress at
+# https://agent-studio-preprod.projectroots-acn.com.
+#
+# The namespace transformer renames the Namespace object itself and rewrites
+# the RoleBinding ServiceAccount subjects (verified with the bundled
+# kustomize v5.8.1); AEE_K8S_NAMESPACE self-adjusts via fieldRef.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-studio-preprod
+resources:
+  - ../../../base/core

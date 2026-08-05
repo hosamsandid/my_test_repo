@@ -203,7 +203,7 @@ Five mergeable PRs. After PR #3 the feature is usable end-to-end; #4 and #5 are 
 - `admin-console/src/pages/agent-chat/AgentList.jsx` — left rail.
 - `admin-console/src/pages/agent-chat/ChatPanel.jsx` — main column.
 - `admin-console/src/pages/agent-chat/Message.jsx` — single message bubble with `react-markdown`.
-- `admin-console/src/pages/agent-chat/MessageInput.jsx` — textarea, Cmd+Enter to send, optimistic insert.
+- `admin-console/src/pages/agent-chat/MessageInput.jsx` — textarea, optimistic insert; a user-configurable send keybinding (`agentChat.sendKeybinding`: `ide` = Cmd/Ctrl+Enter sends / Enter newline, default; `chat` = Enter sends / Shift+Enter newline) with OS-aware (`⌘` vs `Ctrl`) placeholder + helper hints — pure logic in `message-send-keybinding.js`.
 - `admin-console/src/hooks/useSSE.js` — generic SSE hook with reconnect (exponential backoff) and `since` offset support, modeled on bp-explorer `sseClient()` (app.js:4518–4631).
 
 **Edits:**

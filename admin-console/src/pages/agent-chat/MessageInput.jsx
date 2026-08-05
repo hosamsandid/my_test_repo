@@ -2,13 +2,26 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Send, Paperclip, Loader2, Mic, Square, Repeat } from 'lucide-react';
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 import LoopSummaryCard from './LoopSummaryCard';
+import {
+  isMacPlatform,
+  loadSendKeybinding,
+  saveSendKeybinding,
+  decideSendKey,
+  placeholderSendHint,
+  helperSendKeys,
+} from './message-send-keybinding.js';
+
+// OS-aware modifier idiom (shared with RightRail.jsx): Cmd on Mac, Ctrl else.
+const IS_MAC = isMacPlatform();
 
 /**
  * Auto-resizing textarea with a send button and inline file attachments.
  *
- * Keys:
- *   - Cmd/Ctrl + Enter   ⇒ submit
- *   - Plain Enter        ⇒ newline (default behaviour)
+ * Send keybinding (#1354) is user-configurable via `agentChat.sendKeybinding`:
+ *   - 'ide'  (default): Cmd/Ctrl + Enter ⇒ submit; plain Enter ⇒ newline
+ *   - 'chat'          : plain Enter ⇒ submit; Shift + Enter ⇒ newline
+ * The placeholder + helper row reflect both the active preset and the OS, so
+ * Windows/Linux users see `Ctrl` rather than the Mac-only `⌘` glyph.
  *
  * Attachments: drag-and-drop files onto the composer, paste files from the
  * clipboard, or use the paperclip button. Each file is uploaded into the
@@ -36,6 +49,11 @@ import LoopSummaryCard from './LoopSummaryCard';
 export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null }) {
   const [value, setValue] = useState('');
   const [dragging, setDragging] = useState(false);
+  // Per-user send-keybinding preset ('ide' | 'chat'), persisted in localStorage
+  // (mirrors WorkspaceBrowser's workspaceMode pattern). Defaults to 'ide' so
+  // existing users keep the historic Cmd/Ctrl+Enter behaviour (#1354 AC).
+  const [sendKeybinding, setSendKeybinding] = useState(() => loadSendKeybinding());
+  useEffect(() => { saveSendKeybinding(sendKeybinding); }, [sendKeybinding]);
   const taRef = useRef(null);
   const fileRef = useRef(null);
   // dragenter/dragleave fire for every child element; count them so the
@@ -81,11 +99,10 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
   }
 
   function handleKey(e) {
-    // Skip the accelerator while composing; the IME owns this Enter.
-    // Some browsers also surface `e.isComposing === true` and `keyCode === 229`;
-    // we honour both for safety.
-    if (composingRef.current || e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    // The IME guard (composing / isComposing / keyCode 229) and the preset
+    // decision both live in the pure `decideSendKey`. 'send' ⇒ submit;
+    // 'newline' / 'ignore' ⇒ let the textarea insert the newline.
+    if (decideSendKey(e, sendKeybinding, composingRef.current) === 'send') {
       e.preventDefault();
       submit();
     }
@@ -156,9 +173,13 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     }
   }
 
+  // OS- and preset-aware send hint, e.g. '⌘↩ to send' (Mac/IDE),
+  // 'Ctrl+↩ to send' (Windows/IDE) or '↩ to send' (chat style).
+  const sendHint = placeholderSendHint(sendKeybinding, IS_MAC);
   const placeholder = agentDisplayName
-    ? `Message ${agentDisplayName}…  (⌘↩ to send)`
-    : 'Message…  (⌘↩ to send)';
+    ? `Message ${agentDisplayName}…  (${sendHint})`
+    : `Message…  (${sendHint})`;
+  const keys = helperSendKeys(sendKeybinding, IS_MAC);
 
   // Loop launcher discoverability (#1120): name the otherwise icon-only loop
   // control in the composer helper line so newcomers know what it does.
@@ -354,7 +375,7 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
           onClick={submit}
           disabled={disabled || !value.trim()}
           aria-label="Send message"
-          title="Send (Cmd/Ctrl + Enter)"
+          title={sendKeybinding === 'chat' ? 'Send (Enter)' : 'Send (Cmd/Ctrl + Enter)'}
           style={{
             width: 32, height: 32,
             background: (!value.trim() || disabled) ? 'var(--eb-bg-active)' : 'var(--eb-accent-primary)',
@@ -377,19 +398,50 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
         transition: 'color var(--eb-transition-fast)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 'var(--eb-space-2)',
       }}>
-        {voiceError
-          ? voiceError
-          : voiceState === 'transcribing'
-            ? 'Transcribing…'
-            : uploading
-              ? 'Uploading attachment…'
-              : onUpload
-                ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send{loopHint}</>
-                : <>Markdown supported · <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>↩</kbd> to send · <kbd style={kbdStyle}>↩</kbd> for newline{loopHint}</>}
+        <span>
+          {voiceError
+            ? voiceError
+            : voiceState === 'transcribing'
+              ? 'Transcribing…'
+              : uploading
+                ? 'Uploading attachment…'
+                : onUpload
+                  ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · {renderKbd(keys.send)} to send{loopHint}</>
+                  : <>Markdown supported · {renderKbd(keys.send)} to send · {renderKbd(keys.newline)} for newline{loopHint}</>}
+        </span>
+        {/* Discoverable per-user send-behaviour toggle (#1354). Kept in the
+            composer so the hints above always match the live choice. */}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, whiteSpace: 'nowrap' }}>
+          <span>Enter:</span>
+          <select
+            value={sendKeybinding}
+            onChange={e => setSendKeybinding(e.target.value)}
+            aria-label="Enter key sends or inserts a newline"
+            title="Choose what pressing Enter does. IDE style keeps Enter for newlines; Chat style sends on Enter."
+            style={selectStyle}
+          >
+            <option value="ide">{IS_MAC ? '⌘' : 'Ctrl'}+↩ sends</option>
+            <option value="chat">↩ sends</option>
+          </select>
+        </label>
       </div>
     </div>
   );
+}
+
+// Render an ordered list of key tokens as <kbd> chips joined by '+'.
+function renderKbd(tokens) {
+  return tokens.map((k, i) => (
+    <React.Fragment key={`${k}-${i}`}>
+      {i > 0 && '+'}
+      <kbd style={kbdStyle}>{k}</kbd>
+    </React.Fragment>
+  ));
 }
 
 function autoResize(el) {
@@ -407,4 +459,15 @@ const kbdStyle = {
   background: 'var(--eb-bg-elevated)',
   border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-sm)',
+};
+
+const selectStyle = {
+  fontFamily: 'inherit',
+  fontSize: 'var(--eb-text-xs)',
+  color: 'var(--eb-text-secondary)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-sm)',
+  padding: '1px 4px',
+  cursor: 'pointer',
 };

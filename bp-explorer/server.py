@@ -1765,23 +1765,27 @@ async def monitor_bp_completion(
 
 @app.get("/api/workspace/tree")
 async def workspace_tree(root: str, path: str = ""):
-    # Normalize both user-supplied paths with os.path.realpath and verify
-    # containment with a DIRECT str.startswith check in the guard — the exact
-    # barrier CodeQL models for py/path-injection (normalize, then prefix-check
-    # the normalized value in the branch condition). The prior form stored an
-    # os.path.commonpath equality in a boolean variable and branched on it, which
-    # was NOT recognised as a barrier (the guarded value never flowed through a
-    # modelled sanitizer), so the sinks stayed flagged. The exact-match /
-    # trailing-os.sep test rejects prefix-siblings such as "/workspace/agents-evil"
-    # that a bare startswith("/workspace/agents") would accept.
-    agents_root = os.path.realpath("/workspace/agents")
+    # Normalize the user-supplied paths with os.path.realpath and verify
+    # containment with a SINGLE DIRECT str.startswith check (trailing os.sep for
+    # prefix-sibling safety) — the barrier shape CodeQL models for
+    # py/path-injection: normalize, then prefix-check the normalized value in a
+    # guard whose safe branch is reachable ONLY when the check holds. The prior
+    # ``x == base or x.startswith(base + os.sep)`` disjunction was NOT recognised
+    # as a barrier — its safe branch was reachable through the equality arm
+    # without the prefix test — so the sinks stayed flagged. `root` is always an
+    # agent workspace strictly under /workspace/agents/ (the sole caller passes
+    # safeAgentPath(agentId, '')), and an empty `path` lists that root directly,
+    # so no legitimate request relies on the dropped equality arms.
     base = os.path.realpath(root)
-    if not (base == agents_root or base.startswith(agents_root + os.sep)):
+    if not base.startswith("/workspace/agents" + os.sep):
         raise HTTPException(status_code=403, detail="Access denied")
-    target = os.path.realpath(os.path.join(base, path))
-    if not (target == base or target.startswith(base + os.sep)):
-        raise HTTPException(status_code=403, detail="Path traversal denied")
-    target_dir = Path(target)
+    if path:
+        target = os.path.realpath(os.path.join(base, path))
+        if not target.startswith(base + os.sep):
+            raise HTTPException(status_code=403, detail="Path traversal denied")
+        target_dir = Path(target)
+    else:
+        target_dir = Path(base)
     if not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Directory not found")
     dirs = [d.name for d in sorted(target_dir.iterdir()) if d.is_dir()]

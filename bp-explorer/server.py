@@ -832,20 +832,23 @@ def _bare_hash(bp_id: str) -> str:
 def _contain_under(root: Path, candidate: Path) -> Path | None:
     """Resolve *candidate* and return it only when it stays within *root*.
 
-    Uses ``os.path.commonpath`` on the fully-resolved paths — the
-    CodeQL-recognised path-containment barrier already used by
-    ``resolve_workspace`` and ``serve_preview`` — rather than a bare
-    ``str.startswith`` prefix test (not a barrier, and unsafe against
-    prefix-siblings). Returns the resolved absolute ``Path`` when contained,
-    otherwise ``None`` so callers can skip the path.
+    Normalizes both paths with ``os.path.realpath`` (removes ``..`` segments and
+    follows symlinks) and then verifies the candidate stays under *root* with a
+    DIRECT ``str.startswith`` check in the guard condition — the exact barrier
+    CodeQL models for py/path-injection (normalize, then prefix-check the
+    normalized value in the branch condition). A prior form stored an
+    ``os.path.commonpath`` equality in a boolean and branched on it; that was
+    functionally safe but NOT recognised as a barrier by CodeQL (the guarded
+    value never flowed through a modelled sanitizer), so every downstream sink
+    stayed flagged. The exact-match / trailing-``os.sep`` test rejects
+    prefix-siblings such as ``/root-evil`` that a bare
+    ``startswith(root)`` would accept. Returns the resolved absolute ``Path``
+    when contained, otherwise ``None`` so callers can skip the path.
     """
-    root_resolved = str(Path(root).resolve())
-    full = Path(candidate).resolve()
-    try:
-        if os.path.commonpath([root_resolved, str(full)]) == root_resolved:
-            return full
-    except ValueError:
-        pass
+    root_resolved = os.path.realpath(root)
+    full = os.path.realpath(candidate)
+    if full == root_resolved or full.startswith(root_resolved + os.sep):
+        return Path(full)
     return None
 
 

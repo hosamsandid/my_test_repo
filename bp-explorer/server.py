@@ -2109,20 +2109,18 @@ async def transition_bp(bp_id: str, body: BpTransitionRequest, workspace: str):
 
     loop = asyncio.get_running_loop()
     project_root = resolve_workspace(workspace)
-    script = (project_root / "scripts" / "bp-transition.py").resolve()
-    # Containment: assert the fixed script path stays under the (already
-    # contained) project root with os.path.commonpath — a CodeQL-recognised
-    # path barrier — before the fs check and the subprocess invocation below.
-    root_resolved = project_root.resolve()
-    try:
-        contained = (
-            os.path.commonpath([str(root_resolved), str(script)])
-            == str(root_resolved)
-        )
-    except ValueError:
-        contained = False
-    if not contained:
+    # Containment: normalize the fixed script path with os.path.realpath, then
+    # assert it stays under the (already contained) project root with a single
+    # direct startswith prefix check — the barrier shape CodeQL models for
+    # py/path-injection. The script is a fixed strict subpath
+    # (scripts/bp-transition.py), never the root itself, so a plain startswith
+    # (no equality branch, no boolean-stored commonpath) fully covers containment
+    # before the fs check and the subprocess invocation below.
+    root_resolved = os.path.realpath(project_root)
+    script_real = os.path.realpath(project_root / "scripts" / "bp-transition.py")
+    if not script_real.startswith(root_resolved + os.sep):
         raise HTTPException(status_code=403, detail="Path outside project root")
+    script = Path(script_real)
     if not script.exists():
         raise HTTPException(status_code=500, detail="bp-transition.py not found")
 

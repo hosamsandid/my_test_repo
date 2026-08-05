@@ -1580,13 +1580,16 @@ async def lifespan(app: FastAPI):
         print(f"  Agent SDK: not configured ({exc})")
         app.state.agent_bridge = None
         app.state.agent_available = False
-        app.state.agent_unavailable_reason = str(exc)
+        # Do not surface the raw exception text to API clients (stack-trace
+        # exposure); the actionable detail is logged/printed server-side above.
+        app.state.agent_unavailable_reason = "Agent SDK prerequisites not met"
     except Exception as exc:
         logger.warning("Agent bridge init failed: %s", exc)
         print(f"  Agent SDK: unavailable ({exc})")
         app.state.agent_bridge = None
         app.state.agent_available = False
-        app.state.agent_unavailable_reason = str(exc)
+        # Static, non-sensitive reason for clients; full detail is logged above.
+        app.state.agent_unavailable_reason = "Agent SDK initialisation failed"
 
     # --- AEE Bridge startup ---------------------------------------------------
     aee_enabled_env = os.environ.get("AEE_ENABLED", "").strip().lower()
@@ -2645,12 +2648,14 @@ async def set_agent_config(body: AgentConfigRequest, request: Request):
     except Exception as exc:
         request.app.state.agent_bridge = None
         request.app.state.agent_available = False
-        request.app.state.agent_unavailable_reason = str(exc)
+        # Static, non-sensitive reason for clients; full detail is logged below.
+        reason = "Agent bridge reinitialisation failed"
+        request.app.state.agent_unavailable_reason = reason
         logger.warning("Agent bridge reinit failed after config update: %s", exc)
         return _json_response({
             "ok": False,
             "agent_available": False,
-            "agent_unavailable_reason": str(exc),
+            "agent_unavailable_reason": reason,
             "updated_keys": list(updates.keys()),
         })
 

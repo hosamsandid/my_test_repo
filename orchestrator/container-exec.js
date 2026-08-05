@@ -1,7 +1,9 @@
 'use strict';
 
 // container-exec.js — run ONE short command inside a running agent container
-// over the libpod socket and collect its output (#1286).
+// over the libpod socket and collect its output (#1286). Podman side of the
+// exec seam; the Kubernetes counterpart is pod-exec.js, selected by
+// container-exec-runtime.js (#1319).
 //
 // Why this exists: the read-only host-folder context mount (#1283) is visible
 // only inside the agent's own container. The orchestrator already owns every
@@ -16,7 +18,7 @@
 const http = require('http');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
-const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio';
+const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const AGENT_LABEL_KEY = 'aee.agent.id';
 const INSTANCE_LABEL_KEY = 'aee.instance';
 const INSTANCE_ID = process.env.AEE_INSTANCE_ID || COMPOSE_PROJECT;

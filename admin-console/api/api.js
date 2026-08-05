@@ -873,7 +873,14 @@ function loadMcpServer(serverId) {
 }
 
 function saveMcpServer(serverId, data) {
-  const dir = path.join(MCP_SERVERS_DIR, serverId);
+  // Path-injection containment (#207): callers validate serverId with
+  // MCP_SERVER_ID_RE, but CodeQL does not model a regex.test() early-return as
+  // a sanitiser, so re-confine the resolved dir under MCP_SERVERS_DIR here (the
+  // fs sink lives in this helper). Never trips for a regex-valid id.
+  const base = path.resolve(MCP_SERVERS_DIR);
+  const dir = path.resolve(base, serverId);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid MCP server id');
   fs.mkdirSync(dir, { recursive: true });
   writeJsonAtomic(path.join(dir, 'server.json'), data);
 }
@@ -9901,7 +9908,13 @@ app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
   const usedBy = mcpServerInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP server is used by environment '${usedBy}'. Detach it first.` });
-  try { fs.rmSync(path.join(MCP_SERVERS_DIR, id), { recursive: true, force: true }); } catch { /* ignore */ }
+  // Path-injection containment (#208): re-confine the resolved server dir under
+  // MCP_SERVERS_DIR — MCP_SERVER_ID_RE alone is not CodeQL-legible for the sink.
+  const mcpServersBaseDir = path.resolve(MCP_SERVERS_DIR);
+  const serverDir = path.resolve(mcpServersBaseDir, id);
+  const relServerDir = path.relative(mcpServersBaseDir, serverDir);
+  if (relServerDir.startsWith('..') || path.isAbsolute(relServerDir)) return res.status(400).json({ error: 'Invalid server id' });
+  try { fs.rmSync(serverDir, { recursive: true, force: true }); } catch { /* ignore */ }
   res.status(204).end();
 });
 
@@ -9980,7 +9993,13 @@ app.delete('/api/mcp-credentials/:id', apiLimiter, (req, res) => {
   }
   const usedBy = mcpCredentialInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP credential is used by environment '${usedBy}'. Detach it first.` });
-  try { fs.unlinkSync(path.join(MCP_CREDENTIALS_KEYS_DIR, id)); } catch { /* ignore */ }
+  // Path-injection containment (#211): re-confine the resolved key file under
+  // MCP_CREDENTIALS_KEYS_DIR — MCP_CREDENTIAL_ID_RE alone is not CodeQL-legible.
+  const mcpCredsBaseDir = path.resolve(MCP_CREDENTIALS_KEYS_DIR);
+  const credFile = path.resolve(mcpCredsBaseDir, id);
+  const relCredFile = path.relative(mcpCredsBaseDir, credFile);
+  if (relCredFile.startsWith('..') || path.isAbsolute(relCredFile)) return res.status(400).json({ error: 'Invalid credential id' });
+  try { fs.unlinkSync(credFile); } catch { /* ignore */ }
   saveMcpCredentialsIndex(creds.filter(c => c.id !== id));
   res.status(204).end();
 });

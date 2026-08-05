@@ -276,6 +276,9 @@ runs them.
 3. **Where it runs:** locally via `make e2e`; CI nightly + manual first, smoke lane
    (F0+F1) promoted to a blocking PR check after burn-in. LLM cost in CI: zero by
    design; the optional live lane is the only spender and stays nightly/weekly.
+   Since #1319 the journey suite also runs against a dedicated e2e **kind** cluster
+   (`make e2e-kind`, agents as real k8s pods, fakes deployed in-cluster) — the k8s
+   runtime's lane; see `docs/journey-spec-concept.md` §3.1 and `deploy/k8s/README.md`.
 4. **Tooling:** Playwright, aligning with #262 (§3).
 5. **Test environment:** no dedicated infra needed — an **ephemeral compose project**
    (`aee-e2e`) beside the normal stack, fully isolated by project-prefixed volumes and

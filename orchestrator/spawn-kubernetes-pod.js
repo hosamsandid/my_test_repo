@@ -7,23 +7,46 @@
 // anywhere. Selected via AEE_CONTAINER_RUNTIME=kubernetes|k8s.
 //
 // Exports the same five functions as spawn-container.js (the Podman path):
-//   spawnContainer({id, env})  -> EventEmitter handle (stdout/stderr/kill/exit)
+//   spawnContainer({id, env, contextMounts})
+//                              -> EventEmitter handle (stdout/stderr/kill/exit)
 //   libpodRequest(method,path) -> compat shim: answers the orchestrator's
 //                                 "list/delete labelled containers" queries
 //                                 from labelled agent Pods instead
 //   removePerAgentVolume / removePerAgentNetwork / reseedPerAgentVolume
-//                              -> no-ops: isolation is a PVC subPath per agent,
-//                                 networking is the cluster network (NetworkPolicy
-//                                 is an operator concern, not per-spawn)
+//                              -> no-ops (see the differences block below)
+//
+// Deliberate differences vs spawn-container.js — parity-checked in #1319;
+// anything NOT listed here that lands on one runtime only is drift, not
+// design (see the seam discipline note in container-runtime.js):
+//   - pids limit: Podman applies AEE_AGENT_PIDS_LIMIT per container; the k8s
+//     pod spec has no per-pod equivalent — the operator-level knob is the
+//     kubelet's podPidsLimit (node config). Accepted, intentionally absent.
+//   - per-agent volume (#185): no-op — filesystem isolation is the shared
+//     workspace PVC's per-agent subPath in buildPodManifest; dedicated
+//     per-agent PVCs belong to the k8s-at-scale concept, not this file.
+//   - per-agent network (Podman Seam #2): no-op — agent pods share the
+//     cluster network; segmentation is an operator-applied NetworkPolicy
+//     (none ships in deploy/k8s/manifests/ today — deliberate stance, agents
+//     need orchestrator + conduwuit and the manifests target single-node
+//     local clusters).
+//   - context mounts (#1283/#1289/#1290): rendered as hostPath volumes, so
+//     "host" means THE NODE (on kind: the node container — a Mac folder needs
+//     an extraMounts entry at cluster creation, see deploy/k8s/README.md).
+//     Only meaningful on single-node local clusters; opt-in via
+//     AEE_K8S_CONTEXT_HOSTPATH=1, never on hosted GKE.
+//   - SIGUSR1/SIGUSR2: k8s cannot forward per-process signals through the pod
+//     API — see the kill() handler for the mapping.
 //
 // RBAC needed by the orchestrator's ServiceAccount (namespaced Role):
-//   pods [get, list, create, delete] + pods/log [get]
+//   pods [get, list, create, delete] + pods/log [get] + pods/exec [create]
+//   (pods/exec backs the context browse/write transport in pod-exec.js)
 // Agent pods run under a separate ServiceAccount with
 // automountServiceAccountToken: false — agents get NO API access.
 
 const fs = require('fs');
 const https = require('https');
 const { EventEmitter, PassThrough } = require('stream');
+const { validateHostMountPath, CONTEXT_MOUNT_TARGET } = require('./context-mount');
 
 const NAMESPACE = process.env.AEE_K8S_NAMESPACE || readFile('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'default').trim();
 const API_HOST = process.env.KUBERNETES_SERVICE_HOST;
@@ -45,7 +68,7 @@ const AGENT_LABEL_KEY = 'aee.agent.id';
 // when evicting stale agents / listing processes): two stacks sharing one
 // namespace must not touch each other's agent pods.
 const INSTANCE_LABEL_KEY = 'aee.instance';
-const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const APP_LABEL = process.env.AEE_K8S_APP_LABEL || 'agent-studio';
 const POLL_MS = Number(process.env.AEE_K8S_POLL_MS || 5000);
 const LOG_RETRY_MS = Number(process.env.AEE_K8S_LOG_RETRY_MS || 2000);
@@ -354,7 +377,38 @@ function envToK8s(env) {
     .map(([name, value]) => ({ name, value: String(value) }));
 }
 
-function buildPodManifest(id, env, podName) {
+// Host-folder context mounts (#1283/#1290) as k8s hostPath volumes — the
+// counterpart of buildContextMountSpecs on the Podman path (whose libpod OCI
+// bind shape doesn't fit k8s volumes, so entries are mapped directly). Same
+// discipline: the host path is re-validated fail-closed at the point of use
+// and a bad entry drops that mount only, never the spawn. `type: Directory`
+// means the folder must already exist ON THE NODE — a missing path leaves the
+// pod Pending on FailedMount, symmetric to Podman's no-existence-precheck.
+// The AEE_K8S_CONTEXT_HOSTPATH gate is read at call time (not module load) so
+// the hosted stack can never render a hostPath and tests can toggle it.
+function buildContextHostPathVolumes(contextMounts) {
+  const volumes = [];
+  const volumeMounts = [];
+  if (process.env.AEE_K8S_CONTEXT_HOSTPATH !== '1') return { volumes, volumeMounts };
+  let i = 0;
+  for (const m of (Array.isArray(contextMounts) ? contextMounts : [])) {
+    if (!m) continue;
+    const v = validateHostMountPath(m.path);
+    if (!v.ok) continue;
+    // Index-based volume names: mount slugs may contain characters that are
+    // not DNS-1123-label-safe, and the name only has to be unique in the pod.
+    const name = `ctx-${i++}`;
+    volumes.push({ name, hostPath: { path: v.path, type: 'Directory' } });
+    volumeMounts.push({
+      name,
+      mountPath: m.target || CONTEXT_MOUNT_TARGET,
+      readOnly: m.readWrite !== true,
+    });
+  }
+  return { volumes, volumeMounts };
+}
+
+function buildPodManifest(id, env, podName, contextMounts) {
   const memory = parseMemoryQuantity(AGENT_MEM_LIMIT);
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>
@@ -369,6 +423,8 @@ function buildPodManifest(id, env, podName) {
         { name: 'workspace', mountPath: '/workspace' },
         { name: 'workspace', mountPath: '/root/.claude', subPath: 'claude-home' },
       ];
+
+  const ctx = buildContextHostPathVolumes(contextMounts);
 
   const pod = {
     apiVersion: 'v1',
@@ -392,21 +448,21 @@ function buildPodManifest(id, env, podName) {
         image: AGENT_IMAGE,
         imagePullPolicy: AGENT_IMAGE_PULL_POLICY,
         env: envToK8s(env),
-        volumeMounts,
+        volumeMounts: [...volumeMounts, ...ctx.volumeMounts],
         securityContext: {
           allowPrivilegeEscalation: false,
           capabilities: { drop: ['ALL'] },
         },
         resources: memory ? { limits: { memory }, requests: { memory: '256Mi', cpu: '100m' } } : undefined,
       }],
-      volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: WORKSPACE_PVC } }],
+      volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: WORKSPACE_PVC } }, ...ctx.volumes],
     },
   };
   if (IMAGE_PULL_SECRET) pod.spec.imagePullSecrets = [{ name: IMAGE_PULL_SECRET }];
   return pod;
 }
 
-function spawnContainer({ id, env }) {
+function spawnContainer({ id, env, contextMounts }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -452,7 +508,13 @@ function spawnContainer({ id, env }) {
         finalizeHandle(handle, 0);
         return;
       }
-      const manifest = buildPodManifest(id, env, podName);
+      const manifest = buildPodManifest(id, env, podName, contextMounts);
+      for (const vm of manifest.spec.containers[0].volumeMounts) {
+        if (!vm.name.startsWith('ctx-')) continue;
+        const vol = manifest.spec.volumes.find((v) => v.name === vm.name);
+        const mode = vm.readOnly ? 'read-only' : 'read-write';
+        console.log(`[spawn-kubernetes-pod] ${id} -> ${mode} context hostPath ${vol.hostPath.path} at ${vm.mountPath}`);
+      }
       const created = await k8sRequestRetrying('POST', podApiPath(), manifest);
       if (created.status >= 300) {
         throw new Error(`create pod failed: status=${created.status} body=${JSON.stringify(created.body)}`);
@@ -518,6 +580,9 @@ module.exports = {
   removePerAgentVolume,
   removePerAgentNetwork,
   reseedPerAgentVolume,
+  // k8s-runtime-internal extra (NOT part of the five-function seam): pod-exec.js
+  // resolves an agent's running pod through the same instance-scoped selector.
+  listAgentPods,
   // Pure helpers exposed for unit tests only — not part of the runtime seam.
   _internal: {
     safeName,
@@ -527,6 +592,7 @@ module.exports = {
     fatalWaitingReason,
     envToK8s,
     buildPodManifest,
+    buildContextHostPathVolumes,
     safeWrite,
     finalizeHandle,
   },

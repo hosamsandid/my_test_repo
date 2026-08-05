@@ -3596,12 +3596,16 @@ async function rebuildAgentPromptBestEffort(id, reason) {
 /* ─── Read-only host-folder context mount (#1283) ───────────────────────── */
 
 // The mount is a LOCAL/self-hosted-only feature: a host bind-mount has no
-// meaning behind IAP/GKE, and the Kubernetes runtime has no host to mount from.
-// The provisioning side (orchestrator) mirrors this guard on the podman runtime.
+// meaning behind IAP/GKE (hard-off, first check). On the podman runtime it is
+// always offered; on Kubernetes it renders as a hostPath volume — "host" means
+// the node — so it takes the explicit AEE_K8S_CONTEXT_HOSTPATH=1 opt-in
+// (#1319, kind/local single-node clusters only; hosted GKE never sets it).
+// The provisioning side (orchestrator CONTEXT_MOUNT_RUNTIME_OK) mirrors this
+// guard.
 function isLocalContextMountEnv() {
   if (process.env.IAP_AUDIENCE) return false;
   const rt = String(process.env.AEE_CONTAINER_RUNTIME || 'podman').toLowerCase();
-  return rt !== 'kubernetes' && rt !== 'k8s';
+  return (rt !== 'kubernetes' && rt !== 'k8s') || process.env.AEE_K8S_CONTEXT_HOSTPATH === '1';
 }
 
 // Shape an agent config's resolved context folders for the API (#1290). One
@@ -3629,7 +3633,8 @@ app.get('/api/context-mount/capability', (req, res) => {
 // Set / clear the agent's read-only host-folder context mount. Like the provider
 // override, the mount is baked at container spawn time, so a change requires a
 // one-agent respawn — done best-effort after the config write (AC6). Guards:
-//   • local/self-hosted only — 400 in the hosted (IAP/k8s) environment (AC8)
+//   • local/self-hosted only — 400 behind IAP, and on k8s without the
+//     AEE_K8S_CONTEXT_HOSTPATH opt-in (AC8, #1319)
 //   • the caller must have management rights over the agent's owning team (#989)
 //   • the host path must pass basic server-side validation (AC7)
 // A `team` agent hosts no container, so a mount there is meaningless → 400.

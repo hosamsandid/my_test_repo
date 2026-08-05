@@ -1,5 +1,11 @@
 'use strict';
 
+// Podman implementation of the container-runtime seam (see
+// container-runtime.js, including the seam discipline note). Its Kubernetes
+// twin is spawn-kubernetes-pod.js, whose header records the deliberate
+// runtime differences — new spawn-path features land on both or get listed
+// there.
+
 const http = require('http');
 const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');

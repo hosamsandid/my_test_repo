@@ -18,9 +18,22 @@ const {
   fatalWaitingReason,
   envToK8s,
   buildPodManifest,
+  buildContextHostPathVolumes,
   safeWrite,
   finalizeHandle,
 } = _internal;
+
+// The context-hostPath gate is read at call time, so tests toggle it around
+// each call and always restore the ambient value.
+function withContextGate(value, fn) {
+  const prev = process.env.AEE_K8S_CONTEXT_HOSTPATH;
+  if (value === undefined) delete process.env.AEE_K8S_CONTEXT_HOSTPATH;
+  else process.env.AEE_K8S_CONTEXT_HOSTPATH = value;
+  try { return fn(); } finally {
+    if (prev === undefined) delete process.env.AEE_K8S_CONTEXT_HOSTPATH;
+    else process.env.AEE_K8S_CONTEXT_HOSTPATH = prev;
+  }
+}
 
 test('safeName sanitizes agent ids into DNS-safe pod name fragments', () => {
   assert.equal(safeName('My Agent_01'), 'my-agent-01');
@@ -88,6 +101,77 @@ test('buildPodManifest isolates the agent via subPath and carries both scoping l
   const sec = pod.spec.containers[0].securityContext;
   assert.equal(sec.allowPrivilegeEscalation, false);
   assert.deepEqual(sec.capabilities.drop, ['ALL']);
+});
+
+test('buildContextHostPathVolumes renders hostPath volumes with per-folder read-only semantics', () => {
+  withContextGate('1', () => {
+    const { volumes, volumeMounts } = buildContextHostPathVolumes([
+      { path: '/Users/dev/specs', target: '/context/specs', readWrite: false },
+      { path: '/Users/dev/out', target: '/context/out', readWrite: true },
+    ]);
+    assert.deepEqual(volumes, [
+      { name: 'ctx-0', hostPath: { path: '/Users/dev/specs', type: 'Directory' } },
+      { name: 'ctx-1', hostPath: { path: '/Users/dev/out', type: 'Directory' } },
+    ]);
+    assert.deepEqual(volumeMounts, [
+      { name: 'ctx-0', mountPath: '/context/specs', readOnly: true },
+      { name: 'ctx-1', mountPath: '/context/out', readOnly: false },
+    ]);
+  });
+});
+
+test('buildContextHostPathVolumes defaults a target-less legacy entry to /context, read-only', () => {
+  withContextGate('1', () => {
+    const { volumeMounts } = buildContextHostPathVolumes([{ path: '/Users/dev/docs' }]);
+    assert.deepEqual(volumeMounts, [{ name: 'ctx-0', mountPath: '/context', readOnly: true }]);
+  });
+});
+
+test('buildContextHostPathVolumes drops invalid entries fail-closed, keeps the rest', () => {
+  withContextGate('1', () => {
+    const { volumes, volumeMounts } = buildContextHostPathVolumes([
+      null,
+      { path: 'relative/path', target: '/context/a' },        // not absolute
+      { path: '/etc/passwd-dir', target: '/context/b' },      // deny-tree
+      { path: '/Users/dev/../dev/x', target: '/context/c' },  // traversal
+      { path: '/srv/good', target: '/context/good' },
+    ]);
+    assert.equal(volumes.length, 1);
+    assert.deepEqual(volumeMounts, [{ name: 'ctx-0', mountPath: '/context/good', readOnly: true }]);
+  });
+});
+
+test('context mounts render nothing without the AEE_K8S_CONTEXT_HOSTPATH opt-in', () => {
+  withContextGate(undefined, () => {
+    const gated = buildContextHostPathVolumes([{ path: '/srv/good', target: '/context/good' }]);
+    assert.deepEqual(gated, { volumes: [], volumeMounts: [] });
+    // The pod manifest stays byte-identical to a mount-less one (hosted GKE safety).
+    const withMounts = buildPodManifest('a1', { X: '1' }, 'p', [{ path: '/srv/good', target: '/context/good' }]);
+    const without = buildPodManifest('a1', { X: '1' }, 'p');
+    assert.deepEqual(withMounts, without);
+  });
+});
+
+test('buildPodManifest appends context hostPath volumes after the workspace PVC', () => {
+  withContextGate('1', () => {
+    const pod = buildPodManifest('a1', { X: '1' }, 'p', [
+      { path: '/srv/specs', target: '/context/specs', readWrite: true },
+    ]);
+    const vols = pod.spec.volumes;
+    assert.equal(vols[0].name, 'workspace');
+    assert.deepEqual(vols[1], { name: 'ctx-0', hostPath: { path: '/srv/specs', type: 'Directory' } });
+    const vm = pod.spec.containers[0].volumeMounts.find((m) => m.name === 'ctx-0');
+    assert.deepEqual(vm, { name: 'ctx-0', mountPath: '/context/specs', readOnly: false });
+  });
+});
+
+test('instance label default carries no legacy vgh token', () => {
+  const pod = buildPodManifest('a1', {}, 'p');
+  assert.notEqual(pod.metadata.labels['aee.instance'], 'vgh-claw-314092');
+  if (!process.env.AEE_INSTANCE_ID && !process.env.COMPOSE_PROJECT_NAME) {
+    // Matches the Podman path's default (spawn-container.js COMPOSE_PROJECT).
+    assert.equal(pod.metadata.labels['aee.instance'], 'agent-studio-314092');
+  }
 });
 
 function makeHandle() {

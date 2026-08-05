@@ -121,6 +121,8 @@ The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a 
 
 Pick any enabled agent. The status indicator shows current state: **Unread** (new message), **Busy** (active run), **Idle** (waiting), **Disabled** (amber — intentionally off, one-click enable to resume), **Offline** (red — container not running).
 
+Reorder the list with the ▲/▼ arrow buttons (visible on hover) or `Alt+↑`/`Alt+↓`. Drag the grip handle (⠿, visible on hover) to relocate an item in one gesture. Groups, standalone agents, and members within a group each reorder independently; a drag cannot move an item out of its own list. Order persists in `localStorage` (`agentChat.sidebarOrder`) and survives reload. Reordering is disabled while a filter is active.
+
 ### Middle panel — Chat
 
 Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar shows whether a Claude session is active and offers:

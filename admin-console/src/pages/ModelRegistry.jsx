@@ -96,13 +96,13 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
     onChange(models.filter((_, idx) => idx !== i));
     if (removedId && removedId === defaultModelId) onDefaultChange('');
   };
-  const add = () => onChange([...models, { id: '', displayName: '', kind: '' }]);
+  const add = () => onChange([...models, { id: '', displayName: '' }]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '32px 1fr 1fr 110px 32px',
+        gridTemplateColumns: '32px 1fr 1fr 32px',
         gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
         color: 'var(--eb-text-muted)',
@@ -112,7 +112,6 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
         <div title="Default">Def</div>
         <div>Model ID</div>
         <div>Display name</div>
-        <div>Kind</div>
         <div></div>
       </div>
 
@@ -134,7 +133,7 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
         return (
         <div key={i} style={{
           display: 'grid',
-          gridTemplateColumns: '32px 1fr 1fr 110px 32px',
+          gridTemplateColumns: '32px 1fr 1fr 32px',
           gap: 'var(--eb-space-2)',
           alignItems: 'center',
         }}>
@@ -190,25 +189,6 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
               outline: 'none',
             }}
           />
-          <select
-            value={m.kind || ''}
-            onChange={e => update(i, { kind: e.target.value || undefined })}
-            style={{
-              padding: 'var(--eb-space-2) var(--eb-space-3)',
-              background: 'var(--eb-bg-elevated)',
-              border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)',
-              color: 'var(--eb-text-primary)',
-              fontSize: 'var(--eb-text-sm)',
-              outline: 'none',
-              fontFamily: 'inherit',
-            }}
-          >
-            <option value="">—</option>
-            <option value="opus">opus</option>
-            <option value="sonnet">sonnet</option>
-            <option value="haiku">haiku</option>
-          </select>
           <button
             onClick={() => remove(i)}
             aria-label="Remove model"
@@ -894,9 +874,6 @@ function EnvProviderPanel({ provider, onClose }) {
                     style={{ color: isDefault ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
                   />
                   <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{m.id}</code>
-                  {m.kind && (
-                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>· {m.kind}</span>
-                  )}
                   {isDefault && (
                     <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
                       default

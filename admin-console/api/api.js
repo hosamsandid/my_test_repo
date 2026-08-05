@@ -1592,7 +1592,14 @@ function notifyEnvCredentialChange(envId, reason) {
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  // Containment: resolve the agent dir under AGENTS_DIR and reject any id that
+  // escapes it. AGENT_ID_RE alone is not modelled as a path sanitiser, so build
+  // every id-derived path from the resolved `agentDir` behind this barrier.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const agentRel = path.relative(agentsBaseDir, agentDir);
+  if (agentRel.startsWith('..') || path.isAbsolute(agentRel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
@@ -2074,7 +2081,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         resolvedPrompt = teamCfg.systemPromptTemplate;
       }
     }
-    const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
+    const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
     try {
       const tmp = promptPath + '.tmp';
       fs.writeFileSync(tmp, resolvedPrompt, 'utf8');

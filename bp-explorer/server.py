@@ -1535,17 +1535,22 @@ def parse_mrp_structured(raw_text: str, bp_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def resolve_workspace(path: str) -> Path:
-    p = Path(path).resolve()
-    agents_root = "/workspace/agents"
-    # Containment via os.path.commonpath (CodeQL-recognised path barrier) rather
-    # than a bare str.startswith prefix check, which CodeQL does not model as a
-    # sanitizer. Equivalent to the trailing-slash prefix test for containment.
-    try:
-        contained = os.path.commonpath([agents_root, str(p)]) == agents_root
-    except ValueError:
-        contained = False
-    if not contained:
+    # Normalize the user-supplied path with os.path.realpath (removes ".."
+    # segments and follows symlinks) and then verify the normalized result stays
+    # under the agents root with a DIRECT str.startswith check in the guard.
+    # This is the exact barrier CodeQL models for py/path-injection: normalize,
+    # then prefix-check the normalized value in the branch condition. A prior
+    # form that stored an os.path.commonpath equality in a boolean variable and
+    # branched on it was NOT recognised as a barrier (the guarded value never
+    # flowed through a modelled sanitizer), so the sinks stayed flagged.
+    # The exact-match / trailing-os.sep test rejects prefix-siblings such as
+    # "/workspace/agents-evil" that a bare startswith("/workspace/agents") would
+    # accept.
+    agents_root = os.path.realpath("/workspace/agents")
+    full = os.path.realpath(path)
+    if not (full == agents_root or full.startswith(agents_root + os.sep)):
         raise HTTPException(status_code=403, detail="Access denied")
+    p = Path(full)
     briefings = p / "artifacts" / "briefings"
     if not briefings.is_dir():
         raise HTTPException(status_code=404, detail="No briefings found at this path")

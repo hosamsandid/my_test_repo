@@ -7251,6 +7251,20 @@ function stampSkillCopy(dstDir, opts) {
 // Returns { ok: true } or { error } (the content write failed — the caller 500s;
 // stamping is best-effort and never surfaced as an error).
 function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, stamp }) {
+  // #515 (js/path-injection): destDir is composed by callers from a user-supplied
+  // skill name. Every skill write lands under the team-tier root (/workspace/teams)
+  // or the global skill pool (/pool/skills), so re-assert containment *here* — the
+  // CodeQL-legible path.relative barrier co-located with the fs sinks, since the
+  // callers' guards live in a different function and don't reach the sink. A bare
+  // SKILL_NAME_RE regex is not recognised as a traversal barrier; this is. Callers
+  // keep their own guards — this is the last line of defence right at the write.
+  const resolvedDest = path.resolve(destDir);
+  const relFromTeams = path.relative(path.resolve(WORKSPACE, 'teams'), resolvedDest);
+  const relFromPool = path.relative(path.resolve(POOL_DIR, 'skills'), resolvedDest);
+  const underTeams = !!relFromTeams && !relFromTeams.startsWith('..') && !path.isAbsolute(relFromTeams);
+  const underPool = !!relFromPool && !relFromPool.startsWith('..') && !path.isAbsolute(relFromPool);
+  if (!underTeams && !underPool) return { error: 'skill destination escapes the skills root' };
+  destDir = resolvedDest;
   try {
     if (overwrite) fs.rmSync(destDir, { recursive: true, force: true });
     if (copyFrom) {

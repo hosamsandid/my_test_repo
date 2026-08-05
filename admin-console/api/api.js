@@ -7337,6 +7337,24 @@ function safeGlobalSkillDir(name) {
   return dir;
 }
 
+// Agent-tier skill dir with the CodeQL-legible containment guard — the agent
+// twin of safeTeamSkillDir/safeGlobalSkillDir for a per-agent skill copy under
+// /workspace/agents/<agentId>/skills. A raw path.join(AGENTS_DIR, agentId,
+// 'skills', name) with only AGENT_ID_RE + SKILL_NAME_RE guards is functionally
+// safe but is NOT recognised by CodeQL js/path-injection as a traversal
+// barrier; the path.relative idiom on the returned value is. Contains BOTH the
+// agent id (dir) and the skill name (leaf). Returns null on an invalid or
+// escaping id/name. Unlike safeAgentPath it does not realpath, so it resolves a
+// not-yet-existing skill dir (callers check existence and 404 themselves).
+function safeAgentSkillDir(agentId, name) {
+  if (!AGENT_ID_RE.test(agentId || '') || !SKILL_NAME_RE.test(name || '')) return null;
+  const base = path.resolve(AGENTS_DIR);
+  const dir = path.resolve(base, agentId, 'skills', name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
 // List team skills, optionally filtered to one team. Each is tagged with its
 // owning teamId so the UI (and a future membership filter, #302) can scope it.
 function listTeamSkills(filterTeamId) {
@@ -7596,7 +7614,8 @@ app.get('/api/skills/:name/lineage', (req, res) => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
     if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Skill not found' });
     viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
-    viewedDir = path.join(AGENTS_DIR, path.basename(qAgentId), 'skills', name);
+    viewedDir = safeAgentSkillDir(qAgentId, name);
+    if (!viewedDir) return res.status(400).json({ error: 'Invalid agent id or skill name' });
   } else if (source === 'team') {
     viewedDir = safeTeamSkillDir(qTeamId, name);
     if (!viewedDir) return res.status(400).json({ error: 'Invalid team id or skill name' });

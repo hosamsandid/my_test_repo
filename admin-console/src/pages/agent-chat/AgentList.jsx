@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, ArrowUp, ArrowDown } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
+
+import { computeReorder, dropPosition } from './agent-list-dnd.js';
 
 const COLLAPSED_KEY = 'agentChat.collapsedGroups';
 const ORDER_KEY = 'agentChat.sidebarOrder';
@@ -240,6 +242,75 @@ export default function AgentList({
     setSidebarOrder(prev => ({ ...prev, members: { ...prev.members, [key]: newKeys } }));
   }
 
+  // ── Drag & drop reordering (#1304) ──────────────────────────────────────
+  // Additive to the arrow controls: relocates an item in one gesture, writing
+  // to the same `agentChat.sidebarOrder` key arrays so a drag-produced order is
+  // indistinguishable from an arrow-produced one after a reload (AC5/AC6).
+  //
+  // A "scope" pins each drag to one list — `'groups'`, `'singles'`, or
+  // `'members:<groupKey>'`. The dragover handler refuses to allow a drop when
+  // the target scope differs from the drag source, so an item can never leave
+  // its own list (AC4): the browser only fires `drop` on a row whose `dragover`
+  // called `preventDefault()`.
+  const dragRef = useRef(null);                 // { scope, key } for synchronous scope checks
+  const [dragging, setDragging] = useState(null); // { scope, key } — dims the dragged row
+  const [dropHint, setDropHint] = useState(null); // { scope, key, position } — insertion indicator
+
+  function currentKeysForScope(scope) {
+    if (scope === 'groups') return orderedGroups.map(groupKey);
+    if (scope === 'singles') return orderedSingles.map(a => a.id);
+    if (scope.startsWith('members:')) {
+      const key = scope.slice('members:'.length);
+      const g = orderedGroups.find(gr => groupKey(gr) === key);
+      return g ? g.children.map(a => a.id) : [];
+    }
+    return [];
+  }
+
+  function persistScopeOrder(scope, next) {
+    if (scope === 'groups') setSidebarOrder(prev => ({ ...prev, groups: next }));
+    else if (scope === 'singles') setSidebarOrder(prev => ({ ...prev, singles: next }));
+    else if (scope.startsWith('members:')) {
+      const key = scope.slice('members:'.length);
+      setSidebarOrder(prev => ({ ...prev, members: { ...prev.members, [key]: next } }));
+    }
+  }
+
+  function clearDrag() {
+    dragRef.current = null;
+    setDragging(null);
+    setDropHint(null);
+  }
+
+  const dragHandlers = {
+    onStart(scope, key) {
+      dragRef.current = { scope, key };
+      setDragging({ scope, key });
+    },
+    // Returns true when the drop is allowed (same scope) so the caller can
+    // `preventDefault()` — the only way to enable the subsequent `drop`.
+    onOver(scope, key, position) {
+      const d = dragRef.current;
+      if (!d || d.scope !== scope) return false;   // cross-scope → reject (AC4)
+      if (d.key === key) { setDropHint(null); return true; } // over self: droppable no-op, no line
+      setDropHint(cur =>
+        (cur && cur.scope === scope && cur.key === key && cur.position === position)
+          ? cur
+          : { scope, key, position });
+      return true;
+    },
+    onDrop(scope, key, position) {
+      const d = dragRef.current;
+      clearDrag();
+      if (!d || d.scope !== scope) return;
+      const next = computeReorder(currentKeysForScope(scope), d.key, key, position);
+      if (next) persistScopeOrder(scope, next);
+    },
+    onEnd() { clearDrag(); },
+  };
+
+  const drag = { handlers: dragHandlers, dragging, dropHint };
+
   const visibleGroups = orderedGroups
     .map(group => {
       const header   = group.header   && matchesFilter(group.header,   filter) ? group.header   : null;
@@ -283,6 +354,9 @@ export default function AgentList({
           onMoveDown={canReorder && i < visibleGroups.length - 1 ? () => moveGroup(group, 1) : null}
           canReorderMembers={canReorder}
           onMoveMember={moveMember}
+          drag={drag}
+          groupDragKey={groupKey(group)}
+          dragEnabled={canReorder && visibleGroups.length > 1}
         />
       ))}
 
@@ -299,6 +373,10 @@ export default function AgentList({
               activityState={statuses[agent.id] || 'idle'}
               onMoveUp={canReorder && i > 0 ? () => moveSingle(agent, -1) : null}
               onMoveDown={canReorder && i < visibleSingles.length - 1 ? () => moveSingle(agent, 1) : null}
+              drag={drag}
+              dragScope="singles"
+              dragKey={agent.id}
+              dragEnabled={canReorder && visibleSingles.length > 1}
             />
           ))}
         </>
@@ -331,9 +409,14 @@ function GroupSection({
   onMoveDown,
   canReorderMembers,
   onMoveMember,
+  drag,
+  groupDragKey,
+  dragEnabled,
 }) {
   const Icon = group.kind === 'team' ? Users : Layers;
   const count = group.children.length + (group.header ? 1 : 0);
+  const memberScope = `members:${groupDragKey}`;
+  const memberDragEnabled = canReorderMembers && group.children.length > 1;
   return (
     <>
       <CollapsibleHeader
@@ -345,6 +428,10 @@ function GroupSection({
         onToggle={onToggle}
         onMoveUp={onMoveUp}
         onMoveDown={onMoveDown}
+        drag={drag}
+        dragScope="groups"
+        dragKey={groupDragKey}
+        dragEnabled={dragEnabled}
       />
       {!collapsed && group.header && (
         <AgentRow
@@ -366,21 +453,30 @@ function GroupSection({
           indent
           onMoveUp={canReorderMembers && onMoveMember && ci > 0 ? () => onMoveMember(group, agent, -1) : null}
           onMoveDown={canReorderMembers && onMoveMember && ci < group.children.length - 1 ? () => onMoveMember(group, agent, 1) : null}
+          drag={drag}
+          dragScope={memberScope}
+          dragKey={agent.id}
+          dragEnabled={memberDragEnabled}
         />
       ))}
     </>
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onToggle, onMoveUp, onMoveDown }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onToggle, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
   const [hovered, setHovered] = useState(false);
   const canMove = onMoveUp || onMoveDown;
+
+  const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
+
   return (
     <button
       type="button"
       onClick={onToggle}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onDragOver={dnd ? dnd.onDragOver : undefined}
+      onDrop={dnd ? dnd.onDrop : undefined}
       onKeyDown={e => {
         if (!e.altKey) return;
         if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
@@ -404,6 +500,8 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
         cursor: 'pointer',
         fontFamily: 'inherit',
         textAlign: 'left',
+        opacity: dnd && dnd.isDragging ? 0.4 : 1,
+        boxShadow: dnd ? dnd.indicatorShadow : undefined,
         transition: 'background var(--eb-transition-fast)',
       }}
     >
@@ -414,6 +512,7 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {label}
       </span>
+      {dnd && <DragGrip dnd={dnd} active={hovered} />}
       {hovered && canMove && (
         <span style={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
           {onMoveUp && (
@@ -493,10 +592,12 @@ const STATUS_DOT = {
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
 
-function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', indent = false, onMoveUp, onMoveDown }) {
+function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', indent = false, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
   const Icon = iconForRole(agent.role);
   const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
   const [hovered, setHovered] = useState(false);
+
+  const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
 
   // The "mark as unread" button is shown on hover when the agent is not
   // already unread and not in a disabled/offline/error state.
@@ -512,6 +613,8 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
       role="option"
       aria-selected={selected}
       onClick={onSelect}
+      onDragOver={dnd ? dnd.onDragOver : undefined}
+      onDrop={dnd ? dnd.onDrop : undefined}
       onKeyDown={e => {
         if (!e.altKey) return;
         if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
@@ -533,6 +636,8 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         cursor: 'pointer',
         fontFamily: 'inherit',
         textAlign: 'left',
+        opacity: dnd && dnd.isDragging ? 0.4 : 1,
+        boxShadow: dnd ? dnd.indicatorShadow : undefined,
         transition: 'background var(--eb-transition-fast)',
       }}
       onMouseEnter={() => setHovered(true)}
@@ -579,6 +684,7 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
       </div>
 
       <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+        {dnd && <DragGrip dnd={dnd} active={hovered} />}
         {hovered && canMarkUnread && (
           <span
             role="button"
@@ -632,6 +738,89 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         />
       </span>
     </button>
+  );
+}
+
+/**
+ * Bundle the DOM drag handlers + derived visual state for one draggable row.
+ * Returns `null`-safely only via the `dragEnabled && drag` guard at the call
+ * site, so callers can treat a returned object as "drag is on for this row".
+ */
+function makeRowDnd(drag, scope, key) {
+  const { handlers, dragging, dropHint } = drag;
+
+  const isDragging = !!dragging && dragging.scope === scope && dragging.key === key;
+  const indicator = dropHint && dropHint.scope === scope && dropHint.key === key
+    ? dropHint.position
+    : null;
+  const indicatorShadow =
+    indicator === 'before' ? 'inset 0 2px 0 0 var(--eb-accent-primary)'
+    : indicator === 'after' ? 'inset 0 -2px 0 0 var(--eb-accent-primary)'
+    : undefined;
+
+  return {
+    isDragging,
+    indicatorShadow,
+    // Drop-target handlers live on the whole row so you can drop anywhere on it.
+    onDragOver(e) {
+      const position = dropPosition(e.clientY, e.currentTarget.getBoundingClientRect());
+      // Only same-scope drags are droppable; preventDefault is what unlocks drop.
+      if (handlers.onOver(scope, key, position)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+      }
+    },
+    onDrop(e) {
+      e.preventDefault();
+      const position = dropPosition(e.clientY, e.currentTarget.getBoundingClientRect());
+      handlers.onDrop(scope, key, position);
+    },
+    // Drag *source* handlers live on the grip only, so a plain click on the row
+    // still selects the agent and never starts a drag (AC7).
+    onGripDragStart(e) {
+      e.stopPropagation();
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', key); // required for Firefox to start the drag
+      handlers.onStart(scope, key);
+    },
+    onGripDragEnd(e) {
+      e.stopPropagation();
+      handlers.onEnd();
+    },
+  };
+}
+
+/**
+ * The dedicated drag handle. A separate draggable element (not the whole row)
+ * is what keeps click-to-select and drag-to-reorder from conflicting (AC7).
+ * Always mounted while reordering is available so the drag lifecycle survives
+ * the hover state flipping mid-drag; faint at rest, full-strength on hover as
+ * the drag affordance (AC9).
+ */
+function DragGrip({ dnd, active }) {
+  return (
+    <span
+      aria-label="Drag to reorder"
+      title="Drag to reorder"
+      draggable
+      onDragStart={dnd.onGripDragStart}
+      onDragEnd={dnd.onGripDragEnd}
+      onClick={e => e.stopPropagation()}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 12,
+        height: 14,
+        flexShrink: 0,
+        color: 'var(--eb-text-muted)',
+        cursor: 'grab',
+        opacity: active ? 1 : 0.35,
+        transition: 'opacity var(--eb-transition-fast)',
+      }}
+    >
+      <GripVertical size={12} />
+    </span>
   );
 }
 

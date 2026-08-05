@@ -2351,6 +2351,131 @@ app.get('/api/agents/:id/handover/git-status', heavyLimiter, async (req, res) =>
   }
 });
 
+/* ─── Sync repositories into existing agents (#1342) ─────────────────────────
+   The Working Environment form lets you add repositories at any time, but repos
+   are only cloned into an agent's workspace at creation. These endpoints clone
+   the MISSING repos into existing agents (idempotent — already-cloned repos are
+   left untouched) and stream one NDJSON line per repo per agent so the operator
+   sees progress. Per-agent (Agent detail) + per-environment fan-out. */
+
+// Open an NDJSON-over-chunked response for streaming per-line progress (the
+// POST /api/teams/stream mould — see that handler for the flushHeaders /
+// setNoDelay / res.on('close') rationale). Returns { emit, end, isAborted }.
+function openNdjsonStream(res) {
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  if (typeof res.socket?.setNoDelay === 'function') res.socket.setNoDelay(true);
+  let aborted = false;
+  res.on('close', () => { if (!res.writableEnded) aborted = true; });
+  return {
+    emit(ev) { if (aborted) return; try { res.write(JSON.stringify(ev) + '\n'); } catch { /* socket gone */ } },
+    end() { if (!aborted && !res.writableEnded) res.end(); },
+    isAborted: () => aborted,
+  };
+}
+
+const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+
+// Sync one agent by calling the orchestrator's per-agent endpoint and emitting
+// agent-scoped progress lines. Never throws — an orchestrator/transport error
+// becomes an 'agent-error' line so a per-environment fan-out isn't aborted by a
+// single bad agent. Returns { summary } for the caller to accumulate totals.
+async function syncOneAgentToStream(agentId, displayName, emit) {
+  emit({ type: 'agent', agentId, displayName: displayName || agentId });
+  let data;
+  try {
+    const resp = await fetch(
+      `${ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/sync-repositories`,
+      { method: 'POST' },
+    );
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const error = (data && data.error) || `HTTP ${resp.status}`;
+      emit({ type: 'agent-error', agentId, error });
+      return { summary: { ...EMPTY_SYNC_SUMMARY } };
+    }
+  } catch (err) {
+    emit({ type: 'agent-error', agentId, error: `Orchestrator unreachable: ${err.message}` });
+    return { summary: { ...EMPTY_SYNC_SUMMARY } };
+  }
+  if (data.noWorkspace) {
+    emit({ type: 'agent-skip', agentId, reason: 'no-workspace' });
+    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY } };
+  }
+  const repos = Array.isArray(data.repos) ? data.repos : [];
+  for (const r of repos) {
+    emit({
+      type: 'repo', agentId, name: r.name, url: r.url, status: r.status,
+      reason: r.reason || null, error: r.error || null, fromCache: !!r.fromCache,
+    });
+  }
+  const summary = data.summary || summarizeSyncRepos(repos);
+  emit({ type: 'agent-done', agentId, summary });
+  return { summary };
+}
+
+// Local fold, in case the orchestrator omits `summary` (defensive).
+function summarizeSyncRepos(repos) {
+  const list = Array.isArray(repos) ? repos : [];
+  return {
+    total: list.length,
+    cloned: list.filter((r) => r.status === 'cloned').length,
+    skipped: list.filter((r) => r.status === 'skipped').length,
+    failed: list.filter((r) => r.status === 'failed').length,
+  };
+}
+
+// Per-agent: clone the environment's missing repos into this one agent.
+app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const stream = openNdjsonStream(res);
+  try {
+    stream.emit({ type: 'plan', agentCount: 1 });
+    const { summary } = await syncOneAgentToStream(id, id, stream.emit);
+    stream.emit({ type: 'complete', agentCount: 1, totals: summary });
+  } catch (err) {
+    stream.emit({ type: 'error', status: 500, error: err.message });
+  } finally {
+    stream.end();
+  }
+});
+
+// Per-environment: fan the same sync out to every agent bound to the env.
+app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => {
+  const envId = normalizeEnvId(req.params.id);
+  const env = loadEnvironment(envId);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  const agents = agentsUsingEnvironment(envId, scope);
+  const repoCount = (Array.isArray(env.repositories) ? env.repositories : []).length;
+
+  const stream = openNdjsonStream(res);
+  const totals = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+  try {
+    stream.emit({
+      type: 'plan', envId, agentCount: agents.length, repoCount,
+      agents: agents.map((a) => ({ id: a.id, displayName: a.displayName })),
+    });
+    for (const a of agents) {
+      if (stream.isAborted()) break;
+      const { summary } = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
+      totals.total += summary.total || 0;
+      totals.cloned += summary.cloned || 0;
+      totals.skipped += summary.skipped || 0;
+      totals.failed += summary.failed || 0;
+    }
+    stream.emit({ type: 'complete', agentCount: agents.length, totals });
+  } catch (err) {
+    stream.emit({ type: 'error', status: 500, error: err.message });
+  } finally {
+    stream.end();
+  }
+});
+
 // Post a canned "please commit" / "please push" prompt into the source
 // agent's own DM. We send it as the admin user (same path as a manually
 // typed message) so the agent picks it up via its normal DM heuristic and

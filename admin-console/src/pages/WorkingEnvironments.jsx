@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
+import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const labelStyle = {
@@ -444,6 +445,17 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         >
           <Plus size={13} /> Add repository
         </button>
+
+        {isEdit && initial?.id && form.repositories.length > 0 && (initial.agents || []).length > 0 && (
+          <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px dashed var(--eb-border-default)' }}>
+            <SyncReposPanel
+              endpoint={`/api/environments/${encodeURIComponent(initial.id)}/sync-agents`}
+              actionLabel="Sync all agents"
+              description={`Clone the repositories above into every agent already using this environment (${(initial.agents || []).length} agent${(initial.agents || []).length === 1 ? '' : 's'}) — repositories are otherwise only cloned when an agent is first created. Already-cloned repositories are left untouched.`}
+              showAgentHeaders
+            />
+          </div>
+        )}
       </div>
 
       <div style={{

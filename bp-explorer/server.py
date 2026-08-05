@@ -2539,16 +2539,20 @@ async def serve_preview(
 
     # Containment: normalize both the (already contained) project root and the
     # user-supplied path with os.path.realpath and verify the target stays under
-    # the root with a DIRECT str.startswith check in the guard condition — the
-    # exact barrier CodeQL models for py/path-injection (normalize, then
-    # prefix-check the normalized value in the branch). A prior form stored an
-    # os.path.commonpath equality in a boolean variable and branched on it; that
-    # was functionally safe but NOT recognised as a barrier, so every downstream
-    # sink stayed flagged. The exact-match / trailing-os.sep test also rejects
-    # prefix-siblings such as "/root-evil" that a bare startswith(root) accepts.
+    # the root with a SINGLE DIRECT str.startswith check in the guard condition
+    # — the exact barrier CodeQL models for py/path-injection (normalize, then
+    # prefix-check the normalized value in the branch). The prior form used a
+    # disjunction `full_real == root_resolved or full_real.startswith(...)`; the
+    # `== root or …` arm makes the safe branch reachable without startswith, so
+    # CodeQL did NOT recognise it as a barrier and every downstream sink stayed
+    # flagged. The preview target is always a FILE strictly under the root (the
+    # `if not path: raise 400` guard above rules out the empty/root case), so
+    # the equality arm was dead and dropping it is behaviour-preserving. The
+    # trailing-os.sep also rejects prefix-siblings such as "/root-evil" that a
+    # bare startswith(root) accepts.
     root_resolved = os.path.realpath(project_root)
     full_real = os.path.realpath(project_root / path)
-    if not (full_real == root_resolved or full_real.startswith(root_resolved + os.sep)):
+    if not full_real.startswith(root_resolved + os.sep):
         raise HTTPException(status_code=403, detail="Path outside project root")
     full = Path(full_real)
 

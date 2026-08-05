@@ -1894,8 +1894,24 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
             if a.get("direction") != "output":
                 continue
             fpath = project_root / a["path"]
-            exists = fpath.exists()
-            is_dir = fpath.is_dir() if exists else False
+            # Containment: reject artifact paths that resolve outside the
+            # project root before any filesystem access. os.path.commonpath
+            # equality is a CodeQL-recognised path barrier (unlike a bare
+            # str.startswith prefix test, which sibling dirs sharing a prefix
+            # can bypass). The resolved path is used for every fs operation.
+            root_resolved = project_root.resolve()
+            full = fpath.resolve()
+            try:
+                contained = (
+                    os.path.commonpath([str(root_resolved), str(full)])
+                    == str(root_resolved)
+                )
+            except ValueError:
+                contained = False
+            if not contained:
+                continue
+            exists = full.exists()
+            is_dir = full.is_dir() if exists else False
             if not exists and on_branch:
                 exists_on_branch = (
                     git_show_file(project_root, branch, a["path"]) is not None
@@ -1903,7 +1919,7 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
             else:
                 exists_on_branch = False
             if exists:
-                size = fpath.stat().st_size if not is_dir else 0
+                size = full.stat().st_size if not is_dir else 0
             elif exists_on_branch:
                 size = git_file_size(project_root, branch, a["path"])
             else:

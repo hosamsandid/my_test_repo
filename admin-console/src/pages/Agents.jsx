@@ -14,6 +14,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
+import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
 
@@ -1615,6 +1616,17 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       {agent.role !== 'team' && (
         <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
           <ContextMountControl agent={agent} />
+        </div>
+      )}
+
+      {agent.role !== 'team' && agent.environmentId && (
+        <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <div style={labelStyle}>Repositories</div>
+          <SyncReposPanel
+            endpoint={`/api/agents/${encodeURIComponent(agent.id)}/sync-repositories`}
+            actionLabel="Sync repositories"
+            description={"Clone any repositories added to this agent's Working Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
+          />
         </div>
       )}
 

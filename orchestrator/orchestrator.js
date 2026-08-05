@@ -57,6 +57,7 @@ const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
+const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
@@ -8619,6 +8620,40 @@ class Orchestrator {
     return { id, respawned: true };
   }
 
+  // Sync an environment's declared repositories into an already-created agent's
+  // workspace (issue #1342). Repos are otherwise only cloned when the agent is
+  // first seeded, so a repo added to the environment after the fact never
+  // reaches existing agents. This clones only the repos that are MISSING from
+  // the workspace — already-cloned repos are left untouched (no fetch, no
+  // branch switch, no re-clone). Reuses the same clone helper (and therefore
+  // the env's SSH-key / GitHub-token resolution and per-env clone cache) as
+  // creation-time seeding. The workspace volume is shared with the running
+  // container, so cloned files appear inside the agent without a respawn.
+  syncAgentRepositories(agentId) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const environmentId = cfg.environmentId || null;
+    const env = environmentId ? loadEnvironment(environmentId) : null;
+    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const workspace = agentDir(agentId);
+
+    // A stub / never-materialized agent has no workspace on disk — there is
+    // nothing to clone into (git would fail on a missing cwd). Report honestly.
+    if (repositories.length && !fs.existsSync(workspace)) {
+      return { agentId, environmentId, repos: [], noWorkspace: true, summary: summarizeRepoResults([]) };
+    }
+
+    const repos = syncAgentRepoPlan(repositories, {
+      hasGit: (name) => fs.existsSync(path.join(workspace, name, ".git")),
+      clone: (repo) => cloneRepository(workspace, repo, env?.githubTokenId || null, env?.id || null),
+    });
+    return { agentId, environmentId, repos, summary: summarizeRepoResults(repos) };
+  }
+
   // Reset an agent back to its stub state: stop the process, deactivate the
   // Matrix user (best-effort), wipe the workspace, and strip the config of
   // any runtime identity (token, userId). The stub config keeps just the
@@ -11264,6 +11299,27 @@ async function main() {
           res.end(JSON.stringify({ error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Sync an environment's repos into an existing agent's workspace ──────
+    // Fired by the admin-console "Sync repositories" action (#1342). Clones any
+    // repos the environment declares that are missing from this agent's
+    // workspace; idempotent (already-cloned repos are left untouched). Returns
+    // a per-repo result the console streams to the operator.
+    const syncReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/sync-repositories$/);
+    if (syncReposMatch) {
+      const id = decodeURIComponent(syncReposMatch[1]);
+      try {
+        const result = orchestrator.syncAgentRepositories(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error(`[Orchestrator] syncAgentRepositories error for ${id}: ${err.message}`);
+        const status = err.code === 'not-found' || /not found/i.test(err.message) ? 404 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
 

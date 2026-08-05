@@ -2646,9 +2646,14 @@ async def invoke_agent(body: InvokeRequest, request: Request):
                 try:
                     async for event in event_iter:
                         await queue.put(event.to_sse())
-                except Exception as exc:
+                except Exception:
+                    logger.exception("SSE consumer error")
                     error_payload = json.dumps(
-                        {"type": "error", "error": "unexpected", "message": str(exc)},
+                        {
+                            "type": "error",
+                            "error": "unexpected",
+                            "message": "Internal error while streaming events.",
+                        },
                         ensure_ascii=False,
                     )
                     await queue.put(f"data: {error_payload}\n\n")
@@ -2674,10 +2679,14 @@ async def invoke_agent(body: InvokeRequest, request: Request):
             # Ensure the consumer task is cleaned up
             await consumer_task
 
-        except Exception as exc:
+        except Exception:
             logger.exception("SSE generator error")
             error_payload = json.dumps(
-                {"type": "error", "error": "stream_error", "message": str(exc)},
+                {
+                    "type": "error",
+                    "error": "stream_error",
+                    "message": "Internal error while streaming events.",
+                },
                 ensure_ascii=False,
             )
             yield f"data: {error_payload}\n\n"
@@ -2770,9 +2779,14 @@ async def stream_agent_events(
             try:
                 async for event in event_iter:
                     await queue.put(event.to_sse())
-            except Exception as exc:
+            except Exception:
+                logger.exception("SSE consumer error")
                 error_payload = json.dumps(
-                    {"type": "error", "error": "stream_error", "message": str(exc)},
+                    {
+                        "type": "error",
+                        "error": "stream_error",
+                        "message": "Internal error while streaming events.",
+                    },
                     ensure_ascii=False,
                 )
                 await queue.put(f"data: {error_payload}\n\n")

@@ -11528,7 +11528,7 @@ async function main() {
         try {
           result = refreshKnowledgeClone(String(teamId), { force: false });
         } catch (err) {
-          result = { refreshedAt: null, warnings: [String(err && err.message || err)] };
+          result = { refreshedAt: null, warnings: [errorMessage(err)] };
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, ...result }));

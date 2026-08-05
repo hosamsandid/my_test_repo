@@ -12054,7 +12054,18 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     }
     if (created.env) {
       try {
-        fs.rmSync(path.join(ENVIRONMENTS_DIR, created.env), { recursive: true, force: true });
+        // created.env is envId (TEAM_ID_RE / normalizeEnvId), but CodeQL's
+        // js/path-injection query doesn't recognise those as barriers; contain
+        // it under ENVIRONMENTS_DIR with the path.resolve + path.relative
+        // idiom (mirrors the non-streaming handler's rollback) before rmSync.
+        const environmentsRoot = path.resolve(ENVIRONMENTS_DIR);
+        const envPath = path.resolve(environmentsRoot, String(created.env));
+        const rel = path.relative(environmentsRoot, envPath);
+        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+          fs.rmSync(envPath, { recursive: true, force: true });
+        } else {
+          console.error(`[Team:stream] Rollback: refused to delete env outside root: ${created.env}`);
+        }
       } catch (err) {
         console.error(`[Team:stream] Rollback: failed to delete env ${created.env}: ${err.message}`);
       }

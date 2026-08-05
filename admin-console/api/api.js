@@ -13336,10 +13336,21 @@ app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
 // at v12 by default, so the suffix must be optional here.
 const ROOM_ID_RE = /^![a-zA-Z0-9_-]+(?::[a-zA-Z0-9.-]+)?$/;
 
-// Session-file paths are built inline at every call site (rather than via a
-// helper) so the sanitisation gate (AGENT_ID_RE / ROOM_ID_RE tests at the
-// route entry) and the path.join sit in the same function — that's the
-// shape CodeQL's js/path-injection rule recognises as a barrier.
+// Session-file paths derive from two route params (agentId, roomId). Both pass
+// an anchored regex at the route entry (AGENT_ID_RE / ROOM_ID_RE — neither admits
+// a path separator or `..`), but CodeQL's js/path-injection rule does not model a
+// regex test as a traversal barrier, so every downstream fs sink stayed flagged.
+// Resolve every session path through this one helper: its path.relative
+// containment check IS the CodeQL-legible barrier, and its return value is safe to
+// hand to any fs call. Returns null on an escaping / malformed pair (the guard
+// never trips for a regex-valid agentId + roomId — behaviour is unchanged).
+function safeSessionPath(agentId, roomId, suffix) {
+  const base = path.resolve(AGENTS_DIR);
+  const full = path.resolve(base, agentId, 'sessions', roomId + suffix);
+  const rel = path.relative(base, full);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return full;
+}
 
 /* ─── Session pointer (Claude --resume id) ─────────────────────────── */
 
@@ -13354,7 +13365,8 @@ app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
     return res.status(400).json({ error: 'invalid id' });
   }
   const ptr = controlOrAgentPath(agentId, 'sessions', roomId + '.current.json'); // pushed copy preferred (#185)
-  const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
+  const flagPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!flagPath) return res.status(400).json({ error: 'invalid id' });
 
   let sessionId = null, updatedAt = null;
   if (fs.existsSync(ptr)) {
@@ -13394,10 +13406,12 @@ app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (re
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
+  const currentPath = safeSessionPath(agentId, roomId, '.current.json');
+  const flagPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!currentPath || !flagPath) return res.status(400).json({ error: 'invalid id' });
   try {
     // Local pool copy (works on the shared volume; a no-op on an isolated one).
-    fs.rmSync(path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json'), { force: true });
-    const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
+    fs.rmSync(currentPath, { force: true });
     fs.mkdirSync(path.dirname(flagPath), { recursive: true });
     writeJsonAtomic(flagPath, { resetAt: new Date().toISOString() });
   } catch (err) {
@@ -13495,14 +13509,16 @@ app.post('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req,
   // volume this write is directly visible to the agent; on an isolated volume
   // the orchestrator call below queues the same work for the agent to apply.
   const updatedAt = new Date().toISOString();
+  const currentPath = safeSessionPath(agentId, roomId, '.current.json');
+  const resetPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!currentPath || !resetPath) return res.status(400).json({ error: 'invalid id' });
   try {
-    const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions');
-    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
     writeJsonAtomic(
-      path.join(sessionsDir, roomId + '.current.json'),
+      currentPath,
       { sessionId, updatedAt, resumeRequested: true },
     );
-    fs.rmSync(path.join(sessionsDir, roomId + '.reset.json'), { force: true });
+    fs.rmSync(resetPath, { force: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

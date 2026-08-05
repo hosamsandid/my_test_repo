@@ -56,6 +56,79 @@ Known quirks:
 - A `docker` CLI pointing at a dead daemon (e.g. stopped colima) is handled —
   the script probes the daemon and falls back to the Podman provider.
 
+## Context mounts on kind (#1319)
+
+Host-folder context mounts (`docs/context-mount.md`) work on the k8s runtime
+behind an **explicit opt-in**: add to `.env.k8s` and re-run `kind-up.sh`
+
+```
+AEE_K8S_CONTEXT_HOSTPATH=1
+```
+
+Without it the console reports the feature unsupported and the orchestrator
+renders no mount — hosted GKE never sets it (a hostPath on a multi-node
+cluster is the wrong tool; it also stays hard-off behind IAP regardless).
+
+Two things differ from the Podman stack:
+
+- **"Host" means the kind node**, i.e. the `agent-studio-control-plane`
+  container — not your Mac. The mount renders as a `hostPath` volume
+  (`type: Directory`) in the agent pod, so the folder must already exist *in
+  the node* or the pod stays Pending on a `FailedMount` event (symmetric to
+  the Podman path not pre-checking existence). Quick node-local folder:
+  `podman exec agent-studio-control-plane mkdir -p /opt/my-context`.
+- **To expose a real Mac folder** you need a kind `extraMounts` entry, which
+  only applies at cluster creation (`kind delete cluster` first):
+
+  ```yaml
+  # kind-config.yaml — pass with: kind create cluster --name agent-studio --config kind-config.yaml
+  kind: Cluster
+  apiVersion: kind.x-k8s.io/v1alpha4
+  nodes:
+    - role: control-plane
+      extraMounts:
+        - hostPath: /Users/you/project-docs
+          containerPath: /host-context/project-docs
+  ```
+
+  Then set the agent's context folder to the **containerPath**
+  (`/host-context/project-docs`).
+
+Console browsing and read-write uploads run through the agent's pod over the
+Kubernetes `pods/exec` API (`orchestrator/pod-exec.js`; the Podman stack uses
+the libpod socket instead — same endpoints, different transport).
+
+## Run the e2e journey suite on kind (#1319)
+
+The Playwright journey suite (`e2e/journeys/`) can target a **dedicated** e2e
+kind cluster — agents spawn as real k8s pods, so this covers the k8s runtime
+end to end (the compose e2e lane only covers Podman):
+
+```bash
+make e2e-kind        # kind-up --e2e → port-forwards → configure → run journeys
+make e2e-kind-up     # just bring the stack up (authoring loop)
+make e2e-kind-down   # kill port-forwards + delete cluster agent-studio-e2e
+```
+
+What `--e2e` changes vs the dev kind stack: own cluster (`agent-studio-e2e`)
+and env file (`.env.k8s-e2e`), the LLM stubbed at the claude-binary seam
+(`AEE_FAKE_CLAUDE=1` — canned replies, no real endpoint), in-cluster
+`fake-github` + `git-remote` fixture services (`manifests/e2e/80-e2e-fakes.yaml`),
+non-interactive Matrix bootstrap, and `AEE_K8S_CONTEXT_HOSTPATH=1` (the
+`context-mount` journey exercises it). Your dev kind cluster and both compose
+stacks are untouched.
+
+Journeys are lane-filtered: `make e2e-kind` runs with `E2E_LANE=ci,kind`, so
+all the regular `ci` journeys run **plus** the kind-only `context-mount`
+journey (whose fixture shells into the kind node — meaningless on compose).
+
+**Re-runs need a fresh cluster** (`make e2e-kind-down` first). Journeys that
+materialise teams delete them in teardown, which deactivates the members'
+Matrix users — permanent in conduwuit — so a second materialisation of the
+same fixed ids on the same homeserver fails with `M_USER_DEACTIVATED`. The
+compose lane has the same property; it is invisible there only because
+`make e2e` always starts from fresh volumes.
+
 ## Access the hosted version (GKE)
 
 The pilot runs on GKE cluster `agent-studio` (project `acn-projectroots`,
@@ -115,5 +188,7 @@ which rewrites them for Artifact Registry.
 | Stack | Console |
 |---|---|
 | compose/Podman (`make up`) | `:4000` (or `ADMIN_PORT` from `.env`) |
+| compose e2e (`make e2e-up`) | `:4010` (+ fake-github `:4014`) |
 | kind (local) | `:4100` via port-forward |
+| kind e2e (`make e2e-kind-up`) | `:4110` via port-forward (+ fake-github `:4114`) |
 | GKE (hosted) | `https://agent-studio.projectroots-acn.com` (fallback: `:4200` via port-forward) |

@@ -32,7 +32,9 @@ Scope is deliberately small and safe:
 - **read-only by default**, read-write only when explicitly enabled per folder;
 - **admin-only** — only someone with management rights over the agent's team can set it;
 - **one or more folders per agent** (#1290) — each at a distinct, stable path;
-- **local / self-hosted only** — it is unavailable on the hosted (GKE/IAP) stack.
+- **local / self-hosted only** — it is unavailable on the hosted (GKE/IAP) stack. On
+  a local Kubernetes runtime (kind) it takes an explicit operator opt-in
+  (`AEE_K8S_CONTEXT_HOSTPATH=1`, #1319 — see [Kubernetes (kind) support](#kubernetes-kind-support-1319)).
 
 ## How to set it
 
@@ -207,9 +209,37 @@ reads and writes).
 |---|---|
 | **Config** | A single legacy folder persists as `contextMount` (absolute host path string) + optional `contextMountRw: true`. Multiple folders (#1290) persist as `contextMounts: [{ path, name, slug, readWrite? }]` (the two shapes never coexist — writing one drops the other). `readWrite` is stored only when true, and an agent with no folder carries neither key, so its config is byte-identical to a pre-feature agent. `resolveContextMounts(cfg)` (in `context-mount.js`) resolves either shape to the ordered list of folders + in-container targets. |
 | **API** | `PATCH /api/agents/:id/context-mount` accepts either a single-path body (`{ path, readWrite }`) or a `{ mounts: [...] }` array (validated + slug-assigned by `normalizeContextMountsInput`); it writes config, rebuilds the prompt and best-effort respawns the agent. `GET /api/context-mount/capability` tells the UI whether the feature is offered here. `GET /api/agents/:id/context/status` returns one `mounts[]` entry per folder. All admin-gated / local-gated. |
-| **Provisioning** | `startAgentProcess` calls `resolveContextMounts(config)` (podman runtime only) and passes the list to `spawnContainer`, which adds one libpod bind mount per folder at its target in the requested access mode (`buildContextMountSpecs`). Mounts are baked at container-create time, so a change requires a respawn; an invalid folder is skipped without blocking the others. |
+| **Provisioning** | `startAgentProcess` calls `resolveContextMounts(config)` (podman runtime, or k8s behind the `AEE_K8S_CONTEXT_HOSTPATH` opt-in — #1319) and passes the list to `spawnContainer`. Podman adds one libpod bind mount per folder (`buildContextMountSpecs`); Kubernetes renders one `hostPath` volume + volumeMount per folder (`buildContextHostPathVolumes` in `spawn-kubernetes-pod.js`, `readOnly` unless the folder opts into read-write). Mounts are baked at container-create time, so a change requires a respawn; an invalid folder is skipped without blocking the others. |
 | **Prompt** | `prompt-assembly.js` emits the gated context section — the single-folder *Read-only Context Folder* / *Host Context Folder* wording for a lone `/context` folder, or an enumerated **Context Folders** list for a multi-folder set (#1290); `POST /internal/agents/:id/prompt-rebuild` rebuilds + reseeds `CLAUDE.md` when the mounts are set or cleared. |
-| **Browsing** | `GET /api/agents/:id/context/{status,tree,file,image,download}` → `/internal/agents/:id/context/*` → a one-shot read-only exec in the agent's container (`container-exec.js`) running the `list`/`read` program from the pure `context-browse.js`. The browse program lists under `/context`, so each folder's `/context/<slug>` target is reached by a `<slug>/…` relative path with no per-folder branch. |
+| **Browsing** | `GET /api/agents/:id/context/{status,tree,file,image,download}` → `/internal/agents/:id/context/*` → a one-shot read-only exec in the agent's container running the `list`/`read` program from the pure `context-browse.js`. The exec transport is runtime-selected (`container-exec-runtime.js`, #1319): the libpod socket on podman (`container-exec.js`), the Kubernetes `pods/exec` API on k8s (`pod-exec.js`). The browse program lists under `/context`, so each folder's `/context/<slug>` target is reached by a `<slug>/…` relative path with no per-folder branch. |
+
+## Kubernetes (kind) support (#1319)
+
+On the Kubernetes runtime the mount renders as a **`hostPath` volume** in the agent's
+pod — which changes what "host" means and who should enable it:
+
+- **Opt-in, off by default.** Set `AEE_K8S_CONTEXT_HOSTPATH=1` in the stack's env
+  (kind: `.env.k8s`, re-run `kind-up.sh`) to enable it; without the flag the console
+  reports the feature unsupported and the orchestrator renders no mount. The IAP gate
+  stays hard-off regardless, so hosted GKE can never enable it — a hostPath on a
+  multi-node cluster points at whichever node schedules the pod, which is the wrong
+  tool (a hosted design would need its own concept).
+- **"Host" is the node.** On kind, that is the cluster's node *container*
+  (`agent-studio-control-plane`) — a Mac folder needs a kind `extraMounts` entry at
+  cluster creation. See `deploy/k8s/README.md` ("Context mounts on kind") for both
+  recipes.
+- **Fail-closed rendering, `type: Directory`.** Each folder is re-validated at the
+  point of use (same `validateHostMountPath` as podman; a bad entry drops that mount
+  only), and the volume uses `hostPath.type: Directory`, so a folder missing on the
+  node leaves the pod Pending on a `FailedMount` event rather than mounting nothing.
+- **Browse/write travel over `pods/exec`** (`orchestrator/pod-exec.js`, selected by
+  `container-exec-runtime.js`), which needs `pods/exec [create]` on the
+  orchestrator's Role (`deploy/k8s/manifests/10-rbac.yaml`). Uploads stream the tar
+  archive over exec stdin instead of the libpod archive endpoint; semantics (caps,
+  error codes, kernel EROFS backstop on read-only mounts) are unchanged.
+- **Covered by e2e**: the kind-lane `context-mount` journey
+  (`e2e/journeys/context-mount.yaml`, `make e2e-kind`) seeds a node folder, mounts it
+  read-write, browses it in the workspace browser and writes back through the console.
 
 ## Known limits (v1)
 

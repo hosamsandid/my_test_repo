@@ -11924,8 +11924,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     .filter((p) => {
       const memberPath = path.resolve(agentsRoot, p.memberId);
       const memberRel = path.relative(agentsRoot, memberPath);
-      const inAgentsDir = !memberRel.startsWith('..') && !path.isAbsolute(memberRel);
-      if (!inAgentsDir) {
+      if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
         fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
         return false;
       }

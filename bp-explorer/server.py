@@ -834,20 +834,26 @@ def _contain_under(root: Path, candidate: Path) -> Path | None:
 
     Normalizes both paths with ``os.path.realpath`` (removes ``..`` segments and
     follows symlinks) and then verifies the candidate stays under *root* with a
-    DIRECT ``str.startswith`` check in the guard condition — the exact barrier
-    CodeQL models for py/path-injection (normalize, then prefix-check the
-    normalized value in the branch condition). A prior form stored an
-    ``os.path.commonpath`` equality in a boolean and branched on it; that was
-    functionally safe but NOT recognised as a barrier by CodeQL (the guarded
-    value never flowed through a modelled sanitizer), so every downstream sink
-    stayed flagged. The exact-match / trailing-``os.sep`` test rejects
-    prefix-siblings such as ``/root-evil`` that a bare
-    ``startswith(root)`` would accept. Returns the resolved absolute ``Path``
-    when contained, otherwise ``None`` so callers can skip the path.
+    SINGLE, DIRECT ``str.startswith`` check in the guard condition — the exact
+    barrier shape CodeQL models for py/path-injection (normalize, then
+    prefix-check the normalized value; the "contained" branch must be reachable
+    *only* when the check holds).
+
+    A prior form OR-ed ``full == root_resolved`` with the ``startswith`` test.
+    CodeQL only recognises ``str.startswith`` as a path barrier when the safe
+    (return) branch cannot be reached without ``startswith`` being true; the
+    ``== ... or ...`` disjunction left it reachable via the equality alone, so
+    the guard was not modelled and every value returned from here (and the
+    downstream ``.exists()`` / ``.read_text()`` / ``.glob()`` sinks it fed)
+    stayed flagged. The trailing ``os.sep`` keeps prefix-sibling safety
+    (``/root-evil`` is rejected); every caller passes a strict subpath of
+    *root* (``root / <rel>``), never *root* itself, so requiring the separator
+    loses no valid path. Returns the resolved absolute ``Path`` when contained,
+    otherwise ``None`` so callers can skip the path.
     """
     root_resolved = os.path.realpath(root)
     full = os.path.realpath(candidate)
-    if full == root_resolved or full.startswith(root_resolved + os.sep):
+    if full.startswith(root_resolved + os.sep):
         return Path(full)
     return None
 

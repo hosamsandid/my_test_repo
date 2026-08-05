@@ -113,7 +113,7 @@ make e2e-kind-down   # kill port-forwards + delete cluster agent-studio-e2e
 What `--e2e` changes vs the dev kind stack: own cluster (`agent-studio-e2e`)
 and env file (`.env.k8s-e2e`), the LLM stubbed at the claude-binary seam
 (`AEE_FAKE_CLAUDE=1` — canned replies, no real endpoint), in-cluster
-`fake-github` + `git-remote` fixture services (`manifests/e2e/80-e2e-fakes.yaml`),
+`fake-github` + `git-remote` fixture services (`base/e2e/80-e2e-fakes.yaml`),
 non-interactive Matrix bootstrap, and `AEE_K8S_CONTEXT_HOSTPATH=1` (the
 `context-mount` journey exercises it). Your dev kind cluster and both compose
 stacks are untouched.
@@ -129,11 +129,74 @@ same fixed ids on the same homeserver fails with `M_USER_DEACTIVATED`. The
 compose lane has the same property; it is invisible there only because
 `make e2e` always starts from fresh volumes.
 
+## One manifest source, per-environment overlays (#1348)
+
+Every stack deploys the same kustomize **base**, specialised by a thin
+overlay — there is no script-side manifest rewriting anymore:
+
+| Overlay (`deploy/k8s/overlays/…`) | Used by | Differences vs base |
+|---|---|---|
+| `kind` | `kind-up.sh` | none (local `:latest` images, `imagePullPolicy: Never`, no ingress) |
+| `kind-e2e` | `kind-up.sh --e2e` | + in-cluster fakes (`base/e2e`) |
+| `test` | deploy-gke workflow, `gke-up.sh` | Artifact Registry images, `Always`, ingress `agent-studio.projectroots-acn.com` |
+| `preprod` | deploy-gke workflow, `gke-up.sh --env preprod` | as test + namespace `agent-studio-preprod`, own IP/hostname, own `AEE_INSTANCE_ID` |
+
+Each overlay is split `core/` (namespace, RBAC, PVCs, conduwuit) and `app/`
+(orchestrator, console, bp-explorer, ingress) because the `agent-studio-env`
+Secret is created between the two by the up scripts. Apply **only through an
+overlay** (`kubectl apply -k deploy/k8s/overlays/<env>/…`), never `-f base/`.
+
+`deploy/k8s/render-check.sh` (CI: the `k8s-render` job) asserts the overlay
+invariants; `deploy/k8s/set-images.sh <env> <tag>` pins the image tag in the
+working tree at deploy time — the checked-in placeholder stays `latest`, so
+never commit a pinned tag (`git checkout -- deploy/k8s/overlays` to reset).
+
+## Releases & deploys (trunk-based, manual)
+
+`main` is the trunk. A **release** is an annotated tag on a main commit:
+
+```bash
+git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+```
+
+Deploys are manual: Actions → **deploy-gke** → Run workflow, choose
+`environment` + `ref`. Images are built amd64 and pushed with an **immutable
+tag** (the git tag, or `sha-<8>` for branch deploys — `:latest` is gone), the
+overlay is pinned to it, and the workflow **applies the manifests** (core →
+Secret check → app) — routine manifest changes no longer need an out-of-band
+`kubectl apply`. The running version is always visible:
+`kubectl -n <ns> get deploy -o wide`.
+
+- **test** (`agent-studio` namespace) accepts any ref, default `main` HEAD.
+- **preprod** (`agent-studio-preprod`) accepts release tags `vX.Y.Z` only,
+  enforced by the workflow's guard job (tag must also sit on `main`).
+- Re-running the same tag is a no-op (immutable-tag semantics). After a
+  Secret-only change (rotated credentials), re-run `gke-up.sh` — it also
+  rollout-restarts — or bounce the deployments manually.
+
+**First-time preprod bootstrap** (operator machine, one-time):
+
+1. `cd infra/gcp && terraform apply` — creates `agent-studio-preprod-ip` +
+   the DNS record (the ManagedCertificate needs them first).
+2. Deploy the release tag to **test** via the workflow — this pushes the
+   tag's images to the shared Artifact Registry.
+3. `./deploy/k8s/gke-up.sh --env preprod --tag vX.Y.Z` — creates the
+   namespace stack, runs the Matrix bootstrap into `.env.gke-preprod`,
+   creates the Secret, applies the app + ingress.
+4. Wait for the ManagedCertificate to turn `Active` (15–30 min), then open
+   `https://agent-studio-preprod.projectroots-acn.com` (IAP, same access
+   grant as test).
+
+Heads-up: preprod doubles the workload on the single `e2-standard-2` node —
+if pods stay Pending on resources, bump `node_machine_type` in
+`infra/gcp/variables.tf` (node recreation restarts test briefly). More nodes
+is NOT the lever until RWX storage lands (#1316).
+
 ## Access the hosted version (GKE)
 
-The pilot runs on GKE cluster `agent-studio` (project `acn-projectroots`,
-`europe-west3-b`) behind a public HTTPS URL with Google SSO (Cloud IAP —
-`manifests/70-ingress.yaml` + `infra/gcp/ingress.tf`):
+The **test** environment runs on GKE cluster `agent-studio` (project
+`acn-projectroots`, `europe-west3-b`) behind a public HTTPS URL with Google
+SSO (Cloud IAP — `overlays/test/app/ingress.yaml` + `infra/gcp/ingress.tf`):
 
 **https://agent-studio.projectroots-acn.com** — sign in with your
 `@accenture.com` Google account. Access is granted via
@@ -176,12 +239,11 @@ kubectl --context gke_acn-projectroots_europe-west3-b_agent-studio \
 ```
 
 Requires GKE access on `acn-projectroots` (`roles/container.developer` or
-similar). Deploys to GKE: Actions → **deploy-gke** → Run workflow (manual;
-builds amd64 images, pushes to Artifact Registry, rolls out). First-time
-infrastructure setup is `deploy/k8s/gke-up.sh` — see its header. **Applying
-manifests by hand:** never `kubectl apply` the raw files against GKE — they
-carry kind-flavored image refs (`imagePullPolicy: Never`); re-run `gke-up.sh`,
-which rewrites them for Artifact Registry.
+similar). Deploys: see **Releases & deploys** above. First-time environment
+setup is `deploy/k8s/gke-up.sh` — see its header. **Applying manifests by
+hand:** always through the environment's overlay
+(`kubectl apply -k deploy/k8s/overlays/test/app`), never `-f base/` — the
+base carries kind-flavored image refs (`imagePullPolicy: Never`).
 
 ## Port map (all three stacks side by side)
 
@@ -191,4 +253,5 @@ which rewrites them for Artifact Registry.
 | compose e2e (`make e2e-up`) | `:4010` (+ fake-github `:4014`) |
 | kind (local) | `:4100` via port-forward |
 | kind e2e (`make e2e-kind-up`) | `:4110` via port-forward (+ fake-github `:4114`) |
-| GKE (hosted) | `https://agent-studio.projectroots-acn.com` (fallback: `:4200` via port-forward) |
+| GKE test (hosted) | `https://agent-studio.projectroots-acn.com` (fallback: `:4200` via port-forward) |
+| GKE preprod (hosted) | `https://agent-studio-preprod.projectroots-acn.com` (fallback: `:4200` via port-forward, namespace `agent-studio-preprod`) |

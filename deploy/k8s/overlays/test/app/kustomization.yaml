@@ -1,0 +1,31 @@
+# test (GKE) overlay — Artifact Registry images, imagePullPolicy Always,
+# public ingress behind IAP.
+#
+# newTag stays `latest` in git as a render-anywhere placeholder; a real deploy
+# pins the release tag with `deploy/k8s/set-images.sh test <tag>` (which edits
+# this file in the working tree — never commit a pinned tag). The same script
+# rewrites the as-agent tag in patch-agent-image.yaml, which the images
+# transformer cannot see (env var, not a pod image field).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/app
+  - ingress.yaml
+images:
+  - name: agent-studio-orchestrator
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-orchestrator
+    newTag: latest
+  - name: agent-studio-admin-console
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-admin-console
+    newTag: latest
+  - name: agent-studio-bp-explorer
+    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-bp-explorer
+    newTag: latest
+patches:
+  # All three app Deployments pull from AR — Always protects against a
+  # force-pushed tag (and matches the historic gke-up.sh sed behaviour).
+  - path: patch-pull-policy.yaml
+    target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/name=agent-studio
+  - path: patch-agent-image.yaml

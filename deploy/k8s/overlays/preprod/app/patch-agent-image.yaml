@@ -1,0 +1,18 @@
+# The agent image is an ENV VAR on the orchestrator (it spawns agent pods at
+# runtime), so the kustomize images: transformer never sees it — this patch
+# carries the AR path, and set-images.sh rewrites the tag at deploy time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: agent-studio
+spec:
+  template:
+    spec:
+      containers:
+        - name: orchestrator
+          env:
+            - name: AGENT_IMAGE
+              value: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/as-agent:latest
+            - name: AEE_AGENT_IMAGE_PULL_POLICY
+              value: Always

@@ -1,0 +1,7 @@
+# kind e2e overlay (cluster agent-studio-e2e, #1319) — core is identical to
+# the kind dev overlay; the e2e differences are the fakes (app/) and the
+# Secret overrides kind-up.sh --e2e appends at Secret-creation time.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/core

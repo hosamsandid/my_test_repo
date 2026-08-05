@@ -1,0 +1,14 @@
+# Base "app" — the three services that consume the agent-studio-env Secret
+# (envFrom); applied by the up scripts only after the Secret exists. See
+# base/core/kustomization.yaml for the staged-apply rationale (#1348).
+#
+# Image refs here are bare `:latest` + imagePullPolicy Never — correct for the
+# kind overlays (images side-loaded into the node). The test/preprod overlays
+# rewrite them to Artifact Registry paths and pin the release tag via
+# deploy/k8s/set-images.sh.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 40-orchestrator.yaml
+  - 50-admin-console.yaml
+  - 60-bp-explorer.yaml

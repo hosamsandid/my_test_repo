@@ -1,51 +1,92 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy Agent Studio to the stage-1 GKE cluster (single node, RWO storage,
-# no Filestore — see docs/hosting/gcp/). Sibling of kind-up.sh: same manifests,
-# with images rewritten to Artifact Registry and pull policy set for a real
-# registry. Idempotent, safe to re-run.
+# Bootstrap / repair a HOSTED Agent Studio environment on the shared GKE
+# cluster (single node, RWO storage — see docs/hosting/gcp/). Sibling of
+# kind-up.sh: same kustomize base, hosted overlays (#1348). Idempotent.
 #
-#   ./deploy/k8s/gke-up.sh
+#   ./deploy/k8s/gke-up.sh [--env test|preprod] [--tag <image-tag>]
+#
+#   --env   which hosted environment (default: test). test = namespace
+#           agent-studio + agent-studio.projectroots-acn.com; preprod =
+#           namespace agent-studio-preprod + its own hostname. Both live on
+#           the SAME cluster; each has its own env file / Matrix DB / Secret.
+#   --tag   image tag to pin (deploy/k8s/set-images.sh). Default `latest`
+#           only exists for pre-#1348 images — routine deploys go through the
+#           deploy-gke workflow; pass the release tag (vX.Y.Z) here when
+#           bootstrapping, after that tag was deployed to test (which pushes
+#           its images to the shared AR).
+#
+# ROUTINE deploys are the deploy-gke GitHub-Actions workflow (build + push +
+# apply + rollout). This script is for FIRST-TIME environment bootstrap and
+# for repairs that CI cannot do: the Matrix admin bootstrap and (re)creating
+# the agent-studio-env Secret from the env file. It also rollout-restarts, so
+# it picks up Secret-only changes CI's tag-pinned apply would not.
 #
 # Prerequisites (one-time, done outside this script):
-#   - GKE cluster `agent-studio` in europe-west3-b (gcloud container clusters create …)
-#   - AR repo europe-west3-docker.pkg.dev/acn-projectroots/agent-studio
-#   - images pushed there (podman push …) — MUST be linux/amd64: GKE nodes are
-#     x86_64, so on an Apple Silicon Mac build with
-#       podman build --platform linux/amd64 -t <AR>/<image>:latest …
-#     (a default arm64 build crash-loops on GKE with "exec format error")
+#   - GKE cluster `agent-studio` in europe-west3-b (infra/gcp/ Terraform)
+#   - for preprod: `terraform apply` first — static IP + DNS record must exist
+#     before the ManagedCertificate can provision (15–30 min after first apply)
+#   - AR repo europe-west3-docker.pkg.dev/acn-projectroots/agent-studio with
+#     images for <tag> — normally pushed by a deploy-gke run; manual pushes
+#     MUST be linux/amd64 (`podman build --platform linux/amd64 …`; a default
+#     Apple-Silicon arm64 build crash-loops on GKE with "exec format error")
 #   - gke-gcloud-auth-plugin on PATH
 #
 # What it does:
 #   1. switches kubectl to the GKE context
-#   2. applies namespace / RBAC / PVCs / conduwuit (images rewritten to AR)
-#   3. bootstraps the Matrix admin into .env.gke (own homeserver DB ⇒ own token;
-#      seeded from .env.k8s or .env on first run)
-#   4. renders .env.gke into the agent-studio-env Secret
-#   5. applies orchestrator / admin-console / bp-explorer and waits for rollout
+#   2. pins images to --tag and applies the overlay's core
+#      (namespace / RBAC / PVCs / conduwuit)
+#   3. bootstraps the Matrix admin into the env file (own homeserver DB ⇒ own
+#      token; seeded from .env.k8s or .env on first run)
+#   4. renders the env file into the agent-studio-env Secret
+#   5. applies the overlay's app (orchestrator / admin-console / bp-explorer
+#      / ingress) and waits for rollout
 #   6. seeds the skill pool into the workspace PVC
 #
 # Afterwards:
-#   kubectl --context "$GKE_CONTEXT" -n agent-studio port-forward svc/admin-console 4200:4000
-#   open http://localhost:4200
+#   kubectl --context "$GKE_CONTEXT" -n <namespace> port-forward svc/admin-console 4200:4000
+#   (or the public URL once the ManagedCertificate is Active)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MANIFESTS="${SCRIPT_DIR}/manifests"
+
+# --- arguments (bash 3.2) -----------------------------------------------------
+DEPLOY_ENV="test"
+IMAGE_TAG="latest"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --env)  DEPLOY_ENV="${2:-}"; shift 2 ;;
+    --tag)  IMAGE_TAG="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 [--env test|preprod] [--tag <image-tag>]" >&2; exit 1 ;;
+  esac
+done
+case "$DEPLOY_ENV" in
+  test)
+    NAMESPACE="agent-studio"
+    ENV_FILE_DEFAULT="${REPO_ROOT}/.env.gke"
+    BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-28448}"
+    ;;
+  preprod)
+    NAMESPACE="agent-studio-preprod"
+    ENV_FILE_DEFAULT="${REPO_ROOT}/.env.gke-preprod"
+    # Distinct default so test + preprod bootstraps can run concurrently.
+    BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-28449}"
+    ;;
+  *) echo "[gke-up] ERROR: --env must be test or preprod (got: ${DEPLOY_ENV})" >&2; exit 1 ;;
+esac
+OVERLAY="${SCRIPT_DIR}/overlays/${DEPLOY_ENV}"
 
 PROJECT="${PROJECT:-acn-projectroots}"
 ZONE="${ZONE:-europe-west3-b}"
 CLUSTER="${CLUSTER:-agent-studio}"
 GKE_CONTEXT="gke_${PROJECT}_${ZONE}_${CLUSTER}"
-AR="${AR:-europe-west3-docker.pkg.dev/${PROJECT}/agent-studio}"
-NAMESPACE="agent-studio"
 SECRET_NAME="agent-studio-env"
-BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-28448}"
 
-# Own env file per stack (compose=.env, kind=.env.k8s, GKE=.env.gke): each
-# homeserver is a separate DB with its own Matrix token.
-ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env.gke}"
+# Own env file per stack/environment (compose=.env, kind=.env.k8s, GKE test=
+# .env.gke, GKE preprod=.env.gke-preprod): each homeserver is a separate DB
+# with its own Matrix token.
+ENV_FILE="${ENV_FILE:-${ENV_FILE_DEFAULT}}"
 if [ ! -f "$ENV_FILE" ]; then
   for src in "${REPO_ROOT}/.env.k8s" "${REPO_ROOT}/.env"; do
     if [ -f "$src" ]; then
@@ -67,24 +108,12 @@ kubectl config use-context "$GKE_CONTEXT" >/dev/null 2>&1 || fail "kubectl conte
 
 KC() { kubectl --context "$GKE_CONTEXT" "$@"; }
 
-# Rewrite the kind manifests for a real registry: local image names -> AR
-# paths, and imagePullPolicy Never -> Always. Always (not IfNotPresent) because
-# we deploy mutable :latest tags: with IfNotPresent a node that once cached a
-# bad build (e.g. the arm64 exec-format-error incident) would keep running it
-# forever, since the tag name never changes.
-apply_manifest() {
-  sed -e "s|image: agent-studio-|image: ${AR}/agent-studio-|" \
-      -e "s|imagePullPolicy: Never|imagePullPolicy: Always|" \
-      -e "s|value: as-agent:latest|value: ${AR}/as-agent:latest|" \
-      -e "s|value: IfNotPresent|value: Always|" \
-      "$1" | KC apply -f -
-}
-
-# --- base resources + conduwuit ----------------------------------------------
-apply_manifest "${MANIFESTS}/00-namespace.yaml"
-apply_manifest "${MANIFESTS}/10-rbac.yaml"
-apply_manifest "${MANIFESTS}/20-storage.yaml"
-apply_manifest "${MANIFESTS}/30-conduwuit.yaml"
+# --- pin images + base resources + conduwuit ----------------------------------
+# The historic sed rewrites (local image names -> AR, Never -> Always) live in
+# the overlay now (kustomize images: block + patches); set-images.sh pins the
+# tag in the working tree. Reset afterwards: git checkout -- deploy/k8s/overlays
+"${SCRIPT_DIR}/set-images.sh" "$DEPLOY_ENV" "$IMAGE_TAG"
+KC apply -k "${OVERLAY}/core"
 log "waiting for conduwuit ..."
 KC -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=300s
 
@@ -191,9 +220,12 @@ KC -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-env-file="$SECRET_ENV" --dry-run=client -o yaml | KC apply -f -
 
 # --- the rest of the stack -----------------------------------------------------
-apply_manifest "${MANIFESTS}/40-orchestrator.yaml"
-apply_manifest "${MANIFESTS}/50-admin-console.yaml"
-apply_manifest "${MANIFESTS}/60-bp-explorer.yaml"
+# app = orchestrator / admin-console / bp-explorer / ingress (test + preprod
+# overlays include the env's Ingress + ManagedCertificate + IAP BackendConfig,
+# so ingress changes no longer need a manual out-of-band apply).
+KC apply -k "${OVERLAY}/app"
+# CI's tag-pinned apply rolls pods only when the tag changes; this script also
+# restarts so a re-run picks up Secret-only changes (e.g. rotated credentials).
 KC -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer >/dev/null
 for d in orchestrator admin-console bp-explorer; do
   log "waiting for ${d} ..."
@@ -208,7 +240,7 @@ KC -n "$NAMESPACE" cp "${REPO_ROOT}/orchestrator/skill-pool/." "${POOL_POD}:/poo
 KC -n "$NAMESPACE" cp "${REPO_ROOT}/mcp-servers/." "${POOL_POD}:/pool/mcp-servers/"
 
 echo
-log "done. Agent Studio is running on GKE cluster '${CLUSTER}' (${ZONE})."
+log "done. Agent Studio '${DEPLOY_ENV}' (namespace ${NAMESPACE}, images :${IMAGE_TAG}) is running on GKE cluster '${CLUSTER}' (${ZONE})."
 echo
 echo "  Open the console:"
 echo "    kubectl --context ${GKE_CONTEXT} -n ${NAMESPACE} port-forward svc/admin-console 4200:4000"

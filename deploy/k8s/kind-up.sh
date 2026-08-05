@@ -11,12 +11,14 @@ set -euo pipefail
 #   2. creates a single-node kind cluster (Podman provider) if missing
 #   3. builds the 4 images with podman and loads them into the kind node
 #      (no registry anywhere — mirrors the GCP no-Artifact-Registry reality)
-#   4. applies namespace / RBAC / PVCs / conduwuit
+#   4. applies the kind overlay's core (namespace / RBAC / PVCs / conduwuit)
+#      — kustomize overlays under deploy/k8s/overlays/ (#1348)
 #   5. bootstraps the Matrix admin user + token into .env if needed
 #      (k8s equivalent of orchestrator/setup.sh: temporarily patches the
 #      conduwuit Deployment with `--execute "users create-user …"`)
 #   6. renders .env into the agent-studio-env Secret
-#   7. applies orchestrator / admin-console / bp-explorer and waits for rollout
+#   7. applies the overlay's app (orchestrator / admin-console / bp-explorer,
+#      plus the fakes in --e2e mode) and waits for rollout
 #
 # Afterwards (4100, NOT 4000 — the compose stack owns :4000 locally):
 #   kubectl -n agent-studio port-forward svc/admin-console 4100:4000
@@ -26,7 +28,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MANIFESTS="${SCRIPT_DIR}/manifests"
 
 # --e2e (#1319): bring up the DEDICATED e2e kind cluster instead of the dev
 # one — own cluster name / env file / bootstrap port, the LLM stubbed at the
@@ -37,6 +38,15 @@ MANIFESTS="${SCRIPT_DIR}/manifests"
 # own cluster rather than flipping this one).
 E2E_MODE=0
 if [ "${1:-}" = "--e2e" ]; then E2E_MODE=1; fi
+
+# Manifests come from the kustomize overlays (#1348): kind = local images
+# (:latest, Never), kind-e2e = kind + the in-cluster fakes. Same base as the
+# hosted test/preprod overlays — one manifest source, no drift.
+if [ "$E2E_MODE" = "1" ]; then
+  OVERLAY="${SCRIPT_DIR}/overlays/kind-e2e"
+else
+  OVERLAY="${SCRIPT_DIR}/overlays/kind"
+fi
 
 # The k8s stack keeps its OWN env file so it can coexist with the compose
 # stack: the two homeservers are separate databases with different Matrix
@@ -133,10 +143,10 @@ if [ "$E2E_MODE" = "1" ]; then
 fi
 
 # --- 4. base resources + conduwuit ------------------------------------------
-kubectl apply -f "${MANIFESTS}/00-namespace.yaml"
-kubectl apply -f "${MANIFESTS}/10-rbac.yaml"
-kubectl apply -f "${MANIFESTS}/20-storage.yaml"
-kubectl apply -f "${MANIFESTS}/30-conduwuit.yaml"
+# core = namespace / RBAC / PVCs / conduwuit — everything the Matrix bootstrap
+# and Secret creation below need; the app stack (which envFrom's the Secret)
+# is applied afterwards from the overlay's app/ kustomization.
+kubectl apply -k "${OVERLAY}/core"
 log "waiting for conduwuit ..."
 kubectl -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=180s
 
@@ -289,12 +299,8 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-env-file="$SECRET_ENV" --dry-run=client -o yaml | kubectl apply -f -
 
 # --- 7. the rest of the stack ------------------------------------------------
-kubectl apply -f "${MANIFESTS}/40-orchestrator.yaml"
-kubectl apply -f "${MANIFESTS}/50-admin-console.yaml"
-kubectl apply -f "${MANIFESTS}/60-bp-explorer.yaml"
-if [ "$E2E_MODE" = "1" ]; then
-  kubectl apply -f "${MANIFESTS}/e2e/80-e2e-fakes.yaml"
-fi
+# The kind-e2e overlay's app/ already includes the fakes (base/e2e).
+kubectl apply -k "${OVERLAY}/app"
 # Pick up changed images/secret even when the manifests are unchanged.
 kubectl -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer >/dev/null
 for d in orchestrator admin-console bp-explorer; do

@@ -134,6 +134,19 @@ jobs:
         working-directory: e2e/video
         run: npm run test:unit
 
+  # Kustomize overlay invariants (#1348): every overlay renders, kind stays on
+  # local images, test/preprod pin Artifact Registry images and a simulated
+  # set-images.sh run leaves zero :latest. Pure kubectl (bundled kustomize) —
+  # no cluster, no podman.
+  k8s-render:
+    name: k8s overlays (render-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render + invariants
+        run: ./deploy/k8s/render-check.sh
+
   # The journey tooling (#706) is deliberately podman-free: schema/catalog/lint
   # and dry-run resolution are pure Node, so they belong on the fast PR lane
   # (this workflow), NOT the nightly podman e2e lane. `npm install` (not `npm ci`

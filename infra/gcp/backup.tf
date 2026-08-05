@@ -34,7 +34,9 @@ resource "google_gke_backup_backup_plan" "daily" {
     include_secrets     = true
 
     selected_namespaces {
-      namespaces = ["agent-studio"]
+      # Both hosted environments — they share the cluster (#1348), and each
+      # namespace carries its own PVCs/Secrets.
+      namespaces = ["agent-studio", "agent-studio-preprod"]
     }
   }
 }

@@ -234,7 +234,7 @@ pod — which changes what "host" means and who should enable it:
   node leaves the pod Pending on a `FailedMount` event rather than mounting nothing.
 - **Browse/write travel over `pods/exec`** (`orchestrator/pod-exec.js`, selected by
   `container-exec-runtime.js`), which needs `pods/exec [create]` on the
-  orchestrator's Role (`deploy/k8s/manifests/10-rbac.yaml`). Uploads stream the tar
+  orchestrator's Role (`deploy/k8s/base/core/10-rbac.yaml`). Uploads stream the tar
   archive over exec stdin instead of the libpod archive endpoint; semantics (caps,
   error codes, kernel EROFS backstop on read-only mounts) are unchanged.
 - **Covered by e2e**: the kind-lane `context-mount` journey

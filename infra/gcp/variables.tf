@@ -47,7 +47,7 @@ variable "node_machine_type" {
 }
 
 variable "node_count" {
-  description = "Nodes in the default pool. NOTE: >1 requires RWX workspace storage (Filestore) — see deploy/k8s/manifests/20-storage.yaml"
+  description = "Nodes in the default pool. NOTE: >1 requires RWX workspace storage (Filestore) — see deploy/k8s/base/core/20-storage.yaml"
   type        = number
   default     = 1
 }

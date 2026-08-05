@@ -197,6 +197,27 @@ e2e-up:
 e2e-down:
 	./e2e/scripts/stack-down.sh
 
+# ── E2E on kind (#1319) ─────────────────────────────────────────────────────
+# Same journey suite against the DEDICATED e2e kind cluster (agent-studio-e2e)
+# — agents spawn as k8s pods through spawn-kubernetes-pod.js, so this covers
+# the primary (k8s) runtime that the compose lane cannot. kind-stack-up.sh owns
+# the cluster + fakes + port-forwards (console :4110, fake-github :4114);
+# E2E_LANE=ci,kind also picks up kind-only journeys (context-mount). The dev
+# kind cluster (agent-studio) and both compose stacks are untouched.
+e2e-kind:
+	./e2e/scripts/kind-stack-up.sh
+	cd e2e && npm ci && npx playwright install --with-deps chromium && \
+	E2E_SKIP_STACK=1 E2E_BASE_URL=http://localhost:4110 \
+	E2E_FAKE_GITHUB_URL=http://localhost:4114 E2E_LANE=ci,kind \
+	ADMIN_USERNAME=admin ADMIN_PASSWORD=e2e-admin-pass \
+	npx playwright test --project=journeys
+
+e2e-kind-up:
+	./e2e/scripts/kind-stack-up.sh
+
+e2e-kind-down:
+	./e2e/scripts/kind-stack-down.sh
+
 # ── Journey documentation (docs/journey-spec-concept.md §3.2, #707) ─────────
 # Turn the journeys + a green run's screenshot artifacts into the Markdown user
 # guide under docs/user-guide/ plus a coverage report. Pure Node — no browser,

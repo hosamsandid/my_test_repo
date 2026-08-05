@@ -3,7 +3,8 @@ set -euo pipefail
 
 # One-shot local Kubernetes bring-up for the Agent Studio POC.
 #
-#   ./deploy/k8s/kind-up.sh
+#   ./deploy/k8s/kind-up.sh          # dev stack (cluster agent-studio, .env.k8s)
+#   ./deploy/k8s/kind-up.sh --e2e    # dedicated e2e stack (#1319) — see below
 #
 # What it does (idempotent, safe to re-run):
 #   1. checks prerequisites (podman, kind, kubectl, jq, .env)
@@ -26,23 +27,48 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MANIFESTS="${SCRIPT_DIR}/manifests"
+
+# --e2e (#1319): bring up the DEDICATED e2e kind cluster instead of the dev
+# one — own cluster name / env file / bootstrap port, the LLM stubbed at the
+# claude-binary seam (AEE_FAKE_CLAUDE=1), in-cluster fake-github + git-remote
+# fixture services, and the context-mount hostPath opt-in. The dev kind
+# cluster stays untouched: the k8s mirror of the compose `aee-e2e` project
+# isolation (a fake-mode stack is useless for real dev work, so it gets its
+# own cluster rather than flipping this one).
+E2E_MODE=0
+if [ "${1:-}" = "--e2e" ]; then E2E_MODE=1; fi
+
 # The k8s stack keeps its OWN env file so it can coexist with the compose
 # stack: the two homeservers are separate databases with different Matrix
 # tokens, and the bootstrap below writes the token back into this file —
 # sharing .env would corrupt the compose stack's credentials. On first run
-# .env.k8s is seeded from .env (LLM endpoint, admin creds, etc.).
-ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env.k8s}"
-if [ ! -f "$ENV_FILE" ] && [ -f "${REPO_ROOT}/.env" ]; then
-  cp "${REPO_ROOT}/.env" "$ENV_FILE"
-  echo "[kind-up] created ${ENV_FILE} from .env (k8s stack uses its own env file)"
+# .env.k8s is seeded from .env (LLM endpoint, admin creds, etc.); the e2e
+# stack's .env.k8s-e2e is seeded from .env.k8s when present (its LLM keys are
+# overridden with dead values in the Secret step regardless).
+if [ "$E2E_MODE" = "1" ]; then
+  ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env.k8s-e2e}"
+  if [ ! -f "$ENV_FILE" ]; then
+    if [ -f "${REPO_ROOT}/.env.k8s" ]; then cp "${REPO_ROOT}/.env.k8s" "$ENV_FILE"
+    elif [ -f "${REPO_ROOT}/.env" ]; then cp "${REPO_ROOT}/.env" "$ENV_FILE"
+    else touch "$ENV_FILE"; fi
+    echo "[kind-up] created ${ENV_FILE} (e2e kind stack uses its own env file)"
+  fi
+  CLUSTER_NAME="${CLUSTER_NAME:-agent-studio-e2e}"
+  BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-18449}"
+else
+  ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env.k8s}"
+  if [ ! -f "$ENV_FILE" ] && [ -f "${REPO_ROOT}/.env" ]; then
+    cp "${REPO_ROOT}/.env" "$ENV_FILE"
+    echo "[kind-up] created ${ENV_FILE} from .env (k8s stack uses its own env file)"
+  fi
+  CLUSTER_NAME="${CLUSTER_NAME:-agent-studio}"
+  # Local port used only for the bootstrap port-forward (avoid clashing with a
+  # concurrently running compose stack on 8448).
+  BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-18448}"
 fi
 
-CLUSTER_NAME="${CLUSTER_NAME:-agent-studio}"
 NAMESPACE="agent-studio"
 SECRET_NAME="agent-studio-env"
-# Local port used only for the bootstrap port-forward (avoid clashing with a
-# concurrently running compose stack on 8448).
-BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-18448}"
 
 log()  { echo "[kind-up] $*"; }
 fail() { echo "[kind-up] ERROR: $*" >&2; exit 1; }
@@ -97,6 +123,15 @@ build_and_load agent-studio-admin-console "${REPO_ROOT}/admin-console" \
 build_and_load agent-studio-bp-explorer   "${REPO_ROOT}/bp-explorer"
 build_and_load as-agent "${REPO_ROOT}/agent-image" -f "${REPO_ROOT}/agent-image/Dockerfile"
 
+if [ "$E2E_MODE" = "1" ]; then
+  # The compose e2e stack bind-mounts the seeded fixture repo into git-remote;
+  # kind has no host bind-mounts, so seed FIRST and bake the content into the
+  # image (see e2e/git-remote/Dockerfile). Re-running kind-up re-seeds fresh.
+  "${REPO_ROOT}/e2e/scripts/seed-fixture-repo.sh"
+  build_and_load aee-fake-github "${REPO_ROOT}/e2e/fake-github"
+  build_and_load aee-git-remote  "${REPO_ROOT}/e2e/git-remote"
+fi
+
 # --- 4. base resources + conduwuit ------------------------------------------
 kubectl apply -f "${MANIFESTS}/00-namespace.yaml"
 kubectl apply -f "${MANIFESTS}/10-rbac.yaml"
@@ -111,6 +146,8 @@ kubectl -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=180s
 # invalid (a token from the compose stack won't work here — different DB).
 set -a; . "$ENV_FILE"; set +a
 ADMIN_USER="${ADMIN_USER:-admin}"
+# e2e must never sit on an interactive password prompt (CI / make e2e-kind).
+if [ "$E2E_MODE" = "1" ]; then ADMIN_PASS="${ADMIN_PASS:-e2e-matrix-admin}"; fi
 HOMESERVER="http://localhost:${BOOTSTRAP_PORT}"
 
 PF_PID=""
@@ -208,8 +245,15 @@ SECRET_ENV=$(mktemp)
 trap 'stop_port_forward; rm -f "$SECRET_ENV"' EXIT
 # Keys re-emitted explicitly below are filtered out here — kubectl
 # --from-env-file rejects duplicate keys.
+# Keys the e2e overlay overrides (fake LLM, fixture services, opt-ins) join
+# the duplicate filter so a value carried in from .env.k8s/.env can't shadow
+# the deterministic e2e one.
+DUP_KEYS='MATRIX_ACCESS_TOKEN|CONDUWUIT_ADMIN_ROOM|ADMIN_USER_ID'
+if [ "$E2E_MODE" = "1" ]; then
+  DUP_KEYS="${DUP_KEYS}|AEE_FAKE_CLAUDE|AEE_FAKE_CLAUDE_FIXTURES|AEE_FAKE_CLAUDE_PLAYBOOKS|GITHUB_API_BASE|ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_DEFAULT_SONNET_MODEL|ANTHROPIC_DEFAULT_HAIKU_MODEL|CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS|AEE_GITHUB_POLL_INTERVAL_MS|AEE_K8S_CONTEXT_HOSTPATH|ADMIN_USERNAME|ADMIN_PASSWORD"
+fi
 grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" \
-  | grep -Ev '^(MATRIX_ACCESS_TOKEN|CONDUWUIT_ADMIN_ROOM|ADMIN_USER_ID)=' \
+  | grep -Ev "^(${DUP_KEYS})=" \
   | sed -e 's/^\([^=]*\)="\(.*\)"$/\1=\2/' -e "s/^\([^=]*\)='\(.*\)'\$/\1=\2/" \
   > "$SECRET_ENV"
 {
@@ -217,6 +261,30 @@ grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" \
   echo "CONDUWUIT_ADMIN_ROOM=${CONDUWUIT_ADMIN_ROOM}"
   echo "ADMIN_USER_ID=@${ADMIN_USER}:local"
 } >> "$SECRET_ENV"
+if [ "$E2E_MODE" = "1" ]; then
+  # Mirror of docker-compose.e2e.yml + gen-env.sh: the orchestrator spreads its
+  # process.env into every agent pod, so one Secret turns on the fake `claude`
+  # shim stack-wide, routes GitHub API calls at the in-cluster fake-github, and
+  # points the proxy vars at a dead address (a shim bypass fails fast/offline).
+  # AEE_K8S_CONTEXT_HOSTPATH=1 is the #1319 context-mount opt-in the
+  # context-mount journey exercises. No AEE_PER_AGENT_NETWORK_SERVICES here —
+  # that is podman-only wiring; agent pods share the flat cluster network.
+  {
+    echo "AEE_FAKE_CLAUDE=1"
+    echo "AEE_FAKE_CLAUDE_FIXTURES=/opt/ace/e2e/fixtures/iban-story.fixtures.json"
+    echo "AEE_FAKE_CLAUDE_PLAYBOOKS=/opt/ace/e2e/fixtures/playbooks"
+    echo "GITHUB_API_BASE=http://fake-github"
+    echo "ANTHROPIC_BASE_URL=http://127.0.0.1:1"
+    echo "ANTHROPIC_AUTH_TOKEN=e2e-dead-token"
+    echo "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-fake-e2e"
+    echo "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fake-e2e"
+    echo "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
+    echo "AEE_GITHUB_POLL_INTERVAL_MS=2000"
+    echo "AEE_K8S_CONTEXT_HOSTPATH=1"
+    echo "ADMIN_USERNAME=admin"
+    echo "ADMIN_PASSWORD=e2e-admin-pass"
+  } >> "$SECRET_ENV"
+fi
 kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-env-file="$SECRET_ENV" --dry-run=client -o yaml | kubectl apply -f -
 
@@ -224,12 +292,22 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
 kubectl apply -f "${MANIFESTS}/40-orchestrator.yaml"
 kubectl apply -f "${MANIFESTS}/50-admin-console.yaml"
 kubectl apply -f "${MANIFESTS}/60-bp-explorer.yaml"
+if [ "$E2E_MODE" = "1" ]; then
+  kubectl apply -f "${MANIFESTS}/e2e/80-e2e-fakes.yaml"
+fi
 # Pick up changed images/secret even when the manifests are unchanged.
 kubectl -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer >/dev/null
 for d in orchestrator admin-console bp-explorer; do
   log "waiting for ${d} ..."
   kubectl -n "$NAMESPACE" rollout status "deploy/${d}" --timeout=180s
 done
+if [ "$E2E_MODE" = "1" ]; then
+  kubectl -n "$NAMESPACE" rollout restart deploy/fake-github deploy/git-remote >/dev/null
+  for d in fake-github git-remote; do
+    log "waiting for ${d} ..."
+    kubectl -n "$NAMESPACE" rollout status "deploy/${d}" --timeout=120s
+  done
+fi
 
 # --- 8. seed the skill pool ---------------------------------------------------
 # k8s equivalent of `make seed-pool`: the compose targets fill the skills-pool
@@ -245,10 +323,16 @@ kubectl -n "$NAMESPACE" exec "$POOL_POD" -- ls /pool
 echo
 log "done. Agent Studio is running on kind cluster '${CLUSTER_NAME}'."
 echo
-echo "  Open the console:"
-echo "    kubectl -n ${NAMESPACE} port-forward svc/admin-console 4100:4000"
-echo "    open http://localhost:4100"
-echo "    (4100 on purpose — the compose stack owns :4000; console login = ADMIN_USERNAME/ADMIN_PASSWORD from .env)"
+if [ "$E2E_MODE" = "1" ]; then
+  echo "  E2E stack (fake claude/github). Next: e2e/scripts/kind-stack-up.sh"
+  echo "  handles the port-forwards (console :4110, fake-github :4114) and the"
+  echo "  post-up configuration; 'make e2e-kind' runs the journeys."
+else
+  echo "  Open the console:"
+  echo "    kubectl -n ${NAMESPACE} port-forward svc/admin-console 4100:4000"
+  echo "    open http://localhost:4100"
+  echo "    (4100 on purpose — the compose stack owns :4000; console login = ADMIN_USERNAME/ADMIN_PASSWORD from .env)"
+fi
 echo
 echo "  Watch agent pods appear as you enable agents:"
 echo "    kubectl -n ${NAMESPACE} get pods -l app.kubernetes.io/component=as-agent -w"

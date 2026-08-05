@@ -1128,6 +1128,17 @@ function httpGetJson(targetUrl, headers = {}, timeoutMs = 8000) {
   });
 }
 
+// Strip trailing whitespace with a linear scan. A regex trim like `/\s+$/`
+// backtracks O(n²) on a long run of whitespace that is not anchored at the end
+// (CodeQL js/polynomial-redos); scanning from the end is linear. `/\s/.test(ch)`
+// runs on a single character, so it preserves the full `\s` set (incl. Unicode
+// whitespace) without any superlinear matching.
+function trimTrailingWhitespace(s) {
+  let end = s.length;
+  while (end > 0 && /\s/.test(s[end - 1])) end -= 1;
+  return s.slice(0, end);
+}
+
 // Build the URL the LiteLLM proxy exposes its model catalog at. Accepts both
 // `https://host` and `https://host/v1` styles by appending `/v1/models` when
 // the base URL doesn't already end in /v1 or /models.
@@ -5429,7 +5440,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
 
     // E5: reject an empty / identical (no-op) submit.
-    if (v.skillMd.replace(/\s+$/, '') === target.existingSkillMd.replace(/\s+$/, '')) {
+    if (trimTrailingWhitespace(v.skillMd) === trimTrailingWhitespace(target.existingSkillMd)) {
       return res.status(400).json({ error: 'no changes: submitted content is identical to the existing skill' });
     }
 

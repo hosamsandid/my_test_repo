@@ -3851,8 +3851,11 @@ app.get('/api/agents/:agentId/context/download', apiLimiter, async (req, res) =>
 app.get('/api/agents/:id/triggers', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
-  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Resolve the agent root through safeAgentPath so its path.relative
+  // return-value barrier clears the CodeQL js/path-injection sink; null when
+  // the dir is absent, byte-equivalent to the previous existsSync 404.
+  const agentDir = safeAgentPath(id, '');
+  if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json(Array.isArray(triggers) ? triggers : []);
 });

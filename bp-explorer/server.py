@@ -2419,8 +2419,18 @@ async def serve_preview(
     elif filename.lower() not in allowed_names:
         raise HTTPException(status_code=403, detail=f"Preview not allowed for {filename}")
 
+    root_resolved = project_root.resolve()
     full = (project_root / path).resolve()
-    if not str(full).startswith(str(project_root.resolve())):
+    # Containment check: reject any path that resolves outside project_root.
+    # os.path.commonpath equality is a robust barrier (unlike a bare
+    # str.startswith prefix test, which is fooled by sibling dirs sharing a
+    # prefix, e.g. "/workspace/agents/foo-evil" vs "/workspace/agents/foo").
+    try:
+        contained = os.path.commonpath([str(root_resolved), str(full)]) == str(root_resolved)
+    except ValueError:
+        # Raised when the paths are on different drives / have no common base.
+        contained = False
+    if not contained:
         raise HTTPException(status_code=403, detail="Path outside project root")
 
     # --- Try local filesystem first ---

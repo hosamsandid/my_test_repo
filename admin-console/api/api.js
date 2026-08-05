@@ -479,30 +479,40 @@ const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 // writeJsonAtomic and readJsonFile only ever receive paths under WORKSPACE
 // (or POOL_DIR / CONTROL_DIR for skill/control files). Callers should have
 // already validated their user-supplied id segments via AGENT_ID_RE etc., so
-// the containment below only fires on a programming bug. The barrier is
-// path.resolve + a per-root path.relative check applied INLINE in the same
-// function as the sink, and every fs call consumes the resolved, contained
-// value — never the raw filePath. This is the CodeQL-legible form:
-// startsWith(root+path.sep) is NOT recognised as a path-injection barrier, and
-// a helper wouldn't propagate the barrier across the function boundary, so the
-// checks are inlined and nested per-root (a single two-root disjunction that
-// still feeds the original value to the sink also fails to clear).
+// the containment below only fires on a programming bug — it is defense in
+// depth. Both funnel the sink-bound path through containPathUnderRoot(), whose
+// path.relative(root, resolved) + reject-'..'/absolute check is the canonical
+// CodeQL js/path-injection barrier on the RETURNED value (the same idiom as
+// safeAgentPath / safeGlobalSkillDir). Multiple roots compose with `||`, so the
+// value the fs sink consumes always flowed through a single-root barrier.
+// NOTE: an inline nested per-root disjunction that guards `resolved` but then
+// feeds the pre-guard `resolved` straight to the sink is NOT CodeQL-legible
+// (the barrier must gate the exact value the sink consumes) — routing through
+// this helper's return value is what clears the alerts.
+
+// Return `resolved` unchanged if it is contained under `root`, else null. The
+// path.relative + reject-'..'/absolute guard on the returned value is the
+// CodeQL-recognised path-injection barrier; callers OR several roots together.
+function containPathUnderRoot(resolved, root) {
+  const base = path.resolve(root);
+  const rel = path.relative(base, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return resolved;
+}
 
 function writeJsonAtomic(filePath, data) {
   if (typeof filePath !== 'string') {
     throw new Error('writeJsonAtomic: refusing non-string path');
   }
   const resolved = path.resolve(filePath);
-  const relWorkspace = path.relative(WORKSPACE, resolved);
-  if (relWorkspace.startsWith('..') || path.isAbsolute(relWorkspace)) {
-    const relPool = path.relative(POOL_DIR, resolved);
-    if (relPool.startsWith('..') || path.isAbsolute(relPool)) {
-      throw new Error(`writeJsonAtomic: refusing path outside allowed roots: ${filePath}`);
-    }
+  const safe = containPathUnderRoot(resolved, WORKSPACE)
+    || containPathUnderRoot(resolved, POOL_DIR);
+  if (safe === null) {
+    throw new Error(`writeJsonAtomic: refusing path outside allowed roots: ${filePath}`);
   }
-  const tmp = resolved + '.tmp';
+  const tmp = safe + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, resolved);
+  fs.renameSync(tmp, safe);
 }
 
 function podmanRequest(method, urlPath) {
@@ -524,23 +534,16 @@ function podmanRequest(method, urlPath) {
 function readJsonFile(filePath, fallback = null) {
   if (typeof filePath !== 'string') return fallback;
   // Confine reads under an allowed root before the value reaches readFileSync.
-  // Same path.resolve + per-root path.relative barrier as writeJsonAtomic; the
-  // read consumes the resolved, contained value. Reads in this stack are always
-  // built from trusted constants joined with id segments the route handlers
-  // validate — this is defense in depth.
+  // Same containPathUnderRoot() return-value barrier as writeJsonAtomic; reads
+  // in this stack are always built from trusted constants joined with id
+  // segments the route handlers validate — this is defense in depth.
   const resolved = path.resolve(filePath);
-  const relWorkspace = path.relative(WORKSPACE, resolved);
-  if (relWorkspace.startsWith('..') || path.isAbsolute(relWorkspace)) {
-    const relPool = path.relative(POOL_DIR, resolved);
-    if (relPool.startsWith('..') || path.isAbsolute(relPool)) {
-      const relControl = path.relative(CONTROL_DIR, resolved);
-      if (relControl.startsWith('..') || path.isAbsolute(relControl)) {
-        return fallback;
-      }
-    }
-  }
+  const safe = containPathUnderRoot(resolved, WORKSPACE)
+    || containPathUnderRoot(resolved, POOL_DIR)
+    || containPathUnderRoot(resolved, CONTROL_DIR);
+  if (safe === null) return fallback;
   try {
-    return JSON.parse(fs.readFileSync(resolved, 'utf8'));
+    return JSON.parse(fs.readFileSync(safe, 'utf8'));
   } catch {
     return fallback;
   }

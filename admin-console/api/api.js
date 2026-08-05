@@ -13886,9 +13886,13 @@ app.get('/api/agents/:agentId/workspace/dirs', apiLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
-  const root = path.join(AGENTS_DIR, agentId);
-  // Verify agent exists
-  if (!fs.existsSync(root)) return res.status(404).json({ error: 'Agent not found' });
+  // Resolve the agent root through the shared safeAgentPath resolver (same as
+  // the sibling workspace/tree + workspace/file handlers): it realpaths the
+  // root, returns null when the agent dir is absent (→ 404), and its final
+  // path.relative containment check is a CodeQL js/path-injection barrier on
+  // the returned value, so `root` is no longer a tainted path expression.
+  const root = safeAgentPath(agentId, '');
+  if (!root) return res.status(404).json({ error: 'Agent not found' });
   try {
     const qs = new URLSearchParams({ root, path: relPath }).toString();
     const upstream = await fetch(`${BP_EXPLORER_URL}/api/workspace/tree?${qs}`);

@@ -23,7 +23,7 @@ function generateToTemp() {
     journeysDir: JOURNEYS,
     artifactsDir: ARTIFACTS,
     outDir: out,
-    navPages: ['Team Wizard'],
+    navPages: ['Agent Team Wizard'],
     chapters: [{ title: 'Sample Journey', maturity: 'mature', todo: false }],
   });
   return { out, res };

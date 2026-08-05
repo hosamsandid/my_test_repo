@@ -16,7 +16,8 @@ const { test, expect } = require('@playwright/test');
 const NAV_PAGES = [
   { label: 'Agent Chat',           breadcrumb: 'Agent Chat' },
   { label: 'Single Agent',         breadcrumb: 'Single Agent' },
-  { label: 'Team Wizard',          breadcrumb: 'Team Wizard' },
+  // Renamed in the "Agent Team vs human Team" disambiguation (f8937277).
+  { label: 'Agent Team Wizard',    breadcrumb: 'Agent Team Wizard' },
   { label: 'Agents',               breadcrumb: 'Agents' },
   { label: 'Flows',                breadcrumb: 'Flows' },
   { label: 'Knowledge',            breadcrumb: 'Knowledge' },
@@ -48,7 +49,11 @@ test('F0: authenticated shell renders and every nav page mounts', async ({ page 
 
   for (const { label, breadcrumb } of NAV_PAGES) {
     await test.step(`navigate to ${label}`, async () => {
-      await page.getByRole('button', { name: label, exact: true }).click();
+      // A nav entry's optional subtitle joins the button's accessible name
+      // ("Agent Team Wizard Build a squad of agents"), so exact equality fails
+      // on subtitled entries — match the label as a NAME PREFIX instead.
+      const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await page.getByRole('button', { name: new RegExp(`^${esc}( |$)`) }).click();
 
       // Breadcrumb reflects the resolved route.
       await expect(

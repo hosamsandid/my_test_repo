@@ -19,11 +19,11 @@ const navGapLabels = new Set(coverage.navGaps.map((r) => r.label));
 const chapterGapTitles = new Set(coverage.chapterGaps.map((r) => normalizeTitle(r.title)));
 
 test('journeys that drive a page are reflected as touched (no false nav gap)', () => {
-  // The pilot journeys touch the Team Wizard (wizard.*) and Agent Templates
+  // The pilot journeys touch the Agent Team Wizard (wizard.*) and Agent Templates
   // (templates.*) pages — neither may show up as an uncovered nav page.
   assert.ok(journeys.some((j) => j.id === 'team-setup'), 'team-setup journey missing');
   assert.ok(journeys.some((j) => j.id === 'agent-templates'), 'agent-templates journey missing');
-  assert.equal(navGapLabels.has('Team Wizard'), false, 'Team Wizard falsely reported as a gap');
+  assert.equal(navGapLabels.has('Agent Team Wizard'), false, 'Team Wizard falsely reported as a gap');
   assert.equal(navGapLabels.has('Agent Templates'), false, 'Agent Templates falsely reported as a gap');
 });
 
@@ -51,5 +51,5 @@ test('the report surfaces TODO maturity on gap chapters', () => {
 
 test('navLabelsForJourney derives pages from step namespaces', () => {
   const teamSetup = journeys.find((j) => j.id === 'team-setup');
-  assert.ok(navLabelsForJourney(teamSetup).has('Team Wizard'));
+  assert.ok(navLabelsForJourney(teamSetup).has('Agent Team Wizard'));
 });

@@ -10,7 +10,8 @@
     "templates",
     "shell",
     "triggers",
-    "flows"
+    "flows",
+    "context"
   ],
   "steps": [
     {
@@ -180,6 +181,170 @@
           "description": "Max time to wait for readiness."
         }
       ]
+    },
+    {
+      "name": "context.expectHostFile",
+      "module": "context",
+      "description": "Assert a file REALLY landed in the hostPath by reading it back inside the kind node — the only vantage point that proves the write left the pod and hit the node filesystem (true end-to-end for the rw mount).",
+      "params": [
+        {
+          "name": "hostDir",
+          "required": true,
+          "type": "string",
+          "description": "Node directory the mount binds."
+        },
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Filename expected there."
+        },
+        {
+          "name": "content",
+          "required": true,
+          "type": "string",
+          "description": "Exact expected content."
+        }
+      ],
+      "example": "- assert:\n    do: context.expectHostFile\n    hostDir: /opt/e2e-context/specs\n    name: notes.txt\n    content: written through the console"
+    },
+    {
+      "name": "context.expectTreeEntry",
+      "module": "context",
+      "description": "Poll the context BROWSE API until an entry appears in the tree — the first successful call proves the whole k8s chain: hostPath volume mounted in the agent pod, pods/exec transport up, containment guard passing. Polling (not a single call) absorbs the agent pod's startup window, during which the route honestly answers 409 agent-not-running.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Agent whose context tree to read."
+        },
+        {
+          "name": "path",
+          "required": false,
+          "type": "string",
+          "default": "''",
+          "description": "Mount-relative directory to list."
+        },
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Entry name expected in the listing."
+        },
+        {
+          "name": "timeoutMs",
+          "required": false,
+          "type": "number",
+          "default": "180000",
+          "description": "Budget incl. pod startup."
+        }
+      ],
+      "example": "- assert:\n    do: context.expectTreeEntry\n    agentId: ctx-demo-agent\n    path: specs\n    name: brief.md"
+    },
+    {
+      "name": "context.openContextFile",
+      "module": "context",
+      "description": "Expand a context root in the workspace tree and open a file in the viewer — the #1286 browse surface, rendered from data that travelled hostPath → pods/exec → orchestrator → console.",
+      "params": [
+        {
+          "name": "rootLabel",
+          "required": true,
+          "type": "string",
+          "description": "The mount's display name in the tree."
+        },
+        {
+          "name": "fileName",
+          "required": true,
+          "type": "string",
+          "description": "File row to click inside it."
+        },
+        {
+          "name": "contentSnippet",
+          "required": true,
+          "type": "string",
+          "description": "Text the viewer must show."
+        }
+      ],
+      "example": "- action:\n    do: context.openContextFile\n    rootLabel: specs\n    fileName: brief.md\n    contentSnippet: seeded on the kind node"
+    },
+    {
+      "name": "context.openWorkspacePanel",
+      "module": "context",
+      "description": "Open the agent chat's Workspace panel (right rail) — same rail-handling as triggers.openPanel: reopen a collapsed rail, follow the tab into the overflow menu on a narrow rail. The \"Reload tree\" control confirms the workspace browser rendered.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Agent whose chat page to open."
+        }
+      ],
+      "example": "- action:\n    do: context.openWorkspacePanel\n    agentId: ctx-demo-agent"
+    },
+    {
+      "name": "context.removeHostDir",
+      "module": "context",
+      "description": "Remove a seeded directory from the kind node (fixture teardown helper).",
+      "params": []
+    },
+    {
+      "name": "context.seedHostDir",
+      "module": "context",
+      "description": "Seed a directory with one file inside the kind node (fixture helper — the hostPath a context mount binds must exist ON THE NODE before the agent pod starts, or the pod hangs Pending on FailedMount).",
+      "params": [
+        {
+          "name": "hostDir",
+          "required": true,
+          "type": "string",
+          "description": "Absolute node path to create."
+        },
+        {
+          "name": "fileName",
+          "required": true,
+          "type": "string",
+          "description": "Seed file to write inside it."
+        },
+        {
+          "name": "content",
+          "required": true,
+          "type": "string",
+          "description": "Seed file content."
+        }
+      ]
+    },
+    {
+      "name": "context.uploadFile",
+      "module": "context",
+      "description": "Upload a generated file into a read-write context folder through the real console API (multipart, same route the workspace browser's upload panel posts to) — end-to-end this exercises the k8s WRITE path: prepare-upload exec, then the tar streamed over pods/exec stdin into the hostPath.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Agent carrying the rw mount."
+        },
+        {
+          "name": "dir",
+          "required": false,
+          "type": "string",
+          "default": "''",
+          "description": "Mount-relative target directory."
+        },
+        {
+          "name": "name",
+          "required": true,
+          "type": "string",
+          "description": "Filename to upload."
+        },
+        {
+          "name": "content",
+          "required": true,
+          "type": "string",
+          "description": "File content (generated, small)."
+        }
+      ],
+      "example": "- action:\n    do: context.uploadFile\n    agentId: ctx-demo-agent\n    dir: specs\n    name: notes.txt\n    content: written through the console"
     },
     {
       "name": "env.createFixtureEnv",
@@ -695,7 +860,7 @@
     {
       "name": "flows.expectLint",
       "module": "flows",
-      "description": "Assert a lint code's presence or absence via the canvas lint panel. With `absent: true` the whole lint button may be gone (fully clean) or the code missing from the open list.",
+      "description": "Assert a lint code's presence or absence via the canvas lint panel (matched by the code's rendered plain-language title — see LINT_TITLES). With `absent: true` the whole lint button may be gone (fully clean) or the code missing from the open list.",
       "params": [
         {
           "name": "code",
@@ -1899,6 +2064,55 @@
     }
   ],
   "fixtures": [
+    {
+      "name": "contextMountAgent",
+      "description": "contextMountAgent: the context-mount journey's precondition (#1319). KIND-LANE ONLY — the mount is a k8s hostPath, so \"host\" is the kind node container: setup shells into it (docker/podman exec from the Playwright host, the same engine that runs the kind provider) to seed the folder, then stands up one standalone agent on a repo-less env and sets a READ-WRITE multi-folder context mount via the real PATCH route (#1290 shape — the folder gets a slug and mounts at /context/<slug> in the agent pod). The agent is enabled last; the journey's first browse poll absorbs the pod startup window. ENSURE, NEVER DELETE: deleting an agent deactivates its Matrix user, and a conduwuit deactivation is permanent — recreating the same fixed id then fails with M_USER_DEACTIVATED. So setup treats an existing agent/env as reusable (409 = fine) and teardown only DISABLES the agent (pod gone, node folder removable) — same lifecycle as stack-up.sh's standalone e2e-agent. The pre-clean also disables first: re-seeding the node folder while a live pod bind-mounts it would leave that pod staring at the deleted inode.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "Standalone agent id to create."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Repo-less fixture environment id."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Environment display name."
+        },
+        {
+          "name": "hostDir",
+          "required": true,
+          "type": "string",
+          "description": "Absolute folder path INSIDE the kind node."
+        },
+        {
+          "name": "mountName",
+          "required": true,
+          "type": "string",
+          "description": "Mount display name (also its slug)."
+        },
+        {
+          "name": "seedFile",
+          "required": true,
+          "type": "string",
+          "description": "File seeded into the folder before mount."
+        },
+        {
+          "name": "seedContent",
+          "required": true,
+          "type": "string",
+          "description": "Its content (asserted in the viewer)."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: contextMountAgent\n    params:\n      agentId: ctx-demo-agent\n      envId: ctx-demo-env\n      envName: Context Demo\n      hostDir: /opt/e2e-context/specs\n      mountName: specs\n      seedFile: brief.md\n      seedContent: \"Context briefing — seeded on the kind node.\""
+    },
     {
       "name": "flowsDraft",
       "description": "flowsDraft: the `flows-draft` journey's precondition (#733). The journey authors a draft named `draftName` and never materialises it, so there is no team/env/Matrix state — only the draft document. This fixture just pre-/post- cleans any draft with that name so a re-run (or a crashed prior run) starts and ends clean.",

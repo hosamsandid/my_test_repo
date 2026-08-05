@@ -53,7 +53,10 @@ async function newDraft(ctx) {
   await created;
   // The proc param is URL-encoded (draft%3A<id>), so match the decoded-agnostic form.
   await page.waitForURL(/proc=draft/);
-  await expect(page.getByRole('button', { name: 'Add agent' })).toBeVisible();
+  // A blank draft shows TWO "Add agent" buttons since #1171 (toolbar + the
+  // empty-state canvas CTA) — .first() keeps this strict-mode-safe on both an
+  // empty and a populated canvas.
+  await expect(page.getByRole('button', { name: 'Add agent' }).first()).toBeVisible();
 }
 
 /**
@@ -95,7 +98,9 @@ async function renameDraft(ctx, { name }) {
  */
 async function expectEmptyDraft(ctx) {
   const { page } = ctx;
-  await expect(page.getByText(/design from scratch/i)).toBeVisible();
+  // Empty-state copy since #1171 ("This flow is empty" + Add-your-first-agent
+  // CTA) — the old "design from scratch" hint is gone.
+  await expect(page.getByText('This flow is empty')).toBeVisible();
   await expect(page.locator('.bp-node')).toHaveCount(0);
 }
 
@@ -128,7 +133,10 @@ async function closeSidePanel(page, name) {
  */
 async function openAddAgent(ctx, { name, notes }) {
   const { page } = ctx;
-  await page.getByRole('button', { name: 'Add agent' }).click();
+  // Toolbar button and (on a blank canvas, #1171) the empty-state CTA both
+  // open the same dialog; .first() (the toolbar, first in DOM order) works in
+  // both states.
+  await page.getByRole('button', { name: 'Add agent' }).first().click();
   const d = page.getByRole('dialog', ADD_AGENT_DIALOG);
   await expect(d).toBeVisible();
   // Agent templates load async; once they arrive the dialog defaults to
@@ -739,11 +747,26 @@ async function expectNoOutcomes(ctx, { name }) {
  * AUTHORED and asserted on persisted state + rendering + lints — never on
  * runtime trigger delivery (that lives in the iban-story journey). */
 
+// GET with one retry on a connection-level error. This is typically the FIRST
+// request-context call after minutes of UI-only steps; on the kind lane the
+// kubectl port-forward drops idle keep-alive sockets, so that first reuse
+// deterministically dies with "socket hang up" (#1319). A fresh attempt gets a
+// new socket; a real HTTP error is never retried.
+async function apiGetRetrying(ctx, url) {
+  try {
+    return await ctx.request.get(url);
+  } catch (err) {
+    if (!/socket hang up|ECONNRESET|ECONNREFUSED/i.test(err.message)) throw err;
+    await new Promise((r) => setTimeout(r, 500));
+    return ctx.request.get(url);
+  }
+}
+
 // GET the open draft's bundle document (the persisted source of truth).
 async function draftDoc(ctx) {
   const id = draftIdFromUrl(ctx.page);
   if (!id) throw new Error('no draft id in the page URL');
-  const res = await ctx.request.get(`/api/process/drafts/${id}`);
+  const res = await apiGetRetrying(ctx, `/api/process/drafts/${id}`);
   if (!res.ok()) throw new Error(`GET draft ${id} failed: ${res.status()}`);
   return res.json();
 }
@@ -1359,8 +1382,23 @@ async function expectNoLints(ctx) {
   await expect(ctx.page.getByRole('button', { name: /^\d+ issues?/ })).toHaveCount(0);
 }
 
+// The lint panel renders each lint's plain-language TITLE (#1122,
+// lint-view.js LINT_INFO); the raw slug survives only as a tooltip, which
+// getByText cannot match. Mirror of the titles for the codes journeys assert —
+// an unmapped code falls back to the slug, exactly like the app does.
+const LINT_TITLES = {
+  'producer-unconsumed': 'Output nobody consumes',
+  'outcome-without-consumer': 'Outcome nobody reacts to',
+  'duplicate-listener': 'Redundant inputs',
+  'orphan-listener': 'Input never wakes',
+  'dead-end-emitter': 'Signal goes nowhere',
+  'gate-violation': 'Agent claims a human-only gate',
+  'unclaimed-listener': 'Listener without a claim',
+};
+
 /**
- * Assert a lint code's presence or absence via the canvas lint panel. With
+ * Assert a lint code's presence or absence via the canvas lint panel (matched
+ * by the code's rendered plain-language title — see LINT_TITLES). With
  * `absent: true` the whole lint button may be gone (fully clean) or the code
  * missing from the open list.
  *
@@ -1377,7 +1415,7 @@ async function expectLint(ctx, { code, absent = false }) {
   if (absent && await button.count() === 0) return; // fully clean
   await expect(button).toBeVisible();
   await button.click();
-  const entry = page.getByText(code, { exact: false });
+  const entry = page.getByText(LINT_TITLES[code] || code, { exact: false });
   if (absent) await expect(entry).toHaveCount(0);
   else await expect(entry.first()).toBeVisible();
   await button.click(); // toggle closed
@@ -1526,7 +1564,7 @@ async function openTeamFlow(ctx, { team }) {
  *     labelFilter: ready
  */
 async function expectAgentTriggerApi(ctx, { agentId, event, labelFilter }) {
-  const res = await ctx.request.get(`/api/agents/${agentId}/triggers`);
+  const res = await apiGetRetrying(ctx, `/api/agents/${agentId}/triggers`);
   expect(res.ok(), `GET /api/agents/${agentId}/triggers`).toBeTruthy();
   const body = await res.json();
   const triggers = Array.isArray(body) ? body : (body.triggers || []);

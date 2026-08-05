@@ -1,0 +1,98 @@
+journeyVersion: 1
+id: context-mount
+title: Context Folders on Kubernetes
+order: 90
+# KIND lane only (#1319): the mount is a k8s hostPath, so the fixture seeds —
+# and the final assertion reads back — a folder INSIDE THE KIND NODE container
+# via docker/podman exec. Neither exists on the compose stack; the ci lane
+# never selects this journey (E2E_LANE default `ci`; `make e2e-kind` passes
+# `ci,kind`). End-to-end this proves the four #1319 pieces at once: the
+# AEE_K8S_CONTEXT_HOSTPATH opt-in gate, the hostPath rendering in
+# spawn-kubernetes-pod.js, and both directions of the pods/exec transport in
+# pod-exec.js — browse (tree/file) and write (upload tar over exec stdin).
+lanes: [kind]
+# The first browse only answers once the agent pod is Running — image
+# side-loaded but cold PVC seed + Matrix provisioning take a while on kind.
+timeoutMs: 300000
+
+fixtures:
+  - fixture: contextMountAgent
+    params:
+      agentId: ctx-mount-agent
+      envId: ctx-demo-env
+      envName: Context Demo
+      hostDir: /opt/e2e-context/specs
+      mountName: specs
+      seedFile: brief.md
+      seedContent: "Context briefing — seeded on the kind node."
+
+steps:
+  # ── Browse: hostPath → pods/exec → console API ─────────────────────────────
+  # Polls until the agent pod is Running and the seeded file lists — the first
+  # green answer proves the volume is mounted and the exec transport works.
+  - id: browse-api
+    narrative: |
+      An agent on the Kubernetes runtime can carry one or more host context
+      folders, exactly like on the local Podman stack. The folder lives on the
+      node, is bind-mounted into the agent's pod at /context/<slug>, and the
+      console browses it through the agent's own container — here the listing
+      travels over the Kubernetes pods/exec API instead of the Podman socket.
+    assert:
+      do: context.expectTreeEntry
+      agentId: ctx-mount-agent
+      path: specs
+      name: brief.md
+
+  # ── Browse: the workspace-browser UI (#1286) ───────────────────────────────
+  - id: workspace-panel
+    narrative: |
+      In the agent's chat view, the Workspace panel grows a virtual root per
+      mounted folder next to the real workspace entries.
+    action:
+      do: context.openWorkspacePanel
+      agentId: ctx-mount-agent
+    screenshot: workspace-panel
+
+  - id: open-context-file
+    narrative: |
+      Opening the mounted folder and clicking the seeded file renders it in
+      the viewer — read live from the node folder through the agent's pod.
+    action:
+      do: context.openContextFile
+      rootLabel: specs
+      fileName: brief.md
+      contentSnippet: seeded on the kind node
+    screenshot: context-file-viewer
+
+  # ── Write: rw mount upload (#1289/#1290 write path) ────────────────────────
+  - id: upload
+    narrative: |
+      The folder was mounted read-write, so the console can also write into
+      it: an upload is packaged as a tar archive and streamed into the pod
+      over the same exec channel, extracting directly into the hostPath.
+    action:
+      do: context.uploadFile
+      agentId: ctx-mount-agent
+      dir: specs
+      name: notes.txt
+      content: "written through the console"
+
+  - id: upload-visible
+    assert:
+      do: context.expectTreeEntry
+      agentId: ctx-mount-agent
+      path: specs
+      name: notes.txt
+      timeoutMs: 30000
+
+  # The write really left the pod: read the file back from the node itself.
+  - id: host-verify
+    narrative: |
+      The uploaded file is not a copy inside the container — it landed in the
+      node folder itself, which is what makes the mount a real bridge between
+      the host and the agent.
+    assert:
+      do: context.expectHostFile
+      hostDir: /opt/e2e-context/specs
+      name: notes.txt
+      content: "written through the console"

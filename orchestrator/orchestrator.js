@@ -88,7 +88,9 @@ const {
   WRITE_TIMEOUT_MS,
 } = require("./context-write");
 const { buildTar } = require("./tar-single");
-const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec");
+// In-container exec seam (context browse/write): libpod exec on podman,
+// pods/exec on kubernetes — selected the same way as container-runtime.
+const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -364,13 +366,17 @@ const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
-// Read-only host-folder context mount (#1283) is a LOCAL/self-hosted-only
-// feature: a host bind-mount only makes sense on the podman runtime, never on
-// the hosted Kubernetes backend. The API layer already keeps `contextMount` off
-// config in non-local environments; this is the provisioning-side backstop.
+// Host-folder context mounts (#1283) are a LOCAL/self-hosted-only feature. On
+// the podman runtime they are always available; on Kubernetes they are an
+// EXPLICIT opt-in (#1319, AEE_K8S_CONTEXT_HOSTPATH=1): the mount renders as a
+// hostPath volume, so "host" means the node — right on a single-node kind dev
+// cluster, wrong on hosted multi-node GKE, which never sets the flag. The API
+// layer mirrors this gate (isLocalContextMountEnv); this is the
+// provisioning-side backstop.
+const AEE_RUNTIME = String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase();
 const CONTEXT_MOUNT_RUNTIME_OK =
-  String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase() !== "kubernetes" &&
-  String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase() !== "k8s";
+  (AEE_RUNTIME !== "kubernetes" && AEE_RUNTIME !== "k8s") ||
+  process.env.AEE_K8S_CONTEXT_HOSTPATH === "1";
 const { buildLlmProvenanceEnv } = require("./llm-provenance");
 const assistBinding = require("./assist-binding");
 const { reconcileSessionAppend } = require("./session-cursor");
@@ -528,9 +534,11 @@ function startAgentProcess(config) {
     }
   }
 
-  // Host-folder context mount(s) (#1283, multiple folders #1290). Applied only
-  // on the podman runtime; buildContextMountSpecs (in spawn-container) re-validates
-  // each path fail-closed, so a stale/invalid value produces no mount. Each
+  // Host-folder context mount(s) (#1283, multiple folders #1290). Applied on
+  // the podman runtime, and on Kubernetes behind the AEE_K8S_CONTEXT_HOSTPATH
+  // opt-in (#1319); both runtimes re-validate each path fail-closed at the
+  // point of use (buildContextMountSpecs / buildContextHostPathVolumes), so a
+  // stale/invalid value produces no mount. Each
   // folder is read-only by default and read-write only when its per-folder
   // opt-in is set (#1289). resolveContextMounts returns [] when there is no
   // mount at all, so the no-mount spawn path is byte-identical to before (AC9).

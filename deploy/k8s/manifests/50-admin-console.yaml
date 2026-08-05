@@ -41,6 +41,14 @@ spec:
               value: http://conduwuit:6167
             - name: ORCHESTRATOR_URL
               value: http://orchestrator:4002
+            # The console gates runtime-dependent features (host-folder context
+            # mounts, isLocalContextMountEnv) on the same runtime signal as the
+            # orchestrator. Without this the console believed it ran on podman
+            # and OFFERED context mounts that the orchestrator then silently
+            # dropped at spawn (#1319). On k8s the feature needs the explicit
+            # AEE_K8S_CONTEXT_HOSTPATH=1 opt-in via the agent-studio-env Secret.
+            - name: AEE_CONTAINER_RUNTIME
+              value: kubernetes
           ports:
             - containerPort: 4000
           readinessProbe:

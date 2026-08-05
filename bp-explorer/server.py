@@ -1751,28 +1751,26 @@ async def monitor_bp_completion(
 
 @app.get("/api/workspace/tree")
 async def workspace_tree(root: str, path: str = ""):
-    base = Path(root).resolve()
-    agents_root = "/workspace/agents"
-    # Containment via os.path.commonpath (a CodeQL-recognised path barrier)
-    # rather than a bare str.startswith prefix test, which CodeQL does not
-    # model as a sanitizer and which is fooled by sibling dirs sharing a
-    # prefix (e.g. "/workspace/agents-evil" vs "/workspace/agents").
-    try:
-        base_ok = os.path.commonpath([agents_root, str(base)]) == agents_root
-    except ValueError:
-        base_ok = False
-    if not base_ok:
+    # Normalize both user-supplied paths with os.path.realpath and verify
+    # containment with a DIRECT str.startswith check in the guard — the exact
+    # barrier CodeQL models for py/path-injection (normalize, then prefix-check
+    # the normalized value in the branch condition). The prior form stored an
+    # os.path.commonpath equality in a boolean variable and branched on it, which
+    # was NOT recognised as a barrier (the guarded value never flowed through a
+    # modelled sanitizer), so the sinks stayed flagged. The exact-match /
+    # trailing-os.sep test rejects prefix-siblings such as "/workspace/agents-evil"
+    # that a bare startswith("/workspace/agents") would accept.
+    agents_root = os.path.realpath("/workspace/agents")
+    base = os.path.realpath(root)
+    if not (base == agents_root or base.startswith(agents_root + os.sep)):
         raise HTTPException(status_code=403, detail="Access denied")
-    target = (base / path).resolve()
-    try:
-        target_ok = os.path.commonpath([str(base), str(target)]) == str(base)
-    except ValueError:
-        target_ok = False
-    if not target_ok:
+    target = os.path.realpath(os.path.join(base, path))
+    if not (target == base or target.startswith(base + os.sep)):
         raise HTTPException(status_code=403, detail="Path traversal denied")
-    if not target.is_dir():
+    target_dir = Path(target)
+    if not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Directory not found")
-    dirs = [d.name for d in sorted(target.iterdir()) if d.is_dir()]
+    dirs = [d.name for d in sorted(target_dir.iterdir()) if d.is_dir()]
     return dirs
 
 

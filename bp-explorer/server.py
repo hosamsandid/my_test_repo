@@ -829,6 +829,26 @@ def _bare_hash(bp_id: str) -> str:
     return bp_id[3:] if bp_id.startswith("bp:") else bp_id
 
 
+def _contain_under(root: Path, candidate: Path) -> Path | None:
+    """Resolve *candidate* and return it only when it stays within *root*.
+
+    Uses ``os.path.commonpath`` on the fully-resolved paths — the
+    CodeQL-recognised path-containment barrier already used by
+    ``resolve_workspace`` and ``serve_preview`` — rather than a bare
+    ``str.startswith`` prefix test (not a barrier, and unsafe against
+    prefix-siblings). Returns the resolved absolute ``Path`` when contained,
+    otherwise ``None`` so callers can skip the path.
+    """
+    root_resolved = str(Path(root).resolve())
+    full = Path(candidate).resolve()
+    try:
+        if os.path.commonpath([root_resolved, str(full)]) == root_resolved:
+            return full
+    except ValueError:
+        pass
+    return None
+
+
 def _mrp_candidates(bp_id: str, slug: str) -> list[tuple[str, str]]:
     """Return (mrp_dir_rel, mrp_file_rel) candidate paths for an MRP.
 
@@ -866,13 +886,14 @@ def _find_mrp(
 
     # 1. Check named candidates on filesystem
     for dir_rel, file_rel in _mrp_candidates(bp_id, slug):
-        fpath = project_root / file_rel
-        if fpath.exists():
+        fpath = _contain_under(project_root, project_root / file_rel)
+        if fpath is not None and fpath.exists():
             return project_root / dir_rel, fpath, False
 
     # 2. Scan MRP directory for files referencing this BP (own-id naming)
-    if mrp_base.is_dir():
-        for md in mrp_base.glob("*.md"):
+    mrp_base_safe = _contain_under(project_root, mrp_base)
+    if mrp_base_safe is not None and mrp_base_safe.is_dir():
+        for md in mrp_base_safe.glob("*.md"):
             try:
                 head = md.read_text(encoding="utf-8")[:500]
                 fm, _ = parse_frontmatter(head)
@@ -925,7 +946,11 @@ def _collect_mrp_artifacts(
     """
     on_branch = branch is not None
     mrp_rel = str(mrp_path.relative_to(project_root)) if mrp_path.parts else None
-    mrp_on_fs = mrp_path.exists()
+    # Contain the MRP path/dir under project_root before any filesystem access
+    # (paths derive from user-supplied bp_id/slug via _mrp_candidates).
+    mrp_path_safe = _contain_under(project_root, mrp_path)
+    mrp_dir_safe = _contain_under(project_root, mrp_dir)
+    mrp_on_fs = mrp_path_safe is not None and mrp_path_safe.exists()
 
     if not mrp_on_fs and not on_branch:
         return []
@@ -938,8 +963,8 @@ def _collect_mrp_artifacts(
         if rel_path in bp_paths or rel_path in seen_paths:
             return
         seen_paths.add(rel_path)
-        fpath = project_root / rel_path
-        exists = fpath.exists()
+        fpath = _contain_under(project_root, project_root / rel_path)
+        exists = fpath is not None and fpath.exists()
         exists_on_branch = False
         if exists:
             size = fpath.stat().st_size
@@ -961,7 +986,7 @@ def _collect_mrp_artifacts(
     mrp_body: str = ""
     try:
         if mrp_on_fs:
-            mrp_text = mrp_path.read_text(encoding="utf-8")
+            mrp_text = mrp_path_safe.read_text(encoding="utf-8")
         elif on_branch and mrp_rel:
             mrp_text = git_show_file(project_root, branch, mrp_rel)
             if mrp_text is None:
@@ -975,8 +1000,8 @@ def _collect_mrp_artifacts(
     # Source 1: Additional files in the MRP directory
     mrp_dir_rel = str(mrp_dir.relative_to(project_root)) if mrp_dir.parts else None
     skip_names = {"mrp.md", "brief.md"}
-    if mrp_dir.is_dir():
-        for f in sorted(mrp_dir.iterdir()):
+    if mrp_dir_safe is not None and mrp_dir_safe.is_dir():
+        for f in sorted(mrp_dir_safe.iterdir()):
             if f.is_file() and f.name not in skip_names:
                 _add(str(f.relative_to(project_root)), "")
     elif on_branch and mrp_dir_rel:

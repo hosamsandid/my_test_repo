@@ -2923,7 +2923,17 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(newId)) {
     return res.status(400).json({ error: `Invalid agent id '${newId}' (allowed: letters, digits, _ - .)` });
   }
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) {
+  // Containment check for the SOURCE id — AGENT_ID_RE excludes traversal
+  // segments, but CodeQL's path-injection query doesn't follow the regex
+  // through the destructure; path.resolve + path.relative is the in-flow
+  // sanitiser it recognises. Build every id-derived path from the contained dir.
+  const cloneAgentsBaseDir = path.resolve(AGENTS_DIR);
+  const srcAgentDir = path.resolve(cloneAgentsBaseDir, id);
+  const srcRel = path.relative(cloneAgentsBaseDir, srcAgentDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel) || !srcRel) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  if (!fs.existsSync(srcAgentDir)) {
     return res.status(404).json({ error: 'Agent not found' });
   }
   if (parentTeamId != null && !AGENT_ID_RE.test(parentTeamId)) {
@@ -2948,7 +2958,7 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   // management rights over the source agent's owning team, and (when grafting
   // the clone into a team) over the destination team too.
   const cloneScope = getScope(req);
-  const srcCfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const srcCfg = readJsonFile(path.join(srcAgentDir, 'config.json'), null);
   if (!canManageAgent(cloneScope, agentMetaForScope(srcCfg || {}))) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }

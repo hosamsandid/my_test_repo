@@ -1900,9 +1900,20 @@ async def serve_loopscript_phases(workspace: str):
     Reads YAML files from skills/engineering/loops/ and extracts phase id/name pairs.
     """
     project_root: Path = resolve_workspace(workspace)
-    loops_dir = project_root / "skills" / "engineering" / "loops"
+    loops_dir = (project_root / "skills" / "engineering" / "loops").resolve()
+    # Containment: loops_dir is a fixed sub-path of the (already contained)
+    # project root, but re-assert it under project_root with os.path.commonpath
+    # — a CodeQL-recognised path barrier — before any filesystem access.
+    root_resolved = project_root.resolve()
+    try:
+        contained = (
+            os.path.commonpath([str(root_resolved), str(loops_dir)])
+            == str(root_resolved)
+        )
+    except ValueError:
+        contained = False
     result = {}
-    if loops_dir.is_dir():
+    if contained and loops_dir.is_dir():
         for yf in sorted(loops_dir.glob("*.yaml")):
             try:
                 data = yaml.safe_load(yf.read_text(encoding="utf-8"))
@@ -2066,7 +2077,20 @@ async def transition_bp(bp_id: str, body: BpTransitionRequest, workspace: str):
 
     loop = asyncio.get_running_loop()
     project_root = resolve_workspace(workspace)
-    script = project_root / "scripts" / "bp-transition.py"
+    script = (project_root / "scripts" / "bp-transition.py").resolve()
+    # Containment: assert the fixed script path stays under the (already
+    # contained) project root with os.path.commonpath — a CodeQL-recognised
+    # path barrier — before the fs check and the subprocess invocation below.
+    root_resolved = project_root.resolve()
+    try:
+        contained = (
+            os.path.commonpath([str(root_resolved), str(script)])
+            == str(root_resolved)
+        )
+    except ValueError:
+        contained = False
+    if not contained:
+        raise HTTPException(status_code=403, detail="Path outside project root")
     if not script.exists():
         raise HTTPException(status_code=500, detail="bp-transition.py not found")
 

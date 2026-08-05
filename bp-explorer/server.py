@@ -1511,7 +1511,15 @@ def parse_mrp_structured(raw_text: str, bp_id: str) -> dict:
 
 def resolve_workspace(path: str) -> Path:
     p = Path(path).resolve()
-    if not str(p).startswith("/workspace/agents/"):
+    agents_root = "/workspace/agents"
+    # Containment via os.path.commonpath (CodeQL-recognised path barrier) rather
+    # than a bare str.startswith prefix check, which CodeQL does not model as a
+    # sanitizer. Equivalent to the trailing-slash prefix test for containment.
+    try:
+        contained = os.path.commonpath([agents_root, str(p)]) == agents_root
+    except ValueError:
+        contained = False
+    if not contained:
         raise HTTPException(status_code=403, detail="Access denied")
     briefings = p / "artifacts" / "briefings"
     if not briefings.is_dir():

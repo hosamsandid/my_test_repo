@@ -1702,8 +1702,19 @@ async def monitor_bp_completion(
 
         if status.get("exitedAt"):
             # 1. BP-Status → completed
-            transition_script = workspace / "scripts" / "bp-transition.py"
-            if transition_script.exists():
+            transition_script = (workspace / "scripts" / "bp-transition.py").resolve()
+            # Containment: assert the fixed script path stays under the (already
+            # contained) project root with os.path.commonpath — a CodeQL-recognised
+            # path barrier — before the fs check and the subprocess invocation below.
+            root_resolved = workspace.resolve()
+            try:
+                contained = (
+                    os.path.commonpath([str(root_resolved), str(transition_script)])
+                    == str(root_resolved)
+                )
+            except ValueError:
+                contained = False
+            if contained and transition_script.exists():
                 proc = await asyncio.create_subprocess_exec(
                     "python3", str(transition_script),
                     "--workspace", str(workspace),

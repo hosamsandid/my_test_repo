@@ -1,6 +1,9 @@
 # Plugin system — governed capability extensions beyond the agent container
 
-> Status: concept — decided 2026-08-05.
+> Status: concept — decided 2026-08-05. Epic #1368; phases #1369 (core
+> machinery), #1370 (agent surface), #1371 (plugin #1 — #1287 rework),
+> #1372 (Broker SDK), #1373 (plugin #2 — test management), #1374
+> (built-in CLI contract alignment).
 > Decision: agents gain access to the outside world (test-management systems,
 > container runtimes, mainframe bridges, …) **only** through registered
 > plugins. A plugin pairs a **privilege-holding sidecar container** (the

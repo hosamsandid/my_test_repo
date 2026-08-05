@@ -1128,6 +1128,16 @@ function httpGetJson(targetUrl, headers = {}, timeoutMs = 8000) {
   });
 }
 
+// Strip trailing '/' characters with a linear scan. A regex trim like
+// `/\/+$/` backtracks O(n²) on a base URL that is a long run of slashes not
+// anchored at the end (CodeQL js/polynomial-redos); a charCode scan is linear
+// and byte-identical in result (47 === '/').
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1;
+  return s.slice(0, end);
+}
+
 // Strip trailing whitespace with a linear scan. A regex trim like `/\s+$/`
 // backtracks O(n²) on a long run of whitespace that is not anchored at the end
 // (CodeQL js/polynomial-redos); scanning from the end is linear. `/\s/.test(ch)`
@@ -1143,7 +1153,7 @@ function trimTrailingWhitespace(s) {
 // `https://host` and `https://host/v1` styles by appending `/v1/models` when
 // the base URL doesn't already end in /v1 or /models.
 function buildModelsUrl(baseUrl) {
-  const trimmed = baseUrl.replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(baseUrl);
   if (/\/(v1\/)?models$/.test(trimmed)) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/models`;
   return `${trimmed}/v1/models`;
@@ -1153,7 +1163,7 @@ function buildModelsUrl(baseUrl) {
 // Appends `/v1/messages` unless the base URL already targets a versioned or
 // messages path.
 function buildMessagesUrl(baseUrl) {
-  const trimmed = baseUrl.replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(baseUrl);
   if (/\/messages$/.test(trimmed)) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;

@@ -1,9 +1,0 @@
-# Agent Studio on Kubernetes — POC manifests.
-# Applied by deploy/k8s/kind-up.sh (local kind) — later reusable on k3s/GKE
-# (only the StorageClass assumptions in 20-storage.yaml change).
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: agent-studio
-  labels:
-    app.kubernetes.io/name: agent-studio

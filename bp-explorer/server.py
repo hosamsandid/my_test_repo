@@ -1927,22 +1927,22 @@ async def serve_loopscript_phases(workspace: str):
     """
     project_root: Path = resolve_workspace(workspace)
     loops_dir = project_root / "skills" / "engineering" / "loops"
-    # Containment: loops_dir is a fixed sub-path of the (already contained)
-    # project root, but re-assert it under project_root with os.path.realpath
-    # + a DIRECT str.startswith check in the branch condition — the exact
-    # barrier CodeQL models for py/path-injection (normalize, then prefix-check
-    # the normalized value in the guard). A prior form stored an
-    # os.path.commonpath equality in a boolean variable and branched on it;
-    # that was functionally safe but NOT recognised as a barrier, so the
-    # downstream sinks stayed flagged. The exact-match / trailing-os.sep test
-    # also rejects prefix-siblings before any filesystem access.
+    # Containment: loops_dir is a fixed strict sub-path of the (already
+    # contained) project root, but re-assert it under project_root with
+    # os.path.realpath + a single DIRECT str.startswith check in the branch
+    # condition — the exact barrier CodeQL models for py/path-injection
+    # (normalize, then prefix-check the normalized value in the guard). A prior
+    # form OR-ed an `== root_resolved` equality arm onto the startswith; that
+    # was functionally safe but the disjunction is NOT recognised as a barrier
+    # by CodeQL, so the downstream sinks stayed flagged. loops_dir can never
+    # equal the root (it always carries the "skills/engineering/loops" suffix),
+    # so the equality arm was dead — dropping it leaves the bare, recognised
+    # trailing-os.sep prefix test, which also rejects prefix-siblings before
+    # any filesystem access.
     root_resolved = os.path.realpath(project_root)
     loops_real = os.path.realpath(loops_dir)
     result = {}
-    if (
-        loops_real == root_resolved
-        or loops_real.startswith(root_resolved + os.sep)
-    ) and os.path.isdir(loops_real):
+    if loops_real.startswith(root_resolved + os.sep) and os.path.isdir(loops_real):
         for yf in sorted(Path(loops_real).glob("*.yaml")):
             try:
                 data = yaml.safe_load(yf.read_text(encoding="utf-8"))

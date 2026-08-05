@@ -1728,21 +1728,26 @@ async def monitor_bp_completion(
 
         if status.get("exitedAt"):
             # 1. BP-Status → completed
-            transition_script = (workspace / "scripts" / "bp-transition.py").resolve()
-            # Containment: assert the fixed script path stays under the (already
-            # contained) project root with os.path.commonpath — a CodeQL-recognised
-            # path barrier — before the fs check and the subprocess invocation below.
-            root_resolved = workspace.resolve()
-            try:
-                contained = (
-                    os.path.commonpath([str(root_resolved), str(transition_script)])
-                    == str(root_resolved)
-                )
-            except ValueError:
-                contained = False
-            if contained and transition_script.exists():
+            # Containment: normalize the fixed script path with os.path.realpath,
+            # then assert it stays under the (already contained) project root with a
+            # single direct startswith prefix check — the barrier shape CodeQL models
+            # for py/path-injection. The script is a fixed strict subpath
+            # (scripts/bp-transition.py), never the root itself, so a plain startswith
+            # (no equality branch, no boolean-stored commonpath) fully covers
+            # containment before the fs check and the subprocess invocation below.
+            # This runs on a background asyncio task with no HTTP response context, so
+            # a containment breach is a silent skip (no HTTPException 403), preserving
+            # the prior failure mode.
+            root_resolved = os.path.realpath(workspace)
+            script_real = os.path.realpath(workspace / "scripts" / "bp-transition.py")
+            # Keep the guarded, realpath-normalised STRING all the way through to
+            # the fs check and the subprocess: wrapping it in Path() before the
+            # barrier gives CodeQL a second tainted value the startswith guard
+            # does not cover (alert #580). os.path.isfile + create_subprocess_exec
+            # both take the string directly, so no Path() wrapper is needed.
+            if script_real.startswith(root_resolved + os.sep) and os.path.isfile(script_real):
                 proc = await asyncio.create_subprocess_exec(
-                    "python3", str(transition_script),
+                    "python3", script_real,
                     "--workspace", str(workspace),
                     "--bp-id", bp_id,
                     "--action", "complete",

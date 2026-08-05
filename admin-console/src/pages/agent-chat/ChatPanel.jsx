@@ -595,6 +595,22 @@ export default function ChatPanel({
     return () => { cancelled = true; };
   }, [agent?.id]);
 
+  // On-demand refresh of the resolved model options (#1305). The provider
+  // catalog / team assignment can change elsewhere in the app while this chat
+  // stays open; the switcher calls this when its popover opens so a newly
+  // added / (un)assigned provider appears without a full page reload. Unlike
+  // the agent-change effect above, a transient failure keeps the last good
+  // snapshot rather than blanking the chip.
+  const refreshModelOptions = useCallback(async () => {
+    if (!agent?.id) return;
+    try {
+      const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
+      setModelOptions(data);
+    } catch {
+      /* keep the current snapshot on a transient error */
+    }
+  }, [agent?.id]);
+
   async function handleModelChange(newId) {
     if (!agent?.id || modelSwitching) return;
     setModelSwitching(true);
@@ -1052,6 +1068,7 @@ export default function ChatPanel({
           switching={providerSwitching}
           disabled={disabled}
           onChange={handleProviderChange}
+          onOpen={refreshModelOptions}
         />
         <ModelPicker
           options={modelOptions}
@@ -1480,12 +1497,23 @@ const PROVIDER_POP_WIDTH = 300;
 // Shows which LLM endpoint + auth type the agent actually runs on (transparency)
 // and, on click, a popover with the full binding plus a per-agent provider
 // switcher restricted to the agent team's curated, usable providers.
-function ProviderChip({ options, switching, disabled, onChange }) {
+function ProviderChip({ options, switching, disabled, onChange, onOpen }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const popRef = useRef(null);
   const [pos, setPos] = useState(null);
+
+  // Refetch the resolved model options each time the popover opens (#1305), so
+  // a provider added or (un)assigned to this agent's team elsewhere in the app
+  // is reflected without a full page reload. Bounded to the user's open action
+  // — no polling, no per-render fetch. A ref keeps the effect keyed only on
+  // `open` while always calling the latest callback.
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  useEffect(() => {
+    if (open) onOpenRef.current?.();
+  }, [open]);
 
   // Anchor the fixed popover below the trigger, right-aligned to it, then clamp
   // to the viewport so it can never overflow off-screen when the chat column is

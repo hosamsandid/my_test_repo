@@ -6378,7 +6378,9 @@ function inspectAgentRepoStatuses(agentId, env) {
 // Update or insert a top-level YAML key in a frontmatter block. Quotes the
 // value if it contains characters that would break unquoted YAML.
 function upsertYamlField(yaml, key, value) {
-  const v = /[:\s#"]/.test(value) ? `"${String(value).replace(/"/g, '\\"')}"` : value;
+  const v = /[:\s#"\\]/.test(value)
+    ? `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+    : value;
   const re = new RegExp(`^${key}\\s*:.*$`, "m");
   if (re.test(yaml)) return yaml.replace(re, `${key}: ${v}`);
   return yaml.replace(/\s*$/, `\n${key}: ${v}\n`);

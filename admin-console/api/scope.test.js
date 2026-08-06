@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   computeScope, visibleTeam, visibleAgent,
-  canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz,
+  canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint,
@@ -169,6 +169,24 @@ test('describeAuthz: unknown subject fails closed', () => {
   assert.equal(a.admin, false);
   assert.equal(a.systemAdmin, false);
   assert.deepEqual(a.teams, []);
+});
+
+test('isKnownPrincipal: registered user or env admin, fail-closed otherwise (#1415)', () => {
+  assert.equal(isKnownPrincipal({ envAdmin: true, userId: null }), true);
+  assert.equal(isKnownPrincipal({ envAdmin: false, userId: 'u1' }), true);
+  assert.equal(isKnownPrincipal({ envAdmin: false, userId: null }), false);
+  assert.equal(isKnownPrincipal({}), false);
+  assert.equal(isKnownPrincipal(null), false);
+  assert.equal(isKnownPrincipal(undefined), false);
+
+  // Composed through describeAuthz — the production IAP-gate path.
+  const authz = (username, u = users) => describeAuthz({ username, adminUsername: 'admin', users: u, memberships });
+  assert.equal(isKnownPrincipal(authz('alice@corp.com')), true);  // registered, memberships
+  assert.equal(isKnownPrincipal(authz('ALICE@corp.com')), true);  // subject match is case-insensitive
+  assert.equal(isKnownPrincipal(authz('sys@corp.com')), true);    // registered System Admin
+  assert.equal(isKnownPrincipal(authz('admin')), true);           // env admin
+  assert.equal(isKnownPrincipal(authz('ghost@corp.com')), false); // stranger
+  assert.equal(isKnownPrincipal(authz('alice@corp.com', [])), false); // degraded users-index read → unknown
 });
 
 test('describeAuthz: surfaces the caller\'s own githubHandle (#1385)', () => {

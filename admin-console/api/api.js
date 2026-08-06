@@ -247,7 +247,10 @@ app.use('/api', audit.auditMutations);
 // open so the console can load and render its login screen.
 // Inject the authorization descriptor resolver (#584) so the session/login
 // responses carry the caller's admin indicator + per-team roles for the
-// frontend, reusing the same users/memberships indexes as getScope.
+// frontend, reusing the same users/memberships indexes as getScope. The same
+// resolver gates IAP auto-login (#1415): only a registered user-store subject
+// or the env admin gets a silent session; readJsonFile degrading to [] on an
+// unreadable users index means unknown → login form (fail-closed).
 auth.registerAuthRoutes(app, {
   describeAuthz: (subject) => describeAuthz({
     username: subject,

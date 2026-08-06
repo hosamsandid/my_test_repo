@@ -17,14 +17,20 @@
 // ── IAP bridge (SSO, hosted stacks) ─────────────────────────────────────────
 // When IAP_AUDIENCE is set, a request without a session cookie may instead
 // authenticate via the Google-IAP-signed JWT it carries (see iap-auth.js): a
-// normal session is issued for the JWT's email and the login form never
-// appears. The password login stays as break-glass; behind IAP, "logout" is
-// cosmetic — the next request re-authenticates via the proxy (true sign-out
-// is the Google account's, or /?gcp-iap-mode=CLEAR_LOGIN_COOKIE).
+// normal session is issued for the JWT's email — but only when that email is a
+// registered user-store subject or ADMIN_USERNAME (#1415). Any other identity
+// that merely passed Google IAP falls through to the login form instead of
+// getting a silent empty-scope session. The registration lookup fails CLOSED:
+// an unreadable users index (or a throw in the injected resolver) is treated
+// as unregistered, and the env-admin password login — verified locally, no
+// orchestrator needed — is the break-glass. Behind IAP, "logout" is cosmetic —
+// the next request re-authenticates via the proxy (true sign-out is the Google
+// account's, or /?gcp-iap-mode=CLEAR_LOGIN_COOKIE).
 
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { makeIapVerifier, IAP_JWT_HEADER } = require('./iap-auth');
+const { isKnownPrincipal } = require('./scope');
 
 const COOKIE_NAME = 'aee_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -91,6 +97,36 @@ async function getIapPrincipal(req) {
   if (!token) return null;
   try {
     return await iapVerify(token);
+  } catch {
+    return null;
+  }
+}
+
+// The describeAuthz resolver injected via registerAuthRoutes, held at module
+// level because requireAuth is mounted separately (via `gate`) — api.js calls
+// registerAuthRoutes before mounting the gate, so it is set before any request.
+let authzResolver = null;
+
+// Test seam: swap the resolver without going through registerAuthRoutes.
+function _setAuthzResolverForTests(fn) {
+  authzResolver = fn;
+}
+
+// IAP principal that is also allowed to auto-login (#1415): the JWT must
+// verify AND its email must be a known console principal — a registered
+// user-store subject or the env admin. Unknown → null, so the caller falls
+// through to 401 / the login form. Fail-closed: a throw or falsy descriptor
+// from the resolver counts as unregistered (an unreadable users index already
+// degrades to [] in api.js's readJsonFile and lands here as "unknown").
+// With NO resolver injected (registerAuthRoutes called without describeAuthz)
+// legacy behavior is kept — every verified IAP principal is allowed; api.js
+// always injects it in production.
+async function resolveIapPrincipal(req) {
+  const iap = await getIapPrincipal(req);
+  if (!iap) return null;
+  if (typeof authzResolver !== 'function') return iap;
+  try {
+    return isKnownPrincipal(authzResolver(iap.sub)) ? iap : null;
   } catch {
     return null;
   }
@@ -205,9 +241,9 @@ async function requireAuth(req, res, next) {
     return next();
   }
   // No cookie session — behind IAP the request may still carry a verified
-  // identity. Issue a regular session for it so subsequent requests take the
-  // cheap cookie path.
-  const iap = await getIapPrincipal(req);
+  // identity of a registered user. Issue a regular session for it so
+  // subsequent requests take the cheap cookie path.
+  const iap = await resolveIapPrincipal(req);
   if (iap) {
     setSessionCookie(res, issueToken(iap.sub));
     req.user = { username: iap.sub };
@@ -225,7 +261,13 @@ async function requireAuth(req, res, next) {
 // imported so this module stays free of the users/memberships file IO (which
 // lives in api.js) and provider-agnostic. Best-effort: a throw degrades to the
 // bare `{ username }` shape rather than failing the request.
+//
+// The same resolver also gates IAP auto-login (#1415) via resolveIapPrincipal,
+// where the semantics differ: there a throw or unknown subject fails CLOSED
+// (no silent session — the login form appears). Called without a resolver, the
+// IAP gate reverts to the legacy allow-all behavior.
 function registerAuthRoutes(app, { describeAuthz } = {}) {
+  authzResolver = describeAuthz;
   const buildUser = (subject) => {
     const base = { username: subject };
     if (typeof describeAuthz !== 'function') return base;
@@ -251,9 +293,10 @@ function registerAuthRoutes(app, { describeAuthz } = {}) {
   app.get('/api/auth/session', async (req, res) => {
     const session = getSession(req);
     if (session) return res.json({ authenticated: true, user: buildUser(session.sub) });
-    // Behind IAP the very first session probe already authenticates — the SPA
-    // never shows the login form.
-    const iap = await getIapPrincipal(req);
+    // Behind IAP the very first session probe already authenticates a
+    // registered user — the SPA never shows them the login form. Unregistered
+    // IAP identities stay unauthenticated and get the form (#1415).
+    const iap = await resolveIapPrincipal(req);
     if (iap) {
       setSessionCookie(res, issueToken(iap.sub));
       return res.json({ authenticated: true, user: buildUser(iap.sub) });
@@ -289,4 +332,5 @@ module.exports = {
   registerAuthRoutes,
   gate,
   _setIapVerifierForTests,
+  _setAuthzResolverForTests,
 };

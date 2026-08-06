@@ -286,8 +286,10 @@ bootstrap patch (§3.1), reseeds the skill pool, and rollout-restarts (which
 CI's tag-pinned apply cannot do for Secret-only changes).
 
 **Wire IAP single login (`IAP_AUDIENCE`)** — after the environment's ingress
-exists. The audience embeds the environment's **own** backend-service id, so
-test and preprod each need their own (never copy it):
+exists. Silent login is issued only for IAP identities registered as Agent
+Studio users (Teams page) or matching `ADMIN_USERNAME` (#1415); everyone else
+gets the console login form. The audience embeds the environment's **own**
+backend-service id, so test and preprod each need their own (never copy it):
 
 ```bash
 CTX=gke_acn-projectroots_europe-west3-b_agent-studio

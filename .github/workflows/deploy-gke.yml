@@ -163,9 +163,25 @@ jobs:
       - name: Apply core (namespace / RBAC / storage / conduwuit)
         run: |
           set -euo pipefail
+          # On rollout failure, print describe + logs so the CI log shows the
+          # real cause (CrashLoopBackOff reason, previous-container output)
+          # without needing cluster access.
+          rollout_or_diagnose() {
+            local d="$1"
+            kubectl -n "$NS" rollout status "deploy/$d" --timeout=300s && return 0
+            echo "::group::diagnostics: deploy/$d failed to roll out"
+            kubectl -n "$NS" get pods -l "app.kubernetes.io/component=$d" -o wide || true
+            kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$d" | tail -n 100 || true
+            echo "--- current container logs ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 || true
+            echo "--- previous container logs (crash loop) ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 --previous || true
+            echo "::endgroup::"
+            return 1
+          }
           gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT"
           kubectl apply -k "deploy/k8s/overlays/${{ inputs.environment }}/core"
-          kubectl -n "$NS" rollout status deploy/conduwuit --timeout=300s
+          rollout_or_diagnose conduwuit
 
       - name: Require the environment's bootstrap Secret
         run: |
@@ -178,8 +194,23 @@ jobs:
       - name: Apply app (orchestrator / admin-console / bp-explorer / ingress)
         run: |
           set -euo pipefail
+          # Same failure diagnostics as the core step (steps are separate
+          # shells, so the helper is duplicated rather than shared).
+          rollout_or_diagnose() {
+            local d="$1"
+            kubectl -n "$NS" rollout status "deploy/$d" --timeout=300s && return 0
+            echo "::group::diagnostics: deploy/$d failed to roll out"
+            kubectl -n "$NS" get pods -l "app.kubernetes.io/component=$d" -o wide || true
+            kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$d" | tail -n 100 || true
+            echo "--- current container logs ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 || true
+            echo "--- previous container logs (crash loop) ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 --previous || true
+            echo "::endgroup::"
+            return 1
+          }
           kubectl apply -k "deploy/k8s/overlays/${{ inputs.environment }}/app"
           for d in orchestrator admin-console bp-explorer; do
-            kubectl -n "$NS" rollout status "deploy/$d" --timeout=300s
+            rollout_or_diagnose "$d"
           done
           kubectl -n "$NS" get pods

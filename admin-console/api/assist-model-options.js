@@ -34,13 +34,28 @@ function maskAssistProvider(ep) {
 //                         Note the count is over ALL registered endpoints, not
 //                         just the caller-visible ones — a user who simply can't
 //                         see any provider is NOT in the env-fallback state.
+//   exclusionHint      — null when providers is non-empty or envFallbackActive or
+//                         no providers are registered. When providers is empty AND
+//                         providers ARE registered, indicates WHY:
+//                         'all-oauth-token' — every registered provider uses
+//                           oauth-token authType (absolute exclusion, no user
+//                           action can unlock them).
+//                         'no-team-overlap' — non-oauth providers exist but none
+//                           overlap the caller's team membership.
 function buildAssistModelOptions(scope, endpoints = [], { envBaseUrl = '' } = {}) {
   const list = Array.isArray(endpoints) ? endpoints : [];
   const providers = list
     .filter(ep => assistSelectableEndpoint(scope, ep))
     .map(maskAssistProvider);
   const envFallbackActive = list.length === 0 && Boolean(String(envBaseUrl || '').trim());
-  return { providers, envFallbackActive };
+
+  let exclusionHint = null;
+  if (providers.length === 0 && !envFallbackActive && list.length > 0) {
+    const nonOauth = list.filter(ep => ep.authType !== 'oauth-token');
+    exclusionHint = nonOauth.length === 0 ? 'all-oauth-token' : 'no-team-overlap';
+  }
+
+  return { providers, envFallbackActive, exclusionHint };
 }
 
 module.exports = { buildAssistModelOptions, maskAssistProvider };

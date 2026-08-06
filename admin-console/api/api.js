@@ -2818,6 +2818,37 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       memberDisplayName,
       vars: { ...resolved.vars, agentId: memberId },
     });
+  } else if (typeof inBody.processTemplateId === 'string' && inBody.processTemplateId) {
+    // Add-role-from-a-PROCESS-template (#1375): surface a loop-closing role a
+    // team is missing (e.g. merger/reworker) and add it in one click. Unlike the
+    // agent-template branch above, the role comes from a whole-process bundle
+    // (orchestrator/skill-pool/process-templates/), so we mirror the Team-Setup
+    // wizard's per-role materialisation for a SINGLE role — reusing the exact
+    // same pure builders so the added member is byte-identical to one created at
+    // team-setup time: templateToCustomRoles → labelSuffix stamp → buildMemberFromTemplate.
+    const bundle = loadProcessTemplate(PROCESS_TEMPLATES_DIR, inBody.processTemplateId);
+    if (!bundle) return res.status(400).json({ error: `Process template '${inBody.processTemplateId}' not found` });
+    const roleId = typeof inBody.roleId === 'string' ? inBody.roleId : '';
+    const role = (bundle.roles || []).find(r => r.id === roleId);
+    if (!role) return res.status(400).json({ error: `Role '${roleId}' not found in process template '${inBody.processTemplateId}'` });
+    const memberId = typeof inBody.id === 'string' && inBody.id ? inBody.id : `${teamId}-${role.id}`;
+    if (!AGENT_ID_RE.test(memberId)) return res.status(400).json({ error: 'Invalid member id' });
+    const memberDisplayName = typeof inBody.displayName === 'string' && inBody.displayName.trim()
+      ? inBody.displayName.trim() : (role.displayName || role.id);
+    const resolved = resolveTeamMemberVars(teamId, inBody);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    // One role → its member-shaped "custom role", then apply the team's own
+    // labelSuffix (#902) so the new role's labels line up with the rest of the
+    // team, exactly as the wizard stamps the whole bundle before materialising.
+    let customRole = templateToCustomRoles({ roles: [role] })[0];
+    const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix : '';
+    if (suffix) customRole = applyLabelSuffix([customRole], [], suffix).members[0];
+    outBody = buildMemberFromTemplate(customRole, {
+      teamId,
+      memberId,
+      memberDisplayName,
+      vars: { ...resolved.vars, agentId: memberId },
+    });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {

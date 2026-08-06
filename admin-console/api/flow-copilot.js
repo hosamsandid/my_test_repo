@@ -41,6 +41,12 @@ const MAX_REPAIR_ITERATIONS = 2;
 // call site (port-suggestion, hill-climb-analyst, …).
 const MAX_TOKENS = 16000;
 
+// Character limit for the composed system prompt (bundle JSON + format doc +
+// conventions addendum) before the copilot call is attempted (#1404). The
+// guard fires as a plain 400 so the caller receives an actionable error rather
+// than a 504 timeout. ~50 000 tokens at the common 4-chars/token heuristic.
+const SYSTEM_PROMPT_CHAR_LIMIT = 200_000;
+
 // ── sanitize ─────────────────────────────────────────────────────────────────
 // Untrusted model output must not smuggle extra fields toward the import path
 // (a draft bundle is materialised wholesale). Whitelists mirror the documented
@@ -393,6 +399,15 @@ function buildCopilotSystem({ formatDoc, addendum, bundle }) {
 }
 
 /**
+ * Character count of the system prompt for a copilot call. The route uses
+ * this to enforce SYSTEM_PROMPT_CHAR_LIMIT before the NDJSON stream starts,
+ * returning a plain 400 instead of a 504 timeout on oversized bundles (#1404).
+ */
+function measureCopilotSystemPrompt({ formatDoc, addendum, bundle }) {
+  return buildCopilotSystem({ formatDoc, addendum, bundle }).length;
+}
+
+/**
  * The Anthropic Messages payload (minus `model`, added by the route) for one
  * generation turn. The current bundle lives in the system prompt so the
  * client-held conversation passes through unmodified.
@@ -527,6 +542,7 @@ async function runCopilot({
 module.exports = {
   MAX_REPAIR_ITERATIONS,
   COPILOT_HISTORY_CAP,
+  SYSTEM_PROMPT_CHAR_LIMIT,
   sanitizeBundle,
   parseCopilotResponse,
   applyCopilotOps,
@@ -537,5 +553,6 @@ module.exports = {
   readPromptAddendum,
   buildCopilotRequest,
   buildRepairMessage,
+  measureCopilotSystemPrompt,
   runCopilot,
 };

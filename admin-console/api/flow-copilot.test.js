@@ -8,6 +8,7 @@ const path = require('path');
 const {
   MAX_REPAIR_ITERATIONS,
   COPILOT_HISTORY_CAP,
+  SYSTEM_PROMPT_CHAR_LIMIT,
   sanitizeBundle,
   parseCopilotResponse,
   applyCopilotOps,
@@ -17,6 +18,7 @@ const {
   readFormatDoc,
   buildCopilotRequest,
   buildRepairMessage,
+  measureCopilotSystemPrompt,
   runCopilot,
 } = require('./flow-copilot');
 const { validateProcessTemplate } = require('./process-template');
@@ -547,4 +549,32 @@ test('sanitizeCopilotHistory caps at the last N turns and rejects malformed inpu
 test('sanitizeBundle strips the copilot storage key from the portable bundle', () => {
   const b = sanitizeBundle({ ...fixture(), copilot: { messages: [{ role: 'user', content: 'x' }] } });
   assert.equal(b.copilot, undefined);
+});
+
+// ---- system-prompt size guard (#1404) ----------------------------------------
+
+test('SYSTEM_PROMPT_CHAR_LIMIT is exported as 200 000', () => {
+  assert.equal(SYSTEM_PROMPT_CHAR_LIMIT, 200_000);
+});
+
+test('measureCopilotSystemPrompt returns a positive number and grows with bundle size', () => {
+  const base = measureCopilotSystemPrompt({ formatDoc: 'fmt', addendum: 'add', bundle: fixture() });
+  assert.ok(typeof base === 'number' && base > 0, 'returns a positive number for a real fixture bundle');
+  const bigBundle = { ...fixture(), roles: (fixture().roles || []).concat([{ id: 'extra', systemPrompt: 'x'.repeat(10_000) }]) };
+  const big = measureCopilotSystemPrompt({ formatDoc: 'fmt', addendum: 'add', bundle: bigBundle });
+  assert.ok(big > base, 'adding a large role increases the measured size');
+});
+
+test('measureCopilotSystemPrompt: empty bundle is below SYSTEM_PROMPT_CHAR_LIMIT', () => {
+  const size = measureCopilotSystemPrompt({ formatDoc: '', addendum: '', bundle: {} });
+  assert.ok(size < SYSTEM_PROMPT_CHAR_LIMIT, 'an empty bundle is well below the limit');
+});
+
+test('measureCopilotSystemPrompt: oversized components push size above SYSTEM_PROMPT_CHAR_LIMIT', () => {
+  const size = measureCopilotSystemPrompt({
+    formatDoc: 'x'.repeat(SYSTEM_PROMPT_CHAR_LIMIT),
+    addendum: '',
+    bundle: {},
+  });
+  assert.ok(size > SYSTEM_PROMPT_CHAR_LIMIT, 'oversized format doc alone is enough to exceed the limit');
 });

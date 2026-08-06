@@ -46,7 +46,7 @@ const { listProcessTemplates, loadProcessTemplate } = require('./process-templat
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
-const { runCopilot, sanitizeCopilotHistory } = require('./flow-copilot');
+const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
@@ -7097,6 +7097,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   if (body.bundle !== undefined && (body.bundle === null || typeof body.bundle !== 'object' || Array.isArray(body.bundle))) {
     return res.status(400).json({ error: 'bundle must be an object' });
+  }
+
+  // Server-side size guard (#1404): measure the full system prompt before
+  // starting the NDJSON stream so we can return a plain 400. This fires when
+  // the serialised bundle JSON + format doc + conventions addendum would exceed
+  // the threshold, which causes a 504 timeout from the upstream LLM proxy.
+  if (body.bundle !== undefined) {
+    const formatDoc = readFormatDoc();
+    const addendum = readPromptAddendum();
+    const size = measureCopilotSystemPrompt({ formatDoc, addendum, bundle: body.bundle });
+    if (size > SYSTEM_PROMPT_CHAR_LIMIT) {
+      return res.status(400).json({
+        error: 'bundle-too-large',
+        message: `The bundle is too large for the Flow Copilot to process (${size.toLocaleString()} chars; limit ${SYSTEM_PROMPT_CHAR_LIMIT.toLocaleString()}). Make small, targeted requests — describe one role at a time rather than pasting the full bundle JSON.`,
+      });
+    }
   }
 
   const target = resolveAssistTarget(req);

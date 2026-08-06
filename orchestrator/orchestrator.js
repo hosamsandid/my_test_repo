@@ -107,6 +107,7 @@ const { workItemDetail } = require("./work-items");
 const prTokenComment = require("./pr-token-comment");
 const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
+const ticketStore = require("./ticket-store");
 const pendingQueue = require("./pending-queue");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
@@ -6028,6 +6029,133 @@ function _resolveRepoCommentContext(repoFullName) {
   return null;
 }
 
+// ── Parent-ticket binding (#1383) ──────────────────────────────────────────
+// A ticket binds an agent chat room to a parent GitHub issue. The authoritative
+// room-scoped binding + the session-log event live in admin-console (api.js);
+// here we own the GitHub round-trip and the workspace-root `ticket.json` (AC8)
+// that a running agent reads on its next invocation. Pure parsing/shapes are in
+// `ticket-store.js` (unit-tested); these are the thin fs/network adapters.
+
+// Contained path to an agent's workspace-root ticket.json. `id` is already
+// isSafePathSeg-validated by every caller; the path.relative return-value check
+// is the CodeQL-legible containment barrier (mirrors api.js safeSessionPath).
+function agentTicketPath(id) {
+  const base = path.resolve(AGENTS_DIR);
+  const full = path.resolve(base, id, "ticket.json");
+  const rel = path.relative(base, full);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return full;
+}
+
+function readAgentTicket(id) {
+  const fp = agentTicketPath(id);
+  if (!fp || !fs.existsSync(fp)) return null;
+  try {
+    const t = JSON.parse(fs.readFileSync(fp, "utf8"));
+    return ticketStore.isValidTicket(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAgentTicket(id, ticket) {
+  const fp = agentTicketPath(id);
+  if (!fp) throw new Error("bad agent id");
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const tmp = fp + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(ticket, null, 2));
+  fs.renameSync(tmp, fp);
+}
+
+function deleteAgentTicket(id) {
+  const fp = agentTicketPath(id);
+  if (!fp) return;
+  try {
+    fs.unlinkSync(fp);
+  } catch {
+    /* already gone */
+  }
+}
+
+// Resolve the GitHub token + declared repo full-names for an agent's env.
+// Returns null when the agent has no GitHub-enabled environment.
+function resolveAgentGithub(id) {
+  const cfg = loadAgentConfig(id);
+  const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  if (!env || !env.githubTokenId) return null;
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  const repos = Array.isArray(env.repositories)
+    ? env.repositories
+    : env.repository
+      ? [env.repository]
+      : [];
+  const envRepoFullNames = repos.map((r) => ghParseRepoFullName(r && r.url)).filter(Boolean);
+  return { token, envRepoFullNames };
+}
+
+function _ticketErr(message, statusCode) {
+  const e = new Error(message);
+  e.statusCode = statusCode;
+  return e;
+}
+
+// Bind a parent ticket to an agent (create a new issue or attach an existing
+// one), then materialise ticket.json at the workspace root. Returns the stored
+// ticket; throws a `statusCode`-tagged Error on a client/GitHub failure.
+async function bindAgentTicket(id, body) {
+  const gh = resolveAgentGithub(id);
+  if (!gh) throw _ticketErr("agent has no GitHub-enabled environment", 400);
+  const explicitRepo = body && typeof body.repo === "string" ? body.repo : null;
+  const mode = body && body.mode === "create" ? "create" : "attach";
+  let ticket;
+
+  if (mode === "create") {
+    const title = body && typeof body.title === "string" ? body.title.trim() : "";
+    if (!title) throw _ticketErr("title is required", 400);
+    const repoFullName = ticketStore.resolveRepoFullName(null, {
+      explicitRepo,
+      envRepoFullNames: gh.envRepoFullNames,
+    });
+    if (!repoFullName) throw _ticketErr("no target repository for this environment", 400);
+    const args = [`repos/${repoFullName}/issues`, "--method", "POST", "-f", `title=${title}`];
+    if (body && typeof body.issueBody === "string" && body.issueBody) {
+      args.push("-f", `body=${body.issueBody}`);
+    }
+    let issue;
+    try {
+      issue = JSON.parse(await _ghApi(gh.token, args));
+    } catch (err) {
+      throw _ticketErr(`GitHub issue create failed: ${err.message}`, 502);
+    }
+    ticket = ticketStore.ticketFromIssue(issue, repoFullName);
+  } else {
+    const parsed = ticketStore.parseIssueRef(body && body.ref);
+    if (!parsed) throw _ticketErr("ref must be an issue number or a GitHub issue URL", 400);
+    const repoFullName = ticketStore.resolveRepoFullName(parsed, {
+      explicitRepo,
+      envRepoFullNames: gh.envRepoFullNames,
+    });
+    if (!repoFullName) throw _ticketErr("no target repository for this environment", 400);
+    let issue;
+    try {
+      issue = await _flowGithubGetJson(`/repos/${repoFullName}/issues/${parsed.number}`, gh.token);
+    } catch (err) {
+      throw _ticketErr(`issue not found or not accessible: ${err.message}`, 404);
+    }
+    ticket = ticketStore.ticketFromIssue(issue, repoFullName);
+  }
+
+  if (!ticket) throw _ticketErr("could not resolve the issue", 502);
+  writeAgentTicket(id, ticket);
+  return ticket;
+}
+
 // gh api helper bound to a token — no repo checkout needed (`gh api` works from
 // anywhere). Returns stdout string; throws on non-zero exit. Async for the same
 // reason as _execRepo above: a gh network round-trip must not park the loop.
@@ -10912,6 +11040,84 @@ async function main() {
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Parent-ticket binding (#1383) ─────────────────────────────────────
+    // Agents register a child issue on the bound parent ticket (AC6). Checked
+    // before the bare /ticket route (anchored regexes make them disjoint, but
+    // order keeps intent clear).
+    const ticketChildrenMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/ticket\/children$/);
+    if (ticketChildrenMatch) {
+      const id = decodeURIComponent(ticketChildrenMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          if (!isSafePathSeg(id)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+            return;
+          }
+          const { number } = JSON.parse(body || '{}');
+          const parent = readAgentTicket(id);
+          if (!parent) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'no parent ticket bound' }));
+            return;
+          }
+          const next = ticketStore.addChild(parent, number);
+          if (!next) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'child must be a positive issue number' }));
+            return;
+          }
+          writeAgentTicket(id, next);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, children: next.children }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // GET reads the materialised ticket.json; POST binds (create/attach, calls
+    // GitHub with the env PAT + writes ticket.json — AC2/AC3/AC8); DELETE unbinds.
+    const ticketMatch = req.url.match(/^\/internal\/agents\/([^/]+)\/ticket$/);
+    if (ticketMatch && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
+      const id = decodeURIComponent(ticketMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ticket: readAgentTicket(id) }));
+        return;
+      }
+      if (req.method === 'DELETE') {
+        deleteAgentTicket(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      // POST — bind (async GitHub round-trip).
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const ticket = await bindAgentTicket(id, JSON.parse(body || '{}'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ticket }));
+        } catch (err) {
+          const code = err.statusCode || 500;
+          res.writeHead(code, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });

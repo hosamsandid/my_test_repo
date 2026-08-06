@@ -73,6 +73,23 @@ user (the environment needs a PAT attached) or open the PR yourself with plain
 Tasks and Briefing Packs are tracked on GitHub Issues. Use `gh issue view <number>` to read context.
 Open PRs with `gh pr create` after completing work.
 
+## Parent ticket (`ticket.json`)
+
+A conversation may be bound to a **parent GitHub issue** by a human in the Admin Console. When it is, a `ticket.json` file is present at your workspace root:
+
+```json
+{ "repo": "owner/name", "number": 1383, "url": "https://github.com/owner/name/issues/1383", "title": "…", "children": [1401, 1402] }
+```
+
+Read it at session start (if present) to learn which issue this work is about — comment on it, reference it in commits/PRs (`Closes #<number>`), and keep it as the anchor for the task. To register a **child issue** you opened under this parent (so it shows up in `children`):
+
+```bash
+curl -fsS -X POST "${ORCHESTRATOR_INTERNAL_URL:-http://localhost:4002}/internal/agents/$AGENT_ID/ticket/children" \
+  -H 'Content-Type: application/json' -d '{"number": <childIssueNumber>}'
+```
+
+If `ticket.json` is absent, there is no bound parent — proceed normally.
+
 ## Artifact IDs
 
 All artifacts use 12-char random hex IDs. Generate with `openssl rand -hex 6`.

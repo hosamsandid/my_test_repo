@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat,
+  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat, Ticket,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 import { systemEventSummary, systemEventHasDetail } from './system-event.js';
@@ -56,6 +56,8 @@ function iconForType(type) {
     case 'system_init':      return Cpu;
     case 'system_event':     return Settings2;
     case 'trigger.fired':    return Clock;
+    case 'ticket.bound':
+    case 'ticket.unbound':   return Ticket;
     case '_truncated':       return AlertTriangle;
     default:                 return MessageCircle;
   }
@@ -342,6 +344,21 @@ function Body({ event, expanded }) {
           }}>{event.triggerId || event.id || 'unknown'}</code>
         </div>
       );
+    case 'ticket.bound': {
+      // Parent-ticket binding recorded when a human links this room to a GitHub
+      // issue (#1383, AC5).
+      const label = event.repo && event.number
+        ? `${event.repo} #${event.number}`
+        : (event.number ? `#${event.number}` : 'an issue');
+      return (
+        <div style={baseStyle}>
+          Bound to parent ticket <span style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>{label}</span>
+          {event.title ? <span style={{ color: 'var(--eb-text-muted)' }}> — {event.title}</span> : null}
+        </div>
+      );
+    }
+    case 'ticket.unbound':
+      return <div style={baseStyle}>Parent ticket unbound</div>;
     case 'system_init': {
       // #980: model + Model-Provider provenance in one compact opening row;
       // full detail (provider, auth, endpoint, requested vs effective model,

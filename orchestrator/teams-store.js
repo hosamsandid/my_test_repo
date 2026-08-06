@@ -14,7 +14,7 @@
 // collections that back the model:
 //
 //   /workspace/teams/index.json        [{ id, name, description, createdAt, updatedAt }]
-//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, createdAt, updatedAt }]
+//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, createdAt, updatedAt }]
 //   /workspace/memberships/index.json  [{ id, userId, teamId, role, createdAt }]
 //
 // Roles:
@@ -48,6 +48,32 @@ function nowIso() {
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
+}
+
+// GitHub handle (#1385). Optional per-user field so a parent tracker ticket can
+// be assigned to the human who requested the work (the platform otherwise has
+// no GitHub username for an AEE subject). Kept byte-compatible with the pure
+// frontend module `admin-console/src/pages/teams-github-handle.js` — the two
+// live in disjoint images so they cannot share code, but the rules must agree.
+
+// Strip a leading "@" and surrounding whitespace; empty/whitespace-only → ''.
+function normalizeGithubHandle(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.trim().replace(/^@/, '').trim();
+}
+
+// Validate + normalize a GitHub handle. Returns the normalized handle, '' to
+// clear it, or throws badRequest on a malformed value. GitHub username rules:
+// 1–39 chars, letters/digits/hyphens, may not start or end with a hyphen. The
+// regex has no nested quantifiers (linear — no polynomial-ReDoS surface).
+function coerceGithubHandle(raw) {
+  const h = normalizeGithubHandle(raw);
+  if (!h) return '';
+  if (h.length > 39) throw badRequest('githubHandle must be 39 characters or fewer');
+  if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(h)) {
+    throw badRequest('githubHandle may only contain letters, digits, and hyphens, and may not start or end with a hyphen');
+  }
+  return h;
 }
 
 function createTeamsStore({ root } = {}) {
@@ -169,7 +195,7 @@ function createTeamsStore({ root } = {}) {
     return listUsers().find(u => (u.subject || '').toLowerCase() === s) || null;
   }
 
-  function createUser({ subject, email, displayName, systemAdmin } = {}) {
+  function createUser({ subject, email, displayName, systemAdmin, githubHandle } = {}) {
     if (!isNonEmptyString(subject)) {
       throw badRequest('user subject is required');
     }
@@ -183,6 +209,7 @@ function createTeamsStore({ root } = {}) {
       email: isNonEmptyString(email) ? email.trim() : '',
       displayName: isNonEmptyString(displayName) ? displayName.trim() : subject.trim(),
       systemAdmin: systemAdmin === true,
+      githubHandle: coerceGithubHandle(githubHandle),
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -205,6 +232,9 @@ function createTeamsStore({ root } = {}) {
     }
     if (patch.systemAdmin !== undefined) {
       user.systemAdmin = patch.systemAdmin === true;
+    }
+    if (patch.githubHandle !== undefined) {
+      user.githubHandle = coerceGithubHandle(patch.githubHandle);
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -402,6 +432,8 @@ function conflict(m) { return tagged(m, 409); }
 
 module.exports = {
   createTeamsStore,
+  normalizeGithubHandle,
+  coerceGithubHandle,
   DEFAULT_TEAM_ID,
   DEFAULT_TEAM_NAME,
   MEMBERSHIP_ROLES,

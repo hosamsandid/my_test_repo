@@ -256,11 +256,17 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
   const scope = computeScope({ username, adminUsername, users, memberships });
   const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername));
   const teams = [...scope.roles.entries()].map(([teamId, role]) => ({ teamId, role }));
+  // Surface the caller's own GitHub handle (#1385) so the session knows who to
+  // assign a parent tracker ticket to. Present only for a known user record;
+  // the env single-admin credential has no user record and so carries none.
+  const self = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
+  const githubHandle = (self && typeof self.githubHandle === 'string') ? self.githubHandle : '';
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
     systemAdmin: scope.all && !envAdmin, // a non-env-admin with full visibility is a System-Admin user
     userId: scope.userId,
+    githubHandle,
     teams,
   };
 }

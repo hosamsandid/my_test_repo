@@ -95,7 +95,7 @@ const { execInAgentContainer, putArchiveToAgentContainer } = require("./containe
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
-const { buildEnsureUserCommands } = require("./matrix-admin-commands");
+const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
@@ -2742,6 +2742,19 @@ async function ensureMatrixUser(adminClient, username, password) {
   }
 }
 
+// Re-issue only the account-reactivation commands (no create-user) for an
+// existing local account. Called from the login-retry recovery path when a
+// login still returns M_USER_DEACTIVATED after `ensureMatrixUser` (issue #1386):
+// on a delete→immediate-recreate race the admin bot can process the deletion's
+// `deactivate` *after* the ensure sequence's `reset-password`, so re-sending the
+// reactivation once the late deactivate has landed clears the flag.
+async function reissueMatrixReactivation(adminClient, username, password) {
+  for (const { body, delayMs } of buildReactivateCommands(username, password)) {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, { msgtype: "m.text", body });
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+}
+
 // A single login attempt: one /login round-trip, throwing on any non-success
 // response (the error body — including an `M_FORBIDDEN` errcode — is preserved
 // in the message so the retry classifier can read it).
@@ -2764,11 +2777,32 @@ async function attemptLoginMatrixUser(username, password) {
 // system the first attempt succeeds and returns immediately; on a slow one the
 // admin bot may not have finished create-user/enable-login by the time we try,
 // yielding a transient M_FORBIDDEN — we retry the login with bounded backoff up
-// to MATRIX_LOGIN_RETRY_CEILING_MS. Non-M_FORBIDDEN errors propagate at once.
-async function loginMatrixUser(username, password) {
+// to MATRIX_LOGIN_RETRY_CEILING_MS. Non-retryable errors propagate at once.
+//
+// When `adminClient` is supplied, a lingering M_USER_DEACTIVATED between retries
+// re-issues the account-reactivation admin command (issue #1386): the delete→
+// immediate-recreate race can leave the account deactivated at first login
+// because the deletion's `deactivate` was processed *after* the ensure
+// sequence's reactivating `reset-password`. Re-sending the reactivation, then
+// waiting out the backoff, lets the next login succeed once the late deactivate
+// has landed. Without an adminClient the loop behaves exactly as before (login
+// retries only) — every existing call site keeps its prior semantics.
+async function loginMatrixUser(username, password, adminClient = null) {
   return matrixLoginRetry.retryWhile(
     () => attemptLoginMatrixUser(username, password),
-    { ceilingMs: MATRIX_LOGIN_RETRY_CEILING_MS }
+    {
+      ceilingMs: MATRIX_LOGIN_RETRY_CEILING_MS,
+      onBeforeRetry: adminClient
+        ? async (err) => {
+            if (!matrixLoginRetry.isDeactivatedError(err)) return;
+            // Best-effort — a failed re-issue must not abort the retry loop;
+            // the next login attempt is the real gate.
+            await reissueMatrixReactivation(adminClient, username, password).catch((e) =>
+              console.warn(`[Orchestrator] reactivation re-issue for ${username} failed: ${e.message}`)
+            );
+          }
+        : null,
+    }
   );
 }
 
@@ -6987,7 +7021,7 @@ class Orchestrator {
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
 
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, displayName);
 
     // Seed agent workspace using the chosen environment (infrastructure) and
@@ -7200,7 +7234,7 @@ class Orchestrator {
     const userId = `@${memberId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, memberId, password);
-    const token = await loginMatrixUser(memberId, password);
+    const token = await loginMatrixUser(memberId, password, this.adminClient);
     await setDisplayName(token, userId, memberDisplayName);
 
     const seedResult = seedAgentWorkspace(memberId, env, {
@@ -8332,7 +8366,7 @@ class Orchestrator {
     const userId = `@${id}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, cfg.displayName);
 
     const seedResult = seedAgentWorkspace(id, env, {
@@ -8892,7 +8926,7 @@ class Orchestrator {
     const userId = `@${id}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, cfg.displayName);
 
     // Workspace was already seeded at config-create time; no second seed.
@@ -8927,7 +8961,7 @@ class Orchestrator {
     const userId = `@${instanceId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
-    const token = await loginMatrixUser(instanceId, password);
+    const token = await loginMatrixUser(instanceId, password, this.adminClient);
     await setDisplayName(token, userId, instanceDisplayName);
 
     // Initial grant for a blueprint instance: one-time copy of the env's
@@ -8992,7 +9026,7 @@ class Orchestrator {
     const userId = `@${newId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, newId, password);
-    const token = await loginMatrixUser(newId, password);
+    const token = await loginMatrixUser(newId, password, this.adminClient);
     await setDisplayName(token, userId, newDisplayName);
 
     // Copy workspace — skip runtime-only files
@@ -9093,7 +9127,7 @@ class Orchestrator {
     const userId = `@${agentId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, agentId, password);
-    const token = await loginMatrixUser(agentId, password);
+    const token = await loginMatrixUser(agentId, password, this.adminClient);
     await setDisplayName(token, userId, displayName);
 
     // Copy the staged workspace into place, skipping runtime-only files we
@@ -10197,7 +10231,7 @@ async function main() {
           const userId = `@${agentId}:local`;
 
           if (orchestrator.adminClient) await ensureMatrixUser(orchestrator.adminClient, agentId, password);
-          const token = await loginMatrixUser(agentId, password);
+          const token = await loginMatrixUser(agentId, password, orchestrator.adminClient);
           await setDisplayName(token, userId, displayName);
 
           // Initial grant for an ephemeral agent: one-time copy of the env's
@@ -13049,6 +13083,20 @@ async function main() {
         res.end(JSON.stringify(result));
       } catch (err) {
         console.error(`[Orchestrator] Internal API create error: ${err.message}`);
+        // A login that stays M_USER_DEACTIVATED after the reactivation-retry loop
+        // (issue #1386) means the just-deleted account was still deactivated —
+        // e.g. re-creating the same id faster than the homeserver settled, or a
+        // build where reset-password can't clear the flag. Surface the actionable
+        // message + a stable code instead of a raw `Login failed: {...}` stack
+        // (409 = retryable conflict, not a bad request or a server fault).
+        if (matrixLoginRetry.isDeactivatedError(err)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: matrixLoginRetry.DEACTIVATED_USER_MESSAGE,
+            code: 'matrix_user_deactivated',
+          }));
+          return;
+        }
         // 400 for caller-fixable misconfigurations (missing env / token, clone
         // rejected by the remote) so the UI surfaces them as a validation
         // error rather than a generic 500 server error.

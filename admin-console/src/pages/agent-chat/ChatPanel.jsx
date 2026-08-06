@@ -1336,6 +1336,7 @@ export default function ChatPanel({
       <MessageInput
         onSend={handleSend}
         disabled={disabled || !roomId || sending || maintenance.active}
+        agentId={agent.id}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}

@@ -10,6 +10,7 @@ import {
   placeholderSendHint,
   helperSendKeys,
 } from './message-send-keybinding.js';
+import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
 
 // OS-aware modifier idiom (shared with RightRail.jsx): Cmd on Mac, Ctrl else.
 const IS_MAC = isMacPlatform();
@@ -33,8 +34,15 @@ const IS_MAC = isMacPlatform();
  * Auto-resize: line height ~20 px, min 1 row, max 8 rows; we measure via
  * scrollHeight after each input event and clamp.
  *
+ * Draft persistence (#1388): because `AgentChat.jsx` remounts this component on
+ * every agent switch (`key={selectedAgent.id}`), the composer's local `value`
+ * would otherwise be destroyed and the typed draft lost. We persist the draft
+ * per agent under `agentChat.draft.<agentId>` (see message-draft.js) — restored
+ * on mount, cleared on a successful send.
+ *
  * @param {(text:string)=>void} onSend
  * @param {boolean} [disabled]
+ * @param {?string} [agentId]            persists the composer draft per agent
  * @param {string}  [agentDisplayName]   used in placeholder
  * @param {(files:FileList|File[])=>Promise<Array<{name:string,ref:string}>>} [onUpload]
  *        Uploads files and resolves to the uploaded descriptors (empty on failure).
@@ -46,8 +54,11 @@ const IS_MAC = isMacPlatform();
  * @param {?object} [loopTrigger]         the running launched-loop trigger (full config)
  * @param {?object} [loopProgress]        `{ iteration, maxIterations|null }` or null
  */
-export default function MessageInput({ onSend, disabled = false, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null }) {
-  const [value, setValue] = useState('');
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null }) {
+  // Seed the composer from any persisted draft for this agent (#1388). The
+  // component remounts per agent (key={agent.id}) so this initialiser runs
+  // fresh with the right agentId on every switch.
+  const [value, setValue] = useState(() => loadDraft(agentId));
   const [dragging, setDragging] = useState(false);
   // Per-user send-keybinding preset ('ide' | 'chat'), persisted in localStorage
   // (mirrors WorkspaceBrowser's workspaceMode pattern). Defaults to 'ide' so
@@ -84,6 +95,10 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
 
   useEffect(() => { autoResize(taRef.current); }, [value]);
 
+  // Persist the draft per agent (#1388) so it survives the agent-switch remount
+  // (and a page reload). saveDraft removes the key for an empty draft (AC4).
+  useEffect(() => { saveDraft(agentId, value); }, [agentId, value]);
+
   // Auto-focus on mount and when re-enabled.
   useEffect(() => {
     if (!disabled) taRef.current?.focus();
@@ -94,6 +109,10 @@ export default function MessageInput({ onSend, disabled = false, agentDisplayNam
     if (!text || disabled) return;
     onSend(text);
     setValue('');
+    // Drop the persisted draft immediately so the composer doesn't re-populate
+    // after a send (AC2). The value effect would also clear it, but doing it
+    // here keeps intent explicit and avoids relying on effect timing.
+    clearDraft(agentId);
     // Refocus right away — clearing the value won't move focus on its own.
     requestAnimationFrame(() => taRef.current?.focus());
   }

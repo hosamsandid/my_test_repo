@@ -89,6 +89,34 @@ The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 actions — and per-resource visibility — arrive with later tickets (#302/#304);
 today any authenticated operator can manage teams.
 
+## Agent Teams — surfacing missing blueprint roles (#1375)
+
+An **Agent Team** assembled piecewise from a reference process template (dev +
+reviewer only, say) runs part of the SDLC loop and then stalls at the first
+missing role's terminal label — a missing `merger` leaves `ready-to-merge` idle
+(the final merge stays a manual click); a missing `reworker` leaves
+`revisions-required` idle. The Agents page (`/agents`) surfaces that gap on the
+expanded **Agent Team** card: below the member list it lists the roles the team
+is missing relative to its source template, each with an **Add `<role>` role**
+button.
+
+- **Source-template inference.** The team config does *not* persist which template
+  it came from (`POST /api/teams` flattens the bundle into members and discards the
+  template identity). It is inferred client-side (pure `src/pages/missing-roles-view.js`,
+  unit-tested) from two signals the team agent *does* persist: the gate/brake **label
+  registry** (`team.labels[]`, #928 — the strongest fingerprint, since each shipped
+  template has a distinct registry; matched by containment, suffix-stripped for #902)
+  and the **present member role-ids** (recovered from each member id `<teamId>-<roleId>`).
+  When nothing clearly matches, nothing is shown — the hint is purely additive, so
+  unrelated or fully-covered teams sprout no buttons.
+- **One-click add.** The button reuses the existing member-create endpoint via its
+  process-template branch — `POST /api/agents/:teamId/members { processTemplateId, roleId }`
+  — which mirrors the Team-Setup wizard's per-role materialisation (systemPrompt +
+  `{{var}}` substitution, `sessionPolicy`, triggers with repo/claim/transport, the
+  team's own `labelSuffix`) for that one role, so the added member is identical to one
+  created at team-setup time. The new member is then **disabled** (`PUT enabled:false`)
+  so nothing wakes until the operator enables it; a toast confirms.
+
 ## Audit trail (#305)
 
 Every **mutating** API action (`POST`/`PUT`/`PATCH`/`DELETE` under `/api`)

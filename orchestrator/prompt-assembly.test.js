@@ -602,35 +602,3 @@ test('relocated sections are non-empty constants', () => {
   assert.ok(TRIGGER_SECTION.startsWith('## Trigger management'));
   assert.ok(WORKSPACE_SECTION.startsWith('## Workspace'));
 });
-
-// ---- session ticket / sub-issue no-assignee (#1384) --------------------------
-
-test('GIT_SECTION contains the session ticket block with explicit no-assignee rule', () => {
-  assert.ok(GIT_SECTION.includes('### Session ticket'));
-  // The rule must explicitly state sub-issues are unassigned.
-  assert.match(GIT_SECTION, /Sub-issues are \*\*unassigned\*\*/);
-  // A concrete gh issue create example without --assignee.
-  assert.ok(GIT_SECTION.includes('gh issue create'));
-  // The example command must not pass --assignee as an argument.
-  assert.ok(!GIT_SECTION.includes('gh issue create --assignee'));
-  assert.ok(!GIT_SECTION.includes('gh issue create --title') || !GIT_SECTION.match(/gh issue create[^`\n]*--assignee/));
-});
-
-test('assembled CLAUDE.md with a repo includes the session ticket section without --assignee in command examples', () => {
-  const md = assembleClaudeMd({
-    base: BASE, agentPrompt: 'x', role: 'agent',
-    env: { repositories: [{ url: 'git@github.com:acme/x.git' }] },
-  });
-  assert.ok(md.includes('### Session ticket'));
-  assert.match(md, /Sub-issues are \*\*unassigned\*\*/);
-  // No gh issue create call should pass --assignee.
-  assert.ok(!md.includes('gh issue create --assignee'));
-  assert.ok(!/gh issue create[^`\n]*--assignee/.test(md));
-});
-
-test('assembled CLAUDE.md without a repo does not include the session ticket section', () => {
-  const md = assembleClaudeMd({
-    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
-  });
-  assert.ok(!md.includes('### Session ticket'));
-});

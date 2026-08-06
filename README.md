@@ -220,6 +220,7 @@ The most-used pages:
 | Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
 | Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) · [docs/multi-user-concept.md](./docs/multi-user-concept.md) |
 | GCP hosting (pilot VM): access, deploy, operations | [docs/hosting/gcp/vm-podman-runbook.md](./docs/hosting/gcp/vm-podman-runbook.md) |
+| GKE hosting: bootstrap, deploys, troubleshooting | [docs/hosting/gcp/gke-runbook.md](./docs/hosting/gcp/gke-runbook.md) |
 | Key files & project layout | [docs/key-files.md](./docs/key-files.md) |
 
 ## Third-party Models

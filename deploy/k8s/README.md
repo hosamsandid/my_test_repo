@@ -187,6 +187,11 @@ Secret check → app) — routine manifest changes no longer need an out-of-band
    `https://agent-studio-preprod.projectroots-acn.com` (IAP, same access
    grant as test).
 
+Full bootstrap mechanics, the credential/env-file model, and every known
+failure mode: **`docs/hosting/gcp/gke-runbook.md`**. In particular: never
+hand-create the `agent-studio-env` Secret with `--from-env-file` — run
+`gke-up.sh` (the runbook explains why).
+
 Heads-up: preprod doubles the workload on the single `e2-standard-2` node —
 if pods stay Pending on resources, bump `node_machine_type` in
 `infra/gcp/variables.tf` (node recreation restarts test briefly). More nodes
@@ -206,18 +211,9 @@ SSO (Cloud IAP — `overlays/test/app/ingress.yaml` + `infra/gcp/ingress.tf`):
 console's environment, the IAP-verified Google identity logs you into the
 console directly — no second login form (`admin-console/api/iap-auth.js`).
 The password login stays as break-glass and is the only path on compose/kind
-(they never set `IAP_AUDIENCE`). To wire it up after the ingress exists:
-
-```bash
-CTX=gke_acn-projectroots_europe-west3-b_agent-studio
-BACKEND=$(gcloud compute backend-services list --global --project acn-projectroots \
-  --format='value(name)' | grep admin-console)
-AUD="/projects/$(gcloud projects describe acn-projectroots --format='value(projectNumber)')/global/backendServices/$(gcloud compute backend-services describe "$BACKEND" --global --project acn-projectroots --format='value(id)')"
-echo "IAP_AUDIENCE=$AUD" >> .env.gke
-kubectl --context "$CTX" -n agent-studio patch secret agent-studio-env \
-  -p "{\"stringData\":{\"IAP_AUDIENCE\":\"$AUD\"}}"
-kubectl --context "$CTX" -n agent-studio rollout restart deploy/admin-console
-```
+(they never set `IAP_AUDIENCE`). Wiring it up (the audience is pinned per
+environment — never copy it between test and preprod):
+`docs/hosting/gcp/gke-runbook.md` §4.
 
 Note: behind IAP the console's Logout button is cosmetic — the proxy
 re-authenticates you on the next request. Real sign-out is the Google
@@ -244,6 +240,10 @@ setup is `deploy/k8s/gke-up.sh` — see its header. **Applying manifests by
 hand:** always through the environment's overlay
 (`kubectl apply -k deploy/k8s/overlays/test/app`), never `-f base/` — the
 base carries kind-flavored image refs (`imagePullPolicy: Never`).
+
+Something broken (crash-looping conduwuit, Matrix token errors, dead URL,
+empty Skills page, …)? → **`docs/hosting/gcp/gke-runbook.md`** §3 —
+symptom-keyed troubleshooting.
 
 ## Port map (all three stacks side by side)
 

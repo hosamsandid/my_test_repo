@@ -22,6 +22,8 @@ const {
   MAX_PAGES,
 } = require("./github-poller");
 
+const realEvents = require("./github-poller-events.fixture.json");
+
 // ── parseRepoFullName (#711): github-only by default, fixture host when opted in ─
 
 test("parseRepoFullName: parses github.com https and ssh URLs", () => {
@@ -138,7 +140,11 @@ test("backfillHorizonStamps: guards non-arrays and missing stamp", () => {
   assert.deepEqual(backfillHorizonStamps(t, null), { triggers: t, changed: false });
 });
 
-// ── labelFilterMatches: recover wakes the Events API collapses ────────────────
+// ── labelFilterMatches (webhook-shape coverage) ───────────────────────────────
+// These fixtures are WEBHOOK-shaped (nested `issue.labels`) — a shape the Events
+// API never emits (it puts the label set at the payload top level, see the
+// fixture-backed tests below). They exercise the nested fallback that still
+// serves the e2e fake-github and any future webhook ingress.
 
 const labeledEvent = (attributed, currentLabels) => ({
   type: "IssuesEvent",
@@ -157,9 +163,10 @@ test("labelFilterMatches: no filter fires on any label change", () => {
   assert.equal(labelFilterMatches(labeledEvent("ux", ["ux"]), null), true);
 });
 
-test("labelFilterMatches: recovers a collapsed multi-add — event attributed to 'ux', 'ready' also on the issue", () => {
-  // The reported bug: adding bug+ux+ready in one action surfaces labeled(ux);
-  // the 'ready' wake must still fire because 'ready' is on the issue now.
+test("labelFilterMatches: (webhook shape) recovers a collapsed multi-add via nested labels — attributed 'ux', 'ready' also present", () => {
+  // Webhook-shaped fallback: adding bug+ux+ready in one action surfaces
+  // labeled(ux); the 'ready' wake still fires because 'ready' is in the nested
+  // label set. (On the Events API the same recovery comes from payload.labels.)
   assert.equal(labelFilterMatches(labeledEvent("ux", ["bug", "ux", "ready"]), "ready"), true);
 });
 
@@ -178,7 +185,10 @@ test("labelFilterMatches: unlabeled matches only the removed label, not the curr
   assert.equal(labelFilterMatches(unlabeled, "bug"), false); // 'bug' still present, but this event didn't touch it
 });
 
-test("labelFilterMatches: pull_request labeled honours the PR's current label set", () => {
+test("labelFilterMatches: (webhook shape) pull_request labeled honours the nested label set", () => {
+  // Webhook-shaped only: a real Events-API PullRequestEvent never carries
+  // pull_request.labels (see the fixture-backed tests). Kept as fallback
+  // coverage for webhook ingress.
   const prLabeled = {
     type: "PullRequestEvent",
     payload: {
@@ -190,10 +200,65 @@ test("labelFilterMatches: pull_request labeled honours the PR's current label se
   assert.equal(labelFilterMatches(prLabeled, "revisions-required"), true);
 });
 
-test("labelFilterMatches: tolerates a reduced payload with no labels array", () => {
+test("labelFilterMatches: a truly reduced payload (no label set anywhere) only matches the attributed label", () => {
+  // Neither a top-level nor a nested label set — the degenerate case. The
+  // directly-attributed label still matches; an unrelated label finds no set to
+  // recover from and does not crash. (Real Events-API PR events are NOT this
+  // shape — they carry payload.labels; see incidentPrLabeled below.)
   const reduced = { type: "PullRequestEvent", payload: { action: "labeled", label: { name: "x" }, pull_request: { number: 7 } } };
-  assert.equal(labelFilterMatches(reduced, "x"), true); // attributed label still matches
-  assert.equal(labelFilterMatches(reduced, "y"), false); // no set to recover from — no crash
+  assert.equal(labelFilterMatches(reduced, "x"), true);
+  assert.equal(labelFilterMatches(reduced, "y"), false);
+});
+
+// ── labelFilterMatches (real Events-API payloads, #1376) ──────────────────────
+// Verbatim captured Events-API entries; assert the top-level `payload.labels`
+// set is what drives the match — the nested webhook arrays are wrong here.
+
+test("labelFilterMatches: (real) incident PR event 12860294824 matches the base wake label", () => {
+  // Regression test for #1376: payload.label is the ':completed' claim marker,
+  // but the base wake label 'florian-03:ready-for-review' is in payload.labels.
+  const ev = realEvents.incidentPrLabeled;
+  assert.equal(ev.id, "12860294824");
+  assert.equal(ev.payload.label.name, "florian-03:ready-for-review:completed");
+  assert.equal(Object.prototype.hasOwnProperty.call(ev.payload.pull_request, "labels"), false);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review"), true);
+});
+
+test("labelFilterMatches: (real) base wake fires on a PR carrying :wip / :completed claim markers", () => {
+  // The multi-round review/rework case: the base label coexists with claim
+  // markers; each such PR labeled event still wakes the base-label listener.
+  const ev = realEvents.incidentPrLabeled;
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review"), true);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review:completed"), true);
+});
+
+test("labelFilterMatches: (real) IssuesEvent uses event-time payload.labels, not the late-bound issue.labels snapshot", () => {
+  // Event 12842942084: payload.labels = ['florian-03:ready'] (event time), while
+  // payload.issue.labels = ['florian-03:ready:completed'] (a snapshot read 7 min
+  // later). The wake label must match; the late-bound-only label must NOT.
+  const ev = realEvents.lateBoundIssueLabeled;
+  assert.equal(ev.id, "12842942084");
+  assert.deepEqual(ev.payload.labels.map((l) => l.name), ["florian-03:ready"]);
+  assert.deepEqual(ev.payload.issue.labels.map((l) => l.name), ["florian-03:ready:completed"]);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready"), true);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready:completed"), false);
+});
+
+test("labelFilterMatches: (real) top-level labels wins even though the direct label also matches", () => {
+  // Sanity: the attributed-label short-circuit doesn't hide the payload.labels
+  // path — matching the directly-named label still works on a real event.
+  const ev = realEvents.lateBoundIssueLabeled;
+  assert.equal(labelFilterMatches(ev, "florian-03:ready"), true);
+});
+
+test("labelFilterMatches: (fixture) genuinely webhook-shaped payload still recovers via nested labels", () => {
+  // No top-level payload.labels → nested fallback must keep working so the e2e
+  // fake-github path does not regress.
+  const ev = realEvents.webhookShapedIssueLabeled;
+  assert.equal(Object.prototype.hasOwnProperty.call(ev.payload, "labels"), false);
+  assert.equal(labelFilterMatches(ev, "team-x:ready"), true);
+  assert.equal(labelFilterMatches(ev, "bug"), true);
+  assert.equal(labelFilterMatches(ev, "absent"), false);
 });
 
 // ── passesHorizon (Baustein B): >= horizon − grace ────────────────────────────

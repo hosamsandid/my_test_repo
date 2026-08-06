@@ -171,21 +171,34 @@ function conversationKey(ghEvent) {
 // never delivered as its own event — a `labelFilter: 'ready'` listener would
 // silently miss the wake (the reported bug: "reagiert nur auf das letzte Label").
 //
-// Fix: for a `labeled` event, ALSO honour the object's full current label set
-// (`payload.issue.labels` / `payload.pull_request.labels`, always present for
-// IssuesEvent; best-effort for the reduced PR payload). If the wake label is on
-// the object right now, the collapsed add included it — so fire. This is scoped
-// to `labeled` deliberately: on `unlabeled`, a removed label is (correctly)
-// absent from the current set, so we can only honour the directly-named
-// `payload.label` there. Collapsed *removals* are unrecoverable from the Events
-// API (no signal survives) — a known limitation; wakes are near-always on adds.
+// Fix: for a `labeled` event, ALSO honour the object's full label set. The
+// Events API carries that set at the payload TOP level (`payload.labels`), for
+// BOTH IssuesEvent and PullRequestEvent (verified against real events — see
+// `github-poller-events.fixture.json` / #1376). If the wake label is in that
+// set, the collapsed add included it — so fire. This is scoped to `labeled`
+// deliberately: on `unlabeled`, a removed label is (correctly) absent from the
+// set, so we can only honour the directly-named `payload.label` there. Collapsed
+// *removals* are unrecoverable from the Events API (no signal survives) — a
+// known limitation; wakes are near-always on adds.
+//
+// The webhook-shaped nested arrays are NOT usable on the Events API:
+// `pull_request.labels` never exists on a PR event (the reduced payload carries
+// only base/head/id/number/url), and `issue.labels` is late-bound — a snapshot
+// at read time, not at event time — so it both misses the wake label and
+// spuriously matches labels added later. Prefer the top-level set whenever the
+// key is PRESENT (keying off presence, not emptiness — a genuinely empty
+// top-level set must not fall through to a stale nested snapshot); fall back to
+// the nested arrays only for genuinely webhook-shaped payloads (the e2e
+// fake-github, and any future webhook ingress).
 function labelFilterMatches(ghEvent, wanted) {
   if (!wanted) return true; // no filter → fire on any label change (legacy)
   const p = ghEvent?.payload || {};
   if (p.label?.name === wanted) return true; // the directly-attributed label
   if (p.action === 'labeled') {
-    const container = p.issue || p.pull_request || {};
-    const labels = Array.isArray(container.labels) ? container.labels : [];
+    const nested = p.issue || p.pull_request || {};
+    const labels = Array.isArray(p.labels)
+      ? p.labels
+      : (Array.isArray(nested.labels) ? nested.labels : []);
     return labels.some((l) => (typeof l === 'string' ? l : l?.name) === wanted);
   }
   return false;

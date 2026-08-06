@@ -46,6 +46,38 @@ resource "google_project_iam_member" "deployer_container_developer" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# roles/container.developer covers every normal Kubernetes object but NOT RBAC
+# objects — the deploy-gke workflow applies 10-rbac.yaml as part of the
+# overlay, so the first Role drift after #1348 failed with
+# `cannot patch resource "roles" … requires container.roles.update`. This
+# custom role adds exactly the RBAC-object CRUD and nothing else; Kubernetes'
+# own escalation guard still applies, so the deployer can only grant
+# permissions it already holds via container.developer (pods, pods/log,
+# pods/exec) — no privilege escalation path.
+resource "google_project_iam_custom_role" "deployer_rbac" {
+  role_id     = "agentStudioDeployerRbac"
+  title       = "Agent Studio deployer — k8s RBAC objects"
+  description = "CRUD on Roles/RoleBindings so the deploy-gke workflow can apply 10-rbac.yaml (deploy/k8s/base/core)."
+  permissions = [
+    "container.roles.get",
+    "container.roles.list",
+    "container.roles.create",
+    "container.roles.update",
+    "container.roles.delete",
+    "container.roleBindings.get",
+    "container.roleBindings.list",
+    "container.roleBindings.create",
+    "container.roleBindings.update",
+    "container.roleBindings.delete",
+  ]
+}
+
+resource "google_project_iam_member" "deployer_rbac" {
+  project = var.project
+  role    = google_project_iam_custom_role.deployer_rbac.id
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # Read-only plan rights for CI (workflow: .github/workflows/terraform-plan.yml).
 # The PR plan needs to read the state and every managed resource; it runs with
 # -lock=false, so no write access anywhere. Applies stay on operator machines.

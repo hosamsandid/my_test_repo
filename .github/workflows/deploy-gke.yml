@@ -16,7 +16,10 @@
 # Auth is keyless: the workflow exchanges its GitHub OIDC token for the
 # agent-studio-deployer service account via Workload Identity Federation — no
 # GCP keys are stored in GitHub. The WIF provider only accepts tokens from THIS
-# repository (attribute-condition on the provider).
+# repository (attribute-condition on the provider). The SA needs
+# roles/container.developer PLUS the agentStudioDeployerRbac custom role
+# (infra/gcp/deployer.tf) — container.developer alone cannot patch RBAC
+# objects, and the overlay apply includes 10-rbac.yaml.
 #
 # Images are built natively on GitHub's amd64 runners — this replaces the local
 # cross-build path (Apple Silicon Macs build arm64 by default, which

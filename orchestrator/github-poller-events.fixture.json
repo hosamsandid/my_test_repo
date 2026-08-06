@@ -1,0 +1,247 @@
+{
+  "_comment": [
+    "Verbatim Events-API entries captured 2026-08-06 from",
+    "AccentureCodeFoundry/232527_agent-studio-hosting-test (issue #1376).",
+    "Used to prove labelFilterMatches reads the TOP-LEVEL payload.labels set,",
+    "which the Events API actually populates, rather than the nested",
+    "pull_request.labels (never present) / issue.labels (late-bound snapshot).",
+    "The webhookShapedIssueLabeled entry is NOT from the Events API — it is the",
+    "webhook / e2e fake-github shape (no top-level labels), kept so the nested",
+    "fallback stays covered."
+  ],
+  "incidentPrLabeled": {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/308434960?",
+      "display_login": "florian-fuerst_accent",
+      "gravatar_id": "",
+      "id": 308434960,
+      "login": "florian-fuerst_accent",
+      "url": "https://api.github.com/users/florian-fuerst_accent"
+    },
+    "created_at": "2026-08-06T04:35:37Z",
+    "id": "12860294824",
+    "org": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/159431693?",
+      "gravatar_id": "",
+      "id": 159431693,
+      "login": "AccentureCodeFoundry",
+      "url": "https://api.github.com/orgs/AccentureCodeFoundry"
+    },
+    "payload": {
+      "action": "labeled",
+      "label": {
+        "color": "0E8A16",
+        "default": false,
+        "description": "run completed (auto-created claim label)",
+        "id": 11741766434,
+        "name": "florian-03:ready-for-review:completed",
+        "node_id": "LA_kwDOTk5ee88AAAACu90jIg",
+        "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready-for-review:completed"
+      },
+      "labels": [
+        {
+          "color": "1d76db",
+          "default": false,
+          "description": "Developer done; Code Reviewer may proceed",
+          "id": 11694959224,
+          "name": "florian-03:ready-for-review",
+          "node_id": "LA_kwDOTk5ee88AAAACuRLqeA",
+          "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready-for-review"
+        },
+        {
+          "color": "0E8A16",
+          "default": false,
+          "description": "run completed (auto-created claim label)",
+          "id": 11741766434,
+          "name": "florian-03:ready-for-review:completed",
+          "node_id": "LA_kwDOTk5ee88AAAACu90jIg",
+          "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready-for-review:completed"
+        }
+      ],
+      "number": 27,
+      "pull_request": {
+        "base": {
+          "ref": "main",
+          "repo": {
+            "id": 1313758843,
+            "name": "232527_agent-studio-hosting-test",
+            "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test"
+          },
+          "sha": "44d4aaa03dde799faeb6bedb50aa032bcfe69171"
+        },
+        "head": {
+          "ref": "florian-03/feature-16-cmdb-chief-biso",
+          "repo": {
+            "id": 1313758843,
+            "name": "232527_agent-studio-hosting-test",
+            "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test"
+          },
+          "sha": "ba4712353e4d0ae0938cef5b038eeacc2f922268"
+        },
+        "id": 4215439096,
+        "number": 27,
+        "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/pulls/27"
+      }
+    },
+    "public": false,
+    "repo": {
+      "id": 1313758843,
+      "name": "AccentureCodeFoundry/232527_agent-studio-hosting-test",
+      "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test"
+    },
+    "type": "PullRequestEvent"
+  },
+  "lateBoundIssueLabeled": {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/308434960?",
+      "display_login": "florian-fuerst_accent",
+      "gravatar_id": "",
+      "id": 308434960,
+      "login": "florian-fuerst_accent",
+      "url": "https://api.github.com/users/florian-fuerst_accent"
+    },
+    "created_at": "2026-08-05T19:49:01Z",
+    "id": "12842942084",
+    "org": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/159431693?",
+      "gravatar_id": "",
+      "id": 159431693,
+      "login": "AccentureCodeFoundry",
+      "url": "https://api.github.com/orgs/AccentureCodeFoundry"
+    },
+    "payload": {
+      "action": "labeled",
+      "issue": {
+        "active_lock_reason": null,
+        "assignee": null,
+        "assignees": [],
+        "body": "## Context\nDeutsche Bank's Accessio program has a real delivery pack for **Feature #16 CMDB**: the Accessio ETL reads application master data from the `[APP_CMDB]` Oracle system and enriches it with BIB (Business-Impact-Beitrag) attributes for downstream use. Author: Silpa Mandava, Nov 2025. Reference documents live in this agent's mounted host folder:\n\n```\n/context/dbk-accessio/220_Stream_Agentic_SDLC_Setup/ETL-Pilot/\n  ├── Feature+FD+16+CMDB.docx     — Functional Design\n  ├── Feature+TD+16+CMDB.docx     — Technical Design\n  └── UC1+_+CMDB.docx              — Use Case 1 spec\n```\n\nRead those first. They describe the real DBK feature end-to-end — you will build a minimal sandbox miniature that follows the same *shape*, not the full Oracle-Talend implementation.\n\n## Scope — sandbox miniature\n\nThe sandbox `232527_agent-studio-hosting-test` mirrors real Accessio in miniature. Existing state you can rely on:\n- Table `application` already carries three contact-email columns: `iso_email`, `diso_email`, `itao_email`.\n- Existing \"second-source\" pattern: `source-systems/system-a/identities.csv` and `source-systems/system-b/access.csv` are ingested by Spring Batch (`etl/`).\n- `ApplicationView` (record: `narCode`, `name`) is what `GET /api/applications` returns today; `ApplicationRepository` selects only those two columns.\n\nYour job is to **add one more BIB attribute — the Chief BISO email — end-to-end**, mirroring what the FD prescribes for the real feature.\n\n## Acceptance Criteria\n\n**AC1 — Schema.** `application` gets a new nullable column `chief_biso_email VARCHAR(256) NULL`. Add it to `db/init/01_schema.sql` in the same style as the existing three email columns.\n\n**AC2 — Source feed.** Add a new source CSV at `source-systems/system-c/app_contacts.csv` with the header `app_code,contact_type,email`. Keep it small (~5-10 rows). At least one row per existing sample application must exist with `contact_type = Chief BISO`. This is the miniature analogue of the FD's `VS_INS_CHIEF_BISO_V20` feed.\n\n**AC3 — ETL step.** Extend the Spring Batch job (`etl/`) with a third step `systemCStep` that reads `system-c/app_contacts.csv`, filters `contact_type = Chief BISO`, and writes `chief_biso_email` onto the matching row in `application` (join key: `app_code = application.nar_code`). Rows with no matching application → skip with a WARN, same policy as `SystemBProcessor`. The step runs after `systemBStep` in the job flow.\n\n**AC4 — API surface.** `ApplicationView` gains a third record component `String chiefBisoEmail`. `ApplicationRepository` extends its SELECT to include the new column. `GET /api/applications` now returns `chiefBisoEmail` in each element.\n\n**AC5 — Failing test passes.** Add the test file below exactly as given at path `webapp/backend/src/test/java/com/example/webapp/model/ApplicationViewCmdbTest.java`. Today it fails at compile time; after AC4 it must go green.\n\n```java\npackage com.example.webapp.model;\n\nimport org.junit.jupiter.api.Test;\nimport java.lang.reflect.RecordComponent;\nimport java.util.Arrays;\nimport java.util.List;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\n/**\n * Feature #16 CMDB — Chief BISO enrichment (sandbox miniature).\n * See /context/dbk-accessio/220_Stream_Agentic_SDLC_Setup/ETL-Pilot/ for the delivery pack.\n * Chief BISO email is one of the BIB-enrichment attributes the FD calls out\n * (source system: VS_INS_CHIEF_BISO_V20). The sandbox miniature exposes it\n * as ApplicationView.chiefBisoEmail so /api/applications carries it.\n */\nclass ApplicationViewCmdbTest {\n\n    @Test\n    void applicationView_exposesChiefBisoEmailField() {\n        RecordComponent[] components = ApplicationView.class.getRecordComponents();\n        List<String> names = Arrays.stream(components)\n                                   .map(RecordComponent::getName)\n                                   .toList();\n        assertTrue(\n            names.contains(\"chiefBisoEmail\"),\n            \"ApplicationView must expose 'chiefBisoEmail' — required by Feature #16 CMDB \" +\n            \"(Chief BISO enrichment). Current record components: \" + names\n        );\n    }\n}\n```\n\n**AC6 — CI green.** The workflow `.github/workflows/webapp-tests.yml` (already on main) runs `mvn test` in `webapp/backend` on your PR. It must be green before you request review.\n\n**AC7 — README.** Add one paragraph to the top-level `README.md` (or `etl/README.md`) describing the new `system-c` feed and the Chief BISO column, in the same tone as the existing README bullets.\n\n## Out of scope\n\n- Full FD parity (24-hour scheduling, retry/escalate on connectivity failure, staging-table clean, etc. — those are for the real Talend pipeline).\n- BIB enrichment beyond Chief BISO (the FD covers more; miniature only tackles this one).\n- Any change to the real `232527_accessio` repo. Stay in this sandbox.\n- Any browser/UI change. This is a backend feature.\n\n## Definition of Done\n\n- All ACs above met.\n- `.github/workflows/webapp-tests.yml` green on the PR.\n- PR body links to this issue (`Closes #<n>`).\n- Reviewer's `florian-03:ready-for-review` label applied by you when you open the PR (the code reviewer wakes on that label).\n",
+        "closed_at": "2026-08-06T05:47:49Z",
+        "comments": 1,
+        "comments_url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26/comments",
+        "created_at": "2026-08-05T19:46:53Z",
+        "events_url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26/events",
+        "html_url": "https://github.com/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26",
+        "id": 5074636725,
+        "issue_dependencies_summary": {
+          "blocked_by": 0,
+          "blocking": 0,
+          "total_blocked_by": 0,
+          "total_blocking": 0
+        },
+        "issue_field_values": [],
+        "labels": [
+          {
+            "color": "0E8A16",
+            "default": false,
+            "description": "run completed (auto-created claim label)",
+            "id": 11741743961,
+            "name": "florian-03:ready:completed",
+            "node_id": "LA_kwDOTk5ee88AAAACu9zLWQ",
+            "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready:completed"
+          }
+        ],
+        "labels_url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26/labels{/name}",
+        "locked": false,
+        "milestone": null,
+        "node_id": "I_kwDOTk5ee88AAAABLnjPtQ",
+        "number": 26,
+        "performed_via_github_app": null,
+        "pinned_comment": null,
+        "reactions": {
+          "+1": 0,
+          "-1": 0,
+          "confused": 0,
+          "eyes": 0,
+          "heart": 0,
+          "hooray": 0,
+          "laugh": 0,
+          "rocket": 0,
+          "total_count": 0,
+          "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26/reactions"
+        },
+        "repository_url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test",
+        "state": "closed",
+        "state_reason": "completed",
+        "sub_issues_summary": {
+          "completed": 0,
+          "percent_completed": 0,
+          "total": 0
+        },
+        "timeline_url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26/timeline",
+        "title": "Feature #16 CMDB (Sandbox miniature) — expose Chief BISO email on the applications API",
+        "type": null,
+        "updated_at": "2026-08-06T05:47:49Z",
+        "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/issues/26",
+        "user": {
+          "avatar_url": "https://avatars.githubusercontent.com/u/308434960?v=4",
+          "events_url": "https://api.github.com/users/florian-fuerst_accent/events{/privacy}",
+          "followers_url": "https://api.github.com/users/florian-fuerst_accent/followers",
+          "following_url": "https://api.github.com/users/florian-fuerst_accent/following{/other_user}",
+          "gists_url": "https://api.github.com/users/florian-fuerst_accent/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "https://github.com/florian-fuerst_accent",
+          "id": 308434960,
+          "login": "florian-fuerst_accent",
+          "node_id": "U_kgDOEmJYEA",
+          "organizations_url": "https://api.github.com/users/florian-fuerst_accent/orgs",
+          "received_events_url": "https://api.github.com/users/florian-fuerst_accent/received_events",
+          "repos_url": "https://api.github.com/users/florian-fuerst_accent/repos",
+          "site_admin": false,
+          "starred_url": "https://api.github.com/users/florian-fuerst_accent/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/florian-fuerst_accent/subscriptions",
+          "type": "User",
+          "url": "https://api.github.com/users/florian-fuerst_accent",
+          "user_view_type": "public"
+        }
+      },
+      "label": {
+        "color": "0e8a16",
+        "default": false,
+        "description": "Human go-signal: Developer may implement",
+        "id": 11694959119,
+        "name": "florian-03:ready",
+        "node_id": "LA_kwDOTk5ee88AAAACuRLqDw",
+        "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready"
+      },
+      "labels": [
+        {
+          "color": "0e8a16",
+          "default": false,
+          "description": "Human go-signal: Developer may implement",
+          "id": 11694959119,
+          "name": "florian-03:ready",
+          "node_id": "LA_kwDOTk5ee88AAAACuRLqDw",
+          "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test/labels/florian-03:ready"
+        }
+      ]
+    },
+    "public": false,
+    "repo": {
+      "id": 1313758843,
+      "name": "AccentureCodeFoundry/232527_agent-studio-hosting-test",
+      "url": "https://api.github.com/repos/AccentureCodeFoundry/232527_agent-studio-hosting-test"
+    },
+    "type": "IssuesEvent"
+  },
+  "webhookShapedIssueLabeled": {
+    "type": "IssuesEvent",
+    "payload": {
+      "action": "labeled",
+      "label": {
+        "name": "team-x:ready"
+      },
+      "issue": {
+        "number": 42,
+        "labels": [
+          {
+            "name": "team-x:ready"
+          },
+          {
+            "name": "bug"
+          }
+        ]
+      }
+    }
+  }
+}

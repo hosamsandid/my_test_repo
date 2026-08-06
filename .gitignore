@@ -3,6 +3,7 @@
 .env.k8s
 .env.k8s-e2e
 .env.gke
+.env.gke-preprod
 .DS_Store
 /.claude/audit.log
 /.claude/settings.local.json

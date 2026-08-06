@@ -31,9 +31,9 @@ Continuwuity homeserver, which the unit tests cannot.
    `recreate-probe`.
 4. Expected:
    - Creation **succeeds** and the agent starts normally.
-   - `podman logs -f orchestrator` may show one or more
-     `reactivation re-issue for recreate-probe ...` only if a retry was needed;
-     on a fast machine the first login already succeeds.
+   - The re-issue is silent on success — no `reactivation re-issue for ...`
+     warning log appears in `podman logs -f orchestrator` when recovery works.
+     (That warn line only fires if the admin command itself could not be sent.)
 
 **Pass:** Same-id re-creation within the settle window completes without error.
 

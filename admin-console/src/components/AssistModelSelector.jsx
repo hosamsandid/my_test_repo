@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Cpu, Check, AlertTriangle, ChevronDown } from 'lucide-react';
 import { useModelSelection } from '../context/ModelSelectionContext';
 import { selectionLabel } from '../context/assist-model-selection.js';
+import { exclusionMessage } from '../context/assist-selector-exclusion.js';
 
 // Header control for the global assist model selector (#1212, concept §4.3).
 // Sits in the Shell right-cluster left of the theme toggle. Compact button
@@ -65,7 +66,7 @@ function ScopeBadge({ scope }) {
 
 export default function AssistModelSelector() {
   const {
-    providers, envFallbackActive, selection, attention,
+    providers, envFallbackActive, exclusionReason, selection, attention,
     pickerOpen, openPicker, closePicker, select,
   } = useModelSelection();
   const wrapRef = useRef(null);
@@ -98,11 +99,15 @@ export default function AssistModelSelector() {
   // No selectable providers and no fallback: helpers stay visible but will fail
   // server-side until a provider the user's team can use is registered.
   if (!providers || providers.length === 0) {
+    const excl = exclusionMessage(exclusionReason);
+    const chipTitle = excl
+      ? `${excl.title} ${excl.detail}`
+      : 'None of the registered model providers are available to your teams. AI helpers will not run until one is.';
     return (
       <Chip
         icon={<AlertTriangle size={16} />}
         text="No assist model available"
-        title="None of the registered model providers are available to your teams. AI helpers will not run until one is."
+        title={chipTitle}
         muted
       />
     );

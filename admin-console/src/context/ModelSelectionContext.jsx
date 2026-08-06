@@ -7,6 +7,7 @@ import {
   needsSelection,
 } from './assist-model-selection.js';
 import { setAssistSelection, registerAssistErrorHandlers } from './assist-transport.js';
+import { classifyExclusions } from './assist-selector-exclusion.js';
 
 // Global assist model selection (#1212, concept docs/assist-model-selection-
 // concept.md §4.3–§4.5). Sibling of AuthProvider: after login it loads
@@ -29,6 +30,9 @@ export function ModelSelectionProvider({ children }) {
   const [loading, setLoading] = useState(false);
   const [selection, setSelectionState] = useState(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Exclusion reason when providers: [] — set by fetching the full endpoint list
+  // to explain WHY no providers are available (AC3 / #1402).
+  const [exclusionReason, setExclusionReason] = useState(null);
 
   // Keep the transport getter in sync with the live selection.
   useEffect(() => { setAssistSelection(selection); }, [selection]);
@@ -74,22 +78,42 @@ export function ModelSelectionProvider({ children }) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const providers = Array.isArray(data.providers) ? data.providers : [];
-      setOptions({ providers, envFallbackActive: !!data.envFallbackActive });
+      const envFallbackActive = !!data.envFallbackActive;
+      setOptions({ providers, envFallbackActive });
       applyOptions(providers);
+
+      // AC3 (#1402): when there are no selectable providers and the env fallback
+      // is not active, fetch the full endpoint list to explain WHY (oauth exclusion
+      // vs team-scope mismatch) so the selector chip can show a targeted message.
+      if (providers.length === 0 && !envFallbackActive) {
+        try {
+          const epRes = await fetch('/api/llm-endpoints');
+          if (epRes.ok) {
+            const allEndpoints = await epRes.json();
+            const userTeamIds = (user?.teams || []).map(t => t.teamId);
+            const isSysAdmin = !!user?.admin;
+            setExclusionReason(classifyExclusions(allEndpoints, userTeamIds, isSysAdmin));
+          }
+        } catch { /* best-effort — exclusion reason is cosmetic */ }
+      } else {
+        setExclusionReason(null);
+      }
     } catch {
       // Fail soft: no picker, assist helpers still attempt calls (server decides).
       setOptions(EMPTY_OPTIONS);
       setSelectionState(null);
+      setExclusionReason(null);
     } finally {
       setLoading(false);
     }
-  }, [authenticated, applyOptions]);
+  }, [authenticated, applyOptions, user]);
 
   useEffect(() => {
     if (!authenticated) {
       setOptions(EMPTY_OPTIONS);
       setSelectionState(null);
       setPickerOpen(false);
+      setExclusionReason(null);
       return;
     }
     load();
@@ -135,6 +159,7 @@ export function ModelSelectionProvider({ children }) {
     options,
     providers: options.providers,
     envFallbackActive: options.envFallbackActive,
+    exclusionReason,
     selection,
     attention,
     pickerOpen,

@@ -108,12 +108,67 @@ kubectl config use-context "$GKE_CONTEXT" >/dev/null 2>&1 || fail "kubectl conte
 
 KC() { kubectl --context "$GKE_CONTEXT" "$@"; }
 
+# --- composed exit cleanup -----------------------------------------------------
+# ONE trap for the whole script (a later `trap … EXIT` REPLACES the earlier one,
+# which is exactly how the conduwuit bootstrap patch used to leak: the revert
+# lived between two traps and an interrupted run left conduwuit crash-looping
+# on "Username is not available" forever). Every cleanup step is a no-op until
+# its state flag/variable is set.
+PF_PID=""
+SECRET_ENV=""
+CONDUWUIT_PATCHED=0
+
+# kill + wait reaps the background port-forward silently — without the wait,
+# bash prints an async "Terminated: 15" job notice that reads like an error.
+stop_port_forward() {
+  [ -n "$PF_PID" ] || return 0
+  { kill "$PF_PID" && wait "$PF_PID"; } 2>/dev/null || true
+  PF_PID=""
+}
+
+revert_conduwuit_patch() {
+  [ "$CONDUWUIT_PATCHED" = 1 ] || return 0
+  log "reverting conduwuit bootstrap --execute patch ..."
+  if KC -n "$NAMESPACE" patch deploy/conduwuit --type=json -p '[
+    {"op":"remove", "path":"/spec/template/spec/containers/0/command"},
+    {"op":"remove", "path":"/spec/template/spec/containers/0/args"}
+  ]' >/dev/null; then
+    CONDUWUIT_PATCHED=0
+  else
+    echo "[gke-up] WARNING: could not revert the conduwuit bootstrap patch — conduwuit will crash-loop until you run:" >&2
+    echo "  kubectl --context ${GKE_CONTEXT} -n ${NAMESPACE} patch deploy/conduwuit --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/command\"},{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args\"}]'" >&2
+  fi
+  return 0
+}
+
+cleanup() {
+  stop_port_forward
+  revert_conduwuit_patch
+  [ -n "$SECRET_ENV" ] && rm -f "$SECRET_ENV"
+  return 0
+}
+trap cleanup EXIT
+
 # --- pin images + base resources + conduwuit ----------------------------------
 # The historic sed rewrites (local image names -> AR, Never -> Always) live in
 # the overlay now (kustomize images: block + patches); set-images.sh pins the
 # tag in the working tree. Reset afterwards: git checkout -- deploy/k8s/overlays
 "${SCRIPT_DIR}/set-images.sh" "$DEPLOY_ENV" "$IMAGE_TAG"
 KC apply -k "${OVERLAY}/core"
+
+# Self-heal a bootstrap patch left by an interrupted previous run: the base
+# manifest never sets `command`, and kubectl apply's three-way merge never
+# removes imperatively-patched fields — so a non-empty `command` here can only
+# be a stale --execute patch (symptom: CrashLoopBackOff, "Username is not
+# available"). Revert it before waiting on the rollout.
+STALE_CMD=$(KC -n "$NAMESPACE" get deploy/conduwuit \
+  -o jsonpath='{.spec.template.spec.containers[0].command}' 2>/dev/null || true)
+if [ -n "$STALE_CMD" ]; then
+  log "conduwuit carries a bootstrap patch from an interrupted previous run — reverting"
+  CONDUWUIT_PATCHED=1
+  revert_conduwuit_patch
+fi
+
 log "waiting for conduwuit ..."
 KC -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=300s
 
@@ -122,7 +177,6 @@ set -a; . "$ENV_FILE"; set +a
 ADMIN_USER="${ADMIN_USER:-admin}"
 HOMESERVER="http://localhost:${BOOTSTRAP_PORT}"
 
-PF_PID=""
 start_port_forward() {
   KC -n "$NAMESPACE" port-forward svc/conduwuit "${BOOTSTRAP_PORT}:6167" >/dev/null 2>&1 &
   PF_PID=$!
@@ -132,14 +186,6 @@ start_port_forward() {
   done
   fail "cannot reach conduwuit through port-forward on :${BOOTSTRAP_PORT}"
 }
-# kill + wait reaps the background port-forward silently — without the wait,
-# bash prints an async "Terminated: 15" job notice that reads like an error.
-stop_port_forward() {
-  [ -n "$PF_PID" ] || return 0
-  { kill "$PF_PID" && wait "$PF_PID"; } 2>/dev/null || true
-  PF_PID=""
-}
-trap stop_port_forward EXIT
 
 start_port_forward
 
@@ -162,12 +208,13 @@ else
     {op:"add", path:"/spec/template/spec/containers/0/command", value:["/sbin/conduwuit"]},
     {op:"add", path:"/spec/template/spec/containers/0/args",    value:["--execute", $cmd]}
   ]')
+  # Flag BEFORE the patch: a kill between the two can only cause a harmless
+  # spurious revert; the reverse order would leak the patch (the failure mode
+  # this trap design exists to close).
+  CONDUWUIT_PATCHED=1
   KC -n "$NAMESPACE" patch deploy/conduwuit --type=json -p "$PATCH_ADD" >/dev/null
   KC -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=180s >/dev/null
-  KC -n "$NAMESPACE" patch deploy/conduwuit --type=json -p '[
-    {"op":"remove", "path":"/spec/template/spec/containers/0/command"},
-    {"op":"remove", "path":"/spec/template/spec/containers/0/args"}
-  ]' >/dev/null
+  revert_conduwuit_patch
   KC -n "$NAMESPACE" rollout status deploy/conduwuit --timeout=180s >/dev/null
 
   stop_port_forward; start_port_forward
@@ -205,8 +252,7 @@ set_env_var MATRIX_ACCESS_TOKEN "$MATRIX_ACCESS_TOKEN"
 set_env_var CONDUWUIT_ADMIN_ROOM "$CONDUWUIT_ADMIN_ROOM"
 
 # --- secret from env file ------------------------------------------------------
-SECRET_ENV=$(mktemp)
-trap 'stop_port_forward; rm -f "$SECRET_ENV"' EXIT
+SECRET_ENV=$(mktemp)   # removed by the EXIT trap (cleanup)
 grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" \
   | grep -Ev '^(MATRIX_ACCESS_TOKEN|CONDUWUIT_ADMIN_ROOM|ADMIN_USER_ID)=' \
   | sed -e 's/^\([^=]*\)="\(.*\)"$/\1=\2/' -e "s/^\([^=]*\)='\(.*\)'\$/\1=\2/" \

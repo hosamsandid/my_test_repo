@@ -56,8 +56,60 @@ function buildEnsureUserCommands(username, password) {
   ];
 }
 
+// Build the admin-room commands that REACTIVATE an existing (deactivated) local
+// account — re-issued from the login-retry recovery path when a login still
+// returns M_USER_DEACTIVATED after the initial ensure sequence (issue #1386).
+//
+// Why this is separate from buildEnsureUserCommands:
+//   The account already exists (it was created on the first pass, or on the
+//   agent's previous life before deletion), so `create-user` is deliberately
+//   omitted — re-issuing only the reactivating commands is faster and avoids
+//   an "already exists" reply on every retry.
+//
+// Why it re-sends reset-password AND the --convert-to-local-account variant:
+//   The reported bug is a race — the operator deletes and immediately re-creates
+//   the same id, and `deactivateMatrixUser`'s admin-room `deactivate` command can
+//   be processed *after* the ensure sequence's `reset-password`, leaving the
+//   account deactivated at login time. Re-issuing the plain `reset-password`
+//   here (after a settle delay, then a retried login) reactivates it once the
+//   late `deactivate` has landed — the current Continuwuity build clears the
+//   `deactivated` flag via plain reset-password (issue #715).
+//   The `--convert-to-local-account` variant is a belt-and-braces second attempt
+//   for a *different or upgraded* homeserver build where plain reset-password
+//   does NOT clear the flag: an earlier Continuwuity build REQUIRED that flag to
+//   reactivate (issue #715 note). The current build rejects it ("unexpected
+//   argument"), but since it is a fire-and-forget admin-room message whose reply
+//   we never parse, an outright rejection is harmless — and the plain variant,
+//   sent first, has already done the job on the current build. This is the
+//   reliable-retry-loop path from issue #1386: Continuwuity exposes no Synapse
+//   `/_synapse/admin/` REST API, so REST reactivation is not available.
+//
+// Returns: Array<{ body: string, delayMs: number }> in send order.
+function buildReactivateCommands(username, password) {
+  const userId = `@${username}:local`;
+  return [
+    // Plain reset-password: reactivates + sets the password on the build we run.
+    {
+      body: `!admin users reset-password ${userId} ${password}`,
+      delayMs: FOLLOWUP_SETTLE_MS,
+    },
+    // Belt-and-braces for a build that requires the flag; harmlessly rejected on
+    // the current build (plain variant above already reactivated it).
+    {
+      body: `!admin users reset-password ${userId} ${password} --convert-to-local-account`,
+      delayMs: FOLLOWUP_SETTLE_MS,
+    },
+    // Clear the (separate) login-disabled flag as well.
+    {
+      body: `!admin users enable-login ${userId}`,
+      delayMs: FOLLOWUP_SETTLE_MS,
+    },
+  ];
+}
+
 module.exports = {
   buildEnsureUserCommands,
+  buildReactivateCommands,
   CREATE_USER_SETTLE_MS,
   FOLLOWUP_SETTLE_MS,
 };

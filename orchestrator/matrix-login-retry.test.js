@@ -217,3 +217,100 @@ test("a custom shouldRetry predicate is honoured", async () => {
   assert.equal(token, "ok");
   assert.equal(calls, 2);
 });
+
+// ---- retryWhile: onBeforeRetry re-issues reactivation (issue #1386) ----------
+
+test("onBeforeRetry runs before each backoff sleep, with the error and 0-indexed attempt", async () => {
+  const clock = fakeClock();
+  let calls = 0;
+  const seen = [];
+  const token = await retryWhile(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw deactivated();
+      return "token";
+    },
+    {
+      now: clock.now,
+      sleep: clock.sleep,
+      onBeforeRetry: (err, attempt) => {
+        seen.push({ attempt, deactivated: isDeactivatedError(err) });
+      },
+    }
+  );
+  assert.equal(token, "token");
+  // Two failures → two retries → onBeforeRetry fired twice, before the two sleeps.
+  assert.deepEqual(seen, [
+    { attempt: 0, deactivated: true },
+    { attempt: 1, deactivated: true },
+  ]);
+  assert.equal(clock.sleeps.length, 2);
+});
+
+test("re-issuing reactivation in onBeforeRetry lets a lingering M_USER_DEACTIVATED clear and login succeed", async () => {
+  // Simulates the delete→immediate-recreate race: the account is still
+  // deactivated until the reactivation command is (re)issued. Here the fake
+  // homeserver flips to active only once onBeforeRetry has re-sent it.
+  const clock = fakeClock();
+  let reactivated = false;
+  let reissues = 0;
+  const token = await retryWhile(
+    async () => {
+      if (!reactivated) throw deactivated();
+      return "token";
+    },
+    {
+      now: clock.now,
+      sleep: clock.sleep,
+      onBeforeRetry: async (err) => {
+        if (isDeactivatedError(err)) {
+          reissues += 1;
+          reactivated = true; // the re-issued admin command lands
+        }
+      },
+    }
+  );
+  assert.equal(token, "token");
+  assert.equal(reissues, 1);
+});
+
+test("onBeforeRetry is NOT called for a non-retryable error (it propagates immediately)", async () => {
+  const clock = fakeClock();
+  let called = 0;
+  await assert.rejects(
+    retryWhile(async () => { throw new Error("network down"); }, {
+      now: clock.now,
+      sleep: clock.sleep,
+      onBeforeRetry: () => { called += 1; },
+    }),
+    /network down/
+  );
+  assert.equal(called, 0);
+  assert.equal(clock.sleeps.length, 0);
+});
+
+test("onBeforeRetry is NOT called once the ceiling is reached (no retry is armed)", async () => {
+  const clock = fakeClock();
+  let called = 0;
+  await assert.rejects(
+    retryWhile(async () => { throw deactivated(); }, {
+      now: clock.now,
+      sleep: clock.sleep,
+      ceilingMs: 1, // even the first backoff (500ms) crosses it → give up at once
+      onBeforeRetry: () => { called += 1; },
+    }),
+    /M_USER_DEACTIVATED/
+  );
+  assert.equal(called, 0, "no re-issue when the loop never gets to retry");
+});
+
+// ---- DEACTIVATED_USER_MESSAGE (issue #1386, AC3) -----------------------------
+
+test("exports the canonical operator-facing deactivated message", () => {
+  const { DEACTIVATED_USER_MESSAGE } = require("./matrix-login-retry");
+  assert.equal(typeof DEACTIVATED_USER_MESSAGE, "string");
+  assert.match(DEACTIVATED_USER_MESSAGE, /deactivated/i);
+  assert.match(DEACTIVATED_USER_MESSAGE, /try again/i);
+  // Not a raw errcode / stack (AC3).
+  assert.ok(!/M_USER_DEACTIVATED/.test(DEACTIVATED_USER_MESSAGE));
+});

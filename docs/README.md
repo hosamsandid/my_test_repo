@@ -136,6 +136,7 @@ only to understand how the project got here.
 | [agent-chat-plan.md](agent-chat-plan.md) | Build plan for the agent chat, which has shipped; still describes the removed Node agent runner |
 | [vergleich-valkren-vs-agent-studio.md](vergleich-valkren-vs-agent-studio.md) | April-2026 comparison whose premise (agent pool, shared room) was rolled back *(German)* |
 | [manual-test-agent-deactivation.md](manual-test-agent-deactivation.md) | One-off manual test script for a closed issue |
+| [manual-test-agent-recreation.md](manual-test-agent-recreation.md) | Manual test: re-creating a deleted agent with the same id (issue #1386) |
 | [test-207-deactivation-stops-triggers.md](test-207-deactivation-stops-triggers.md) | Older duplicate of the above |
 
 ## Domain material

@@ -34,6 +34,13 @@ const DEFAULT_CEILING_MS = 45000;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 5000;
 
+// Canonical, human-facing message for a login that stays M_USER_DEACTIVATED
+// after all recovery attempts (issue #1386, AC3). Surfaced by the create-agent
+// API instead of a raw `Login failed: {...}` stack so the operator gets an
+// actionable next step rather than an errcode.
+const DEACTIVATED_USER_MESSAGE =
+  "Matrix user is deactivated — wait a moment and try again, or use a different agent ID";
+
 // Is this login error the transient provisioning race that a retry can plausibly
 // clear? The homeserver returns `M_FORBIDDEN` both when the account does not
 // exist yet (the race we recover from) and when the password is genuinely wrong.
@@ -81,6 +88,14 @@ function backoffDelay(
 //   - otherwise back off and retry, until the next sleep would cross `ceilingMs`
 //     of total elapsed time, at which point the last error is rethrown.
 //
+// `onBeforeRetry(err, attempt)` (optional, async) runs once we have decided to
+// retry — after `shouldRetry` and the ceiling check, before the backoff sleep.
+// The orchestrator uses it to re-issue the account-reactivation admin command
+// on a lingering M_USER_DEACTIVATED (issue #1386): the command is re-sent, then
+// the backoff sleep gives the admin bot time to process it before the next
+// login attempt. It runs *inside* the ceiling gate, so a retry is never armed
+// past the ceiling — but its own duration is not counted, so keep it cheap.
+//
 // The first attempt runs with no delay, so behaviour on a fast system is
 // unchanged (first-attempt success is returned immediately).
 async function retryWhile(attemptFn, options = {}) {
@@ -91,6 +106,7 @@ async function retryWhile(attemptFn, options = {}) {
     maxDelayMs = DEFAULT_MAX_DELAY_MS,
     now = Date.now,
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    onBeforeRetry = null,
   } = options;
 
   const start = now();
@@ -105,6 +121,7 @@ async function retryWhile(attemptFn, options = {}) {
       // Give up once the ceiling is reached, or when the next sleep would cross
       // it — never sleep past the ceiling.
       if (elapsed + delay >= ceilingMs) throw err;
+      if (onBeforeRetry) await onBeforeRetry(err, attempt);
       await sleep(delay);
       attempt += 1;
     }
@@ -120,4 +137,5 @@ module.exports = {
   DEFAULT_CEILING_MS,
   DEFAULT_BASE_DELAY_MS,
   DEFAULT_MAX_DELAY_MS,
+  DEACTIVATED_USER_MESSAGE,
 };

@@ -13586,6 +13586,24 @@ function safeSessionPath(agentId, roomId, suffix) {
   return full;
 }
 
+// Append one JSONL event to a room's session log (#1383, AC5). Best-effort:
+// a failure here never blocks the caller's response. The log is otherwise
+// agent-written, but appends are O_APPEND-atomic and readers already tolerate a
+// malformed line, so an out-of-band admin event is safe. On the default shared
+// volume this is exactly the file the history reader reads; the write is routed
+// through safeSessionPath so the fs sink stays behind the CodeQL barrier.
+function appendSessionEvent(agentId, roomId, event) {
+  const fp = safeSessionPath(agentId, roomId, '.jsonl');
+  if (!fp) return;
+  try {
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    const ev = { ts: new Date().toISOString(), ...event };
+    fs.appendFileSync(fp, JSON.stringify(ev) + '\n');
+  } catch (err) {
+    console.warn(`[API] session-event append failed for ${agentId}/${roomId}: ${err.message}`);
+  }
+}
+
 /* ─── Session pointer (Claude --resume id) ─────────────────────────── */
 
 // Returns the active Claude session id for a given (agent, room), if any.
@@ -13772,6 +13790,121 @@ app.post('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req,
   }
 
   res.json({ ok: true, sessionId, updatedAt });
+});
+
+/* ─── Parent-ticket binding (#1383) ────────────────────────────────────── */
+
+// Read the parent GitHub issue bound to this agent+room, or null when unbound.
+// Room-scoped (AC4: persists across Reset Session — a separate file from
+// `.current.json`/`.reset.json`). Prefers a pushed control-plane copy (#185).
+app.get('/api/agents/:agentId/session/:roomId/ticket', (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const fp = controlOrAgentPath(agentId, 'sessions', roomId + '.ticket.json');
+  let ticket = null;
+  if (fs.existsSync(fp)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (j && typeof j === 'object' && Number.isInteger(j.number) && j.number >= 1) ticket = j;
+    } catch { /* corrupt binding → treat as unbound */ }
+  }
+  res.json({ ticket });
+});
+
+// Bind a parent issue to this agent+room. Body: `{ mode: 'create', title,
+// repo?, issueBody? }` (AC2) or `{ mode: 'attach', ref, repo? }` where `ref`
+// is an issue number or GitHub issue URL (AC3). The orchestrator does the
+// GitHub round-trip with the env PAT and materialises `ticket.json` at the
+// workspace root (AC8); we then persist the room-scoped copy and append a
+// `ticket.bound` session-log event (AC5).
+app.put('/api/agents/:agentId/session/:roomId/ticket', apiLimiter, async (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const ticketPath = safeSessionPath(agentId, roomId, '.ticket.json');
+  if (!ticketPath) return res.status(400).json({ error: 'invalid id' });
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const mode = body.mode === 'create' ? 'create' : 'attach';
+  if (mode === 'create') {
+    if (typeof body.title !== 'string' || !body.title.trim()) {
+      return res.status(400).json({ error: 'title is required to create an issue' });
+    }
+  } else if (typeof body.ref !== 'string' || !body.ref.trim()) {
+    return res.status(400).json({ error: 'an issue number or GitHub issue URL is required' });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let ticket;
+  try {
+    const r = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/ticket`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data || data.ok === false || !data.ticket) {
+      return res.status(r.status && r.status >= 400 ? r.status : 502)
+        .json({ error: (data && data.error) || 'could not bind the ticket' });
+    }
+    ticket = data.ticket;
+  } catch (err) {
+    return res.status(502).json({ error: 'orchestrator unreachable: ' + err.message });
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(ticketPath), { recursive: true });
+    writeJsonAtomic(ticketPath, ticket);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  appendSessionEvent(agentId, roomId, {
+    type: 'ticket.bound',
+    repo: ticket.repo,
+    number: ticket.number,
+    url: ticket.url || '',
+    title: ticket.title || '',
+  });
+  res.json({ ok: true, ticket });
+});
+
+// Remove the parent-ticket binding (AC7): delete the room-scoped copy, ask the
+// orchestrator to drop the workspace `ticket.json`, and append a `ticket.unbound`
+// session-log event.
+app.delete('/api/agents/:agentId/session/:roomId/ticket', apiLimiter, async (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const ticketPath = safeSessionPath(agentId, roomId, '.ticket.json');
+  if (!ticketPath) return res.status(400).json({ error: 'invalid id' });
+
+  let hadBinding = false;
+  try {
+    hadBinding = fs.existsSync(ticketPath);
+    fs.rmSync(ticketPath, { force: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/ticket`,
+      { method: 'DELETE' },
+    );
+  } catch (err) {
+    console.warn(`[API] ticket delete call failed for ${agentId}: ${err.message}`);
+  }
+
+  if (hadBinding) appendSessionEvent(agentId, roomId, { type: 'ticket.unbound' });
+  res.json({ ok: true });
 });
 
 // Send a stop-session signal to the orchestrator, which forwards it via IPC

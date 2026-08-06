@@ -117,6 +117,13 @@ A lightweight 1:1 chat for talking to Matrix agents directly inside the Admin Co
 // progress; both fields are absent on non-loop firings.
 { "ts":"...", "type":"trigger.fired",       "correlationId":"trigger:lp:...",
   "triggerId":"lp", "triggerType":"loop", "loopIteration":3, "loopMaxIterations":25 }
+
+// A parent-ticket binding change (#1383). Appended by the admin console when a
+// human binds/rebinds or unbinds the GitHub issue this room is about. No
+// correlationId (it is an out-of-band human action, not a chat turn).
+{ "ts":"...", "type":"ticket.bound",   "repo":"owner/name", "number":1383,
+  "url":"https://github.com/owner/name/issues/1383", "title":"..." }
+{ "ts":"...", "type":"ticket.unbound" }
 ```
 
 `correlationId` is the Matrix event ID of the user message that triggered this work — lets the UI highlight log entries belonging to a chat bubble.

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Ticket, ExternalLink, X, Plus } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -17,6 +17,7 @@ import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
+import { describeTicket, NO_TICKET_LABEL, parseIssueRefInput } from './ticket-view.js';
 
 // Default prompt sent when the user clicks "Save & Learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -180,6 +181,12 @@ export default function ChatPanel({
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
 
+  // Parent-ticket binding (#1383): the GitHub issue this room is about.
+  const [ticket, setTicket] = useState(null);
+  const [ticketOpen, setTicketOpen] = useState(false);
+  const [ticketBusy, setTicketBusy] = useState(false);
+  const [ticketError, setTicketError] = useState(null);
+
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
     if (!agent || roomId) return;
@@ -210,6 +217,48 @@ export default function ChatPanel({
     const timer = setInterval(loadGitInfo, 30_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [agent?.id]);
+
+  /* ─── 1c. Parent-ticket binding (#1383) ─────────────────────────── */
+  // Room-scoped: it survives Reset Session (AC4), so it is keyed on the room,
+  // not the Claude session pointer.
+  const refreshTicket = useCallback(() => {
+    if (!agent?.id || !roomId) { setTicket(null); return; }
+    apiCall('GET', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`)
+      .then(d => setTicket(d?.ticket ?? null))
+      .catch(() => { /* leave the last-known binding on a transient error */ });
+  }, [agent?.id, roomId]);
+
+  useEffect(() => { setTicket(null); setTicketOpen(false); refreshTicket(); }, [refreshTicket]);
+
+  const bindTicket = useCallback(async (body) => {
+    if (!agent?.id || !roomId) return;
+    setTicketBusy(true);
+    setTicketError(null);
+    try {
+      const d = await apiCall('PUT', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`, body);
+      setTicket(d?.ticket ?? null);
+      setTicketOpen(false);
+    } catch (e) {
+      setTicketError(e.message);
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [agent?.id, roomId]);
+
+  const unbindTicket = useCallback(async () => {
+    if (!agent?.id || !roomId) return;
+    setTicketBusy(true);
+    setTicketError(null);
+    try {
+      await apiCall('DELETE', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`);
+      setTicket(null);
+      setTicketOpen(false);
+    } catch (e) {
+      setTicketError(e.message);
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [agent?.id, roomId]);
 
   /* ─── 2. Backfill on roomId change ──────────────────────────────── */
   useEffect(() => {
@@ -955,6 +1004,11 @@ export default function ChatPanel({
               onClick={onOpenKnowledge}
               title="Show what this agent has learned (Knowledge tab)"
             />
+            <TicketChip
+              ticket={ticket}
+              disabled={!roomId || disabled}
+              onManage={() => { setTicketError(null); setTicketOpen(true); }}
+            />
           </div>
           {gitInfo && gitInfo.length > 0 && (
             <div
@@ -1423,9 +1477,220 @@ export default function ChatPanel({
         onConfirm={handleStopLoop}
         onCancel={() => setShowStopLoopConfirm(false)}
       />
+      {ticketOpen && (
+        <TicketDialog
+          ticket={ticket}
+          agentName={agent.displayName || agent.id}
+          busy={ticketBusy}
+          error={ticketError}
+          onBind={bindTicket}
+          onUnbind={unbindTicket}
+          onClose={() => setTicketOpen(false)}
+        />
+      )}
     </div>
   );
 }
+
+// Compact header chip: the bound parent issue (link + optional "closed") or the
+// "No parent ticket" placeholder, plus a button to open the manage dialog (#1383).
+function TicketChip({ ticket, disabled, onManage }) {
+  const d = describeTicket(ticket);
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, flex: '0 1 auto' }}>
+      <Ticket size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+      {d ? (
+        <a
+          href={d.href}
+          target="_blank"
+          rel="noreferrer"
+          title={`${d.repo} #${d.number}${d.title ? ' — ' + d.title : ''}${d.closed ? ' (closed)' : ''}`}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, minWidth: 0,
+            fontSize: 'var(--eb-text-xs)',
+            color: d.closed ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)',
+            textDecoration: 'none', overflow: 'hidden',
+          }}
+        >
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {d.label}{d.closed ? ' (closed)' : ''}
+          </span>
+          <ExternalLink size={9} style={{ flexShrink: 0 }} />
+        </a>
+      ) : (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>
+          {NO_TICKET_LABEL}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onManage}
+        disabled={disabled}
+        title={d ? 'Manage the parent ticket' : 'Bind a parent GitHub issue to this conversation'}
+        style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', background: 'transparent', cursor: disabled ? 'not-allowed' : 'pointer',
+          color: 'var(--eb-text-muted)', padding: 2, opacity: disabled ? 0.5 : 1, flexShrink: 0,
+        }}
+      >
+        {d ? <ChevronDown size={11} /> : <Plus size={11} />}
+      </button>
+    </div>
+  );
+}
+
+// Modal to bind a parent GitHub issue: "New issue" (create) or "Attach existing"
+// (by number or URL), plus Unbind when a binding already exists (#1383).
+function TicketDialog({ ticket, agentName, busy, error, onBind, onUnbind, onClose }) {
+  const bound = describeTicket(ticket);
+  const [mode, setMode] = useState(bound ? 'attach' : 'create');
+  const [title, setTitle] = useState(agentName ? `${agentName}: ` : '');
+  const [issueBody, setIssueBody] = useState('');
+  const [ref, setRef] = useState('');
+  const [repo, setRepo] = useState('');
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose?.(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const refValid = !!parseIssueRefInput(ref);
+  const canSubmit = !busy && (mode === 'create' ? title.trim().length > 0 : refValid);
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const repoTrim = repo.trim();
+    if (mode === 'create') {
+      onBind({
+        mode: 'create',
+        title: title.trim(),
+        ...(issueBody.trim() ? { issueBody: issueBody.trim() } : {}),
+        ...(repoTrim ? { repo: repoTrim } : {}),
+      });
+    } else {
+      onBind({ mode: 'attach', ref: ref.trim(), ...(repoTrim ? { repo: repoTrim } : {}) });
+    }
+  };
+
+  const tabStyle = (active) => ({
+    padding: 'var(--eb-space-2) var(--eb-space-3)',
+    background: active ? 'var(--eb-bg-surface)' : 'transparent',
+    border: '1px solid var(--eb-border-default)',
+    borderBottom: active ? '1px solid var(--eb-bg-surface)' : '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md) var(--eb-radius-md) 0 0',
+    color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+    fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+    fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
+  });
+  const inputStyle = {
+    width: '100%', boxSizing: 'border-box',
+    padding: 'var(--eb-space-2)',
+    background: 'var(--eb-bg-elevated)',
+    border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md)',
+    color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+  };
+  const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 3, display: 'block' };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Parent ticket" style={ticketOverlayStyle}>
+      <div style={ticketDialogStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)' }}>
+          <Ticket size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <h3 style={{ margin: 0, flex: 1, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+            Parent ticket
+          </h3>
+          <button type="button" onClick={onClose} title="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--eb-text-muted)', padding: 2 }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        {bound && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+          }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Bound to <a href={bound.href} target="_blank" rel="noreferrer" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>{bound.repo} #{bound.number}</a>
+              {bound.title ? ` — ${bound.title}` : ''}{bound.closed ? ' (closed)' : ''}
+            </span>
+            <button type="button" onClick={onUnbind} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>
+              Unbind
+            </button>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 4, marginBottom: -1 }}>
+          <button type="button" onClick={() => setMode('create')} style={tabStyle(mode === 'create')}>+ New issue</button>
+          <button type="button" onClick={() => setMode('attach')} style={tabStyle(mode === 'attach')}>Attach existing</button>
+        </div>
+        <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: '0 var(--eb-radius-md) var(--eb-radius-md) var(--eb-radius-md)', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {mode === 'create' ? (
+            <>
+              <div>
+                <label style={labelStyle}>Issue title</label>
+                <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Short summary of the work" style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Description (optional)</label>
+                <textarea value={issueBody} onChange={e => setIssueBody(e.target.value)} rows={3} placeholder="Optional issue body" style={{ ...inputStyle, resize: 'vertical' }} />
+              </div>
+            </>
+          ) : (
+            <div>
+              <label style={labelStyle}>Issue number or GitHub URL</label>
+              <input autoFocus value={ref} onChange={e => setRef(e.target.value)} placeholder="e.g. 1383 or https://github.com/owner/repo/issues/1383" style={inputStyle} />
+              {ref.trim() && !refValid && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 3 }}>
+                  Enter a positive issue number or a GitHub issue URL.
+                </div>
+              )}
+            </div>
+          )}
+          <div>
+            <label style={labelStyle}>Repository (owner/name, optional — defaults to the environment&apos;s repo)</label>
+            <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={inputStyle} />
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button type="button" onClick={onClose} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={!canSubmit} style={{ ...ticketPrimaryBtn, ...(!canSubmit ? { opacity: 0.5, cursor: 'not-allowed' } : null) }}>
+            {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : (mode === 'create' ? 'Create & bind' : 'Attach')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ticketOverlayStyle = {
+  position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+};
+const ticketDialogStyle = {
+  background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5, 20px)',
+  maxWidth: 520, width: '92%', boxShadow: 'var(--eb-shadow-xl)',
+};
+const ticketPrimaryBtn = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: 'var(--eb-space-2) var(--eb-space-4)',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+  borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const ticketSecondaryBtn = {
+  padding: 'var(--eb-space-2) var(--eb-space-4)',
+  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+};
 
 function ContextResetSeparator({ ts }) {
   const label = ts

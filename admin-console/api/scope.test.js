@@ -171,6 +171,21 @@ test('describeAuthz: unknown subject fails closed', () => {
   assert.deepEqual(a.teams, []);
 });
 
+test('describeAuthz: surfaces the caller\'s own githubHandle (#1385)', () => {
+  const withHandle = [
+    { id: 'u-a', subject: 'alice@corp.com', githubHandle: 'alice-gh' },
+    { id: 'u-b', subject: 'bob@corp.com' }, // no handle set
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(alice.githubHandle, 'alice-gh');
+  // A user with no handle set reports the empty string, not undefined.
+  const bob = describeAuthz({ username: 'bob@corp.com', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(bob.githubHandle, '');
+  // The env single-admin credential has no user record → empty handle.
+  const admin = describeAuthz({ username: 'admin', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(admin.githubHandle, '');
+});
+
 // ── Credentials scope & management gate (#798) ─────────────────────────────
 // alice = team-admin of 'payments', team-member of 'default'.
 // bob   = team-member of 'risk'. sys = System Admin. admin = env admin.

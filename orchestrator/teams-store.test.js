@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -124,6 +124,50 @@ test('users: create / lookup by subject / promote', () => {
 test('users: subject required', () => {
   const { store } = freshStore();
   assert.throws(() => store.createUser({ displayName: 'x' }), /subject is required/);
+});
+
+// ---- GitHub handle (#1385) ------------------------------------------------
+
+test('githubHandle: normalize strips leading @ and whitespace', () => {
+  assert.equal(normalizeGithubHandle('  @octocat  '), 'octocat');
+  assert.equal(normalizeGithubHandle('octocat'), 'octocat');
+  assert.equal(normalizeGithubHandle('   '), '');
+  assert.equal(normalizeGithubHandle('@'), '');
+  assert.equal(normalizeGithubHandle(undefined), '');
+  assert.equal(normalizeGithubHandle(42), '');
+});
+
+test('githubHandle: coerce validates the GitHub username rules', () => {
+  assert.equal(coerceGithubHandle('@octocat'), 'octocat');
+  assert.equal(coerceGithubHandle('mona-lisa-9'), 'mona-lisa-9');
+  assert.equal(coerceGithubHandle(''), '');       // blank clears
+  assert.equal(coerceGithubHandle(undefined), ''); // absent clears
+  assert.throws(() => coerceGithubHandle('-bad'), /may not start or end with a hyphen/);
+  assert.throws(() => coerceGithubHandle('bad-'), /may not start or end with a hyphen/);
+  assert.throws(() => coerceGithubHandle('has space'), /letters, digits, and hyphens/);
+  assert.throws(() => coerceGithubHandle('a'.repeat(40)), /39 characters or fewer/);
+});
+
+test('githubHandle: persisted on create, defaults to empty, updatable and clearable', () => {
+  const { store } = freshStore();
+  // Absent on create → empty string, not undefined.
+  const plain = store.createUser({ subject: 'plain@corp.com' });
+  assert.equal(plain.githubHandle, '');
+
+  // Provided on create → normalized and stored.
+  const u = store.createUser({ subject: 'jane@corp.com', githubHandle: '@jane-gh' });
+  assert.equal(u.githubHandle, 'jane-gh');
+  assert.equal(store.getUser(u.id).githubHandle, 'jane-gh');
+
+  // Update sets a new value.
+  assert.equal(store.updateUser(u.id, { githubHandle: 'jane2' }).githubHandle, 'jane2');
+  // Blank clears it; an untouched update leaves it alone.
+  assert.equal(store.updateUser(u.id, { githubHandle: '  ' }).githubHandle, '');
+  store.updateUser(u.id, { githubHandle: 'jane3' });
+  assert.equal(store.updateUser(u.id, { displayName: 'Jane' }).githubHandle, 'jane3');
+
+  // An invalid handle is rejected at the store boundary.
+  assert.throws(() => store.updateUser(u.id, { githubHandle: 'bad handle' }), /letters, digits, and hyphens/);
 });
 
 test('users: delete cascades memberships', () => {

@@ -512,7 +512,12 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {label}
       </span>
-      {dnd && <DragGrip dnd={dnd} active={hovered} />}
+      {/*
+       * Trailing cluster order (left→right): hover-revealed move actions →
+       * grip → persistent count. The grip sits immediately left of the
+       * always-present count so its horizontal position never changes when
+       * hover reveals the move icons — they grow to the *left* of it (#1377).
+       */}
       {hovered && canMove && (
         <span style={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
           {onMoveUp && (
@@ -531,6 +536,7 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
           )}
         </span>
       )}
+      {dnd && <DragGrip dnd={dnd} active={hovered} />}
       <span style={{
         flexShrink: 0,
         fontSize: 'var(--eb-text-xs)',
@@ -684,7 +690,12 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
       </div>
 
       <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
-        {dnd && <DragGrip dnd={dnd} active={hovered} />}
+        {/*
+         * Trailing cluster order (left→right): hover-revealed actions →
+         * grip → persistent status dot. The grip sits immediately left of the
+         * always-present dot so its horizontal position never changes when
+         * hover reveals the extra icons — they grow to the *left* of it (#1377).
+         */}
         {hovered && canMarkUnread && (
           <span
             role="button"
@@ -725,6 +736,7 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
             )}
           </span>
         )}
+        {dnd && <DragGrip dnd={dnd} active={hovered} />}
         <span
           title={dot.label}
           className={dot.pulse ? 'eb-status-pulse' : undefined}

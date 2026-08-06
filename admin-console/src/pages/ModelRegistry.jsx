@@ -25,6 +25,7 @@ import {
 } from './llm-probe-state';
 import { groupAgentsByTeam } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
+import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
 
@@ -973,6 +974,8 @@ export default function ModelRegistry() {
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
+  // User's team IDs for assist-exclusion badge computation (AC1/AC2, #1402).
+  const userTeamIds = (user?.teams || []).map(t => t.teamId);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing]   = useState(null);    // endpoint object
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -1013,16 +1016,50 @@ export default function ModelRegistry() {
     {
       key: 'name',
       label: 'Name',
-      render: (v, row) => row.readOnly
-        ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <span>{v}</span>
-            <span style={{
-              fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
-              padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
-              border: '1px solid var(--eb-border-default)',
-            }}>read-only</span>
+      render: (v, row) => {
+        if (row.readOnly) {
+          return (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <span>{v}</span>
+              <span style={{
+                fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+                padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)',
+              }}>read-only</span>
+            </span>
+          );
+        }
+        // AC1 / AC2 (#1402): badge explaining why this provider is excluded from assist.
+        const exclusion = endpointAssistExclusion(row, userTeamIds, isSysAdmin);
+        if (!exclusion) return v;
+        const badgeStyle = {
+          fontSize: 'var(--eb-text-xs)',
+          padding: '0 var(--eb-space-2)',
+          borderRadius: 'var(--eb-radius-sm)',
+          border: '1px solid var(--eb-border-default)',
+          whiteSpace: 'nowrap',
+          flexShrink: 0,
+        };
+        const [badgeText, badgeTitle] = exclusion === 'oauth'
+          ? [
+              'Not for assist',
+              'OAuth subscription tokens cannot be used for server-side assist calls. Add an API-key provider to use the assist selector.',
+            ]
+          : [
+              'Not your teams',
+              'This provider is not assigned to any of your teams and will not appear in the assist model selector. A System Admin can assign it on this page.',
+            ];
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', maxWidth: '100%' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
+            <span title={badgeTitle} style={{
+              ...badgeStyle,
+              color: exclusion === 'oauth' ? 'var(--eb-text-secondary)' : 'var(--eb-status-warning)',
+              borderColor: exclusion === 'oauth' ? 'var(--eb-border-default)' : 'var(--eb-status-warning)',
+            }}>{badgeText}</span>
           </span>
-        : v,
+        );
+      },
     },
     {
       key: '_scope', label: 'Scope / Teams', sortable: false,

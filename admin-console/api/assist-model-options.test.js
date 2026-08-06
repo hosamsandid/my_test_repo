@@ -75,6 +75,56 @@ test('envFallbackActive: only when zero providers registered AND ANTHROPIC_BASE_
   assert.equal(buildAssistModelOptions(sys, endpoints, { envBaseUrl: 'https://env' }).envFallbackActive, false); // providers exist
 });
 
+// ---- exclusionHint (#1402) -------------------------------------------------
+
+test('exclusionHint: null when providers are available', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(alice, endpoints, {});
+  assert.equal(opts.exclusionHint, null);
+});
+
+test('exclusionHint: null when envFallbackActive (zero registered providers)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(alice, [], { envBaseUrl: 'https://env' });
+  assert.equal(opts.envFallbackActive, true);
+  assert.equal(opts.exclusionHint, null);
+});
+
+test('exclusionHint: null when no providers registered and no env fallback', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(alice, [], {});
+  assert.equal(opts.exclusionHint, null);
+});
+
+test('exclusionHint: all-oauth-token when every registered provider is oauth-token', () => {
+  const oauthOnly = [
+    { id: 'o1', authType: 'oauth-token', scope: 'system', assignedTeamIds: ['team-a'], models: [] },
+    { id: 'o2', authType: 'oauth-token', scope: 'team', teamId: 'team-a', models: [] },
+  ];
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(alice, oauthOnly, {});
+  assert.deepEqual(opts.providers, []);
+  assert.equal(opts.exclusionHint, 'all-oauth-token');
+});
+
+test('exclusionHint: no-team-overlap when non-oauth providers exist but caller has no matching team', () => {
+  const nomad = computeScope({ username: 'nomad@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(nomad, endpoints, {});
+  assert.deepEqual(opts.providers, []);
+  assert.equal(opts.exclusionHint, 'no-team-overlap');
+});
+
+test('exclusionHint: no-team-overlap not all-oauth when registry is mixed and caller has no overlap', () => {
+  const mixed = [
+    { id: 'o1', authType: 'oauth-token', scope: 'system', assignedTeamIds: ['team-a'], models: [] },
+    { id: 'api1', authType: 'api-key', scope: 'team', teamId: 'team-b', models: [] },
+  ];
+  const nomad = computeScope({ username: 'nomad@corp.com', adminUsername: 'admin', users, memberships });
+  const opts = buildAssistModelOptions(nomad, mixed, {});
+  assert.deepEqual(opts.providers, []);
+  assert.equal(opts.exclusionHint, 'no-team-overlap');
+});
+
 test('masking: never leaks token material, defaults model from catalog', () => {
   const masked = maskAssistProvider(endpoints[0]);
   assert.deepEqual(masked, {

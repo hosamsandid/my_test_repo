@@ -71,7 +71,22 @@ const GIT_SECTION =
   "gh-as-agent stamp /tmp/review.md\n" +
   "gh pr review <NUM> --comment --body-file /tmp/review.md\n" +
   "```\n\n" +
-  "`stamp` is idempotent (re-stamping the same file is a no-op). The marker is an HTML comment, invisible in rendered Markdown but present in the source.";
+  "`stamp` is idempotent (re-stamping the same file is a no-op). The marker is an HTML comment, invisible in rendered Markdown but present in the source.\n\n" +
+  "### Session ticket (`ticket.json`)\n\n" +
+  "If `ticket.json` exists at your workspace root, a human has bound this session to a **parent ticket** — read it before you start (`{repo, number, url, title}`). Everything you do in this session belongs to that ticket.\n\n" +
+  "The parent is a **tracker**: it is assigned to the person who asked for the work and carries no flow label, so it wakes nobody. Two ways to proceed:\n\n" +
+  "- **Reuse it** — when the ask can be satisfied by one role, in one stage, producing one PR. Work the parent directly and reference it with a closing keyword in your PR.\n" +
+  "- **Split it** — otherwise, open one sub-issue per role hand-off, each independently mergeable. Sub-issues are **unassigned** — never add `--assignee` when creating them. The correct call is:\n" +
+  "  ```bash\n" +
+  "  gh issue create --title \"...\" --body-file /tmp/body.md\n" +
+  "  ```\n" +
+  "  The claim labels (e.g. `ready`, `dispatch`) determine which agent picks up each one; the assignee field is for the human who asked for the work on the parent tracker only. Track each sub-issue on the parent with:\n" +
+  "  ```bash\n" +
+  "  curl -sS -X POST \"$ORCHESTRATOR_INTERNAL_URL/internal/agents/$AGENT_ID/ticket/children\" \\\n" +
+  "    -H 'Content-Type: application/json' -d '{\"number\": <child-issue-number>}'\n" +
+  "  ```\n\n" +
+  "**Never label the parent once you have split it** — the children carry the labels, and labelling both wakes the flow twice for the same ask.\n\n" +
+  "**Issue templates.** If the repository has `.github/ISSUE_TEMPLATE/`, use the matching template for every issue you open: read the file, drop the `---` frontmatter, the `<!-- … -->` guidance comments and any `<details>` worked example, fill in the remaining sections, and pass the frontmatter's own `labels:` on the command line — `gh issue create` applies none of this by itself.";
 
 const TRIGGER_SECTION =
   "## Trigger management (triggers.json)\n\n" +

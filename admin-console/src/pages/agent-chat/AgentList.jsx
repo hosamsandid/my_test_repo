@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
+import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, GripVertical } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 
@@ -482,6 +482,9 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
         if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
         if (e.key === 'ArrowDown' && onMoveDown)  { e.preventDefault(); onMoveDown(); }
       }}
+      // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
+      // that the visible arrow buttons — previously its only affordance — are gone.
+      aria-keyshortcuts={canMove ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
       aria-expanded={!collapsed}
       style={{
         display: 'flex',
@@ -513,29 +516,12 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
         {label}
       </span>
       {/*
-       * Trailing cluster order (left→right): hover-revealed move actions →
-       * grip → persistent count. The grip sits immediately left of the
-       * always-present count so its horizontal position never changes when
-       * hover reveals the move icons — they grow to the *left* of it (#1377).
+       * Trailing cluster order (left→right): grip → persistent count. The grip
+       * sits immediately left of the always-present count so its horizontal
+       * position never changes on hover (#1377). Mouse reordering is the grip's
+       * drag; the keyboard path is Alt+↑/↓ (see aria-keyshortcuts above) — the
+       * visible arrow buttons were removed as redundant with drag&drop (#1381).
        */}
-      {hovered && canMove && (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
-          {onMoveUp && (
-            <MoveButton
-              icon={ArrowUp}
-              title="Move up (Alt+↑)"
-              onClick={e => { e.stopPropagation(); onMoveUp(); }}
-            />
-          )}
-          {onMoveDown && (
-            <MoveButton
-              icon={ArrowDown}
-              title="Move down (Alt+↓)"
-              onClick={e => { e.stopPropagation(); onMoveDown(); }}
-            />
-          )}
-        </span>
-      )}
       {dnd && <DragGrip dnd={dnd} active={hovered} />}
       <span style={{
         flexShrink: 0,
@@ -626,6 +612,9 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         if (e.key === 'ArrowUp'   && onMoveUp)   { e.preventDefault(); onMoveUp();   }
         if (e.key === 'ArrowDown' && onMoveDown)  { e.preventDefault(); onMoveDown(); }
       }}
+      // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
+      // that the visible arrow buttons — previously its only affordance — are gone.
+      aria-keyshortcuts={canMove ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -691,10 +680,13 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
 
       <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
         {/*
-         * Trailing cluster order (left→right): hover-revealed actions →
+         * Trailing cluster order (left→right): hover-revealed mark-as-unread →
          * grip → persistent status dot. The grip sits immediately left of the
          * always-present dot so its horizontal position never changes when
-         * hover reveals the extra icons — they grow to the *left* of it (#1377).
+         * hover reveals the mark-as-unread icon — it grows to the *left* of it
+         * (#1377). The visible up/down arrow reorder buttons were removed as
+         * redundant with drag&drop; the keyboard path stays as Alt+↑/↓ (see
+         * aria-keyshortcuts above) (#1381).
          */}
         {hovered && canMarkUnread && (
           <span
@@ -716,24 +708,6 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
             onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
           >
             <MailOpen size={12} />
-          </span>
-        )}
-        {hovered && canMove && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            {onMoveUp && (
-              <MoveButton
-                icon={ArrowUp}
-                title="Move up (Alt+↑)"
-                onClick={e => { e.stopPropagation(); onMoveUp(); }}
-              />
-            )}
-            {onMoveDown && (
-              <MoveButton
-                icon={ArrowDown}
-                title="Move down (Alt+↓)"
-                onClick={e => { e.stopPropagation(); onMoveDown(); }}
-              />
-            )}
           </span>
         )}
         {dnd && <DragGrip dnd={dnd} active={hovered} />}
@@ -836,29 +810,3 @@ function DragGrip({ dnd, active }) {
   );
 }
 
-function MoveButton({ icon: Icon, title, onClick }) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <span
-      role="button"
-      aria-label={title}
-      title={title}
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 14,
-        height: 14,
-        borderRadius: 'var(--eb-radius-sm)',
-        color: hovered ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-        cursor: 'pointer',
-        transition: 'color var(--eb-transition-fast)',
-      }}
-    >
-      <Icon size={10} />
-    </span>
-  );
-}

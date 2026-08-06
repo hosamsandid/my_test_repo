@@ -44,7 +44,7 @@ records written atomically (write-temp + rename):
 | Path | Record shape |
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
-| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, createdAt, updatedAt }` |
+| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, createdAt, updatedAt }` |
 | `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
@@ -116,9 +116,9 @@ PUT    /internal/admin/teams/:id                    { name?, description? }
 DELETE /internal/admin/teams/:id                    (409 if it still owns resources; default team protected)
 
 GET    /internal/admin/users        [?subject=]
-POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin? }
+POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin?, githubHandle? }
 GET    /internal/admin/users/:id
-PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin? }
+PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin?, githubHandle? }
 DELETE /internal/admin/users/:id                    (cascades memberships)
 
 GET    /internal/admin/memberships  [?userId=&teamId=]

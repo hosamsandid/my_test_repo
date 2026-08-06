@@ -15,6 +15,8 @@ import {
   toPersistedMessages,
   hydrateMessages,
   proposalNodeDiff,
+  bundleSizeCharCount,
+  bundleSizeLevel,
 } from './flow-copilot-view.js';
 
 test('starter prompts: three chips, whole-flow example first', () => {
@@ -88,6 +90,34 @@ test('copilotErrorInfo: 502 and network errors are retryable transport failures'
   assert.equal(net.kind, 'transport');
   assert.equal(net.retryable, true);
   assert.match(net.message, /Request failed/);
+});
+
+test('copilotErrorInfo: 400 bundle-too-large is a non-retryable bundle-size error', () => {
+  const e = copilotErrorInfo(400, 'bundle-too-large');
+  assert.equal(e.kind, 'bundle-too-large');
+  assert.equal(e.retryable, false);
+});
+
+test('copilotErrorInfo: 504 is a retryable timeout', () => {
+  const e = copilotErrorInfo(504, 'LLM request failed: HTTP 504');
+  assert.equal(e.kind, 'timeout');
+  assert.equal(e.retryable, true);
+});
+
+test('bundleSizeCharCount returns JSON.stringify length, 0 for null/undefined', () => {
+  assert.equal(bundleSizeCharCount(null), 0);
+  assert.equal(bundleSizeCharCount(undefined), 0);
+  const bundle = { processTemplateVersion: 1, roles: [] };
+  assert.equal(bundleSizeCharCount(bundle), JSON.stringify(bundle).length);
+});
+
+test('bundleSizeLevel: ok below 160k, amber 160k–200k, red at/above 200k', () => {
+  assert.equal(bundleSizeLevel(0), 'ok');
+  assert.equal(bundleSizeLevel(159_999), 'ok');
+  assert.equal(bundleSizeLevel(160_000), 'amber');
+  assert.equal(bundleSizeLevel(199_999), 'amber');
+  assert.equal(bundleSizeLevel(200_000), 'red');
+  assert.equal(bundleSizeLevel(300_000), 'red');
 });
 
 test('supersedePending retires only still-proposed assistant entries', () => {

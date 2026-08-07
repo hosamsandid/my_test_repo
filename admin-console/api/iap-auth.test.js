@@ -3,7 +3,8 @@
 // Unit tests for the IAP identity bridge. Run: node --test admin-console/api/iap-auth.test.js
 //
 // Tokens are forged locally with a generated P-256 keypair and verified
-// against a fake JWKS endpoint — no network, no Google.
+// against a fake key endpoint (kid → PEM, like Google's public_key endpoint)
+// — no network, no Google.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,8 +16,8 @@ const AUDIENCE = '/projects/594390336049/global/backendServices/1234567890';
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const otherPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 
-function jwk(key, kid) {
-  return { ...key.export({ format: 'jwk' }), kid, use: 'sig', alg: 'ES256' };
+function pem(key) {
+  return key.export({ type: 'spki', format: 'pem' });
 }
 
 function b64(obj) {
@@ -49,7 +50,7 @@ function validToken(overrides = {}, headerOverrides = {}) {
 function verifier(extraOpts = {}) {
   return makeIapVerifier({
     audience: AUDIENCE,
-    fetchKeys: async () => ({ keys: [jwk(publicKey, 'key-1')] }),
+    fetchKeys: async () => ({ 'key-1': pem(publicKey) }),
     ...extraOpts,
   });
 }
@@ -126,7 +127,7 @@ test('rejects unknown kid and garbage input', async () => {
 });
 
 test('is inert without an audience', async () => {
-  const v = makeIapVerifier({ fetchKeys: async () => ({ keys: [jwk(publicKey, 'key-1')] }) });
+  const v = makeIapVerifier({ fetchKeys: async () => ({ 'key-1': pem(publicKey) }) });
   assert.equal(await v(validToken(), NOW), null);
 });
 
@@ -136,8 +137,8 @@ test('caches keys and survives a failing refresh', async () => {
     audience: AUDIENCE,
     fetchKeys: async () => {
       calls += 1;
-      if (calls > 1) throw new Error('JWKS endpoint down');
-      return { keys: [jwk(publicKey, 'key-1')] };
+      if (calls > 1) throw new Error('key endpoint down');
+      return { 'key-1': pem(publicKey) };
     },
   });
   assert.ok(await v(validToken(), NOW));

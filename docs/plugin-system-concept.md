@@ -383,6 +383,11 @@ dependency-free Node module (mirroring the pure-module discipline of
   the orchestrator invalidates the token**.
 - `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` — the
   `requiresApproval` holding pen (v1: DM confirm).
+- `authorizeAction(policy, subcommand, caller)` / `isActionPermitted(...)` —
+  per-scope action authorisation (#1521): `policy` is the manifest's normalized
+  policy map; `caller` is `{ kind: 'team'|'agent', flowFinal?, crossChecksPassed? }`;
+  returns `{ allowed }` or `{ allowed: false, code, reason }`. Fails closed on
+  a malformed caller. First rule only agent granularity can carry.
 
 The SDK is extracted from plugin #1's broker (`podman-mcp/`), not designed on
 paper — `podman-token.js`, `owner-scope.js`, `mask-env.js`, and the teardown

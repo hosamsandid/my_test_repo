@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -90,7 +90,7 @@ logs:
 	$(foreach svc,$(SERVICES),$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 $(svc) &)
 	wait
 
-seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
+seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -167,6 +167,23 @@ seed-mcp-servers:
 	  alpine sh -c 'rm -rf /pool/mcp-servers && mkdir -p /pool/mcp-servers && cp -r /src/. /pool/mcp-servers/'
 	@echo "Done. Pool mcp-servers contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
+
+# Reference plugins (plugin system Phase 1, #1517): each `plugins/<id>/` carries
+# plugin.json + bin/. Seeded into the pool as /pool/plugins/<id>/ (→ the
+# operator registry at /workspace/plugins/<id>/), mirroring seed-mcp-servers.
+# Installing a plugin from the registry grants nothing to any agent.
+seed-plugins:
+	@if [ ! -d "$(CURDIR)/plugins" ]; then \
+	  echo "ERROR: $(CURDIR)/plugins not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm --security-opt label=disable \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(CURDIR)/plugins:/src:ro \
+	  alpine sh -c 'rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/'
+	@echo "Done. Pool plugins contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/plugins/
 
 # ── E2E (Playwright) ────────────────────────────────────────────────────────
 # The disposable `aee-e2e` compose project (#666, docs/e2e-testing-concept.md).
@@ -264,4 +281,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

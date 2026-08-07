@@ -84,6 +84,18 @@ Static skills live in the workspace; **MCP servers** are how agents reach runtim
 
 **Per-agent isolation.** At seed time the orchestrator reads `env.mcpServers` (or a member's `mcpServersOverride`), substitutes `${credential}`, and writes the merged stanza into **the agent's own** `.claude/settings.json` under `mcpServers[<serverId>]` (Claude Code schema: stdio `{command, args, env}`; http/sse `{type, url, headers}`). No pool-wide MCP config. `mcpServersOverride` on a member replaces the env's MCP set for that member; absent = inherit.
 
+### Plugins (governed capability extensions, #1516)
+
+Agents reach the outside world (container runtimes, test-management systems, …) **only** through registered **platform plugins** (not to be confused with Claude Code "agent plugins"). A plugin pairs a privilege-holding **broker sidecar** with a dependency-free **CLI facade** seeded into the agent workspace — CLI-first (deliberately not MCP), all security server-side, "one contract, two provenances". Concept: `docs/plugin-system-concept.md`. Built in phases (#1517 core machinery → #1522); PR #1287's `podman-mcp` broker becomes plugin #1 in Phase 3.
+
+**Phase 1 core machinery (#1517) — pure, unit-tested modules:**
+- `admin-console/api/plugin-manifest.js` — validator/normalizer for a `pluginVersion: 1` manifest (the `process-template.js` discipline). `sidecar.capabilities` is a **closed enum** (`podman-socket`, `egress`, `host-mount:<path>` — a plugin cannot request an arbitrary mount); `scopes` declares the granularities the broker honours (`["team"]` or `["team","agent"]`, must include `team`) and bounds a grant's choice (`assertGranularityGrantable`); `ui.routes[].minRole` is **validated + reserved** in Phase 1, the proxy/role enforcement lands in Phase 5.
+- `orchestrator/plugin-scope-token.js` — generalises `podman-token.js` to HMAC-signed `{pluginId, scopeId}` tokens (broker verifies on every call).
+- `orchestrator/plugin-scope.js` — `resolveScopeId(agentCfg, granularity)` (**both granularities from the start**: `team` = team for members / self for standalone; `agent` = the member's own id) + ownership-label helpers (`aee.plugin.owner=<scopeId>` stamp/filter). Granularity multiplies *tokens*, never backend credentials; teardown keys on `scopeId` so deleting one member at `agent` granularity leaves siblings untouched.
+- `orchestrator/plugin-sidecar.js` — pure lifecycle planners: `reconcileSidecars` (start installed / stop orphaned sidecars — `aee.plugin.id` label), `reconcileAttachments` (grant-driven per-agent network connect/disconnect — reachability matches grant truth), `capabilityAttachments` (closed-enum → concrete attachments). The impure libpod calls wrap these in the orchestrator runtime.
+
+**Registry:** reference plugins ship under `plugins/<id>/` (`plugin.json` + `bin/`); `make seed-plugins` (chained from `seed-pool`) lays them into `/pool/plugins/` → the operator registry `/workspace/plugins/<id>/`. Installing grants nothing. `plugins/dummy-echo/` is a no-op reference plugin exercising the machinery before a real broker exists.
+
 ### Agent Roles
 
 - `agent` — standalone. Responds to DMs in its 1:1 room; with cron/GitHub triggers it can run autonomously.
@@ -282,6 +294,10 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `agent-image/` | Per-agent image `as-agent:latest`; entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live runtime |
 | `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, `POST /api/teams`, agent-templates |
 | `admin-console/api/process-template.js` | Pure builders/validators for process-template bundles |
+| `admin-console/api/plugin-manifest.js` | Pure validator/normalizer for a `pluginVersion: 1` plugin manifest (#1517) |
+| `orchestrator/plugin-scope-token.js` | HMAC `{pluginId, scopeId}` scope tokens (generalised `podman-token.js`) |
+| `orchestrator/plugin-scope.js` | `resolveScopeId` (team/agent granularity) + resource ownership-label helpers |
+| `orchestrator/plugin-sidecar.js` | Pure sidecar lifecycle + grant-driven network attachment planners |
 | `admin-console/src/pages/{Agents,WorkingEnvironments,TeamSetup,ProcessCanvas}.jsx` | Agent CRUD; env CRUD; the 5-step wizard; the Flows graph/editor (`ProcessGraphPanel`) |
 
 ## Commands

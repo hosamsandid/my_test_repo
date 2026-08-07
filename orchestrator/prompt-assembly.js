@@ -24,6 +24,11 @@
 // runtime). If you change one, change the other — a test asserts the expected
 // string so drift is caught.
 
+// The Plugin Capabilities section (plugin system Phase 2, #1518) is composed by
+// its own pure sibling module and injected here as a gated block, the same way
+// the Skills section is — from the resolved grant, never env contents.
+const { pluginCapabilitiesSection } = require('./plugin-prompt');
+
 // ------------------------------------------------------------
 // Conditional / relocated sections
 //
@@ -467,6 +472,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 //   6. ## Memory System         (from base)
 //   7. ## Team Knowledge        (digest `@`-import) — only if a KB checkout is provisioned
 //   8. ## Skills                (from base) — only if the agent's resolved skill grant is non-empty
+//  8b. ## Plugin Capabilities   (code-owned) — only if the agent's resolved plugin grant is non-empty (#1518)
 //   9. ## GitHub Actions        (relocated) — only if the env has a repository
 //  10. ## Trigger management    (relocated) — only if the agent is autonomous
 //  11. ## Important Notes       (from base)
@@ -488,7 +494,12 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // Knowledge section `@`-imports the generated digest (Memory/Knowledge
 // unification, Phase 1). Callers pass it only when the agent's KB checkout is
 // actually provisioned, so the import never dangles.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false, contextMounts = null } = {}) {
+// `plugins`: the agent's resolved plugin grant as display data
+// `[{ id, name?, cliName?, promptLine?, scopeGranularity? }]` (plugin-grants.js
+// + each granted plugin's manifest). Supplied as data so this module stays
+// fs-free; drives the gated Plugin Capabilities section (#1518). Empty → no
+// section, matching the Skills gate.
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, plugins = [], blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false, contextMounts = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -566,6 +577,13 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   const skillsBlock = take("Skills");
   const enrichedSkills = skillsSection(skillsBlock, skills, skillDescriptions);
   if (enrichedSkills) blocks.push(enrichedSkills);
+
+  // 8b. Plugin Capabilities — only when the agent's resolved plugin grant is
+  //     non-empty (#1518). Composed entirely in code from the resolved grant
+  //     (never env contents), so a grant flip that reruns prompt-rebuild adds
+  //     or drops exactly the changed one-liners.
+  const pluginBlock = pluginCapabilitiesSection(plugins);
+  if (pluginBlock) blocks.push(pluginBlock);
 
   // 9. Git — only when the env has a repository
   if (envHasRepository(env)) blocks.push(GIT_SECTION);
@@ -664,6 +682,7 @@ module.exports = {
   envHasRepository,
   hasSkillGrant,
   skillsSection,
+  pluginCapabilitiesSection,
   WORKSPACE_SECTION,
   GIT_SECTION,
   TRIGGER_SECTION,

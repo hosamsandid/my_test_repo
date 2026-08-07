@@ -96,6 +96,14 @@ Agents reach the outside world (container runtimes, test-management systems, …
 
 **Registry:** reference plugins ship under `plugins/<id>/` (`plugin.json` + `bin/`); `make seed-plugins` (chained from `seed-pool`) lays them into `/pool/plugins/` → the operator registry `/workspace/plugins/<id>/`. Installing grants nothing. `plugins/dummy-echo/` is a no-op reference plugin exercising the machinery before a real broker exists.
 
+**Phase 2 agent surface (#1518) — pure, unit-tested modules:**
+- `orchestrator/plugin-grants.js` — the plugin GRANT, sibling of `skill-grants.js` (same skill-grant doctrine: the grant lives on the agent construct, never on the env). `plugins[]` on team agents (inherited), `pluginsOverride` on members, own list on standalone/orchestrator, inherit on bp-instance. `effectivePlugins(cfg, loadCfg)` resolves it; each entry normalises to **`{ id, scopeGranularity }`** (`"team"` default / `"agent"`; a bare string is the team shorthand). `planAgentPluginGrantEdit` upserts keyed on id — activating an already-granted plugin at a **different** granularity is a granularity flip (entry replaced in place); `planPluginSync` fans a team grant out per member (`skip-override`/`sync-override`/`stub` like `planSkillSync`).
+- `orchestrator/plugin-sync.js` — the workspace seed/sync **planner**: grant → `.aee/bin/<cli>` (0755) + `.aee/plugins/<id>.json` (0600 — endpoint + minted scope token, the shape the CLI reads) + network connect; revoke → remove both files + network disconnect. A **granularity flip** re-mints the token for the new `scopeId` and rewrites ONLY the config — additive, no orphan-removal, network kept (resources under the old `scopeId` keep their owner label and are reaped by TTL/teardown; §4.6). Impure fs/net wraps this in the runtime (skill-sync pattern, no respawn).
+- `orchestrator/plugin-prompt.js` — the gated **Plugin Capabilities** CLAUDE.md section, built by `pluginCapabilitiesSection(plugins)` from the resolved grant (never env contents), one `promptLine` per plugin (fail-soft generic line otherwise). Wired into `prompt-assembly.js` right after Skills (new `plugins` param), so a grant flip that reruns prompt-rebuild adds/drops exactly the changed lines.
+- `orchestrator/plugin-audit.js` — the broker **audit obligation** shape: `buildPluginAuditLine({ts,pluginId,scopeId,agentId,subcommand,outcome})` (one JSONL line per call) + parse/retention. At `agent` granularity `scopeId` and `agentId` coincide — both kept, not deduped, so a line reads the same at either granularity.
+- `plugins/CONTRACT.md` + `orchestrator/plugin-cli-contract.test.js` — the **CLI contract** (§4.5: dependency-free single file, `--json` per subcommand, exit 0/1/2/3, `--help`, submit→poll) enforced end-to-end by driving the `dummy-echo` python CLI.
+- `admin-console/src/pages/plugin-grant-view.js` — pure **grant-UI** decisions (admin-console-src CI job): `granularitySelectorState` (disabled + honest hint when the manifest offers only `["team"]`), `quotaCeiling` (per-scope footprint stated before the toggle — `agent` × member count), `platformMismatch` (`platforms` vs stack runtime), `pluginGrantRow`. The JSX grant panel is a thin renderer over these; server re-enforces `assertGranularityGrantable`.
+
 ### Agent Roles
 
 - `agent` — standalone. Responds to DMs in its 1:1 room; with cron/GitHub triggers it can run autonomously.
@@ -299,6 +307,11 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `orchestrator/plugin-scope-token.js` | HMAC `{pluginId, scopeId}` scope tokens (generalised `podman-token.js`) |
 | `orchestrator/plugin-scope.js` | `resolveScopeId` (team/agent granularity) + resource ownership-label helpers |
 | `orchestrator/plugin-sidecar.js` | Pure sidecar lifecycle + grant-driven network attachment planners |
+| `orchestrator/plugin-grants.js` | Source of truth for the team-owned plugin grant + per-grant scope granularity (`effectivePlugins`, sibling of `skill-grants.js`) (#1518) |
+| `orchestrator/plugin-sync.js` | Pure workspace seed/sync planner: CLI + 0600 token config + network on grant, removed on revoke; granularity-flip re-mint (#1518) |
+| `orchestrator/plugin-prompt.js` | Pure gated "Plugin Capabilities" CLAUDE.md section from the resolved grant (#1518) |
+| `orchestrator/plugin-audit.js` | Pure broker audit-line shape + retention (#1518) |
+| `admin-console/src/pages/plugin-grant-view.js` | Pure grant-UI decisions: granularity selector, quota ceiling, platform match (#1518) |
 | `admin-console/src/pages/{Agents,WorkingEnvironments,TeamSetup,ProcessCanvas}.jsx` | Agent CRUD; env CRUD; the 5-step wizard; the Flows graph/editor (`ProcessGraphPanel`) |
 
 ## Commands

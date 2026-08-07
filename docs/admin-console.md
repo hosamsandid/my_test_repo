@@ -11,8 +11,9 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
 | **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller and HTTPS repository access |
+| **Jira Credentials** | `/jira-tokens` | Register Jira site + email + API token credentials for the Jira event poller |
 | **Skills Registry** | `/skills` | Browse available skills; click to view skill content |
-| **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
+| **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, GitHub event, and Jira event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
 | **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |

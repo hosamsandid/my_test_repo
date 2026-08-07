@@ -170,13 +170,13 @@ Start with the visual walkthrough, then dive into the reference docs as needed.
 | Visual platform walkthrough | [docs/platform-story.html](./docs/platform-story.html) |
 | Agent roles & team patterns | [docs/agent-roles.md](./docs/agent-roles.md) |
 | Working Environments | [docs/working-environments.md](./docs/working-environments.md) |
-| Triggers (cron, once, webhook, GitHub event) | [docs/triggers.md](./docs/triggers.md) |
+| Triggers (cron, once, webhook, GitHub/Jira event) | [docs/triggers.md](./docs/triggers.md) |
 | Flow / process connection model | [docs/flow-connection-model.md](./docs/flow-connection-model.md) |
 | Process-template bundle format | [docs/process-template-format.md](./docs/process-template-format.md) |
 | Team-Setup wizard & Flow integration | [docs/wizard-flow-integration.md](./docs/wizard-flow-integration.md) |
 | Skills system | [docs/skills-system.md](./docs/skills-system.md) |
 | Persistent memory | [docs/persistent-memory.md](./docs/persistent-memory.md) |
-| SSH keys & GitHub tokens | [docs/credentials.md](./docs/credentials.md) |
+| SSH keys, GitHub tokens & Jira credentials | [docs/credentials.md](./docs/credentials.md) |
 | Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
 | MCP servers | [docs/mcp-servers.md](./docs/mcp-servers.md) |
 | Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |

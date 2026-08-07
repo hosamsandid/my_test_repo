@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
-  Boxes, Key, MessageCircle, Github, Layers, GitBranch,
+  Boxes, Key, MessageCircle, Github, Layers, GitBranch, Workflow,
   Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
@@ -59,6 +59,7 @@ const NAV = [
   { section: 'WORKSPACES', items: [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
+    { path: '/jira-tokens',   label: 'Jira Credentials',     Icon: Workflow, credAdmin: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
@@ -85,6 +86,7 @@ const BREADCRUMBS = {
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
+  '/jira-tokens':  'Jira Credentials',
   '/skills':       'Skills Registry',
   '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',

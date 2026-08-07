@@ -124,6 +124,7 @@ const ENVIRONMENTS_DIR = "/workspace/environments";
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
+const JIRA_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_jira-tokens");
 const LLM_ENDPOINTS_INDEX = "/workspace/llm-endpoints/index.json";
 const LLM_KEYS_DIR = "/workspace/llm-endpoints/_keys";
 const MCP_SERVERS_DIR = "/workspace/mcp-servers";
@@ -709,6 +710,7 @@ function backfillResourceOwnership() {
   const CREDENTIAL_INDEXES = [
     SSH_KEYS_INDEX,
     path.join(GH_TOKENS_DIR, "index.json"),
+    path.join(JIRA_TOKENS_DIR, "index.json"),
     path.join(MCP_CREDENTIALS_KEYS_DIR, "index.json"),
     LLM_ENDPOINTS_INDEX,
   ];
@@ -10538,6 +10540,28 @@ async function main() {
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
   });
   ghPoller.start();
+
+  // ============================================================
+  // Jira status-change poller — translates Jira issue status transitions
+  // into pending-triggers entries for agents that subscribed via a
+  // type=jira-event trigger. See orchestrator/jira-poller.js and
+  // docs/jira-integration-concept.md.
+  // ============================================================
+  const { JiraPoller } = require('./jira-poller');
+  const jiraPoller = new JiraPoller({
+    loadEnvironment,
+    loadJiraCredential: (id) => {
+      try {
+        const list = JSON.parse(fs.readFileSync(path.join(JIRA_TOKENS_DIR, 'index.json'), 'utf8'));
+        return Array.isArray(list) ? (list.find((c) => c.id === id) || null) : null;
+      } catch {
+        return null;
+      }
+    },
+    enqueuePending, // #185 Phase 2: orchestrator owns the queue (control plane when isolated)
+    triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
+  });
+  jiraPoller.start();
 
   // ============================================================
   // Knowledge curator backstop (Shared Agent Learning, Phase 4).

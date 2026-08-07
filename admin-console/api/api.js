@@ -97,6 +97,8 @@ const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, '_keys');
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, 'index.json');
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
 const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
+const JIRA_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_jira-tokens');
+const JIRA_TOKENS_INDEX = path.join(JIRA_TOKENS_DIR, 'index.json');
 const LLM_ENDPOINTS_DIR = path.join(WORKSPACE, 'llm-endpoints');
 const LLM_ENDPOINTS_INDEX = path.join(LLM_ENDPOINTS_DIR, 'index.json');
 const LLM_KEYS_DIR = path.join(LLM_ENDPOINTS_DIR, '_keys');
@@ -119,6 +121,7 @@ const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765'
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
 fs.mkdirSync(GH_TOKENS_DIR, { recursive: true });
+fs.mkdirSync(JIRA_TOKENS_DIR, { recursive: true });
 fs.mkdirSync(LLM_ENDPOINTS_DIR, { recursive: true });
 fs.mkdirSync(LLM_KEYS_DIR, { recursive: true });
 fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
@@ -144,6 +147,7 @@ app.use(express.static(STATIC_DIR));
 const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 const SSH_KEY_ID_RE = /^[a-z0-9-]+$/;
 const GH_TOKEN_ID_RE = /^[a-z0-9-]+$/;
+const JIRA_TOKEN_ID_RE = /^[a-z0-9-]+$/;
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
 // Blueprint id / memory-file path params (proxied into the orchestrator URL).
 // Allowlist guards (no separators, no '..') sanitize the values for the URL path.
@@ -834,6 +838,46 @@ function githubTokenInUse(tokenId) {
   for (const envId of listEnvironmentIds()) {
     const env = loadEnvironment(envId);
     if (env?.githubTokenId === tokenId) return envId;
+  }
+  return null;
+}
+
+/* ─── Jira Tokens ────────────────────────────────────────────────────
+   Same shape/lifecycle as GitHub Tokens above, plus `siteUrl`/`email` on
+   the credential itself — a deployment can span multiple Jira sites, so
+   "which site" has to travel with "which secret" rather than living on
+   the environment or trigger (see docs/jira-integration-concept.md). */
+
+function listJiraTokens() {
+  return readJsonFile(JIRA_TOKENS_INDEX, []);
+}
+
+function saveJiraTokensIndex(tokens) {
+  writeJsonAtomic(JIRA_TOKENS_INDEX, tokens);
+}
+
+function jiraTokenFingerprint(token) {
+  return 'SHA256:' + crypto.createHash('sha256').update(token).digest('base64').replace(/=+$/, '').slice(0, 16);
+}
+
+// Jira Cloud API tokens have no stable public prefix (unlike GitHub's
+// ghp_/github_pat_/...), so the preview is just a masked tail.
+function jiraTokenPreview(token) {
+  return `••••${token.slice(-4)}`;
+}
+
+// Accepts a bare Atlassian subdomain ("yourcompany") or a full origin
+// ("https://yourcompany.atlassian.net", or a custom/test-fixture host).
+// Storage keeps whichever form the operator entered (minus a trailing
+// slash) — resolution to a full API base happens in the Jira poller.
+function normalizeJiraSiteUrl(raw) {
+  return String(raw).trim().replace(/\/+$/, '');
+}
+
+function jiraTokenInUse(tokenId) {
+  for (const envId of listEnvironmentIds()) {
+    const env = loadEnvironment(envId);
+    if ((env?.jiraProjects || []).some(p => p?.credentialId === tokenId)) return envId;
   }
   return null;
 }
@@ -2938,7 +2982,7 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
-  if (newTrigger.type === 'github-event') {
+  if (newTrigger.type === 'github-event' || newTrigger.type === 'jira-event') {
     const now = new Date().toISOString();
     if (!newTrigger.createdAt) newTrigger.createdAt = now;
     if (!newTrigger.activatedAt) newTrigger.activatedAt = now;
@@ -2968,7 +3012,7 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
   delete merged.emits;
   delete merged.emitsDerived;
-  if (merged.type === 'github-event') {
+  if (merged.type === 'github-event' || merged.type === 'jira-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
     // re-enabled trigger drops the backlog that accrued while it was off.
@@ -8149,6 +8193,34 @@ function normalizeMcpServersInput(input) {
   return cleaned;
 }
 
+// Validates env.jiraProjects: [{ projectKey, credentialId }]. Unlike
+// mcpServers' optional credentialId, a project binding with no credential
+// can't be polled at all, so credentialId is required here. Mirrors the
+// {id, credentialId} shape of mcpServers rather than the URL-derived
+// repositories[] shape — a Jira project key is opaque and only makes sense
+// paired explicitly with a credential (see docs/jira-integration-concept.md).
+const JIRA_PROJECT_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+function normalizeJiraProjectsInput(input) {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw new Error('jiraProjects must be an array');
+  const knownCreds = listJiraTokens();
+  const cleaned = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== 'object') continue;
+    const projectKey = typeof entry.projectKey === 'string' ? entry.projectKey.trim() : '';
+    if (!projectKey) continue;
+    if (!JIRA_PROJECT_KEY_RE.test(projectKey)) throw new Error(`Invalid jiraProjects.projectKey: ${projectKey}`);
+    const credentialId = typeof entry.credentialId === 'string' ? entry.credentialId.trim() : '';
+    if (!credentialId) throw new Error(`jiraProjects entry for '${projectKey}' needs a credentialId`);
+    if (!JIRA_TOKEN_ID_RE.test(credentialId) || !knownCreds.some(c => c.id === credentialId)) {
+      throw new Error(`Jira credential '${credentialId}' not found`);
+    }
+    cleaned.push({ projectKey, credentialId });
+  }
+  return cleaned;
+}
+
 /* ─── Teams data model (#299) ───────────────────────────────────────────
  * Thin proxy onto the orchestrator's /internal/admin/* surface, which owns the
  * Team / user / membership store. These are the *human* Team endpoints — the
@@ -8349,7 +8421,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // (orchestrator/skill-grants.js) and lives on the agent constructs — the
   // Working Environment is a pure infrastructure template. Old clients may
   // still send the field; it is ignored so it can't silently grant anything.
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, jiraProjects, teamId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -8381,6 +8453,13 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
+  let normalizedJiraProjects;
+  try {
+    normalizedJiraProjects = normalizeJiraProjectsInput(jiraProjects);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
   const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
   if (llm.error) return res.status(400).json({ error: llm.error });
 
@@ -8392,6 +8471,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
     mcpServers: normalizedMcp,
+    jiraProjects: normalizedJiraProjects,
     llmEndpointId: llm.llmEndpointId,
     defaultModelId: llm.defaultModelId,
     additionalContext: additionalContext || '',
@@ -8408,7 +8488,7 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, jiraProjects, teamId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -8446,6 +8526,13 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   if (mcpServers !== undefined) {
     try {
       env.mcpServers = normalizeMcpServersInput(mcpServers);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  }
+  if (jiraProjects !== undefined) {
+    try {
+      env.jiraProjects = normalizeJiraProjectsInput(jiraProjects);
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }
@@ -10391,6 +10478,112 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   }
   try { fs.unlinkSync(path.join(GH_TOKENS_DIR, path.basename(id))); } catch { /* ignore */ }
   saveGithubTokensIndex(tokens.filter(t => t.id !== id));
+  res.status(204).end();
+});
+
+/* ─── Jira Tokens ───────────────────────────────────────────────────── */
+
+app.get('/api/jira-tokens', (req, res) => {
+  // Metadata only — never the raw token. Same caller-scoping model as
+  // GitHub tokens / SSH keys.
+  const scope = getScope(req);
+  res.json(listJiraTokens().map(normalizeCredential).filter(t => visibleCredential(scope, t)));
+});
+
+app.post('/api/jira-tokens', apiLimiter, (req, res) => {
+  const { name, siteUrl, email, token, id: rawId } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!siteUrl || typeof siteUrl !== 'string' || !siteUrl.trim()) {
+    return res.status(400).json({ error: 'siteUrl is required (e.g. "yourcompany" or "https://yourcompany.atlassian.net")' });
+  }
+  if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return res.status(400).json({ error: 'a valid email is required (the Jira Cloud Basic-Auth username)' });
+  }
+  if (!token || typeof token !== 'string' || token.trim().length < 10) {
+    return res.status(400).json({ error: 'token (string, the Jira API token) is required' });
+  }
+  const scope = getScope(req);
+  let ownership;
+  try { ownership = resolveCredentialOwnership(req.body); }
+  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateCredential(scope, ownership)) {
+    return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
+  }
+  const trimmed = token.trim();
+
+  const existing = listJiraTokens();
+  let id;
+  if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+    id = String(rawId).trim();
+    if (!JIRA_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'id must contain lowercase letters, digits and hyphens only' });
+    if (existing.some(t => t.id === id)) return res.status(409).json({ error: `Jira token id '${id}' already exists` });
+  } else {
+    const baseId = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    id = baseId || `jira-token-${Date.now()}`;
+    if (existing.some(t => t.id === id)) {
+      id = `${id}-${Date.now().toString(36)}`;
+    }
+  }
+  if (!JIRA_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+
+  const tokenPath = path.join(JIRA_TOKENS_DIR, path.basename(id));
+  fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
+  try { fs.chmodSync(tokenPath, 0o600); } catch { /* best effort */ }
+
+  const entry = {
+    id,
+    name,
+    scope: ownership.scope,
+    teamId: ownership.teamId,
+    assignedTeamIds: ownership.assignedTeamIds,
+    siteUrl: normalizeJiraSiteUrl(siteUrl),
+    email: email.trim(),
+    preview: jiraTokenPreview(trimmed),
+    fingerprint: jiraTokenFingerprint(trimmed),
+    createdAt: new Date().toISOString(),
+  };
+  saveJiraTokensIndex([...existing, entry]);
+  res.status(201).json(normalizeCredential(entry));
+});
+
+// Reassign / rename a Jira credential, or update its siteUrl/email — same
+// role model as GitHub tokens above (applyCredentialPatch handles
+// name/scope/team; siteUrl/email are Jira-specific so are merged here).
+app.patch('/api/jira-tokens/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!JIRA_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
+  const tokens = listJiraTokens();
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'Jira token not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const updated = applyCredentialPatch({ res, cred, scope, body: req.body, inUse: jiraTokenInUse(id), label: 'Jira credential' });
+  if (!updated) return;
+  const b = req.body || {};
+  if (typeof b.siteUrl === 'string' && b.siteUrl.trim()) updated.siteUrl = normalizeJiraSiteUrl(b.siteUrl);
+  if (typeof b.email === 'string' && b.email.trim()) updated.email = b.email.trim();
+  saveJiraTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  res.json(normalizeCredential(updated));
+});
+
+app.delete('/api/jira-tokens/:id', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!JIRA_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
+  const tokens = listJiraTokens();
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'Jira token not found' });
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const usedBy = jiraTokenInUse(id);
+  if (usedBy) {
+    return res.status(409).json({ error: `Jira credential is used by environment '${usedBy}'. Detach it first.` });
+  }
+  try { fs.unlinkSync(path.join(JIRA_TOKENS_DIR, path.basename(id))); } catch { /* ignore */ }
+  saveJiraTokensIndex(tokens.filter(t => t.id !== id));
   res.status(204).end();
 });
 

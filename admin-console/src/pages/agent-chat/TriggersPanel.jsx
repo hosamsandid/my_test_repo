@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Workflow, Terminal, FileCode2, GitBranch } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -83,6 +83,7 @@ function TypeBadge({ type, dataFlow }) {
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
+  const isJira   = type === 'jira-event';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
@@ -94,6 +95,8 @@ function TypeBadge({ type, dataFlow }) {
     bg = 'var(--eb-status-success-bg)'; color = 'var(--eb-status-success)'; label = 'http'; Icon = Globe;
   } else if (isGithub) {
     bg = 'var(--eb-status-info-bg, var(--eb-accent-muted))'; color = 'var(--eb-status-info, var(--eb-accent-primary))'; label = 'github'; Icon = Github;
+  } else if (isJira) {
+    bg = 'var(--eb-status-info-bg, var(--eb-accent-muted))'; color = 'var(--eb-status-info, var(--eb-accent-primary))'; label = 'jira'; Icon = Workflow;
   } else {
     bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = type || 'unknown'; Icon = AlertCircle;
   }
@@ -294,6 +297,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   const ghSummary = (trigger.type === 'github-event' && !isDataFlow)
     ? summarizeGithubEventTrigger(trigger)
     : null;
+  const isJira = trigger.type === 'jira-event';
   let schedule;
   if (isDataFlow) {
     schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
@@ -301,6 +305,8 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (ghSummary) {
     schedule = trigger.repo || 'any repo';
+  } else if (isJira) {
+    schedule = trigger.projectKey || 'any project';
   } else if (trigger.cron) {
     schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
   } else {
@@ -370,6 +376,28 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 {' · label '}
                 <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
                   “{ghSummary.label}”
+                </strong>
+              </>
+            )}
+          </span>
+        </div>
+      )}
+
+      {isJira && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4,
+        }}>
+          <Workflow size={13} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+              status changed
+            </strong>
+            {trigger.statusFilter && (
+              <>
+                {' · to '}
+                <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                  “{trigger.statusFilter}”
                 </strong>
               </>
             )}
@@ -500,18 +528,23 @@ function generateSecret() {
 // `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
 // `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
 // turning a schedule into a different trigger kind, re-deriving the edge).
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, presetType }) {
   const isEdit = !!initialValues;
-  const typeLocked = isEdit && !allowTypeChange;
+  // presetType locks the Type selector in create mode too (e.g. a dedicated
+  // "Jira event" Add-input tile) without faking isEdit — faking edit mode would
+  // also disable the ID field and drop custom-id support for that tile alone.
+  const typeLocked = (isEdit || !!presetType) && !allowTypeChange;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'jira-event']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
   const initialType = startedAsDataFlow
     ? 'data-flow'
-    : (knownTypes.has(initialValues?.type) ? initialValues.type : 'cron');
+    : knownTypes.has(initialValues?.type) ? initialValues.type
+    : knownTypes.has(presetType) ? presetType
+    : 'cron';
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
@@ -523,6 +556,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
+    // jira-event: project key (bound in the agent's environment's
+    // jiraProjects[]) and an optional exact-match filter on the status the
+    // issue transitioned INTO (mirrors labelFilter's semantics).
+    projectKey:  initialValues?.projectKey  ?? '',
+    statusFilter: initialValues?.statusFilter ?? '',
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -584,6 +622,30 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     }
   }, [availableRepos, form.repo]);
 
+  // Jira projects available to this agent — sourced from the agent's working
+  // environment's jiraProjects[] binding, same lookup shape as availableRepos.
+  const [availableProjects, setAvailableProjects] = useState(isDraftMode ? [] : null); // null = not loaded
+  useEffect(() => {
+    if (isDraftMode) return undefined;
+    if (form.type !== 'jira-event' || availableProjects !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agent = await apiCall('GET', `/api/agents/${agentId}`);
+        const envId = agent?.environmentId;
+        let projects = [];
+        if (envId) {
+          const env = await apiCall('GET', `/api/environments/${envId}`);
+          projects = Array.isArray(env?.jiraProjects) ? env.jiraProjects : [];
+        }
+        if (!cancelled) setAvailableProjects(projects);
+      } catch {
+        if (!cancelled) setAvailableProjects([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, availableProjects, isDraftMode]);
+
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
   function changeType(next) {
@@ -610,6 +672,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
+    }
+    if (form.type === 'jira-event') {
+      if (!form.projectKey.trim() && !isDraftMode) { setFormError('Project is required.'); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -642,6 +707,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+    } else if (form.type === 'jira-event') {
+      if (form.projectKey.trim()) body.projectKey = form.projectKey.trim(); // a draft's project lands at materialise
+      body.events = ['status_changed'];
+      const sf = (form.statusFilter || '').trim();
+      body.statusFilter = sf || null;
     }
     await onSave(body);
   }
@@ -677,6 +747,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           <option value="once">Once (one-shot)</option>
           <option value="http">HTTP webhook</option>
           <option value="github-event">GitHub event</option>
+          <option value="jira-event">Jira event</option>
           <option value="data-flow">Data flow (agent dependency)</option>
         </select>
       </div>
@@ -822,6 +893,66 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {form.type === 'jira-event' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {isDraftMode ? (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+              The project is applied when the draft is materialised into a team.
+            </div>
+          ) : (
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Project
+            </div>
+            {availableProjects === null ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+                Loading projects…
+              </div>
+            ) : availableProjects.length === 0 ? (
+              <div style={{
+                padding: 'var(--eb-space-3)',
+                background: 'var(--eb-status-warning-bg)',
+                border: '1px solid var(--eb-status-warning)',
+                borderRadius: 'var(--eb-radius-md)',
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-status-warning)',
+              }}>
+                The agent's working environment has no Jira projects bound. Add one in <strong>Working Environments</strong> first.
+              </div>
+            ) : (
+              <select
+                value={form.projectKey}
+                onChange={e => set('projectKey', e.target.value)}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              >
+                <option value="">— Select a project —</option>
+                {availableProjects.map(p => (
+                  <option key={p.projectKey} value={p.projectKey}>{p.projectKey}</option>
+                ))}
+              </select>
+            )}
+          </div>
+          )}
+
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Status filter (optional)
+            </div>
+            <input
+              type="text"
+              value={form.statusFilter}
+              onChange={e => set('statusFilter', e.target.value)}
+              placeholder="e.g. Ready for Dev (leave empty to fire on any status change)"
+              style={{ ...FIELD_STYLE, width: '100%' }}
+            />
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              Only fire when an issue transitions INTO this exact status name. Saves a Claude invocation on every other transition.
+            </div>
+          </div>
         </div>
       )}
 

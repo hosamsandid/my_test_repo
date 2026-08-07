@@ -333,6 +333,7 @@ export function AddInputDialog({ node, peers = [], labels = [], ops = liveOps, o
 
   if (step === 'event') return <GithubTriggerForm {...common} labels={labels} onBack={toTiles} />;
   if (step === 'label') return <GithubTriggerForm {...common} labels={labels} initialEvent="issues.labeled" onBack={toTiles} />;
+  if (step === 'jira') return <JiraInputForm {...common} onBack={toTiles} />;
   if (step === 'webhook') return <WebhookForm {...common} onBack={toTiles} />;
   if (step === 'schedule') return <ScheduleInputForm {...common} onBack={toTiles} />;
 
@@ -364,6 +365,7 @@ export function AddInputDialog({ node, peers = [], labels = [], ops = liveOps, o
     { id: 'event', title: 'GitHub event', desc: `${toName} wakes on a repo event (issue/PR opened, push, …).` },
     { id: 'label', title: 'Label applied', desc: `${toName} wakes when a specific label is set — by an agent or a human.` },
     { id: 'channel:pick', title: 'PR / issue from another agent', desc: `${toName} reacts to a pull request or issue another agent opens.` },
+    { id: 'jira', title: 'Jira event', desc: `${toName} wakes when a Jira issue's status changes.` },
     { id: 'schedule', title: 'Schedule', desc: `${toName} wakes on a recurring cron or a one-shot time.` },
     { id: 'webhook', title: 'Webhook', desc: `An external system (CI, tooling) wakes ${toName} via an HTTP call.` },
     { id: 'artifact:pick', title: 'Artifact from another agent', desc: `${toName} consumes an artifact another agent produces.` },
@@ -438,6 +440,34 @@ function ScheduleInputForm({ to, toName, ops = liveOps, onBack, onClose, onDone 
         agentId={to}
         ops={ops}
         saving={saving}
+        onSave={save}
+        onCancel={onBack || onClose}
+      />
+    </SidePanel>
+  );
+}
+
+// Jira input — same wrapper pattern as ScheduleInputForm, but locks the reused
+// TriggersPanel form onto the jira-event branch via presetType (project picker
+// sourced from the agent's environment's jiraProjects[], optional statusFilter)
+// so the tile opens directly into a ready-to-fill Jira form.
+function JiraInputForm({ to, toName, ops = liveOps, onBack, onClose, onDone }) {
+  const [saving, setSaving] = useState(false);
+  async function save(body) {
+    setSaving(true);
+    try { await ops.createTrigger(to, body); onDone?.(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <SidePanel open onClose={onClose} title="Add a Jira trigger" width="520px">
+      <p style={hint}>
+        <strong>{toName}</strong> wakes when a Jira issue's status changes.
+      </p>
+      <TriggerForm
+        agentId={to}
+        ops={ops}
+        saving={saving}
+        presetType="jira-event"
         onSave={save}
         onCancel={onBack || onClose}
       />

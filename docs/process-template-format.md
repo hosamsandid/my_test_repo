@@ -56,10 +56,12 @@ role's `{{vars}}` and the target repo are applied per member.
       "triggers": [
         {
           "id": "developer-assigned",
-          "type": "github-event" | "cron" | "once" | "http",
+          "type": "github-event" | "jira-event" | "cron" | "once" | "http",
           "enabled": true,
           "events": ["issues.labeled"],   // github-event
           "labelFilter": "assigned:{{agentId}}",
+          "projectKey": "ENG",            // jira-event
+          "statusFilter": "Ready for Dev",
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "description": "…",

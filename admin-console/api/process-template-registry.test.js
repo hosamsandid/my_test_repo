@@ -95,11 +95,6 @@ test('curated repo templates render with no error/warning lints', () => {
     const agents = b.roles.map(r => ({
       id: r.id, role: r.role || 'team-member', displayName: r.displayName,
       sessionPolicy: r.sessionPolicy, emits: r.emits, github: r.github,
-      // Thread the structured `outcomes` port (#827/#830) so the outcome lints
-      // (outcome-without-consumer / same-label-multiple-outcomes /
-      // human-label-as-outcome / switch-with-one-option) are exercised against
-      // the shipped templates too — they must stay clean under the new rules.
-      outcomes: r.outcomes,
       channels: r.channels, triggers: r.triggers || [],
     }));
     const graph = buildProcessGraph(agents);

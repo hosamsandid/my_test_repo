@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, Clock, CalendarClock, Globe, Github, AlertCircle, Edit } from 'lucide-react';
+import { Plus, Trash2, Clock, CalendarClock, Globe, Github, Workflow, AlertCircle, Edit } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -15,10 +15,11 @@ function TypeBadge({ type }) {
   const isOnce   = type === 'once';
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
-  const bg    = isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : isGithub ? 'var(--eb-status-info-bg, var(--eb-bg-elevated))' : 'var(--eb-status-warning-bg)';
-  const color = isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : isGithub ? 'var(--eb-text-primary)' : 'var(--eb-status-warning)';
-  const label = isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : isGithub ? 'github-event' : type || 'unknown';
-  const Icon  = isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : isGithub ? Github : AlertCircle;
+  const isJira = type === 'jira-event';
+  const bg    = isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : (isGithub || isJira) ? 'var(--eb-status-info-bg, var(--eb-bg-elevated))' : 'var(--eb-status-warning-bg)';
+  const color = isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : (isGithub || isJira) ? 'var(--eb-text-primary)' : 'var(--eb-status-warning)';
+  const label = isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : isGithub ? 'github-event' : isJira ? 'jira-event' : type || 'unknown';
+  const Icon  = isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : isGithub ? Github : isJira ? Workflow : AlertCircle;
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -131,6 +132,9 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     // github-event fields
     repo: initial?.repo || '',
     events: Array.isArray(initial?.events) ? initial.events : [],
+    // jira-event fields
+    projectKey: initial?.projectKey || '',
+    statusFilter: initial?.statusFilter || '',
   });
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const isEdit = !!initial;
@@ -172,6 +176,10 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
     else if (form.type === 'github-event') {
       body.repo = form.repo;
       body.events = form.events;
+    } else if (form.type === 'jira-event') {
+      body.projectKey = form.projectKey;
+      body.events = ['status_changed'];
+      body.statusFilter = form.statusFilter || null;
     }
     return { agentId: form.agentId, body };
   }
@@ -221,6 +229,7 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
           <option value="once">Once (one-shot)</option>
           <option value="http">HTTP webhook</option>
           <option value="github-event">GitHub event</option>
+          <option value="jira-event">Jira event</option>
         </select>
         {isEdit && (
           <div style={fieldHintStyle}>Type and ID are immutable on edit — delete and re-create to change them.</div>
@@ -309,6 +318,27 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         </>
       )}
 
+      {form.type === 'jira-event' && (
+        <>
+          <FormInput
+            label="Project key"
+            value={form.projectKey}
+            onChange={v => update('projectKey', v)}
+            placeholder="ENG"
+          />
+          <FormInput
+            label="Status filter (optional)"
+            value={form.statusFilter}
+            onChange={v => update('statusFilter', v)}
+            placeholder="e.g. Ready for Dev (leave empty to fire on any status change)"
+          />
+          <div style={fieldHintStyle}>
+            The project key must be bound to a Jira credential on this agent's Working Environment (see <code>Jira Projects</code> there).
+            Fires when an issue transitions INTO the given status — or any status change if left empty.
+          </div>
+        </>
+      )}
+
       <FormInput label="Prompt" value={form.prompt} onChange={v => update('prompt', v)} multiline rows={6} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
@@ -377,6 +407,14 @@ export default function ScheduledJobs() {
           </div>
         );
       }
+      if (row.type === 'jira-event') {
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+            <span>{row.projectKey || '—'}</span>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{row.statusFilter ? `→ ${row.statusFilter}` : 'any status change'}</span>
+          </div>
+        );
+      }
       if (row.type === 'http') {
         return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>/hooks/{row._agentId}/{row.id}</span>;
       }
@@ -422,7 +460,7 @@ export default function ScheduledJobs() {
           columns={COLS}
           data={triggers}
           getRowKey={r => `${r._agentId}/${r.id}`}
-          emptyText="No triggers configured. Add one to schedule recurring runs, fire one-shot tasks, expose an HTTP webhook, or react to GitHub events."
+          emptyText="No triggers configured. Add one to schedule recurring runs, fire one-shot tasks, expose an HTTP webhook, or react to GitHub/Jira events."
         />
       )}
 

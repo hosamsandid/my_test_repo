@@ -552,7 +552,7 @@ before it moves from catalog to roadmap.
   token payload and ownership labels are the same code either way; retrofitting
   agent scoping later would be a data migration) + grant-driven network
   attachment. No UI extension, no approval flow.
-- **Phase 2 — agent surface**: CLI contract, workspace seeding/sync, config
+- **Phase 2 — agent surface** *(shipped — #1534)*: CLI contract, workspace seeding/sync, config
   files, prompt-gating block, grant UI (team/agent, tri-state, granularity
   selector bounded by the manifest's `scopes`), audit JSONL.
 - **Phase 3 — plugin #1**: rework PR #1287 onto the machinery per §6; delete

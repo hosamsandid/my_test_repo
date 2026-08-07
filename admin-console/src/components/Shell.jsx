@@ -11,6 +11,7 @@ import { useAuth } from '../auth/AuthContext';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import AccentureLogo from './AccentureLogo';
 import AssistModelSelector from './AssistModelSelector';
+import TranscriptionOverlay from './TranscriptionOverlay';
 import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
@@ -463,6 +464,10 @@ export default function Shell({ children }) {
           {children}
         </main>
       </div>
+
+      {/* Persistent Meeting Note-Taker overlay (#1296) — portaled to body, so
+          it floats over every page while a meeting transcription runs. */}
+      <TranscriptionOverlay />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Send, Paperclip, Loader2, Mic, Square, Repeat } from 'lucide-react';
+import { Send, Paperclip, Loader2, Mic, Square, Repeat, ChevronDown, Radio } from 'lucide-react';
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 import LoopSummaryCard from './LoopSummaryCard';
 import {
@@ -53,8 +53,14 @@ const IS_MAC = isMacPlatform();
  * @param {boolean} [loopBusy]            true while a loop launch/stop is in flight
  * @param {?object} [loopTrigger]         the running launched-loop trigger (full config)
  * @param {?object} [loopProgress]        `{ iteration, maxIterations|null }` or null
+ * @param {()=>void} [onStartMeeting]      Start a persistent meeting transcription (#1296)
+ *        for this agent. When provided, a chevron next to the mic opens a
+ *        "Record meeting" menu; quick dictation stays the plain mic tap.
+ * @param {boolean} [meetingActive]        true while a meeting session is running
+ *        anywhere in the app — disables both quick dictation and starting a
+ *        second meeting (one mic use at a time).
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, onStartMeeting, meetingActive = false }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -65,6 +71,11 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   // existing users keep the historic Cmd/Ctrl+Enter behaviour (#1354 AC).
   const [sendKeybinding, setSendKeybinding] = useState(() => loadSendKeybinding());
   useEffect(() => { saveSendKeybinding(sendKeybinding); }, [sendKeybinding]);
+  // Meeting-mode menu (#1296): the mic becomes a split control — plain tap is
+  // quick dictation (unchanged), the chevron opens a small menu to start a
+  // persistent meeting transcription for this agent.
+  const [meetingMenuOpen, setMeetingMenuOpen] = useState(false);
+  const micGroupRef = useRef(null);
   const taRef = useRef(null);
   const fileRef = useRef(null);
   // dragenter/dragleave fire for every child element; count them so the
@@ -94,6 +105,16 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   }, [voiceError, clearError]);
 
   useEffect(() => { autoResize(taRef.current); }, [value]);
+
+  // Close the meeting menu on an outside click / Escape.
+  useEffect(() => {
+    if (!meetingMenuOpen) return undefined;
+    const onDown = (e) => { if (!micGroupRef.current?.contains(e.target)) setMeetingMenuOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setMeetingMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [meetingMenuOpen]);
 
   // Persist the draft per agent (#1388) so it survives the agent-switch remount
   // (and a page reload). saveDraft removes the key for an empty draft (AC4).
@@ -362,33 +383,104 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
               {Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')}
             </span>
           )}
-          <button
-            onClick={toggleRecording}
-            disabled={disabled || voiceState === 'transcribing'}
-            aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
-            title={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input'}
-            style={{
-              width: 32, height: 32,
-              background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
-              color: voiceState === 'recording'
-                ? 'var(--eb-status-error-text, #dc2626)'
+          <div ref={micGroupRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <button
+              onClick={toggleRecording}
+              disabled={disabled || voiceState === 'transcribing' || meetingActive}
+              aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
+              title={meetingActive
+                ? 'A meeting transcription is already running'
+                : voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input (tap to dictate)'}
+              style={{
+                width: 32, height: 32,
+                background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
+                color: voiceState === 'recording'
+                  ? 'var(--eb-status-error-text, #dc2626)'
+                  : (voiceState === 'transcribing' || meetingActive)
+                    ? 'var(--eb-text-muted)'
+                    : 'var(--eb-text-secondary)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: (disabled || voiceState === 'transcribing' || meetingActive) ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+                animation: voiceState === 'recording' ? 'stt-pulse 1.5s ease-in-out infinite' : 'none',
+              }}
+            >
+              {voiceState === 'recording'
+                ? <Square size={14} />
                 : voiceState === 'transcribing'
-                  ? 'var(--eb-text-muted)'
-                  : 'var(--eb-text-secondary)',
-              border: 'none',
-              borderRadius: 'var(--eb-radius-md)',
-              cursor: (disabled || voiceState === 'transcribing') ? 'not-allowed' : 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-              animation: voiceState === 'recording' ? 'stt-pulse 1.5s ease-in-out infinite' : 'none',
-            }}
-          >
-            {voiceState === 'recording'
-              ? <Square size={14} />
-              : voiceState === 'transcribing'
-                ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
-                : <Mic size={14} />}
-          </button>
+                  ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                  : <Mic size={14} />}
+            </button>
+            {/* Meeting-mode chevron (#1296). Only when the host wires meetings. */}
+            {onStartMeeting && (
+              <button
+                onClick={() => setMeetingMenuOpen(o => !o)}
+                aria-label="Meeting transcription options"
+                aria-haspopup="menu"
+                aria-expanded={meetingMenuOpen}
+                title="Meeting transcription"
+                style={{
+                  width: 16, height: 32,
+                  background: 'transparent',
+                  color: 'var(--eb-text-secondary)',
+                  border: 'none', borderRadius: 'var(--eb-radius-md)',
+                  cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0, padding: 0,
+                }}
+              >
+                <ChevronDown size={12} />
+              </button>
+            )}
+            {meetingMenuOpen && onStartMeeting && (
+              <div
+                role="menu"
+                style={{
+                  position: 'absolute',
+                  bottom: 'calc(100% + 6px)',
+                  right: 0,
+                  minWidth: 240,
+                  background: 'var(--eb-bg-surface)',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-md)',
+                  boxShadow: 'var(--eb-shadow-lg, 0 8px 24px rgba(0,0,0,0.24))',
+                  padding: 'var(--eb-space-1)',
+                  zIndex: 20,
+                }}
+              >
+                <button
+                  role="menuitem"
+                  disabled={meetingActive}
+                  onClick={() => { setMeetingMenuOpen(false); onStartMeeting(); }}
+                  title={meetingActive ? 'A meeting transcription is already running' : undefined}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%',
+                    background: 'transparent', border: 'none', textAlign: 'left',
+                    padding: 'var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+                    cursor: meetingActive ? 'not-allowed' : 'pointer',
+                    color: meetingActive ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+                  }}
+                  onMouseEnter={e => { if (!meetingActive) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <Radio size={15} style={{ marginTop: 1, flexShrink: 0 }} />
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: 'block', fontWeight: 'var(--eb-font-medium)' }}>
+                      Record meeting{agentDisplayName ? ` for ${agentDisplayName}` : ''}
+                    </span>
+                    <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.35 }}>
+                      {meetingActive
+                        ? 'A meeting transcription is already running'
+                        : 'Keeps recording as you move around Agent Studio; the transcript is sent here when you stop.'}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <button
           onClick={submit}

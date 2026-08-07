@@ -200,6 +200,65 @@ test('rejects a malformed quota', () => {
   assert.ok(validatePluginManifest({ ...base(), quota: { maxObjects: 2, ttlSeconds: -1 } }).errors.some((e) => /ttlSeconds must be a positive integer/.test(e)));
 });
 
+// ── policy (per-subcommand authorization keyed on scope, #1521) ──────────────
+test('accepts a valid policy and normalizes each rule', () => {
+  const { ok, errors, manifest } = validatePluginManifest({
+    ...base(),
+    scopes: ['team', 'agent'],
+    policy: {
+      'create-case': { scopes: ['agent'], requiresFlowFinal: true },
+      'delete-data': { scopes: ['agent'] },
+    },
+  });
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.policy['create-case'], { scopes: ['agent'], requiresFlowFinal: true });
+  assert.deepEqual(manifest.policy['delete-data'], { scopes: ['agent'] });
+});
+
+test('a manifest without policy has none on the normalized shape', () => {
+  const { ok, manifest } = validatePluginManifest(base());
+  assert.equal(ok, true);
+  assert.equal('policy' in manifest, false);
+});
+
+test('rejects policy scopes outside the plugin scopes', () => {
+  const r = validatePluginManifest({
+    ...base(),
+    scopes: ['team'],
+    policy: { 'x': { scopes: ['agent'] } },
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /not in the plugin's scopes/.test(e)));
+});
+
+test('rejects an unknown policy granularity', () => {
+  const r = validatePluginManifest({ ...base(), policy: { 'x': { scopes: ['squad'] } } });
+  assert.ok(r.errors.some((e) => /unknown granularities/.test(e)));
+});
+
+test('rejects requiresFlowFinal when the rule admits team granularity', () => {
+  // Explicitly including team.
+  const r1 = validatePluginManifest({
+    ...base(), scopes: ['team', 'agent'],
+    policy: { 'x': { scopes: ['team', 'agent'], requiresFlowFinal: true } },
+  });
+  assert.ok(r1.errors.some((e) => /only expressible at agent granularity/.test(e)));
+  // No explicit scopes → defaults to all the plugin's scopes, which include team.
+  const r2 = validatePluginManifest({
+    ...base(), scopes: ['team', 'agent'],
+    policy: { 'x': { requiresFlowFinal: true } },
+  });
+  assert.ok(r2.errors.some((e) => /only expressible at agent granularity/.test(e)));
+});
+
+test('rejects malformed policy shapes', () => {
+  assert.ok(validatePluginManifest({ ...base(), policy: 5 }).errors.some((e) => /policy must be an object/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), policy: { x: 3 } }).errors.some((e) => /must be an object/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), policy: { x: { requiresFlowFinal: 'yes' } } }).errors.some((e) => /must be a boolean/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), policy: { x: { scopes: [] } } }).errors.some((e) => /non-empty array/.test(e)));
+});
+
 // ── ACCEPTANCE: the shipped plugin #1 manifest validates end to end ──────────
 test('the shipped podman-sandbox manifest (plugins/podman-sandbox) is valid', () => {
   const p = path.join(__dirname, '..', '..', 'plugins', 'podman-sandbox', 'plugin.json');

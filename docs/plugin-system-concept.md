@@ -124,6 +124,7 @@ the sidecar image.
   "platforms": ["podman"],
   "scopes": ["team", "agent"],
   "requiresApproval": ["compose up", "rm"],
+  "policy": { "create-case": { "scopes": ["agent"], "requiresFlowFinal": true } },
   "ui": {
     "title": "Sandbox Dashboard",
     "routes": [
@@ -149,6 +150,13 @@ the sidecar image.
   granularity a grant may choose is bounded by what the plugin can honour.
 - `requiresApproval` names subcommands the broker must hold for human
   confirmation (§4.6).
+- `policy` (optional, shipped #1521) narrows **which** subcommands a caller may
+  run, keyed on the granularity of its scope — the first governance rule only
+  agent granularity can carry (§4.6). Each key is a subcommand; `scopes`
+  restricts the calling granularity (⊆ the plugin's `scopes`) and
+  `requiresFlowFinal` gates on flow position (agent-only — a team-scoped token
+  cannot express it, so a rule with it may not admit team granularity). The
+  broker enforces it via `broker-sdk/authz.js`; the console validates the field.
 - `credentials` are bound at install/bind time from the existing credential
   store; secrets go into the **sidecar's** environment, never into agents.
 - `companionSkill` (optional) names a skill shipped alongside the plugin:
@@ -339,6 +347,16 @@ Sequencing: scope discovery ships with the first UI-bearing plugin (any of
 them needs it). Multi-route roles are a manifest field reserved now and
 implemented when a plugin declares more than one route — reserving it costs
 nothing, retrofitting it into a shipped proxy contract would be breaking.
+
+The decidable core of all three landed with plugin #2 (#1521,
+`admin-console/api/plugin-ui-proxy.js`, unit-tested): `deriveScopeList` (the
+grant-derived scope list — a plugin can only enumerate scopes it was granted
+to), `enforceUiRoute` (the console's `minRole` refusal, `ui.routes` longest-
+prefix match), and `signViewerHeaders`/`verifyViewerHeaders` (the signed viewer
+identity + effective role). The live Express proxy, iframe mount and nav entry
+wire when the product decision (Florian's #1367 verdict) calls for an embedded
+QE UI; test-mgmt's manifest already declares three routes to exercise the
+role contract.
 
 ### 4.9 Broker SDK
 
@@ -575,10 +593,20 @@ before it moves from catalog to roadmap.
   from plugin #1's broker (token verify, scope filtering, audit writer, secret
   masking, health/teardown routes, approval pen) into `broker-sdk/`; retrofit
   plugin #1 (`podman-mcp/`) onto it so the SDK has a live consumer from day one.
-- **Phase 5 — plugin #2 (test management)**: built **on the SDK** — the
-  proof that a credential-backed broker is thin; also validates the
-  `requiresApproval` flow and (if the product decision falls that way) the
-  iframe UI.
+- **Phase 5 — plugin #2 (test management)** *(shipped — #1521)*: built **on the
+  SDK** — the proof that a credential-backed broker is thin (`test-mgmt-broker/`
+  imports `broker-sdk/` and adds only the credential-holding `vendor-client.js`
+  + the policy glue). Introduces per-scope **authorisation** (`policy` +
+  `broker-sdk/authz.js` — the first rule only agent granularity can carry:
+  create-case = flow-final agent, cross-checks passed), the first real
+  `requiresApproval` flow (destructive test-data ops parked for DM confirm), and
+  the UI-extension surface's decidable core (`admin-console/api/plugin-ui-proxy
+  .js`: scope discovery derived from the grant, `ui.routes` `minRole`
+  enforcement, signed viewer headers) — reserved now; the live iframe proxy +
+  nav wire when the product decision (§4.8) calls for an embedded QE UI. The
+  orchestrator live-stack (token mint, scope-registry push, sidecar lifecycle,
+  DM approval round-trip) is the completion step, same "pure core now, live
+  stack next" split as Phases 1–3.
 - **Phase 6 — contract alignment** *(shipped — #1536)*: align built-in CLIs to the
   contract conventions (no mechanism change). Documented in
   [`cli-contract.md`](cli-contract.md); conformance-tested in

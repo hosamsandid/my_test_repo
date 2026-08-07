@@ -25,7 +25,8 @@
 //     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
 //     quota?: { maxObjects, ttlSeconds? },      // per-scope resource cap (§4.6)
 //     requiresApproval?: [ "<subcommand>" ],
-//     ui?: { title?, routes?: [ { path, minRole } ] },  // reserved for Phase 5
+//     policy?: { "<subcommand>": { scopes?: ["team"|"agent"], requiresFlowFinal?: bool } },
+//     ui?: { title?, routes?: [ { path, minRole } ] },
 //     companionSkill?, promptLine?, version?,
 //   }
 
@@ -267,6 +268,61 @@ function validatePluginManifest(input) {
     }
   }
 
+  // ── policy (optional; per-subcommand authorization keyed on scope, §4.6) ──
+  // The first governance surface that only agent granularity can carry
+  // (plugin #2, #1521): "test cases may only be created by the last agent in
+  // the flow, once its cross-checks passed." Each key is a CLI subcommand; each
+  // value narrows who may run it. `scopes` restricts the calling granularity
+  // (⊆ the manifest's `scopes`); `requiresFlowFinal` gates on flow position,
+  // which a team-scoped token cannot express — so a rule with it must not admit
+  // team granularity. The broker enforces via broker-sdk/authz.js.
+  let policy;
+  if (input.policy !== undefined) {
+    if (!isPlainObject(input.policy)) {
+      errors.push('policy must be an object keyed by subcommand');
+    } else {
+      const out = {};
+      for (const [sub, rawRule] of Object.entries(input.policy)) {
+        if (!isNonEmptyString(sub)) { errors.push('policy keys must be non-empty subcommand names'); continue; }
+        if (!isPlainObject(rawRule)) { errors.push(`policy["${sub}"] must be an object`); continue; }
+        const rule = {};
+        let ruleScopes = null;
+        if (rawRule.scopes !== undefined) {
+          if (!Array.isArray(rawRule.scopes) || rawRule.scopes.length === 0) {
+            errors.push(`policy["${sub}"].scopes must be a non-empty array`);
+          } else {
+            const invalid = rawRule.scopes.filter((s) => !SCOPE_GRANULARITIES.includes(s));
+            const notHonoured = rawRule.scopes.filter((s) => SCOPE_GRANULARITIES.includes(s) && !scopes.includes(s));
+            if (invalid.length) {
+              errors.push(`policy["${sub}"].scopes has unknown granularities: ${invalid.map(String).join(', ')}`);
+            } else if (notHonoured.length) {
+              errors.push(`policy["${sub}"].scopes has granularities not in the plugin's scopes: ${notHonoured.join(', ')}`);
+            } else {
+              ruleScopes = [...new Set(rawRule.scopes)];
+              rule.scopes = ruleScopes;
+            }
+          }
+        }
+        if (rawRule.requiresFlowFinal !== undefined) {
+          if (typeof rawRule.requiresFlowFinal !== 'boolean') {
+            errors.push(`policy["${sub}"].requiresFlowFinal must be a boolean`);
+          } else if (rawRule.requiresFlowFinal) {
+            // Flow position is only expressible at agent granularity — the rule
+            // must not admit a team-scoped caller.
+            const effectiveScopes = ruleScopes || scopes;
+            if (effectiveScopes.includes('team')) {
+              errors.push(`policy["${sub}"].requiresFlowFinal is only expressible at agent granularity; set scopes to ["agent"]`);
+            } else {
+              rule.requiresFlowFinal = true;
+            }
+          }
+        }
+        out[sub] = rule;
+      }
+      policy = out;
+    }
+  }
+
   // ── ui (optional; validated + reserved, not implemented in Phase 1) ──────
   let ui;
   if (input.ui !== undefined) {
@@ -329,6 +385,7 @@ function validatePluginManifest(input) {
   };
   if (defaultScopeGranularity) manifest.defaultScopeGranularity = defaultScopeGranularity;
   if (quota) manifest.quota = quota;
+  if (policy) manifest.policy = policy;
   if (ui) manifest.ui = ui;
   Object.assign(manifest, optionalStrings);
   return { ok: true, errors: [], manifest };

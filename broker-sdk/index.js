@@ -36,6 +36,7 @@ const {
 } = require('./mask-secrets');
 const { healthEndpoint, teardownScopeEndpoint } = require('./endpoints');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
+const { authorizeAction, isActionPermitted } = require('./authz');
 
 module.exports = {
   // token verification (§4.6)
@@ -68,4 +69,7 @@ module.exports = {
   needsApproval,
   approvalHoldingPen,
   parkForApproval,
+  // per-scope action authorization (§4.6 — first used by plugin #2, #1521)
+  authorizeAction,
+  isActionPermitted,
 };

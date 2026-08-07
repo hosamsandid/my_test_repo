@@ -9,6 +9,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { runArchiveTool, describeArchiveFailure } = require('./archive');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
@@ -3020,24 +3021,27 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
 // startsWith(rootPrefix) as a path-injection sanitiser when applied in the
 // same function as the sink. Allowed roots are WORKSPACE (agent files) and
 // /tmp (scratch dirs from fs.mkdtempSync). Refuses anything else.
-function copyDirRecursive(src, dst) {
+// Asynchronous by design: an agent workspace is routinely hundreds of MB over
+// tens of thousands of files, and a synchronous copy would block the
+// single-threaded API for its whole duration.
+async function copyDirRecursiveAsync(src, dst) {
   if (typeof src !== 'string' || src.includes('..') ||
       !(src.startsWith(WORKSPACE + path.sep) || src.startsWith('/tmp' + path.sep))) {
-    throw new Error(`copyDirRecursive: refusing src outside allowed roots: ${src}`);
+    throw new Error(`copyDirRecursiveAsync: refusing src outside allowed roots: ${src}`);
   }
   if (typeof dst !== 'string' || dst.includes('..') ||
       !(dst.startsWith(WORKSPACE + path.sep) || dst.startsWith('/tmp' + path.sep))) {
-    throw new Error(`copyDirRecursive: refusing dst outside allowed roots: ${dst}`);
+    throw new Error(`copyDirRecursiveAsync: refusing dst outside allowed roots: ${dst}`);
   }
-  fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+  await fs.promises.mkdir(dst, { recursive: true });
+  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name);
     const d = path.join(dst, entry.name);
     if (entry.isSymbolicLink()) continue; // skip symlinks for safety
     if (entry.isDirectory()) {
-      copyDirRecursive(s, d);
+      await copyDirRecursiveAsync(s, d);
     } else {
-      fs.copyFileSync(s, d);
+      await fs.promises.copyFile(s, d);
     }
   }
 }
@@ -3089,10 +3093,10 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
   const zipPath = path.join(zipDir, 'export.zip');
   try {
     // Copy workspace excluding sessions/ (conversation history, logs).
-    // copyDirRecursive carries an inline path-containment check; using it
+    // copyDirRecursiveAsync carries an inline path-containment check; using it
     // for both files and directories keeps every fs sink behind that gate.
     const workspaceDir = path.join(tmpDir, 'workspace');
-    copyDirRecursive(agentDirPath, workspaceDir);
+    await copyDirRecursiveAsync(agentDirPath, workspaceDir);
     try { fs.rmSync(path.join(workspaceDir, 'sessions'), { recursive: true, force: true }); } catch { /* noop */ }
 
     // Agent-specific env vars (sensitive Matrix creds are excluded)
@@ -3107,9 +3111,10 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
       envVars,
     }, null, 2));
 
-    const zipResult = spawnSync('zip', ['-r', zipPath, '.'], { cwd: tmpDir });
-    if (zipResult.status !== 0) {
-      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
+    // -q: no per-file listing (see archive.js).
+    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, '.'], { cwd: tmpDir });
+    if (zipResult.code !== 0) {
+      throw new Error(describeArchiveFailure('zip', zipResult));
     }
 
     const stat = fs.statSync(zipPath);
@@ -3154,8 +3159,11 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     fs.writeFileSync(zipPath, req.file.buffer);
     fs.mkdirSync(extractDir);
 
-    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
-    if (unzipResult.status !== 0) {
+    // -q: no per-file listing (see runArchiveTool) — an agent export routinely
+    // holds tens of thousands of members.
+    const unzipResult = await runArchiveTool('unzip', ['-q', '-o', zipPath, '-d', extractDir]);
+    if (unzipResult.code !== 0) {
+      console.error(`[API] Import: ${describeArchiveFailure('unzip', unzipResult)}`);
       return res.status(400).json({ error: 'Could not extract ZIP — ensure the file is a valid agent export' });
     }
 
@@ -3248,7 +3256,7 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const stagingRoot = path.join(WORKSPACE, '.import-staging');
     fs.mkdirSync(stagingRoot, { recursive: true });
     stagingDir = path.join(stagingRoot, crypto.randomUUID());
-    copyDirRecursive(workspaceDir, stagingDir);
+    await copyDirRecursiveAsync(workspaceDir, stagingDir);
 
     const orchResp = await fetch(`${ORCH_URL()}/internal/agents/import`, {
       method: 'POST',
@@ -8004,7 +8012,7 @@ app.put('/api/skills/:name/file', (req, res) => {
 // Stream a ZIP archive of an entire skill directory (pool or agent source).
 // The archive contains a single top-level folder named after the skill, so it
 // round-trips cleanly through POST /api/skills/import.
-app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
+app.get('/api/skills/:name/export', heavyLimiter, async (req, res) => {
   const { name } = req.params;
   const { source, agentId, teamId } = req.query;
   const root = skillRootDir(source, name, agentId, teamId);
@@ -8013,13 +8021,16 @@ app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
 
   const parentDir = path.dirname(root);
   const dirName = path.basename(root);
-  // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
-  const zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
-  const zipPath = path.join(zipDir, 'skill.zip');
+  // Scratch dir is created inside the try: this handler is async, so a throw
+  // outside it would surface as an unhandled rejection instead of a 500.
+  let zipDir = null;
   try {
-    const zipResult = spawnSync('zip', ['-r', zipPath, dirName], { cwd: parentDir });
-    if (zipResult.status !== 0) {
-      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
+    // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
+    zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
+    const zipPath = path.join(zipDir, 'skill.zip');
+    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName], { cwd: parentDir });
+    if (zipResult.code !== 0) {
+      throw new Error(describeArchiveFailure('zip', zipResult));
     }
     const stat = fs.statSync(zipPath);
     res.setHeader('Content-Disposition', `attachment; filename="skill-${name}.zip"`);
@@ -8029,7 +8040,7 @@ app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
     stream.on('close', () => { try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ } });
     stream.pipe(res);
   } catch (err) {
-    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    if (zipDir) { try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ } }
     console.error(`[API] Skill export failed for ${name}: ${err.message}`);
     res.status(500).json({ error: `Export failed: ${err.message}` });
   }
@@ -8049,7 +8060,7 @@ const _skillImportUpload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
-app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), (req, res) => {
+app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
 
   const tmpDir = fs.mkdtempSync(path.join('/tmp', 'skill-import-'));
@@ -8061,8 +8072,9 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
 
     // A .skill file is just a ZIP under the hood, so unzip handles both .zip and
     // .skill uploads — extraction is content-based and ignores the file extension.
-    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
-    if (unzipResult.status !== 0) {
+    const unzipResult = await runArchiveTool('unzip', ['-q', '-o', zipPath, '-d', extractDir]);
+    if (unzipResult.code !== 0) {
+      console.error(`[API] Skill import: ${describeArchiveFailure('unzip', unzipResult)}`);
       return res.status(400).json({ error: 'Could not extract archive — ensure the file is a valid .zip or .skill skill archive' });
     }
 

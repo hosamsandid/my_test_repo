@@ -2599,7 +2599,12 @@ function saveTriggers(id, triggers) {
 
 function deleteAgentFiles(id) {
   const dir = agentDir(id);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+  // `force: true` matches the sibling cleanups below: without it, an
+  // rmSync that fails mid-walk (e.g. an NFS/Filestore `.nfsXXXX` silly-rename
+  // left by a live pod → ENOTEMPTY) throws AFTER unlinking config.json,
+  // leaving exactly the invisible config-less residue that dead-locked
+  // same-id team retries (#1525 B2).
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   // Control-plane state pushed by the agent (#185): /control/agents/<id>/
   // status.json + sessions/<roomId>.jsonl + the session-pointer mirror. This
   // is UNCONDITIONAL — push (AEE_PUSH_STATE) defaults ON, so the control dir

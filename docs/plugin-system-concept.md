@@ -562,7 +562,7 @@ before it moves from catalog to roadmap.
 - **Phase 2 — agent surface** *(shipped — #1534)*: CLI contract, workspace seeding/sync, config
   files, prompt-gating block, grant UI (team/agent, tri-state, granularity
   selector bounded by the manifest's `scopes`), audit JSONL.
-- **Phase 3 — plugin #1**: rework PR #1287 onto the machinery per §6; delete
+- **Phase 3 — plugin #1** *(shipped — #1537)*: rework PR #1287 onto the machinery per §6; delete
   the special cases; `aee-podman` domain CLI.
 - **Phase 4 — Broker SDK**: extract the §4.9 module set from plugin #1's
   broker (token verify, scope filtering, audit writer, secret masking,

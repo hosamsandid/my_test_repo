@@ -51,8 +51,13 @@ Team scope (KNOWLEDGE_TEAM_ID):
     runtime too (e.g. a manual shell), and never mis-scopes: set KNOWLEDGE_TEAM_ID
     by hand only to deliberately override the config-derived team.
 
-Exit codes: 0 ok · 1 nothing found (search/path/promote) · 2 usage/validation
-error.
+Every data subcommand (add / search / list / path / promote) accepts --json for
+a machine-readable object on stdout.
+
+Exit codes (shared CLI contract, docs/cli-contract.md): 0 ok · 1 domain error
+(search/path/promote found nothing; a local write or commit failed) · 2
+usage/validation error. `knowledge add` treats a failed push as a soft warning —
+the entry is recorded locally and shared on the next push — so it still exits 0.
 """
 
 import json
@@ -725,7 +730,13 @@ def _post_retrieval(source, entry_ids):
 # Commands
 # ===========================================================================
 
-def _die(msg, code=2):
+# Shared CLI-contract exit codes (docs/cli-contract.md).
+EXIT_OK = 0
+EXIT_DOMAIN = 1
+EXIT_USAGE = 2
+
+
+def _die(msg, code=EXIT_USAGE):
     sys.stderr.write(f"knowledge: {msg}\n")
     sys.exit(code)
 
@@ -789,7 +800,7 @@ def cmd_add(argv):
         with open(shard, "a", encoding="utf-8") as fh:
             fh.write(serialize_entry(entry) + "\n")
     except OSError as exc:
-        _die(f"could not write shard {shard}: {exc}", 2)
+        _die(f"could not write shard {shard}: {exc}", EXIT_DOMAIN)
 
     # Commit with the agent identity so provenance holds on the shared branch.
     # Committer identity is set inline (see build_commit_args) so this works with
@@ -805,7 +816,7 @@ def cmd_add(argv):
         _die(
             f'entry {entry["id"]} was NOT recorded: local commit failed — the '
             f"lesson was not shared: {commit.stderr.strip()}",
-            2,
+            EXIT_DOMAIN,
         )
 
     if not no_push:
@@ -913,16 +924,22 @@ def cmd_list(argv):
 
 
 def cmd_path(argv):
-    if not argv:
-        _die('path: usage: knowledge path "<id>"')
-    wanted = argv[0]
+    as_json = "--json" in argv
+    pos = [a for a in argv if a != "--json"]
+    if not pos:
+        _die('path: usage: knowledge path "<id>" [--json]')
+    wanted = pos[0]
     manifest = _load_manifest()
     for e, fpath in _read_all_entries(manifest):
         if e.get("id") == wanted:
-            print(os.path.relpath(fpath, _store_root()))
+            rel = os.path.relpath(fpath, _store_root())
+            if as_json:
+                print(json.dumps({"id": wanted, "path": rel}, ensure_ascii=False))
+            else:
+                print(rel)
             return
     sys.stderr.write(f'knowledge: no entry with id "{wanted}"\n')
-    sys.exit(1)
+    sys.exit(EXIT_DOMAIN)
 
 
 def _agent_skills_root():
@@ -985,11 +1002,14 @@ def cmd_promote(argv):
     note = None
     to = None
     name = None
+    as_json = False
     pos = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--note":
+        if a == "--json":
+            as_json = True
+        elif a == "--note":
             i += 1
             if i < len(argv):
                 note = argv[i]
@@ -1011,7 +1031,7 @@ def cmd_promote(argv):
             pos.append(a)
         i += 1
     if not pos:
-        _die('promote: usage: knowledge promote <id> [--to agent] [--name X] [--note "why skill-worthy"]')
+        _die('promote: usage: knowledge promote <id> [--to agent] [--name X] [--note "why skill-worthy"] [--json]')
     entry_id = pos[0]
 
     # Resolve the entry from the synced KB.
@@ -1030,7 +1050,10 @@ def cmd_promote(argv):
         except ValueError as exc:
             _die(str(exc))
         dst = _write_agent_skill(skill)
-        print(skill["name"])
+        if as_json:
+            print(json.dumps({"to": "agent", "name": skill["name"], "path": dst}, ensure_ascii=False))
+        else:
+            print(skill["name"])
         sys.stderr.write(
             f'knowledge: wrote private agent skill "{skill["name"]}" ({dst}); '
             "lift it to the team (agent→team) from the Admin Console when it is team-ready.\n"
@@ -1041,13 +1064,16 @@ def cmd_promote(argv):
 
     ok, detail = _nominate_via_orchestrator(entry_id, note)
     if not ok:
-        _die(f"nomination failed: {detail}", 2)
+        _die(f"nomination failed: {detail}", EXIT_DOMAIN)
     try:
         cand = json.loads(detail).get("candidate", {})
     except (json.JSONDecodeError, ValueError):
         cand = {}
     cid = cand.get("id", "?")
-    print(cid)
+    if as_json:
+        print(json.dumps({"to": "team", "nominated": entry_id, "candidate": cid}, ensure_ascii=False))
+    else:
+        print(cid)
     sys.stderr.write(
         f"knowledge: nominated {entry_id} for promotion (suggestion {cid}); "
         "a human confirms in the Admin Console.\n"

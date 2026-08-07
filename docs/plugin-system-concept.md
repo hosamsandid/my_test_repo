@@ -211,7 +211,8 @@ additive rather than a migration.
 
 ### 4.5 CLI contract
 
-Applies to plugin CLIs **and** (incrementally) to the built-in ones:
+Applies to plugin CLIs **and** (incrementally) to the built-in ones (the
+built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
 
 1. **Dependency-free single file** against the runtimes present in the agent
    image (`python3`, `node`, `curl`) — no compiled binaries (arch
@@ -565,8 +566,10 @@ before it moves from catalog to roadmap.
   proof that a credential-backed broker is thin; also validates the
   `requiresApproval` flow and (if the product decision falls that way) the
   iframe UI.
-- **Phase 6 — contract alignment**: rename/align built-in CLIs to the
-  contract conventions (no mechanism change).
+- **Phase 6 — contract alignment** *(shipped — #1536)*: align built-in CLIs to the
+  contract conventions (no mechanism change). Documented in
+  [`cli-contract.md`](cli-contract.md); conformance-tested in
+  `agent-image/scripts/test_cli_contract.py`.
 
 ## 10. Open questions
 

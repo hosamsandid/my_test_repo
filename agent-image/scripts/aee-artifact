@@ -20,6 +20,12 @@ The manifest is `.aee/artifacts.jsonl` at the repo root — one JSON object per
 line, committed to git so it travels between agents like every other hand-off.
 `add` stages the manifest (git add); you commit + push it with your own work so
 downstream agents are woken by the push and can look the path up here.
+
+Pass --json on `add` / `list` / `path` for machine-readable JSON on stdout
+(`list` always emits one JSON object per line).
+
+Exit codes (shared CLI contract, docs/cli-contract.md): 0 ok · 1 domain error
+(not inside a git repo, or no such registered artifact) · 2 usage error.
 """
 
 import json
@@ -29,6 +35,11 @@ import sys
 from datetime import datetime, timezone
 
 MANIFEST_REL = os.path.join(".aee", "artifacts.jsonl")
+
+# Shared CLI-contract exit codes (docs/cli-contract.md).
+EXIT_OK = 0
+EXIT_DOMAIN = 1
+EXIT_USAGE = 2
 
 
 def _git(*args):
@@ -41,7 +52,7 @@ def repo_root():
     r = _git("rev-parse", "--show-toplevel")
     if r.returncode != 0:
         sys.stderr.write("aee-artifact: not inside a git repository\n")
-        sys.exit(2)
+        sys.exit(EXIT_DOMAIN)
     return r.stdout.strip()
 
 
@@ -69,6 +80,7 @@ def read_entries():
 
 def cmd_add(argv):
     desc = None
+    as_json = False
     pos = []
     i = 0
     while i < len(argv):
@@ -78,12 +90,14 @@ def cmd_add(argv):
             desc = argv[i] if i < len(argv) else None
         elif a.startswith("--desc="):
             desc = a[len("--desc="):]
+        elif a == "--json":
+            as_json = True
         else:
             pos.append(a)
         i += 1
     if len(pos) < 2:
-        sys.stderr.write('aee-artifact add: usage: aee-artifact add "<name>" <path> [--desc "..."]\n')
-        sys.exit(2)
+        sys.stderr.write('aee-artifact add: usage: aee-artifact add "<name>" <path> [--desc "..."] [--json]\n')
+        sys.exit(EXIT_USAGE)
     name, path = pos[0], pos[1]
 
     head = _git("rev-parse", "--short", "HEAD")
@@ -103,28 +117,39 @@ def cmd_add(argv):
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     # Stage it so it rides along with the agent's next commit + push.
     _git("add", p)
+    if as_json:
+        print(json.dumps(entry, ensure_ascii=False))
     sys.stderr.write(
         f'aee-artifact: registered "{name}" -> {path} (commit it and push so downstream agents are notified)\n'
     )
 
 
 def cmd_list(argv):
-    name = argv[0] if argv else None
+    # `list` is machine-readable by default (one JSON object per line); --json is
+    # accepted for symmetry with the other subcommands.
+    pos = [a for a in argv if a != "--json"]
+    name = pos[0] if pos else None
     for e in read_entries():
         if name is None or e.get("artifact") == name:
             print(json.dumps(e, ensure_ascii=False))
 
 
 def cmd_path(argv):
-    if not argv:
-        sys.stderr.write('aee-artifact path: usage: aee-artifact path "<name>"\n')
-        sys.exit(2)
-    name = argv[0]
+    as_json = "--json" in argv
+    pos = [a for a in argv if a != "--json"]
+    if not pos:
+        sys.stderr.write('aee-artifact path: usage: aee-artifact path "<name>" [--json]\n')
+        sys.exit(EXIT_USAGE)
+    name = pos[0]
     match = [e for e in read_entries() if e.get("artifact") == name]
     if not match:
         sys.stderr.write(f'aee-artifact: no artifact named "{name}" is registered yet\n')
-        sys.exit(1)
-    print(match[-1].get("path", ""))
+        sys.exit(EXIT_DOMAIN)
+    resolved = match[-1].get("path", "")
+    if as_json:
+        print(json.dumps({"artifact": name, "path": resolved}, ensure_ascii=False))
+    else:
+        print(resolved)
 
 
 def main():
@@ -142,7 +167,7 @@ def main():
         sys.stderr.write(
             f"aee-artifact: unknown subcommand '{cmd}'. Supported: add, list, path.\n"
         )
-        sys.exit(2)
+        sys.exit(EXIT_USAGE)
 
 
 if __name__ == "__main__":

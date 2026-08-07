@@ -35,12 +35,23 @@
 #
 #   gh-as-agent marker
 #       prints the HTML comment so it can be inlined.
+#
+# Pass --json to push / pr / marker for a machine-readable JSON object on stdout
+# (push / pr echo the orchestrator's structured result verbatim).
+#
+# Exit codes (shared CLI contract, docs/cli-contract.md): 0 ok · 1 domain error
+# (orchestrator reachable but rejected the request, missing body file, …) ·
+# 2 usage error (bad/missing arguments, unusable AGENT_ID) · 3 orchestrator
+# unreachable (network step could not reach it — nothing was pushed/opened).
 
 set -euo pipefail
 
+# Shared CLI-contract exit codes (docs/cli-contract.md).
+EXIT_OK=0; EXIT_DOMAIN=1; EXIT_USAGE=2; EXIT_UNREACHABLE=3
+
 if [[ -z "${AGENT_ID:-}" ]]; then
   echo "gh-as-agent: AGENT_ID is not set in the environment" >&2
-  exit 2
+  exit "$EXIT_USAGE"
 fi
 
 # Mirror the regex the poller uses to extract agent ids from author emails
@@ -48,23 +59,42 @@ fi
 # will silently fail to match on the read side.
 if [[ ! "${AGENT_ID}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   echo "gh-as-agent: AGENT_ID '${AGENT_ID}' contains unexpected characters; loop protection would not work — refusing" >&2
-  exit 2
+  exit "$EXIT_USAGE"
 fi
 
 marker="<!-- agent: ${AGENT_ID} -->"
 ORCH="${ORCHESTRATOR_INTERNAL_URL:-${AEE_ORCHESTRATOR_URL:-http://orchestrator:4002}}"
+AS_JSON="false"
 
-die() { echo "gh-as-agent: $*" >&2; exit 2; }
+# Emit a "{\"ok\":false,\"error\":...}" object (--json) or a human error line,
+# then exit with a contract code (default 2 = usage). Callers pass the code as $2.
+die() {
+  local code="${2:-$EXIT_USAGE}"
+  if [[ "$AS_JSON" == "true" ]]; then
+    local msg="${1//\\/\\\\}"; msg="${msg//\"/\\\"}"
+    printf '{"ok":false,"error":"%s"}\n' "$msg"
+  else
+    echo "gh-as-agent: $1" >&2
+  fi
+  exit "$code"
+}
 
 # POST JSON ($2) to $1; print server 'url'/'output'/'error', exit non-zero on failure.
 _post() {
   local route="$1" payload="$2" resp http_code body
+  # A failed network step (orchestrator unreachable) is exit 3: nothing was
+  # pushed/opened. This is distinct from a reachable-but-rejected HTTP error.
   resp="$(curl -sS -w $'\n%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
     --data "$payload" \
-    "${ORCH%/}${route}")" || die "could not reach orchestrator at ${ORCH}"
+    "${ORCH%/}${route}")" || die "could not reach orchestrator at ${ORCH}" "$EXIT_UNREACHABLE"
   http_code="${resp##*$'\n'}"
   body="${resp%$'\n'*}"
+  # --json: echo the orchestrator's structured result verbatim on success.
+  if [[ "$AS_JSON" == "true" && "$http_code" == "200" ]]; then
+    printf '%s\n' "$body"
+    return 0
+  fi
   if command -v jq >/dev/null 2>&1; then
     if [[ "$http_code" == "200" ]]; then
       local url out
@@ -82,15 +112,15 @@ _post() {
     # A missing GitHub token (HTTP 424, code=no-github-token) is not a git
     # conflict — the branch is already pushed. Report it distinctly so the
     # agent surfaces "no PAT in this environment" to the user, and does not
-    # retry with a raw 'git push'.
+    # retry with a raw 'git push'. Reachable-but-rejected → domain error (1).
     if [[ "$code" == "no-github-token" ]]; then
-      [[ -n "$branch_pushed" ]] && echo "gh-as-agent: branch '$branch_pushed' pushed OK; PR step skipped." >&2
-      die "no-github-token: ${err:-this environment has no GitHub token to open a PR}"
+      [[ -n "$branch_pushed" && "$AS_JSON" != "true" ]] && echo "gh-as-agent: branch '$branch_pushed' pushed OK; PR step skipped." >&2
+      die "no-github-token: ${err:-this environment has no GitHub token to open a PR}" "$EXIT_DOMAIN"
     fi
-    die "${err:-HTTP $http_code}"
+    die "${err:-HTTP $http_code}" "$EXIT_DOMAIN"
   fi
   [[ "$http_code" == "200" ]] && { echo "$body"; return 0; }
-  die "HTTP $http_code: $body"
+  die "HTTP $http_code: $body" "$EXIT_DOMAIN"
 }
 
 # Build a JSON object from key=value pairs. String values are escaped; the
@@ -144,6 +174,7 @@ case "${1:-}" in
         --repo) repo="${2:-}"; shift 2 ;;
         --branch) branch="${2:-}"; shift 2 ;;
         --no-set-upstream) set_upstream="false"; shift ;;
+        --json) AS_JSON="true"; shift ;;
         *) die "unknown push option: $1" ;;
       esac
     done
@@ -166,6 +197,7 @@ case "${1:-}" in
         --body-file) body_file="${2:-}"; shift 2 ;;
         --base) base="${2:-}"; shift 2 ;;
         --draft) draft="true"; shift ;;
+        --json) AS_JSON="true"; shift ;;
         *) die "unknown pr option: $1" ;;
       esac
     done
@@ -190,11 +222,11 @@ case "${1:-}" in
     file="${2:-}"
     if [[ -z "$file" ]]; then
       echo "gh-as-agent stamp: missing <file>" >&2
-      exit 2
+      exit "$EXIT_USAGE"
     fi
     if [[ ! -f "$file" ]]; then
       echo "gh-as-agent stamp: file not found: $file" >&2
-      exit 2
+      exit "$EXIT_USAGE"
     fi
     # Idempotent: only append if the marker isn't already present.
     if ! grep -qF "$marker" "$file"; then
@@ -203,11 +235,18 @@ case "${1:-}" in
     ;;
 
   marker)
-    printf '%s\n' "$marker"
+    if [[ "${2:-}" == "--json" ]]; then
+      m="${marker//\\/\\\\}"; m="${m//\"/\\\"}"
+      printf '{"marker":"%s"}\n' "$m"
+    else
+      printf '%s\n' "$marker"
+    fi
     ;;
 
   ""|-h|--help|help)
-    sed -n '2,33p' "$0"
+    # Print the leading comment block (everything after the shebang up to the
+    # first non-comment line), robust to edits in the header.
+    awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"
     ;;
 
   *)
@@ -217,6 +256,6 @@ case "${1:-}" in
     echo "'gh pr create' can be blocked by the org's managed Claude Code policy in unattended runs." >&2
     echo "For other GitHub ops (issue/pr list/view/comment/review) use plain 'gh'; if the action carries" >&2
     echo "a body, write it to a file, run 'gh-as-agent stamp <file>', then 'gh ... --body-file <file>'." >&2
-    exit 2
+    exit "$EXIT_USAGE"
     ;;
 esac

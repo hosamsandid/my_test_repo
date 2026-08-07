@@ -14,6 +14,21 @@
 // trigger of T listens on L. Labels only a human can set (human gates) and
 // brake labels have no agent-wired listener edge — their edges originate from
 // `null` and are tagged so the renderer can colour them.
+//
+// The one caveat to "T listens on L → edge exists": a `channel: true` trigger
+// (#380) is a listener DERIVED from a `channels` port, whose edge is the
+// on:'github' PORT edge drawn in unified-graph — so it is not re-drawn here as
+// a label edge, to avoid a double edge on the unified canvas. That exclusion is
+// only valid while the backing port still exists. A `channel: true` trigger
+// carrying a `labelFilter` that matches NO channel-port label on the same node
+// is NOT a live derived listener (a genuine one's labelFilter always equals one
+// of its consumer's channel labels — see expandGithubChannels): it is a listener
+// installed post-hoc via POST /api/agents/:id/triggers that copied the derived
+// shape, or an orphan a reconcile has yet to strip. Such a trigger wires as an
+// ordinary label listener — otherwise its producer's emit renders as a false
+// dead-end even though emits + labelFilter match (#1524). Unlabelled channel
+// triggers (PR/issue open, no labelFilter) stay excluded — they are pure
+// artifact listeners whose only edge is the port edge.
 
 // Structured OUTCOMES port (#827): the successor to flat `emits`. Legacy agents
 // (flat `emits`, no `outcomes`) are untouched below and yield byte-identical
@@ -139,6 +154,23 @@ function channelLabels(node) {
     if (ch && typeof ch.label === 'string' && ch.label.trim()) out.push(ch.label.trim());
   }
   return out;
+}
+
+// Is this trigger a LIVE derived GitHub-channel listener (#380) — i.e. one whose
+// edge is the on:'github' port edge drawn in unified-graph, so it must NOT be
+// re-drawn here as a label/event edge? True for every `channel: true` trigger
+// whose backing `channels` port still exists on the consumer node: an unlabelled
+// channel listener (no `labelFilter`, reacts to PR/issue open), or a labelled one
+// whose `labelFilter` matches one of the node's channel-port labels (`portLabels`).
+// A `channel: true` trigger with a `labelFilter` that matches NO port label is
+// NOT live-derived (post-hoc copy of the shape, or a not-yet-reconciled orphan) —
+// it wires as an ordinary label listener so its producer's emit is not a false
+// dead-end (#1524).
+function isDerivedChannelListener(t, portLabels) {
+  if (!t || t.channel !== true) return false;
+  const lf = (typeof t.labelFilter === 'string' && t.labelFilter.trim()) ? t.labelFilter.trim() : '';
+  if (!lf) return true; // unlabelled channel listener — always port-driven
+  return portLabels instanceof Set && portLabels.has(lf);
 }
 
 // Convenience wrapper for a one-off classification: `classifyKind(key, sources)`
@@ -412,11 +444,15 @@ function buildProcessGraph(agents, options) {
     // Agent-level emits (operator-declared on the agent) are the ONLY emit
     // source (#414/#783) — trigger-level emits were removed.
     for (const e of n.emits) addEmit(e, n.id);
+    const portLabels = new Set(channelLabels(n));
     for (const t of n.triggers) {
-      // Derived GitHub-channel triggers (#380) are represented by the on:'github'
-      // edges built from the channel ports (unified-graph) — never as label/event
-      // edges here, so their labelFilter must not register as a listen key.
-      if (t.channel) continue;
+      // Live derived GitHub-channel triggers (#380) are represented by the
+      // on:'github' edges built from the channel ports (unified-graph) — never as
+      // label/event edges here, so their labelFilter must not register as a listen
+      // key. A `channel: true` trigger with no backing port is NOT one of those —
+      // it wires as an ordinary label listener (#1524), so its labelFilter must
+      // register here or the producer's emit becomes a false dead-end.
+      if (isDerivedChannelListener(t, portLabels)) continue;
       const lk = labelListenKey(t);
       if (lk) { allListenKeys.add(lk); noteLabel(lk); }
     }
@@ -448,8 +484,11 @@ function buildProcessGraph(agents, options) {
   const gateSet = new Set();
 
   for (const n of nodes) {
+    const portLabels = new Set(channelLabels(n));
     for (const t of n.triggers) {
-      if (t.channel) continue; // GitHub-channel edges come from the ports (#380)
+      // Live derived channel edges come from the ports (#380); a `channel: true`
+      // trigger with no backing port wires as an ordinary label listener (#1524).
+      if (isDerivedChannelListener(t, portLabels)) continue;
       if (t.type === 'cron' || t.type === 'once') {
         edges.push({
           from: n.id, to: n.id,
@@ -542,8 +581,13 @@ function buildProcessGraph(agents, options) {
   const triggerLabelListens = new Map(); // nodeId -> Set(label)
   for (const n of nodes) {
     const set = new Set();
+    const portLabels = new Set(channelLabels(n));
     for (const t of n.triggers) {
-      if (t.channel) continue; // derived channel triggers wire no label edges
+      // Live derived channel triggers wire no label edges (#380); a channel:true
+      // trigger with no backing port DOES wire one (#1524), so count it here too
+      // — its label edge is drawn in the trigger loop above, and the channel-label
+      // loop below must skip re-drawing that same label.
+      if (isDerivedChannelListener(t, portLabels)) continue;
       const lk = labelListenKey(t);
       if (lk) set.add(lk);
     }

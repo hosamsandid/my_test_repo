@@ -2,6 +2,7 @@
 #
 # Covered suites (one job each):
 #   orchestrator          — orchestrator/*.test.js            (node --test)
+#   broker-sdk            — broker-sdk/*.test.js              (node --test, dependency-free)
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
 #   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
@@ -49,6 +50,20 @@ jobs:
       - name: Run unit tests
         working-directory: orchestrator
         run: npm test
+
+  broker-sdk:
+    name: broker-sdk (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Dependency-free (like the pure modules under admin-console/src) — no install step.
+      - name: Run unit tests
+        working-directory: broker-sdk
+        run: node --test
 
   admin-api:
     name: admin-console api tests

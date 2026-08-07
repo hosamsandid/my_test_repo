@@ -20,6 +20,11 @@ WORKDIR /opt/podman-mcp
 COPY podman-mcp/package.json ./package.json
 RUN npm install --omit=dev
 COPY podman-mcp/ ./
+# Broker SDK (plugin system Phase 4, #1520): the shared broker obligations
+# module. This build's context is the repo root (see the podman-mcp/ COPYs
+# above), so the sibling broker-sdk/ is available; copy it to /opt/broker-sdk
+# so server.js resolves it as ../broker-sdk both here and in the source tree.
+COPY broker-sdk/ /opt/broker-sdk/
 
 ENV PODMAN_MCP_PORT=4004
 EXPOSE 4004

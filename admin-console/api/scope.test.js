@@ -171,6 +171,22 @@ test('describeAuthz: unknown subject fails closed', () => {
   assert.deepEqual(a.teams, []);
 });
 
+test('describeAuthz: chatFontSize surfaces the caller\'s own preference (#1437)', () => {
+  const withPref = [
+    { id: 'u-a', subject: 'alice@corp.com', chatFontSize: 16 },
+    { id: 'u-b', subject: 'bob@corp.com' }, // no preference → default
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', adminUsername: 'admin', users: withPref, memberships: [] });
+  assert.equal(alice.chatFontSize, 16);
+  const bob = describeAuthz({ username: 'bob@corp.com', adminUsername: 'admin', users: withPref, memberships: [] });
+  assert.equal(bob.chatFontSize, 12); // default when unset
+});
+
+test('describeAuthz: env admin (no user record) gets the 12px default (#1437)', () => {
+  const a = describeAuthz({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(a.chatFontSize, 12);
+});
+
 test('isKnownPrincipal: registered user or env admin, fail-closed otherwise (#1415)', () => {
   assert.equal(isKnownPrincipal({ envAdmin: true, userId: null }), true);
   assert.equal(isKnownPrincipal({ envAdmin: false, userId: 'u1' }), true);

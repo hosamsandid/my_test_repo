@@ -208,8 +208,8 @@ Five mergeable PRs. After PR #3 the feature is usable end-to-end; #4 and #5 are 
 **New files:**
 - `admin-console/src/pages/AgentChat.jsx` — top-level page, owns layout state (which agent, log panel open/closed).
 - `admin-console/src/pages/agent-chat/AgentList.jsx` — left rail.
-- `admin-console/src/pages/agent-chat/ChatPanel.jsx` — main column.
-- `admin-console/src/pages/agent-chat/Message.jsx` — single message bubble with `react-markdown`.
+- `admin-console/src/pages/agent-chat/ChatPanel.jsx` — main column; hosts a per-user transcript font-size −/+ stepper in the session toolbar (#1437 — default 12px, range 10–18px). The message scroll container sets a scoped `--chat-font-size` CSS var that the message bubble reads; the chosen size is persisted server-side on the user record (`PUT /api/me/preferences` → `describeAuthz.chatFontSize` in the session), with a per-username `agentChat.fontSize.<username>` localStorage fallback for the env single-admin. Pure clamp/step/persist logic in `chat-font-size.js`.
+- `admin-console/src/pages/agent-chat/Message.jsx` — single message bubble with `react-markdown`; the bubble font-size reads `var(--chat-font-size, var(--eb-text-md))` so it scales with the toolbar stepper and falls back to the 14px token outside the chat view.
 - `admin-console/src/pages/agent-chat/MessageInput.jsx` — textarea, optimistic insert; a user-configurable send keybinding (`agentChat.sendKeybinding`: `ide` = Cmd/Ctrl+Enter sends / Enter newline, default; `chat` = Enter sends / Shift+Enter newline) with OS-aware (`⌘` vs `Ctrl`) placeholder + helper hints — pure logic in `message-send-keybinding.js`. The composer draft is persisted per agent under `agentChat.draft.<agentId>` (pure logic in `message-draft.js`) so text typed for one agent survives switching to another agent and back — restored on mount, cleared on a successful send (#1388).
 - `admin-console/src/hooks/useSSE.js` — generic SSE hook with reconnect (exponential backoff) and `since` offset support, modeled on bp-explorer `sseClient()` (app.js:4518–4631).
 

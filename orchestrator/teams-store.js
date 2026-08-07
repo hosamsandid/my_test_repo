@@ -76,6 +76,29 @@ function coerceGithubHandle(raw) {
   return h;
 }
 
+// Per-user Agent-Chat transcript font size (#1437). A discoverable +/- control
+// lets each user tune the chat font on their own profile; the value is stored
+// server-side on the user record so it follows the user across browsers,
+// devices and screen resolutions and never leaks into another user's view.
+const CHAT_FONT_SIZE_MIN = 10;
+const CHAT_FONT_SIZE_MAX = 18;
+const CHAT_FONT_SIZE_DEFAULT = 12;
+
+// Validate a chat font size. Returns an integer in [MIN,MAX], or `undefined`
+// when the value is absent/blank (leave the field unset — the session default
+// of 12px applies). Throws badRequest on a non-integer or out-of-range value.
+function coerceChatFontSize(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n)) {
+    throw badRequest('chatFontSize must be an integer');
+  }
+  if (n < CHAT_FONT_SIZE_MIN || n > CHAT_FONT_SIZE_MAX) {
+    throw badRequest(`chatFontSize must be between ${CHAT_FONT_SIZE_MIN} and ${CHAT_FONT_SIZE_MAX}`);
+  }
+  return n;
+}
+
 function createTeamsStore({ root } = {}) {
   if (!isNonEmptyString(root)) {
     throw new Error('createTeamsStore: { root } is required');
@@ -195,7 +218,7 @@ function createTeamsStore({ root } = {}) {
     return listUsers().find(u => (u.subject || '').toLowerCase() === s) || null;
   }
 
-  function createUser({ subject, email, displayName, systemAdmin, githubHandle } = {}) {
+  function createUser({ subject, email, displayName, systemAdmin, githubHandle, chatFontSize } = {}) {
     if (!isNonEmptyString(subject)) {
       throw badRequest('user subject is required');
     }
@@ -213,6 +236,10 @@ function createTeamsStore({ root } = {}) {
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
+    // Optional per-user chat font size — persisted only when explicitly set, so
+    // an unset record keeps the 12px session default (#1437).
+    const cfs = coerceChatFontSize(chatFontSize);
+    if (cfs !== undefined) user.chatFontSize = cfs;
     users.push(user);
     writeArray(USERS_INDEX, users);
     return user;
@@ -235,6 +262,12 @@ function createTeamsStore({ root } = {}) {
     }
     if (patch.githubHandle !== undefined) {
       user.githubHandle = coerceGithubHandle(patch.githubHandle);
+    }
+    if (patch.chatFontSize !== undefined) {
+      const cfs = coerceChatFontSize(patch.chatFontSize);
+      // A blank/absent value clears the override back to the 12px default.
+      if (cfs === undefined) delete user.chatFontSize;
+      else user.chatFontSize = cfs;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -434,6 +467,10 @@ module.exports = {
   createTeamsStore,
   normalizeGithubHandle,
   coerceGithubHandle,
+  coerceChatFontSize,
+  CHAT_FONT_SIZE_MIN,
+  CHAT_FONT_SIZE_MAX,
+  CHAT_FONT_SIZE_DEFAULT,
   DEFAULT_TEAM_ID,
   DEFAULT_TEAM_NAME,
   MEMBERSHIP_ROLES,

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Ticket, ExternalLink, X, Plus } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Ticket, ExternalLink, X, Plus, Minus, Type } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useAuth } from '../../auth/AuthContext';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import { useTranscriptionSession } from '../../context/TranscriptionSessionContext.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog';
@@ -19,6 +20,10 @@ import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK 
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
 import { describeTicket, NO_TICKET_LABEL, parseIssueRefInput } from './ticket-view.js';
+import {
+  MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
+  resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
+} from './chat-font-size.js';
 
 // Default prompt sent when the user clicks "Save & Learn". The agent
 // continues in its current Claude session (so it has full conversational
@@ -187,6 +192,41 @@ export default function ChatPanel({
   const [ticketOpen, setTicketOpen] = useState(false);
   const [ticketBusy, setTicketBusy] = useState(false);
   const [ticketError, setTicketError] = useState(null);
+
+  // Per-user transcript font size (#1437). Default 12px (was 14px). Seeded from
+  // the user's server-stored preference (authoritative, cross-device) with a
+  // per-username localStorage fallback for the env single-admin (no user
+  // record). Adjusted live by the +/- control in the session toolbar.
+  const { user } = useAuth();
+  const username = user?.username;
+  const hasServerRecord = user != null && user.userId != null;
+  const [fontSize, setFontSize] = useState(() => resolveInitialFontSize({
+    sessionValue: user?.chatFontSize,
+    storedValue: loadStoredFontSize(username),
+    hasServerRecord,
+  }));
+  // Re-seed only when the logged-in identity changes (login / logout / initial
+  // session load) — keyed on the stable username, so an optimistic +/- press is
+  // never clobbered by an unrelated re-render.
+  useEffect(() => {
+    setFontSize(resolveInitialFontSize({
+      sessionValue: user?.chatFontSize,
+      storedValue: loadStoredFontSize(username),
+      hasServerRecord,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
+  const changeFontSize = useCallback((delta) => {
+    const next = stepFontSize(fontSize, delta);
+    if (next === fontSize) return;
+    setFontSize(next);                       // live apply
+    saveStoredFontSize(username, next);       // instant + env-admin fallback store
+    // Best-effort server persistence (follows the user across devices). The env
+    // single-admin has no record → the route returns {persisted:false} and the
+    // localStorage mirror above is the store; a transient failure is non-fatal.
+    apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
+  }, [fontSize, username]);
 
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
@@ -1134,6 +1174,7 @@ export default function ChatPanel({
           disabled={disabled}
           onChange={handleModelChange}
         />
+        <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
         {sessionCost !== null && sessionCost.usd > 0 && (
           <span
@@ -1268,6 +1309,11 @@ export default function ChatPanel({
           gap: 'var(--eb-space-3)',
           minHeight: 0,
           position: 'relative',
+          // Per-user transcript font size (#1437). Scopes the override to the
+          // message list only — the header/toolbar keep their own sizing. Each
+          // message bubble reads var(--chat-font-size), falling back to the
+          // 14px design token outside the chat view.
+          '--chat-font-size': `${fontSize}px`,
         }}
       >
         {/* Top spinner while backfilling older history on scroll-up. */}
@@ -2052,5 +2098,74 @@ function sessionBtnStyle(isDisabled) {
     opacity: isDisabled ? 0.6 : 1,
     transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
   };
+}
+
+// Per-user transcript font-size stepper (#1437). A compact −/+ pair with the
+// current size shown between them; each press adjusts the chat font live within
+// [MIN,MAX] px. Stays on the toolbar (which flexWraps) at any layout width.
+function FontSizeControl({ size, onChange }) {
+  const stepBtn = (enabled) => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 20,
+    height: 18,
+    padding: 0,
+    color: enabled ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+    background: 'transparent',
+    border: 'none',
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    opacity: enabled ? 1 : 0.5,
+    fontFamily: 'inherit',
+  });
+  const canDec = canDecrease(size);
+  const canInc = canIncrease(size);
+  return (
+    <div
+      role="group"
+      aria-label="Chat font size"
+      title={`Chat font size: ${size}px (adjustable ${MIN_FONT_SIZE}–${MAX_FONT_SIZE}px)`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 2,
+        padding: '2px 4px',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-sm)',
+        color: 'var(--eb-text-muted)',
+      }}
+    >
+      <Type size={11} style={{ flexShrink: 0 }} />
+      <button
+        type="button"
+        onClick={() => onChange(-1)}
+        disabled={!canDec}
+        aria-label="Decrease chat font size"
+        title="Decrease chat font size"
+        style={stepBtn(canDec)}
+      >
+        <Minus size={12} />
+      </button>
+      <span
+        aria-live="polite"
+        style={{
+          minWidth: 26, textAlign: 'center', fontFamily: 'var(--eb-font-mono)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+        }}
+      >
+        {size}px
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(1)}
+        disabled={!canInc}
+        aria-label="Increase chat font size"
+        title="Increase chat font size"
+        style={stepBtn(canInc)}
+      >
+        <Plus size={12} />
+      </button>
+    </div>
+  );
 }
 

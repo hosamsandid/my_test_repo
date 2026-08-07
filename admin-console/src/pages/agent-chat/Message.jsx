@@ -388,7 +388,10 @@ export default function Message({ message, agentUserId, thinking, onRelaunchLoop
           padding: 'var(--eb-space-2) var(--eb-space-3)',
           borderRadius: 'var(--eb-radius-lg)',
           border: '1px solid var(--eb-border-default)',
-          fontSize: 'var(--eb-text-md)',
+          // Per-user chat font size (#1437): the transcript sets --chat-font-size
+          // on its scroll container; falls back to the 14px token when this
+          // bubble is rendered outside the chat view.
+          fontSize: 'var(--chat-font-size, var(--eb-text-md))',
           lineHeight: 1.5,
           overflowWrap: 'anywhere',
           wordBreak: 'break-word',

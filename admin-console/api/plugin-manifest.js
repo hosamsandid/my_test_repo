@@ -22,6 +22,8 @@
 //     credentials?: [ { key, description?, required? } ],
 //     platforms?: [ "podman" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
+//     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
+//     quota?: { maxObjects, ttlSeconds? },      // per-scope resource cap (§4.6)
 //     requiresApproval?: [ "<subcommand>" ],
 //     ui?: { title?, routes?: [ { path, minRole } ] },  // reserved for Phase 5
 //     companionSkill?, promptLine?, version?,
@@ -208,6 +210,53 @@ function validatePluginManifest(input) {
     }
   }
 
+  // ── defaultScopeGranularity (optional) ───────────────────────────────────
+  // Which granularity a grant defaults to when the admin does not choose one
+  // (§4.4). The §10 open question — one platform-wide default vs. per-manifest
+  // — is decided here in favour of per-manifest: plugin #1 (the sandbox) reads
+  // most naturally as `agent`, the opposite of the safe `team` default for
+  // shared expensive backends, so the default is the manifest's to declare.
+  // Absent → the platform default `team` (see `defaultGranularity`). It must be
+  // one of the granularities the broker actually honours.
+  let defaultScopeGranularity;
+  if (input.defaultScopeGranularity !== undefined) {
+    if (!SCOPE_GRANULARITIES.includes(input.defaultScopeGranularity)) {
+      errors.push(`defaultScopeGranularity has unknown granularity "${String(input.defaultScopeGranularity)}"`);
+    } else if (!scopes.includes(input.defaultScopeGranularity)) {
+      errors.push(`defaultScopeGranularity "${input.defaultScopeGranularity}" is not in scopes (${scopes.join(', ')})`);
+    } else {
+      defaultScopeGranularity = input.defaultScopeGranularity;
+    }
+  }
+
+  // ── quota (optional; mandatory in practice for resource-creating plugins) ─
+  // Per-scope resource cap (§4.6): a loop-triggered agent creating one object
+  // per iteration is a runaway the #611 backstop cannot see, so the cap is a
+  // manifest field rather than a single platform-wide Settings toggle, and it
+  // is enforced per `scopeId` — n members at `agent` granularity means n× the
+  // footprint, which the grant UI states as a ceiling before the toggle.
+  let quota;
+  if (input.quota !== undefined) {
+    if (!isPlainObject(input.quota)) {
+      errors.push('quota must be an object');
+    } else {
+      const q = {};
+      if (!Number.isInteger(input.quota.maxObjects) || input.quota.maxObjects < 1) {
+        errors.push('quota.maxObjects must be a positive integer');
+      } else {
+        q.maxObjects = input.quota.maxObjects;
+      }
+      if (input.quota.ttlSeconds !== undefined) {
+        if (!Number.isInteger(input.quota.ttlSeconds) || input.quota.ttlSeconds < 1) {
+          errors.push('quota.ttlSeconds must be a positive integer');
+        } else {
+          q.ttlSeconds = input.quota.ttlSeconds;
+        }
+      }
+      if (q.maxObjects !== undefined) quota = q;
+    }
+  }
+
   // ── requiresApproval (optional) ──────────────────────────────────────────
   let requiresApproval = [];
   if (input.requiresApproval !== undefined) {
@@ -278,6 +327,8 @@ function validatePluginManifest(input) {
     scopes,
     requiresApproval,
   };
+  if (defaultScopeGranularity) manifest.defaultScopeGranularity = defaultScopeGranularity;
+  if (quota) manifest.quota = quota;
   if (ui) manifest.ui = ui;
   Object.assign(manifest, optionalStrings);
   return { ok: true, errors: [], manifest };
@@ -286,6 +337,17 @@ function validatePluginManifest(input) {
 // Which granularities a (validated) manifest permits a grant to choose.
 function grantableGranularities(manifest) {
   return (manifest && Array.isArray(manifest.scopes)) ? manifest.scopes.slice() : ['team'];
+}
+
+// The granularity a grant defaults to when the admin does not choose one: the
+// manifest's own declared default, else the platform default `team` (§4.4/§10).
+// Always returns a granularity the manifest honours (the validator rejects a
+// `defaultScopeGranularity` outside `scopes`).
+function defaultGranularity(manifest) {
+  if (manifest && SCOPE_GRANULARITIES.includes(manifest.defaultScopeGranularity)) {
+    return manifest.defaultScopeGranularity;
+  }
+  return 'team';
 }
 
 // A grant may only choose a granularity the broker honours (§4.4/§4.6).
@@ -311,6 +373,7 @@ module.exports = {
   UI_ROLES,
   validatePluginManifest,
   grantableGranularities,
+  defaultGranularity,
   assertGranularityGrantable,
   isValidCapability,
 };

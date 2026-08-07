@@ -1,0 +1,26 @@
+FROM node:22-bookworm-slim
+
+# Podman client (talks to the mounted rootless socket via --url).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends podman podman-compose ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Nested Podman-in-Podman: the base image ships no /etc/containers/storage.conf
+# at all, so podman falls back to its compiled-in "overlay" driver, which
+# cannot run on top of the host's own overlayfs-backed container filesystem
+# ("'overlay' is not supported over overlayfs, a mount_program is required").
+# Force the vfs driver instead — it needs no fuse-overlayfs/kernel support,
+# at the cost of slower/more disk-hungry container creation, which is fine
+# here since this service only manages a handful of lightweight per-scope
+# stacks.
+RUN mkdir -p /etc/containers \
+ && printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' > /etc/containers/storage.conf
+
+WORKDIR /opt/podman-mcp
+COPY podman-mcp/package.json ./package.json
+RUN npm install --omit=dev
+COPY podman-mcp/ ./
+
+ENV PODMAN_MCP_PORT=4004
+EXPOSE 4004
+CMD ["node", "server.js"]

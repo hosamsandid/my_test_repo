@@ -99,3 +99,84 @@ test('ungranted (no seeded config) → exit 3 broker-unreachable with not-grante
   assert.equal(obj.ok, false);
   assert.equal(obj.error, 'not-granted');
 });
+
+// ── plugin #1: podman-sandbox (Phase 3, #1519) ───────────────────────────────
+// The same §4.5 contract, enforced against the real `aee-podman` CLI. Every
+// case here is broker-free: `whoami` reads only the seeded config; the
+// container/compose verbs point at an unroutable endpoint so a call attempt
+// deterministically returns the broker-unreachable exit code (3) rather than
+// depending on a live sidecar.
+const POD_CLI = path.join(__dirname, '..', 'plugins', 'podman-sandbox', 'bin', 'aee-podman.py');
+
+function runPod(args, workspace) {
+  return spawnSync('python3', [POD_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedPodWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-pod-'));
+  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'podman-sandbox', scopeId: 't1',
+    endpoint: endpoint || 'http://127.0.0.1:59371/',   // reserved, unroutable
+    token: 'podman-sandbox.t1.SIG', cliName: 'aee-podman',
+  });
+  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'podman-sandbox.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-podman is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(POD_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-podman: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runPod([], grantedPodWorkspace()).status, 2);
+  const help = runPod(['--help'], grantedPodWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /compose/);
+  assert.match(help.stdout, /ps/);
+});
+
+test('aee-podman: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runPod(['frobnicate'], grantedPodWorkspace()).status, 2);
+});
+
+test('aee-podman: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runPod(['whoami', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 't1');
+});
+
+test('aee-podman: ungranted → exit 3 with not-granted error', () => {
+  const r = runPod(['ps', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-podman: a granted verb against an unreachable broker → exit 3', () => {
+  const r = runPod(['ps', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-podman: compose up with an unreadable file → exit 2 (usage), never a broker call', () => {
+  const r = runPod(['compose', 'up', '-f', '/no/such/compose.yml', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});

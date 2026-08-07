@@ -2,9 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   validatePluginManifest,
   grantableGranularities,
+  defaultGranularity,
   assertGranularityGrantable,
   isValidCapability,
 } = require('./plugin-manifest');
@@ -150,4 +153,64 @@ test('rejects duplicate credential keys and non-string env values', () => {
 
 test('rejects unknown platforms', () => {
   assert.ok(validatePluginManifest({ ...base(), platforms: ['k8s'] }).errors.some((e) => /platforms has unknown/.test(e)));
+});
+
+// ── defaultScopeGranularity (§4.4/§10 decision: per-manifest default) ─────────
+test('accepts a defaultScopeGranularity within scopes and normalizes it', () => {
+  const { ok, manifest } = validatePluginManifest({ ...base(), defaultScopeGranularity: 'agent' });
+  assert.equal(ok, true);
+  assert.equal(manifest.defaultScopeGranularity, 'agent');
+  assert.equal(defaultGranularity(manifest), 'agent');
+});
+
+test('rejects a defaultScopeGranularity outside scopes or unknown', () => {
+  const notInScopes = validatePluginManifest({ ...base(), scopes: ['team'], defaultScopeGranularity: 'agent' });
+  assert.equal(notInScopes.ok, false);
+  assert.ok(notInScopes.errors.some((e) => /not in scopes/.test(e)));
+
+  const unknown = validatePluginManifest({ ...base(), defaultScopeGranularity: 'galaxy' });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.errors.some((e) => /unknown granularity/.test(e)));
+});
+
+test('defaultGranularity falls back to team when unset (platform default)', () => {
+  const noDefault = validatePluginManifest(base()).manifest;
+  assert.equal('defaultScopeGranularity' in noDefault, false);
+  assert.equal(defaultGranularity(noDefault), 'team');
+  assert.equal(defaultGranularity(null), 'team');
+  assert.equal(defaultGranularity({}), 'team');
+});
+
+// ── quota (§4.6: per-scope resource cap) ─────────────────────────────────────
+test('accepts a valid quota and normalizes it', () => {
+  const { ok, manifest } = validatePluginManifest({ ...base(), quota: { maxObjects: 8, ttlSeconds: 86400 } });
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.quota, { maxObjects: 8, ttlSeconds: 86400 });
+
+  const noTtl = validatePluginManifest({ ...base(), quota: { maxObjects: 3 } }).manifest;
+  assert.deepEqual(noTtl.quota, { maxObjects: 3 });
+
+  assert.equal('quota' in validatePluginManifest(base()).manifest, false);
+});
+
+test('rejects a malformed quota', () => {
+  assert.ok(validatePluginManifest({ ...base(), quota: 5 }).errors.some((e) => /quota must be an object/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), quota: { maxObjects: 0 } }).errors.some((e) => /maxObjects must be a positive integer/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), quota: { maxObjects: 2.5 } }).errors.some((e) => /maxObjects must be a positive integer/.test(e)));
+  assert.ok(validatePluginManifest({ ...base(), quota: { maxObjects: 2, ttlSeconds: -1 } }).errors.some((e) => /ttlSeconds must be a positive integer/.test(e)));
+});
+
+// ── ACCEPTANCE: the shipped plugin #1 manifest validates end to end ──────────
+test('the shipped podman-sandbox manifest (plugins/podman-sandbox) is valid', () => {
+  const p = path.join(__dirname, '..', '..', 'plugins', 'podman-sandbox', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // It is the case that forces the §10 default-granularity decision: agent.
+  assert.equal(defaultGranularity(manifest), 'agent');
+  assert.deepEqual(manifest.scopes, ['team', 'agent']);
+  assert.deepEqual(manifest.sidecar.capabilities, ['podman-socket']);
+  assert.equal(manifest.quota.maxObjects >= 1, true);
+  assert.equal(manifest.cli.name, 'aee-podman');
 });

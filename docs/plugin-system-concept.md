@@ -11,6 +11,10 @@
 > workspace. MCP is deliberately **not** the agent-facing surface.
 > Sequencing: this infrastructure is built first; PR #1287 (built-in
 > `podman-mcp`) is then reworked on top of it as plugin #1 (§6).
+> Revised 2026-08-07 after review: per-grant **scope granularity** with
+> agent-level isolation (§4.4/§4.6), **scope discovery + role-aware routes**
+> for plugin UIs (§4.8), and an explicit **MCP screening rule** for the
+> catalog (§8).
 
 ## 1. Problem
 
@@ -51,6 +55,25 @@ system stay built-in (§7).
 | Broker-side JSONL observability | `github-event-log.js` pattern | plugin audit obligation |
 
 ## 3. Core decisions
+
+**Why a plugin layer at all, and not just more MCP servers.** The MCP
+registry already wires backends per environment — but it stops exactly where
+governance begins. Two things are missing, and neither is an MCP concern:
+a **management surface for differentiated permissions** per team and per
+agent, and **credential fan-in** — one credential registered once in the
+target system rather than a fresh one minted per agent, which is what
+per-agent authorisation would otherwise force on the operator. The broker
+supplies both: it holds the single backend credential and mints per-scope
+tokens in front of it. Authorisation granularity thereby becomes a platform
+concern, while the target system keeps seeing one well-known identity.
+
+**Naming.** "Plugin" in this document always means a **platform plugin**: a
+registered sidecar + CLI extension of the Agent Studio platform itself. It is
+*not* a Claude Code plugin (the CLI's own marketplace format bundling skills,
+commands, hooks and MCP servers), which the platform may separately adopt as
+a distribution channel for agent-side content. If both ever coexist, the
+terms are **platform plugin** vs. **agent plugin**; unqualified "plugin"
+means the platform one (§10).
 
 **CLI-first, not MCP.** Agents demonstrably work better with CLIs than with
 MCP tools (composable in Bash, no per-invocation schema cost, lazy `--help`
@@ -99,8 +122,15 @@ the sidecar image.
   "cli": { "name": "aee-podman", "entrypoint": "bin/aee-podman.py", "runtime": "python3" },
   "credentials": [ { "key": "api-token", "description": "Backend API token", "required": true } ],
   "platforms": ["podman"],
+  "scopes": ["team", "agent"],
   "requiresApproval": ["compose up", "rm"],
-  "ui": { "title": "Sandbox Dashboard" },
+  "ui": {
+    "title": "Sandbox Dashboard",
+    "routes": [
+      { "path": "/", "minRole": "team-member" },
+      { "path": "/admin", "minRole": "team-admin" }
+    ]
+  },
   "companionSkill": "batch-parity-testing",
   "promptLine": "You can spawn containers with `aee-podman` — run `aee-podman --help`."
 }
@@ -113,6 +143,10 @@ the sidecar image.
 - `platforms` declares runtime requirements (`podman` = local/compose only,
   like context mounts); the console shows an honest "not available on this
   stack" instead of a broken toggle.
+- `scopes` declares which **scope granularities** the broker actually
+  implements (§4.6). A broker that cannot separate its resources per agent
+  lists `["team"]` and the console offers no agent-level toggle — the
+  granularity a grant may choose is bounded by what the plugin can honour.
 - `requiresApproval` names subcommands the broker must hold for human
   confirmation (§4.6).
 - `credentials` are bound at install/bind time from the existing credential
@@ -160,9 +194,20 @@ standalone agents carry their own. Resolution via a sibling of
 `effectiveSkills`. Team Admins grant within their team; System Admins
 install. Working Environments are untouched.
 
+A grant carries one setting beyond on/off: its **scope granularity**
+(`scopeGranularity: "team" | "agent"`, default `team`, offerable only within
+the manifest's `scopes`). It decides whether the granted squad shares one
+broker-side identity or every member gets its own — see §4.6, where the
+consequences live. It is a property of the grant, not of the plugin, because
+the same plugin is shared infrastructure for one team and per-agent
+infrastructure for the next.
+
 Grant changes are **live, no respawn**: CLI script + config file sync into
 the agent workspace (skill-sync pattern), CLAUDE.md rebuild through the
 existing `prompt-rebuild` path, network connect/disconnect of the sidecar.
+Flipping the granularity is a token re-mint plus a config re-sync; existing
+resources keep their original owner label until torn down, so the flip is
+additive rather than a migration.
 
 ### 4.5 CLI contract
 
@@ -188,18 +233,50 @@ Applies to plugin CLIs **and** (incrementally) to the built-in ones:
 ### 4.6 Identity, tenancy, policy
 
 - **Scope tokens**: `podman-token.js` generalises to a plugin-scope-token
-  module — HMAC-signed `{pluginId, scopeId}` where scope = `parentTeamId`
-  for members, agent id for standalone (the `podmanScopeId` rule). The broker
-  verifies on every call; forged/missing token → 401. Tenant isolation is
-  thereby the broker's *first* check, not an afterthought — two teams sharing
-  one plugin never see each other's resources.
+  module — HMAC-signed `{pluginId, scopeId}`. The broker verifies on every
+  call; forged/missing token → 401. Tenant isolation is thereby the broker's
+  *first* check, not an afterthought — two scopes sharing one plugin never
+  see each other's resources.
+- **Two scope granularities, chosen per grant** (§4.4). At **`team`**
+  (default) the `scopeId` is `parentTeamId` for members and the agent id for
+  standalone agents (the `podmanScopeId` rule): a squad shares one pool of
+  broker-side resources — the right default for a shared, expensive backend.
+  At **`agent`** every member mints its own token and carries its own
+  `scopeId`, so two agents of one team are as isolated from each other as two
+  teams are: separate ownership labels, separate quotas, separate audit rows,
+  separate environments behind the broker.
+
+  Agent granularity buys two things team granularity structurally cannot:
+
+  1. **Agent-level parallelism.** An adversarial tester can run live tests
+     against its own stack while a developer of the same squad exercises a
+     different feature against its own — no shared environment to collide in,
+     no shared teardown. This is the plugin-side counterpart of the per-agent
+     network/volume isolation the platform already gives agent containers.
+  2. **Per-agent policy.** Because the broker sees *which* agent is calling,
+     it can restrict subcommands by role — e.g. only the last agent in a flow,
+     after its cross-checks passed, may create test cases in the
+     test-management system. A team-scoped token cannot express that
+     distinction at all.
+
+  What granularity does **not** multiply is backend credentials: it multiplies
+  *tokens in front of* the broker, while the broker keeps holding exactly one
+  credential for the target system. That asymmetry is the whole point of the
+  broker sitting there (§3) — per-agent authorisation without per-agent
+  accounts to provision in the backend.
 - **Resource ownership**: whatever a broker creates on behalf of a scope is
   labelled (`aee.plugin.owner=<scopeId>`), listed/operated only within the
   scope, quota-capped, and torn down on team/agent deletion **before** the
-  token is destroyed (the #1287 teardown ordering).
+  token is destroyed (the #1287 teardown ordering). At `agent` granularity
+  deleting one member tears down only that member's resources; the squad's
+  other scopes are untouched.
 - **Quotas are mandatory manifest/config fields** for resource-creating
   plugins (max objects, TTL). Rationale: a loop-triggered agent creating one
-  resource per iteration is a runaway the #611 backstop cannot see.
+  resource per iteration is a runaway the #611 backstop cannot see. Quotas
+  are **per scope**, so agent granularity on an eight-member squad multiplies
+  the worst-case footprint eightfold — the grant UI states that resulting
+  ceiling before the toggle is flipped, rather than letting an admin discover
+  it as a full disk.
 - **`requiresApproval`**: the broker parks the operation and posts an
   approval request; v1 delivers it as a DM to the agent's room (human
   confirms in chat), a later phase can bind it to the flow human-gate
@@ -226,6 +303,34 @@ A plugin may serve a web UI from its sidecar; the console proxies it at
 when present (bp-explorer pattern). **No React injection into the console**
 — the iframe boundary is the contract. Plugin UIs inherit no console state;
 if they need identity they use the same scope-token mechanism.
+
+Two things the boundary must nevertheless carry, or every UI-bearing plugin
+re-invents them badly:
+
+- **Scope discovery.** A plugin that assigns resources or permissions per
+  team/agent has to know which teams and agents exist. Copying ids across by
+  hand does not survive the first twenty-agent installation. The console
+  therefore exposes a read-only endpoint to the proxied UI:
+  `GET /plugins/:id/scopes` → `[{ scopeId, kind, displayName, teamId }]`.
+  It is **derived from the resolved grant**, so a plugin can only ever
+  enumerate the scopes it was granted to — discovery is not a new read
+  privilege — and the UI can render an honest dropdown instead of a free-text
+  id field. Brokers get the same list server-side for validating what an
+  admin picked.
+- **Viewer identity and role.** The proxy forwards the authenticated console
+  user and their effective role (System Admin / Team Admin / Team Member,
+  plus the team ids in scope) as signed headers, so a plugin UI reflects the
+  platform's user model instead of inventing a second login. A plugin may
+  serve **several paths behind its one mount** and declare the minimum role
+  each requires (`ui.routes`, §4.1) — a configuration/admin page, a
+  day-to-day working page, a read-only view. The console refuses to proxy
+  below the declared minimum and the plugin enforces it again: the same
+  two-defense-lines discipline as network truth + token truth.
+
+Sequencing: scope discovery ships with the first UI-bearing plugin (any of
+them needs it). Multi-route roles are a manifest field reserved now and
+implemented when a plugin declares more than one route — reserving it costs
+nothing, retrofitting it into a shipped proxy contract would be breaking.
 
 ### 4.9 Broker SDK
 
@@ -275,6 +380,9 @@ only guarantees contract-level stability (`pluginVersion`).
 | Hosted/GKE stack | `platforms` mismatch → plugin listed as unavailable, no toggle offered |
 | Secret leakage via verbose backend output | Broker must mask credential values in returned output (the #1287 deferred item becomes a contract requirement) |
 | Many plugins granted | Context cost is one line each; grants are deliberately per-team narrow — no "grant all" affordance |
+| Agent granularity on a large squad | Quotas are per scope, so n members = n× the worst-case footprint; the grant UI states the resulting ceiling before the toggle, and manifest quota defaults are authored per scope, not per team |
+| Granularity flipped on a live grant | Token re-mint + config re-sync; resources created under the old `scopeId` keep their owner label and are reaped by TTL/teardown — no ownership migration, no orphans |
+| Plugin UI asks for a scope it was not granted | `GET /plugins/:id/scopes` is derived from the resolved grant, so the scope is simply absent; a broker call with a forged `scopeId` fails token verification anyway |
 
 ## 6. Extraction path from PR #1287 (podman-mcp → plugin #1)
 
@@ -304,7 +412,12 @@ up -f compose.yml`); `mcp-stdio-proxy.py` → not needed on the CLI path.
 (`docs/superpowers/specs/2026-08-04-podman-mcp-relay-design.md`) — consistent
 with the broker model, but layered on plugin #1, not on the special case.
 
-## 7. Explicitly not plugins
+## 7. What stays out of the plugin mechanism
+
+Two distinct exclusions live here. First, **skills are not the vehicle** for
+building plugins (the boundary rule below). Second, a set of platform
+capabilities are deliberately never *packaged* as plugins even though they
+look like they could be.
 
 **The skill/plugin boundary.** Skills were considered as the delivery
 vehicle (a skill can carry a script, and the grant/sync/gating machinery is
@@ -344,6 +457,19 @@ admin to the difference. The boundary rule:
 Illustrative, not committed roadmap. Each fits the same shape: CLI facade →
 scope-verified broker → guarded external resource.
 
+**Screening rule — apply before any entry is built.** Most of these backends
+already have a public MCP server. The first question for every candidate is
+therefore not "how do we build it" but *what does a plugin add over pointing
+the existing MCP registry at that server*. The answer must be at least one of
+the three governance properties MCP does not carry: a **credential that must
+not enter the agent container**, **per-scope authorisation/quotas**, or an
+**audited approval gate**. If none applies, the honest answer is an MCP
+server, not a plugin. Where one does apply, the plugin is frequently the
+*thin* option rather than a fresh integration: a broker that wraps the
+existing MCP server and contributes only the missing governance and the
+fine-grained permissions on top. Each entry below carries this justification
+before it moves from catalog to roadmap.
+
 **Mainframe migration (the product's home turf)**
 
 1. **Mainframe bridge** — submit JCL, fetch job output/SYSOUT, browse
@@ -369,7 +495,14 @@ scope-verified broker → guarded external resource.
 **Quality engineering**
 
 9. **Test management** (Xray/Zephyr/qTest — the original request) — create
-   test cases, trigger runs, manage test data; optional sidecar UI.
+   test cases, trigger runs, manage test data; optional sidecar UI. Passes
+   the screening rule on two counts, and they are worth naming because they
+   generalise: the API is trivial to script *as a skill*, but doing so
+   exposes the vendor credential to the agent one way or another; and the
+   broker can narrow the surface to specific actions per scope — with agent
+   granularity (§4.6), "test cases may only be created by the last agent in
+   the flow, once its cross-checks passed" becomes enforceable server-side
+   rather than a prompt request.
 10. **Test-data generation/anonymisation** — produce GDPR-safe
     production-like data sets; broker enforces the anonymisation profile.
 11. **Load/performance testing** — launch k6/JMeter runs, fetch result
@@ -415,10 +548,13 @@ scope-verified broker → guarded external resource.
 ## 9. Rollout
 
 - **Phase 1 — core machinery**: manifest schema + registry + sidecar
-  lifecycle + scope-token module + grant-driven network attachment. No UI
-  extension, no approval flow.
+  lifecycle + scope-token module (**both granularities from the start** — the
+  token payload and ownership labels are the same code either way; retrofitting
+  agent scoping later would be a data migration) + grant-driven network
+  attachment. No UI extension, no approval flow.
 - **Phase 2 — agent surface**: CLI contract, workspace seeding/sync, config
-  files, prompt-gating block, grant UI (team/agent, tri-state), audit JSONL.
+  files, prompt-gating block, grant UI (team/agent, tri-state, granularity
+  selector bounded by the manifest's `scopes`), audit JSONL.
 - **Phase 3 — plugin #1**: rework PR #1287 onto the machinery per §6; delete
   the special cases; `aee-podman` domain CLI.
 - **Phase 4 — Broker SDK**: extract the §4.9 module set from plugin #1's
@@ -442,3 +578,14 @@ scope-verified broker → guarded external resource.
   most maintenance-prone building block; defer until a real user insists.
 - **Approval UX**: DM-based confirm (v1) vs. wiring into the flow human-gate
   registry — revisit when the first `requiresApproval` plugin ships.
+- **Default scope granularity per plugin**: `team` is the safe default for
+  shared, expensive backends, but for a sandbox-style plugin agent granularity
+  may be the *expected* behaviour and a team default the surprising one. Let
+  each manifest declare its own default within `scopes`, or keep one
+  platform-wide default? Decide with plugin #1, which is exactly the case
+  where agent granularity is the natural reading.
+- **Claude Code plugins as "agent plugins"**: worth adopting the CLI's own
+  marketplace format as a distribution channel for agent-side content
+  (skills, commands, hooks)? It solves a different problem than this
+  document — no sidecar, no privilege — but it shares the word, so the
+  terminology fixed in §3 has to hold before both exist.

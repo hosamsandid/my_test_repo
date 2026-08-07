@@ -496,19 +496,8 @@ export default function AgentChat() {
             margin: 0,
             color: 'var(--eb-text-primary)',
           }}>
-            Agents
+            {loading || !agents ? 'Agents' : `Agents (${agents.length})`}
           </h1>
-          <div style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
-            marginTop: 'var(--eb-space-1)',
-          }}>
-            {loading
-              ? 'Loading…'
-              : agents
-                ? `${agents.length} agent${agents.length === 1 ? '' : 's'}`
-                : ''}
-          </div>
           {agents && agents.length > 0 && (
             <FilterSelect
               agents={agents}

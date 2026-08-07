@@ -16,6 +16,8 @@ import {
   consumeCopilotStream,
   toPersistedMessages,
   hydrateMessages,
+  bundleSizeCharCount,
+  bundleSizeLevel,
 } from './flow-copilot-view';
 
 // FlowCopilotPanel (#1069, spec #1047) — the docked chat rail of the Flow
@@ -330,8 +332,11 @@ export default function FlowCopilotPanel({
                 {busy ? <Loader2 size={15} style={{ animation: 'eb-copilot-spin 1s linear infinite' }} /> : <Send size={15} />}
               </button>
             </div>
-            <div style={{ marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              Every answer is a proposal — nothing changes the draft until you apply it.
+            <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                Every answer is a proposal — nothing changes the draft until you apply it.
+              </span>
+              {bundle && <BundleSizeHint bundle={bundle} />}
             </div>
           </div>
         </>
@@ -471,12 +476,33 @@ function ProposalCard({ entry, actionable, applying, onApply, onDiscard }) {
 }
 
 function ErrorRow({ entry, busy, onRetry }) {
+  // AC2 (#1404): bundle-too-large — non-dismissable warning notice, no retry.
+  if (entry.kind === 'bundle-too-large') {
+    return (
+      <div style={{
+        border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 6,
+      }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.5 }}>
+          Your current bundle is too large for the Copilot to process in one go. Make small, targeted
+          requests — describe one role at a time rather than pasting the full bundle JSON.
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          Use the <strong>Edit&nbsp;as&nbsp;draft</strong> workflow and describe incremental changes, one step at a time.
+        </div>
+      </div>
+    );
+  }
+  // AC3 (#1404): timeout — show specific guidance; retry is still available.
+  const messageText = entry.kind === 'timeout'
+    ? 'The LLM call timed out. If your bundle is large, try breaking your request into smaller steps.'
+    : entry.message;
   return (
     <div style={{
       border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 6,
     }}>
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)', lineHeight: 1.4 }}>{entry.message}</div>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)', lineHeight: 1.4 }}>{messageText}</div>
       {entry.kind === 'provider' ? (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
           The Copilot needs a configured LLM —{' '}
@@ -493,5 +519,24 @@ function ErrorRow({ entry, busy, onRetry }) {
         }}><RefreshCw size={12} /> Retry</button>
       )}
     </div>
+  );
+}
+
+// AC4 (#1404): reactive bundle size counter in the composer footer.
+// Amber at BUNDLE_AMBER_THRESHOLD (160k chars = 80% of server guard 200k).
+function BundleSizeHint({ bundle }) {
+  const charCount = bundleSizeCharCount(bundle);
+  const level = bundleSizeLevel(charCount);
+  const color = level === 'red' ? 'var(--eb-status-error)'
+    : level === 'amber' ? 'var(--eb-status-warning)'
+    : 'var(--eb-text-muted)';
+  const hint = level === 'red' ? ' — too large' : level === 'amber' ? ' — may time out' : null;
+  return (
+    <span
+      title={`Bundle JSON is ${charCount.toLocaleString()} characters (server limit: 200 000)`}
+      style={{ fontSize: 'var(--eb-text-xs)', color, whiteSpace: 'nowrap', flexShrink: 0 }}
+    >
+      {(charCount / 1000).toFixed(1)}k chars{hint}
+    </span>
   );
 }

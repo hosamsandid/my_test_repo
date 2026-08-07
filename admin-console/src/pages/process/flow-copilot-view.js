@@ -74,15 +74,41 @@ export function lintColor(severity) {
 
 /**
  * Classify a failed POST /api/process/copilot for the chat's error row.
- * A 400 is a request-shape/provider problem — the panel always sends a valid
- * shape, so in practice it means no Model Provider is configured; retrying the
- * identical request cannot succeed, the fix is configuration (link to /models).
+ * A 400 bundle-too-large is a non-retryable bundle-size error (AC2 #1404).
+ * A 400 otherwise is a request-shape/provider problem — the panel always sends
+ * a valid shape, so in practice it means no Model Provider is configured;
+ * retrying the identical request cannot succeed, the fix is configuration.
+ * A 504 is a retryable LLM timeout (AC3 #1404).
  * Everything else (502 transport, network) is retryable as-is.
  */
 export function copilotErrorInfo(status, message) {
+  if (status === 400 && message === 'bundle-too-large') {
+    return { kind: 'bundle-too-large', retryable: false, message: 'bundle-too-large' };
+  }
   const msg = typeof message === 'string' && message.trim() ? message.trim() : `Request failed (HTTP ${status || '?'})`;
   if (status === 400) return { kind: 'provider', retryable: false, message: msg };
+  if (status === 504) return { kind: 'timeout', retryable: true, message: msg };
   return { kind: 'transport', retryable: true, message: msg };
+}
+
+// ── Bundle size helpers (AC4 #1404) ─────────────────────────────────────────
+// Server-side guard is 200 000 chars. Amber fires 20% below that (160 000)
+// so the user gets a warning before they hit the hard limit.
+
+export const BUNDLE_AMBER_THRESHOLD = 160_000;
+export const BUNDLE_RED_THRESHOLD = 200_000;
+
+/** Character count of the bundle JSON (0 when bundle is null/undefined). */
+export function bundleSizeCharCount(bundle) {
+  if (bundle == null) return 0;
+  try { return JSON.stringify(bundle).length; } catch { return 0; }
+}
+
+/** 'ok' | 'amber' | 'red' based on character count against the server guard. */
+export function bundleSizeLevel(charCount) {
+  if (charCount >= BUNDLE_RED_THRESHOLD) return 'red';
+  if (charCount >= BUNDLE_AMBER_THRESHOLD) return 'amber';
+  return 'ok';
 }
 
 /**

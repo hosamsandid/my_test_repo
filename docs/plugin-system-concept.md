@@ -349,25 +349,29 @@ plugin. The platform therefore ships a **Broker SDK**: a small,
 dependency-free Node module (mirroring the pure-module discipline of
 `process-template.js` / `prompt-assembly.js`) that a sidecar imports:
 
-- `verifyScopeToken(header)` → `{ pluginId, scopeId }` or 401 — the
-  generalised `podman-token.js`.
+- `verifyScopeToken(reqOrHeader, secret)` → `{ pluginId, scopeId }` or 401 —
+  **granularity-agnostic** (the broker must not branch on `scopeId` shape);
+  byte-identical contract to `orchestrator/plugin-scope-token.js`.
 - `scopeFilter(scopeId)` — ownership-label helpers (stamp on create, filter
-  on list, exact-match on operate; the `owner-scope.js` rules).
-- `auditWriter(dir)` — one JSONL line per call, retention-rotated.
-- `maskSecrets(output, secrets)` — response redaction (the `mask-env.js`
-  lesson: backends echo credentials in verbose output).
-- `healthEndpoint()` / `teardownScopeEndpoint(handler)` — the two routes the
-  orchestrator calls on every broker (registry card health, scope teardown
-  on team/agent deletion).
-- `parkForApproval(op)` — the `requiresApproval` holding pen (v1: DM
-  confirm).
+  on list, exact-match on operate) using the platform label `aee.plugin.owner`.
+- `auditWriter(dir, {retentionMs, now})` — one JSONL line per call,
+  retention-rotated on write.
+- `maskSecrets(output, secrets)` — response redaction: explicit secret values
+  plus the `-e/--env KEY=VALUE` values backends echo verbatim.
+- `healthEndpoint()` / `teardownScopeEndpoint(reap, {secret})` — the two
+  plain-REST routes the orchestrator calls on every broker (health probe, scope
+  teardown on team/agent deletion). Teardown is per `scopeId` — one handler
+  serves both team and single-member deletion; resources are **reaped before
+  the orchestrator invalidates the token**.
+- `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` — the
+  `requiresApproval` holding pen (v1: DM confirm).
 
-The SDK is extracted from plugin #1's broker, not designed on paper — the
-#1287 modules (`podman-token.js`, `owner-scope.js`, `mask-env.js`, the
-teardown endpoint) are its seed and already adversarially tested. Using the
-SDK is strongly recommended, not enforced (the wire contract is what the
-platform verifies), but the reference plugins all use it, and a broker
-without it must still implement the same routes and checks.
+The SDK is extracted from plugin #1's broker (`podman-mcp/`), not designed on
+paper — `podman-token.js`, `owner-scope.js`, `mask-env.js`, and the teardown
+endpoint were its seeds. Phase 4 (#1520) deleted those copies from `podman-mcp/`
+and moved them into `broker-sdk/`, retrofitting plugin #1 onto the SDK so it
+has a live consumer from day one. Using the SDK is strongly recommended, not
+enforced (the platform verifies the wire contract, not the implementation).
 
 ### 4.10 Versioning
 
@@ -399,7 +403,9 @@ integration layer, not its core.
 
 **Kept nearly unchanged** (becomes the plugin's sidecar): the `podman-mcp/`
 directory — `server.js`, `compose-harden.js`, `compose-validate.js`,
-`owner-scope.js`, `mask-env.js`, teardown endpoint, Dockerfile, tests.
+teardown endpoint, Dockerfile, tests. (`owner-scope.js` and `mask-env.js`
+stayed here through Phase 3 and were extracted to `broker-sdk/` in Phase 4
+#1520, along with `podman-token.js`.)
 
 **Generalised into platform machinery**: `podman-token.js` → plugin scope
 tokens (§4.6); the team/agent tri-state activation + no-respawn file sync →

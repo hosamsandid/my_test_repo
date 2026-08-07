@@ -73,6 +73,33 @@ function visibleAgent(scope, agent) {
   return true;
 }
 
+// ── Agent → human tenant resolution ─────────────────────────────────────────
+//
+// An agent's `teamId` names its human **Team** — the tenant every ownership,
+// visibility and credential-scoping decision is keyed on. A `team-member` also
+// carries `parentTeamId`, which is the id of its **Agent Team** construct (a
+// `role: "team"` agent). Those are two different namespaces, and reading
+// `parentTeamId` as a tenant only appears to work while an Agent Team happens
+// to share its id with a human Team; otherwise it names a team that does not
+// exist and every team-scoped lookup fails closed on an empty result.
+//
+// Per docs/teams-data-model.md a team-member inherits its parent Agent Team's
+// `teamId`, so resolve the parent and read *its* tenant — one hop, since a team
+// agent never carries a `parentTeamId` of its own. Falls back to the member's
+// own stamp when the parent is missing or unstamped.
+//
+// `loadAgentConfig(id) -> config | null` is injected so this stays pure.
+// Mirrored by resolveAgentTenant in orchestrator/agent-tenant.js (separate
+// images, so the logic is duplicated rather than shared).
+function resolveAgentTenant(cfg, loadAgentConfig) {
+  const parentId = cfg && cfg.parentTeamId;
+  if (parentId && typeof loadAgentConfig === 'function') {
+    const parent = loadAgentConfig(parentId);
+    if (parent && parent.teamId) return parent.teamId;
+  }
+  return (cfg && cfg.teamId) || 'default';
+}
+
 // ── Admin surface (Teams / Users / Memberships) scoping & gating (#584) ──────
 //
 // The #302 list-endpoints above are read-only filters. The Teams admin surface
@@ -296,6 +323,7 @@ module.exports = {
   computeScope,
   visibleTeam,
   visibleAgent,
+  resolveAgentTenant,
   canManageTeam,
   canManageAgent,
   canManageEnvironment,

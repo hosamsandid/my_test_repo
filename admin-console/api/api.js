@@ -26,7 +26,8 @@ const { githubApiBase } = require('./github-api-base');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
-        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
+        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
+        resolveAgentTenant } = require('./scope');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -3594,10 +3595,14 @@ app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (re
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
 
-// The team an agent belongs to (team members carry parentTeamId). Mirrors the
-// orchestrator's enrichUsageRecord derivation.
+// The human Team an agent belongs to — the tenant for ownership, visibility,
+// management and credential scoping. A team-member inherits it from its parent
+// Agent Team; `parentTeamId` is an Agent-Team id and is never itself a tenant
+// (see resolveAgentTenant in scope.js).
 function agentTeamId(cfg) {
-  return (cfg && (cfg.parentTeamId || cfg.teamId)) || 'default';
+  return resolveAgentTenant(cfg, (id) => (
+    AGENT_ID_RE.test(id) ? readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null) : null
+  ));
 }
 
 // The minimal agent shape visibleAgent() needs (team + private-ownership).

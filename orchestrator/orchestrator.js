@@ -11,6 +11,7 @@ const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
@@ -317,8 +318,11 @@ function resolveAssistBindingForTeam(teamId) {
   const endpointId = cfg && typeof cfg.assistLlmEndpointId === "string" ? cfg.assistLlmEndpointId.trim() : "";
   if (!endpointId) return null; // unset → .env as today (no warning: the common case)
   // Endpoints are scoped to the human tenant that owns the agents, mirroring
-  // spawn-binding + admin-console usableEndpointsForTeam (parentTeamId || teamId).
-  const tenant = (cfg && (cfg.parentTeamId || cfg.teamId)) || "default";
+  // spawn-binding + admin-console usableEndpointsForTeam. `parentTeamId` names
+  // the Agent Team, not the tenant — resolve the parent's `teamId` instead.
+  const tenant = resolveAgentTenant(cfg, (id) => {
+    try { return loadAgentConfig(id); } catch { return null; }
+  });
   let index = null;
   try { index = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8")); } catch { index = null; }
   const pick = assistBinding.pickAssistEndpoint(index, endpointId, tenant);
@@ -915,6 +919,7 @@ function backfillResourceOwnership() {
 
   // Agents
   if (fs.existsSync(AGENTS_DIR)) {
+    const configs = {};
     for (const id of listAgentIds()) {
       const cfg = loadAgentConfig(id);
       if (cfg && cfg.teamId === undefined) {
@@ -922,6 +927,18 @@ function backfillResourceOwnership() {
         saveAgentConfig(id, cfg);
         stamped++;
       }
+      if (cfg) configs[id] = cfg;
+    }
+    // A team-member's tenant is its parent Agent Team's `teamId` (see
+    // agent-tenant.js). Members created before that was enforced can carry a
+    // stale stamp; realign them so the on-disk value matches what every scoping
+    // decision already resolves. Idempotent — a synced member is skipped.
+    for (const { id, from, to } of planTenantBackfill(configs)) {
+      const cfg = configs[id];
+      cfg.teamId = to;
+      saveAgentConfig(id, cfg);
+      console.log(`[Orchestrator] Realigned team-member ${id} tenant ${from || "(unset)"} → ${to}`);
+      stamped++;
     }
   }
 

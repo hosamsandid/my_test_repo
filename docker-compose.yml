@@ -169,6 +169,10 @@ services:
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
       STT_URL: "${STT_URL:-http://stt:9000}"
+      # STT request timeout (ms). A Meeting Note-Taker segment (#1296) can be up
+      # to 120 s of audio, which may take longer to transcribe on CPU than the
+      # old 15 s hard cap; default 60 s (set in admin-console/api/transcribe.js).
+      STT_TIMEOUT_MS: "${STT_TIMEOUT_MS:-}"
       # Max simultaneous orchestrator respawn calls fired by
       # POST /api/llm-endpoints/:id/respawn-agents (see .env.example).
       RESPAWN_CONCURRENCY: "${RESPAWN_CONCURRENCY:-}"

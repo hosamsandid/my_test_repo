@@ -8,6 +8,7 @@ describe('POST /api/transcribe', () => {
 
   beforeEach(() => {
     mock.restoreAll();
+    delete process.env.STT_TIMEOUT_MS;
   });
 
   it('forwards audio to STT service and returns transcribed text', async () => {
@@ -119,5 +120,50 @@ describe('POST /api/transcribe', () => {
     assert.equal(res._status, 400);
     assert.deepEqual(res._body, { error: 'No audio file provided' });
     assert.equal(mockFetch.mock.calls.length, 0);
+  });
+
+  it('passes an AbortSignal to the STT fetch', async () => {
+    const mockFetch = mock.fn(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve({ text: 'x' }) })
+    );
+    const { createTranscribeRoute } = require('./transcribe.js');
+    const handler = createTranscribeRoute({ fetchFn: mockFetch, sttUrl: 'http://stt:9000' });
+
+    const req = { file: { buffer: Buffer.from('a'), originalname: 'r.webm', mimetype: 'audio/webm' } };
+    const res = { status(c) { this._status = c; return this; }, json(b) { this._body = b; } };
+    await handler(req, res);
+
+    const [, opts] = mockFetch.mock.calls[0].arguments;
+    assert.ok(opts.signal instanceof AbortSignal, 'fetch should receive an AbortSignal');
+  });
+});
+
+describe('resolveTimeoutMs (STT_TIMEOUT_MS config)', () => {
+  const { resolveTimeoutMs, DEFAULT_STT_TIMEOUT_MS } = require('./transcribe.js');
+
+  beforeEach(() => { delete process.env.STT_TIMEOUT_MS; });
+
+  it('defaults to 60 000 ms when unset', () => {
+    assert.equal(DEFAULT_STT_TIMEOUT_MS, 60_000);
+    assert.equal(resolveTimeoutMs(), 60_000);
+  });
+
+  it('honours a valid STT_TIMEOUT_MS env override', () => {
+    process.env.STT_TIMEOUT_MS = '120000';
+    assert.equal(resolveTimeoutMs(), 120_000);
+  });
+
+  it('honours an explicit timeoutMs argument over the env', () => {
+    process.env.STT_TIMEOUT_MS = '5000';
+    assert.equal(resolveTimeoutMs(30_000), 30_000);
+  });
+
+  it('falls back to the default for non-positive / non-numeric values', () => {
+    process.env.STT_TIMEOUT_MS = 'abc';
+    assert.equal(resolveTimeoutMs(), 60_000);
+    process.env.STT_TIMEOUT_MS = '0';
+    assert.equal(resolveTimeoutMs(), 60_000);
+    process.env.STT_TIMEOUT_MS = '-1';
+    assert.equal(resolveTimeoutMs(), 60_000);
   });
 });

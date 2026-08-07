@@ -5,6 +5,7 @@ import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
+import { useTranscriptionSession } from '../../context/TranscriptionSessionContext.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
@@ -949,6 +950,10 @@ export default function ChatPanel({
   const disabled = agent.enabled === false;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+  // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
+  // only needs to kick a session off for this agent and know whether one is
+  // already running (to disable the entry point + quick dictation).
+  const transcription = useTranscriptionSession();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -1398,6 +1403,8 @@ export default function ChatPanel({
         loopBusy={loopBusy}
         loopTrigger={activeLoop}
         loopProgress={loopProgress}
+        onStartMeeting={transcription ? () => transcription.startSession({ agentId: agent.id, agentName: agent.displayName || agent.id }) : undefined}
+        meetingActive={!!transcription?.active}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}

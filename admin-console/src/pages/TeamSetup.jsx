@@ -205,8 +205,14 @@ function SuggestSuffixButton({ onSuggest }) {
 // Comes after the Working-Environment pick so both fields can be pre-filled
 // from the environment's name (with a uniqueness-resolving suggestion). The
 // user may change them, but doesn't have to.
-function StepProject({ form, setForm, environments, takenAgentIds, error }) {
+function StepProject({ form, setForm, environments, takenAgentIds, takenTeamNames, error }) {
   const env = (environments || []).find(e => e.id === form.environmentId);
+  // Non-blocking duplicate-name warning (#1455): the name is cosmetic (the ID is
+  // the unique key), so a collision only warns — the user may still advance.
+  // Compared trimmed + lowercased, matching how takenTeamNames is built; empty
+  // names are handled by the existing "Team name required" blocking check.
+  const trimmedName = form.teamName.trim().toLowerCase();
+  const duplicateName = !!trimmedName && takenTeamNames?.has(trimmedName);
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -235,6 +241,11 @@ function StepProject({ form, setForm, environments, takenAgentIds, error }) {
               ? <>Suggested from the working environment <strong>{env.name}</strong> — change it if you like.</>
               : <>Used as the prefix for all created resources and as the team identifier.</>}
           </div>
+          {duplicateName && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-2)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+              <AlertTriangle size={12} style={{ flexShrink: 0 }} /> Another team already uses this name. Names don't have to be unique (the ID is the identifier) — you can still continue.
+            </div>
+          )}
         </div>
 
         <div>
@@ -843,6 +854,18 @@ export default function TeamSetup() {
     () => new Set((Array.isArray(agentsList) ? agentsList : []).map(a => a.id)),
     [agentsList],
   );
+  // Lowercased display names of existing Agent Teams — used only to WARN (never
+  // block) about a duplicate team name on the Team step (#1455). Built the same
+  // way suggestTeamNaming's `takenNames` is (role === 'team', trimmed +
+  // lowercased) so the warning is consistent with the auto-suggestion.
+  const takenTeamNames = useMemo(
+    () => new Set(
+      (Array.isArray(agentsList) ? agentsList : [])
+        .filter(a => a.role === 'team')
+        .map(a => String(a.displayName || '').trim().toLowerCase()),
+    ),
+    [agentsList],
+  );
 
   // Selecting an environment pulls its repo/credentials/MCP set into the form
   // (used for review display; the backend re-resolves everything from
@@ -1101,7 +1124,7 @@ export default function TeamSetup() {
         />
       )}
       {step === 2 && (
-        <StepProject {...stepProps} environments={environments} takenAgentIds={takenAgentIds} error={stepError} />
+        <StepProject {...stepProps} environments={environments} takenAgentIds={takenAgentIds} takenTeamNames={takenTeamNames} error={stepError} />
       )}
       {step === 3 && (
         <StepKnowledgeSummary

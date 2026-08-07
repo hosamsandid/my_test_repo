@@ -9,7 +9,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
-const { runArchiveTool, describeArchiveFailure } = require('./archive');
+const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
@@ -3049,6 +3049,57 @@ async function copyDirRecursiveAsync(src, dst) {
   }
 }
 
+// Mirrors a directory tree as a farm of hard links: same shape, same file
+// contents (same inodes), but no data copied and no second copy of the bytes on
+// disk. The export needs a tree it can hand to `zip` under a chosen top-level
+// name; it does not need the bytes duplicated, and duplicating them costs ~10 s
+// and ~545 MB on a real agent workspace.
+//
+// Same inline containment gate and the same skip-symlinks rule as
+// copyDirRecursiveAsync — see there. `skipTop` names top-level entries to leave
+// out (the export drops sessions/).
+//
+// Falls back to a copy per file when linking is refused — a hard link cannot
+// cross a filesystem boundary (EXDEV) and some backing stores reject it
+// outright — so the result is correct wherever the volumes happen to sit.
+const LINK_BATCH = 32;
+async function linkDirRecursiveAsync(src, dst, skipTop = new Set()) {
+  if (typeof src !== 'string' || src.includes('..') ||
+      !(src.startsWith(WORKSPACE + path.sep) || src.startsWith('/tmp' + path.sep))) {
+    throw new Error(`linkDirRecursiveAsync: refusing src outside allowed roots: ${src}`);
+  }
+  if (typeof dst !== 'string' || dst.includes('..') ||
+      !(dst.startsWith(WORKSPACE + path.sep) || dst.startsWith('/tmp' + path.sep))) {
+    throw new Error(`linkDirRecursiveAsync: refusing dst outside allowed roots: ${dst}`);
+  }
+  await fs.promises.mkdir(dst, { recursive: true });
+  const files = [];
+  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
+    if (skipTop.has(entry.name)) continue;
+    if (entry.isSymbolicLink()) continue; // skip symlinks for safety
+    if (entry.isDirectory()) {
+      await linkDirRecursiveAsync(path.join(src, entry.name), path.join(dst, entry.name));
+    } else if (entry.isFile()) {
+      files.push(entry.name);
+    }
+    // sockets/fifos/devices: nothing an export should carry
+  }
+  // Linking a file is a metadata operation; issued one await at a time it
+  // leaves the fs thread pool idle. Batching is ~5× on the workspace volume
+  // (5k files: 229 ms → 44 ms) and matters more still on the copy fallback.
+  for (let i = 0; i < files.length; i += LINK_BATCH) {
+    await Promise.all(files.slice(i, i + LINK_BATCH).map(async (name) => {
+      const s = path.join(src, name);
+      const d = path.join(dst, name);
+      try {
+        await fs.promises.link(s, d);
+      } catch {
+        await fs.promises.copyFile(s, d);
+      }
+    }));
+  }
+}
+
 // Streams a ZIP archive of the agent workspace + manifest.json.
 // Excludes the sessions/ directory (conversation history and container logs).
 app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
@@ -3088,25 +3139,32 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
     }
   } catch { /* Podman unavailable — proceed without image info */ }
 
-  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'aee-export-'));
-  // zipDir is a sibling scratch dir (so `zip -r` doesn't try to archive its
-  // own output). Neither tmpDir nor zipDir carries any user-controlled path
-  // segment, which keeps the filesystem sinks below clear of req-derived data.
-  const zipDir = fs.mkdtempSync(path.join('/tmp', 'aee-zip-'));
-  const zipPath = path.join(zipDir, 'export.zip');
+  // The archive is streamed straight to the client and never materialises on
+  // disk, so all that is staged is the shape `zip` walks: a link farm under the
+  // top-level name the importer expects (`workspace/`) plus the manifest. The
+  // staging root sits on the workspace volume — a hard link cannot cross a
+  // filesystem boundary, and the point of the farm is not copying the bytes.
+  // No path segment below carries request-derived data (the id is contained
+  // above, the rest is a UUID), which keeps the filesystem sinks clear.
+  const stagingDir = path.join(WORKSPACE, '.export-staging', crypto.randomUUID());
+  let cleanedUp = false;
+  const cleanupStaging = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    // Only the links go — the agent's own files are untouched by rmSync here.
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ }
+  };
   try {
-    // Copy workspace excluding sessions/ (conversation history, logs).
-    // copyDirRecursiveAsync carries an inline path-containment check; using it
+    // Excludes sessions/ (conversation history, container logs).
+    // linkDirRecursiveAsync carries an inline path-containment check; using it
     // for both files and directories keeps every fs sink behind that gate.
-    const workspaceDir = path.join(tmpDir, 'workspace');
-    await copyDirRecursiveAsync(agentDirPath, workspaceDir);
-    try { fs.rmSync(path.join(workspaceDir, 'sessions'), { recursive: true, force: true }); } catch { /* noop */ }
+    await linkDirRecursiveAsync(agentDirPath, path.join(stagingDir, 'workspace'), new Set(['sessions']));
 
     // Agent-specific env vars (sensitive Matrix creds are excluded)
     const envVars = { AGENT_ID: id };
     if (cfg.modelOverride) envVars.AGENT_DEFAULT_MODEL = cfg.modelOverride;
 
-    fs.writeFileSync(path.join(tmpDir, 'manifest.json'), JSON.stringify({
+    await fs.promises.writeFile(path.join(stagingDir, 'manifest.json'), JSON.stringify({
       version: '1',
       exportedAt: new Date().toISOString(),
       agentId: id,
@@ -3114,27 +3172,47 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
       envVars,
     }, null, 2));
 
-    // -q: no per-file listing (see archive.js).
-    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, '.'], { cwd: tmpDir });
-    if (zipResult.code !== 0) {
-      throw new Error(describeArchiveFailure('zip', zipResult));
-    }
+    // `-` as the archive name makes zip write to stdout; -q keeps the per-file
+    // listing out of it (see archive.js).
+    const { child, done } = streamArchiveTool('zip', ['-r', '-q', '-', '.'], { cwd: stagingDir });
 
-    const stat = fs.statSync(zipPath);
     res.setHeader('Content-Disposition', `attachment; filename="agent-${id}-export.zip"`);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Length', stat.size);
-    const stream = fs.createReadStream(zipPath);
-    stream.on('close', () => {
-      try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+    // No Content-Length: the size isn't known until the archive is finished,
+    // and waiting for that is exactly what this route no longer does.
+
+    // `end: false` keeps the decision to terminate the response here rather
+    // than with the pipe: a response ended by zip's stdout closing would look
+    // complete to the client even when zip died mid-archive.
+    child.stdout.pipe(res, { end: false });
+
+    // Client cancelled the download — stop archiving instead of building the
+    // rest of a ZIP nobody is reading.
+    let clientGone = false;
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
+      child.kill('SIGKILL');
     });
-    stream.pipe(res);
+
+    const zipResult = await done;
+    cleanupStaging();
+    if (clientGone) {
+      console.log(`[API] Export of ${id} cancelled by the client`);
+    } else if (zipResult.code === 0) {
+      res.end();
+    } else {
+      console.error(`[API] Export failed for ${id}: ${describeArchiveFailure('zip', zipResult)}`);
+      // Headers are long gone, so there is no status left to send: destroy the
+      // response so the client sees a truncated download rather than a
+      // silently corrupt ZIP.
+      res.destroy();
+    }
   } catch (err) {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
-    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    cleanupStaging();
     console.error(`[API] Export failed for ${id}: ${err.message}`);
-    res.status(500).json({ error: `Export failed: ${err.message}` });
+    if (res.headersSent) res.destroy();
+    else res.status(500).json({ error: `Export failed: ${err.message}` });
   }
 });
 
@@ -15671,7 +15749,26 @@ function backfillSkillManifests() {
   if (stamped > 0) console.log(`[Admin] Skill manifest backfill stamped ${stamped} skill(s)`);
 }
 
+// A crash mid-export leaves its link farm behind, and hard links keep the
+// linked file contents alive even after the agent rewrites or deletes them —
+// a leaked farm pins real disk, not just inodes. Nothing reads the staging
+// root between requests, so anything found at startup is a leftover.
+function sweepExportStaging() {
+  const stagingRoot = path.join(WORKSPACE, '.export-staging');
+  let swept = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(stagingRoot); } catch { return; }
+  for (const entry of entries) {
+    try {
+      fs.rmSync(path.join(stagingRoot, entry), { recursive: true, force: true });
+      swept++;
+    } catch { /* noop */ }
+  }
+  if (swept > 0) console.log(`[Admin] Swept ${swept} leftover export staging dir(s)`);
+}
+
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
+  try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
 });

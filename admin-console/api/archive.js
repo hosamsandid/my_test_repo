@@ -62,6 +62,51 @@ function runArchiveTool(cmd, args, opts = {}) {
 }
 
 /**
+ * Sibling of runArchiveTool for the streaming case: stdout stays a readable
+ * stream instead of being discarded, so an archive can be piped straight into
+ * an HTTP response without ever landing on disk. `zip` writes to stdout when
+ * the archive name is `-`.
+ *
+ * stderr is captured exactly as above. The caller pipes `child.stdout` and
+ * awaits `done` to learn whether the archive is complete — a non-zero exit
+ * after the first byte means the response must be destroyed, not finished, so
+ * the client sees a truncated download instead of a silently corrupt ZIP.
+ *
+ * Throws only if spawn fails synchronously (bad options); a missing executable
+ * arrives as an `error` event and resolves `done` like runArchiveTool does.
+ *
+ * @returns {{child: import('child_process').ChildProcess,
+ *            done: Promise<{code: number|null, signal: string|null, stderr: string}>}}
+ */
+function streamArchiveTool(cmd, args, opts = {}) {
+  const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    if (stderr.length < MAX_STDERR) stderr += chunk;
+  });
+  const done = new Promise((resolve) => {
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    child.on('error', (err) => {
+      settle({ code: null, signal: null, stderr: `could not run ${cmd}: ${err.message}` });
+    });
+    child.on('close', (code, signal) => {
+      settle({
+        code,
+        signal,
+        stderr: signal && !stderr.trim() ? `killed by ${signal}` : stderr.trim(),
+      });
+    });
+  });
+  return { child, done };
+}
+
+/**
  * One-line description of a failed run, for logs and error responses.
  * @param {string} cmd
  * @param {{code: number|null, signal: string|null, stderr: string}} result
@@ -72,4 +117,4 @@ function describeArchiveFailure(cmd, result) {
   return `${cmd} exited ${result.code}${sig}${err}`;
 }
 
-module.exports = { runArchiveTool, describeArchiveFailure, MAX_STDERR };
+module.exports = { runArchiveTool, streamArchiveTool, describeArchiveFailure, MAX_STDERR };

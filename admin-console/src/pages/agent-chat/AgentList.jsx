@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, GripVertical } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
+import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 
 const COLLAPSED_KEY = 'agentChat.collapsedGroups';
 const ORDER_KEY = 'agentChat.sidebarOrder';
@@ -371,6 +372,8 @@ export default function AgentList({
               onSelect={() => onSelect(agent.id)}
               onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(agent.id) : null}
               activityState={statuses[agent.id] || 'idle'}
+              // Ungrouped: no header to hoist the environment to (#1451).
+              environmentName={rowEnvironmentName(agent)}
               onMoveUp={canReorder && i > 0 ? () => moveSingle(agent, -1) : null}
               onMoveDown={canReorder && i < visibleSingles.length - 1 ? () => moveSingle(agent, 1) : null}
               drag={drag}
@@ -417,6 +420,9 @@ function GroupSection({
   const count = group.children.length + (group.header ? 1 : 0);
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = canReorderMembers && group.children.length > 1;
+  // The Working Environment shared by this group's rows is shown once, on the
+  // header; rows that inherit it drop their own line (#1451).
+  const groupEnv = groupEnvironmentName(group);
   return (
     <>
       <CollapsibleHeader
@@ -424,6 +430,7 @@ function GroupSection({
         icon={Icon}
         subtle={!group.header}
         count={count}
+        environmentName={groupEnv}
         collapsed={collapsed}
         onToggle={onToggle}
         onMoveUp={onMoveUp}
@@ -440,6 +447,7 @@ function GroupSection({
           onSelect={() => onSelect(group.header.id)}
           onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(group.header.id) : null}
           activityState={statuses[group.header.id] || 'idle'}
+          environmentName={rowEnvironmentName(group.header, groupEnv)}
         />
       )}
       {!collapsed && group.children.map((agent, ci) => (
@@ -450,6 +458,7 @@ function GroupSection({
           onSelect={() => onSelect(agent.id)}
           onMarkAsUnread={onMarkAsUnread ? () => onMarkAsUnread(agent.id) : null}
           activityState={statuses[agent.id] || 'idle'}
+          environmentName={rowEnvironmentName(agent, groupEnv)}
           indent
           onMoveUp={canReorderMembers && onMoveMember && ci > 0 ? () => onMoveMember(group, agent, -1) : null}
           onMoveDown={canReorderMembers && onMoveMember && ci < group.children.length - 1 ? () => onMoveMember(group, agent, 1) : null}
@@ -463,7 +472,7 @@ function GroupSection({
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onToggle, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, onToggle, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
   const [hovered, setHovered] = useState(false);
   const canMove = onMoveUp || onMoveDown;
 
@@ -512,8 +521,36 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, collapsed, onTogg
         ? <ChevronRight size={12} style={{ flexShrink: 0 }} />
         : <ChevronDown  size={12} style={{ flexShrink: 0 }} />}
       {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {label}
+      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        {/*
+         * The group's shared Working Environment — shown once here instead of on
+         * every member row (#1451). `textTransform`/`letterSpacing` are reset so
+         * the env name reads as itself, not as an uppercase section label.
+         */}
+        {environmentName && (
+          <span
+            title={environmentName}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              maxWidth: '100%',
+              fontWeight: 'var(--eb-font-normal)',
+              textTransform: 'none',
+              letterSpacing: 0,
+              color: 'var(--eb-text-muted)',
+              overflow: 'hidden',
+            }}
+          >
+            <Server size={10} style={{ flexShrink: 0 }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {environmentName}
+            </span>
+          </span>
+        )}
       </span>
       {/*
        * Trailing cluster order (left→right): grip → persistent count. The grip
@@ -584,7 +621,12 @@ const STATUS_DOT = {
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
 
-function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', indent = false, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
+/**
+ * One agent row. `environmentName` is resolved by the caller (agent-list-env.js)
+ * rather than read off `agent`: inside a group the shared env lives on the
+ * header, so an inheriting row is passed `null` and renders single-line (#1451).
+ */
+function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', environmentName = null, indent = false, onMoveUp, onMoveDown, drag, dragScope, dragKey, dragEnabled }) {
   const Icon = iconForRole(agent.role);
   const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
   const [hovered, setHovered] = useState(false);
@@ -654,9 +696,9 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
         >
           {agent.displayName || agent.id}
         </div>
-        {agent.environmentName && (
+        {environmentName && (
           <div
-            title={agent.environmentName}
+            title={environmentName}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -672,7 +714,7 @@ function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = '
           >
             <Server size={10} style={{ flexShrink: 0 }} />
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {agent.environmentName}
+              {environmentName}
             </span>
           </div>
         )}

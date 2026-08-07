@@ -11,6 +11,7 @@ import {
   helperSendKeys,
 } from './message-send-keybinding.js';
 import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
+import { decideComposerAction } from './composer-action.js';
 
 // OS-aware modifier idiom (shared with RightRail.jsx): Cmd on Mac, Ctrl else.
 const IS_MAC = isMacPlatform();
@@ -47,12 +48,24 @@ const IS_MAC = isMacPlatform();
  * @param {(files:FileList|File[])=>Promise<Array<{name:string,ref:string}>>} [onUpload]
  *        Uploads files and resolves to the uploaded descriptors (empty on failure).
  * @param {boolean} [uploading]          true while an upload is in flight
- * @param {()=>void} [onLoopClick]        Launch a loop (or stop the running one).
- *        When provided, a loop control renders immediately left of the mic.
+ * Unified Stop control (#1427): while the selected agent is busy on a
+ * chat-initiated turn *or* a launched loop (`busy`), the primary-action button
+ * switches from Send to a single Stop (⏹) control in the same position, and
+ * `onStop` aborts whatever is running. There is exactly one stop affordance in
+ * the composer — the loop control below is a launcher only, never a second Stop.
+ *
+ * @param {()=>void} [onLoopClick]        Launch a loop. When provided, a loop
+ *        control renders immediately left of the mic (launch-only — stopping a
+ *        running loop is handled by the unified Stop button, see `onStop`).
  * @param {boolean} [loopRunning]         true while a chat-launched loop runs
  * @param {boolean} [loopBusy]            true while a loop launch/stop is in flight
  * @param {?object} [loopTrigger]         the running launched-loop trigger (full config)
  * @param {?object} [loopProgress]        `{ iteration, maxIterations|null }` or null
+ * @param {boolean} [busy]                true while a chat turn or loop is running
+ *        for this agent — flips the primary action from Send to Stop.
+ * @param {()=>void} [onStop]             Abort whatever is running (turn or loop).
+ * @param {boolean} [stopBusy]            true while a stop request is in flight
+ *        (disables the Stop button so a double-press can't fire two aborts).
  * @param {()=>void} [onStartMeeting]      Start a persistent meeting transcription (#1296)
  *        for this agent. When provided, a chevron next to the mic opens a
  *        "Record meeting" menu; quick dictation stays the plain mic tap.
@@ -60,7 +73,7 @@ const IS_MAC = isMacPlatform();
  *        anywhere in the app — disables both quick dictation and starting a
  *        second meeting (one mic use at a time).
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, onStartMeeting, meetingActive = false }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -228,10 +241,23 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     : null;
 
   const canAttach = !!onUpload && !disabled && !uploading;
-  // The loop control stays clickable even while the composer is disabled IF a
-  // loop is running — so a launched loop can always be stopped (#1020 AC5).
-  // Launching, by contrast, follows the composer's disabled state.
-  const canLoop = !!onLoopClick && !loopBusy && (loopRunning || !disabled);
+  // The loop control is a launcher only (#1427): stopping a running loop moves
+  // to the unified Stop button in the primary-action position, so the loop
+  // button is disabled whenever the agent is already busy (a turn or a loop is
+  // running) or the composer is disabled — you can't launch a second loop.
+  const canLoop = !!onLoopClick && !loopBusy && !busy && !disabled;
+
+  // Primary-action button: Send when idle, a single unified Stop while the
+  // agent is busy on a turn or loop (#1427). Decision is the pure
+  // `decideComposerAction` so it stays unit-testable.
+  const primary = decideComposerAction({
+    busy,
+    canStop: !!onStop,
+    hasText: !!value.trim(),
+    disabled,
+    stopBusy,
+  });
+  const showStop = primary.mode === 'stop';
 
   return (
     <div style={{
@@ -240,7 +266,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       background: 'var(--eb-bg-surface)',
       flexShrink: 0,
     }}>
-      {(voiceState === 'recording' || loopRunning) && (
+      {(voiceState === 'recording' || loopRunning || showStop) && (
         <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }'}</style>
       )}
       {/* Running-loop transparency (#1155): a collapsed summary the user can
@@ -349,27 +375,26 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           <button
             onClick={() => canLoop && onLoopClick()}
             disabled={!canLoop}
-            aria-label={loopRunning ? 'Stop the running loop' : 'Start a loop'}
-            title={loopRunning ? 'Stop the running loop' : 'Start a loop — run this agent until the goal is met'}
+            aria-label="Start a loop"
+            title={loopRunning
+              ? 'A loop is running — use Stop to end it'
+              : busy
+                ? 'Agent is busy — wait for the turn to finish'
+                : 'Start a loop — run this agent until the goal is met'}
             style={{
               width: 32, height: 32,
-              background: loopRunning ? 'var(--eb-status-warning-bg, #fffbeb)' : 'transparent',
-              color: loopRunning
-                ? 'var(--eb-status-warning, #b45309)'
-                : canLoop ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+              background: 'transparent',
+              color: canLoop ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
               border: 'none',
               borderRadius: 'var(--eb-radius-md)',
               cursor: canLoop ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               flexShrink: 0,
-              animation: loopRunning ? 'stt-pulse 1.6s ease-in-out infinite' : 'none',
             }}
           >
             {loopBusy
               ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
-              : loopRunning
-                ? <Square size={13} />
-                : <Repeat size={15} />}
+              : <Repeat size={15} />}
           </button>
         )}
         <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
@@ -483,23 +508,34 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           </div>
         </div>
         <button
-          onClick={submit}
-          disabled={disabled || !value.trim()}
-          aria-label="Send message"
-          title={sendKeybinding === 'chat' ? 'Send (Enter)' : 'Send (Cmd/Ctrl + Enter)'}
+          onClick={showStop ? (() => primary.enabled && onStop?.()) : submit}
+          disabled={!primary.enabled}
+          aria-label={showStop ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn') : 'Send message'}
+          title={showStop
+            ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn')
+            : (sendKeybinding === 'chat' ? 'Send (Enter)' : 'Send (Cmd/Ctrl + Enter)')}
           style={{
             width: 32, height: 32,
-            background: (!value.trim() || disabled) ? 'var(--eb-bg-active)' : 'var(--eb-accent-primary)',
-            color: (!value.trim() || disabled) ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
+            background: showStop
+              ? 'var(--eb-status-error-bg, #fef2f2)'
+              : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
+            color: showStop
+              ? 'var(--eb-status-error-text, #dc2626)'
+              : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
             border: 'none',
             borderRadius: 'var(--eb-radius-md)',
-            cursor: (!value.trim() || disabled) ? 'not-allowed' : 'pointer',
+            cursor: primary.enabled ? 'pointer' : 'not-allowed',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             flexShrink: 0,
             transition: 'background var(--eb-transition-fast)',
+            animation: (showStop && primary.enabled) ? 'stt-pulse 1.6s ease-in-out infinite' : 'none',
           }}
         >
-          <Send size={14} />
+          {showStop
+            ? (stopBusy
+                ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                : <Square size={14} />)
+            : <Send size={14} />}
         </button>
       </div>
 

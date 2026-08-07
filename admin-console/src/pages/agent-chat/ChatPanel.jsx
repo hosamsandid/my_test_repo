@@ -143,6 +143,9 @@ export default function ChatPanel({
   const [loopProgress, setLoopProgress] = useState(null);
   const [loopBusy, setLoopBusy] = useState(false);
   const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
+  // A chat-turn stop request is in flight (#1427). Distinct from `loopBusy`
+  // (loop lifecycle) so the unified Stop button reflects either abort path.
+  const [stopping, setStopping] = useState(false);
 
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
@@ -876,6 +879,39 @@ export default function ChatPanel({
     }
   }
 
+  // Unified composer Stop (#1427): abort whatever is running for this agent.
+  // A running loop is the more consequential state (repeated autonomous runs),
+  // so it keeps its confirmation dialog; a single chat turn stops immediately,
+  // matching the instant Stop of VS Code / Cursor / the Claude Code CLI.
+  function handleStop() {
+    if (activeLoop) { setShowStopLoopConfirm(true); return; }
+    handleStopTurn();
+  }
+
+  // Stop the in-flight chat turn by reusing the existing session-stop path
+  // (SIGUSR1 → terminate the Claude process — same endpoint the Sessions tab
+  // uses). Optimistically end the local thinking state and drop a distinct
+  // "Stopped by user" marker into the transcript (AC4); the runtime also posts
+  // its own abort notice, which arrives over SSE.
+  async function handleStopTurn() {
+    if (!agent?.id || !roomId) return;
+    setStopping(true);
+    setError(null);
+    try {
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
+      setSending(false);
+      setMessages(prev => [...prev, {
+        event_id: `user-stop-${crypto.randomUUID()}`,
+        type: 'user-stop',
+        ts: Date.now(),
+      }]);
+    } catch (err) {
+      setError(`Stop failed: ${err.message}`);
+    } finally {
+      setStopping(false);
+    }
+  }
+
   async function handleSend(text) {
     if (!roomId) return;
     const body = text.trim();
@@ -981,10 +1017,14 @@ export default function ChatPanel({
   const showThinking =
     !!lastMsg &&
     lastMsg.type !== 'context-reset' &&
+    lastMsg.type !== 'user-stop' && // a user Stop ends the turn — no thinking
     lastMsg.sender !== agent.userId &&
     !lastMsg.isOptimistic && // already covered by sending state below
     !sending;
   const showSendingDots = sending;
+  // The agent is busy on something the unified composer Stop (#1427) can abort:
+  // a chat turn in flight (sending or waiting on the reply) or a running loop.
+  const agentBusy = showSendingDots || showThinking || !!activeLoop;
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
@@ -1385,6 +1425,9 @@ export default function ChatPanel({
           if (msg.type === 'context-reset') {
             return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
           }
+          if (msg.type === 'user-stop') {
+            return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
+          }
           const cid = correlationByEvent.get(msg.event_id) || null;
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
           return (
@@ -1449,6 +1492,9 @@ export default function ChatPanel({
         loopBusy={loopBusy}
         loopTrigger={activeLoop}
         loopProgress={loopProgress}
+        busy={agentBusy}
+        onStop={handleStop}
+        stopBusy={stopping || loopBusy}
         onStartMeeting={transcription ? () => transcription.startSession({ agentId: agent.id, agentName: agent.displayName || agent.id }) : undefined}
         meetingActive={!!transcription?.active}
       />
@@ -1770,6 +1816,41 @@ function ContextResetSeparator({ ts }) {
         ↺ New Context{label ? ` · ${label}` : ''}
       </span>
       <div style={{ flex: 1, height: 1, background: 'var(--eb-status-warning)' }} />
+    </div>
+  );
+}
+
+// A distinct "Stopped by user" transcript marker (#1427 AC4): rendered when the
+// operator aborts a running turn from the composer's unified Stop control, so
+// the stop is visibly different from a natural end-of-turn. Danger-toned to
+// mirror the Stop button; injected optimistically on Stop (the runtime also
+// posts its own abort notice over SSE).
+function UserStopSeparator({ ts }) {
+  const label = ts
+    ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 'var(--eb-space-3)',
+      margin: 'var(--eb-space-2) 0',
+      userSelect: 'none',
+    }}>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+      <span style={{
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-status-error-text, #dc2626)',
+        fontWeight: 'var(--eb-font-medium)',
+        whiteSpace: 'nowrap',
+        padding: '2px var(--eb-space-2)',
+        border: '1px solid var(--eb-status-error-text, #dc2626)',
+        borderRadius: 'var(--eb-radius-sm)',
+        background: 'var(--eb-status-error-bg, #fef2f2)',
+      }}>
+        ⏹ Stopped by user{label ? ` · ${label}` : ''}
+      </span>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
     </div>
   );
 }

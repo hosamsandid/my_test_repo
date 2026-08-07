@@ -273,3 +273,26 @@ test('the shipped podman-sandbox manifest (plugins/podman-sandbox) is valid', ()
   assert.equal(manifest.quota.maxObjects >= 1, true);
   assert.equal(manifest.cli.name, 'aee-podman');
 });
+
+// ── ACCEPTANCE: the shipped plugin #2 manifest validates end to end ──────────
+test('the shipped test-mgmt manifest (plugins/test-mgmt) is valid', () => {
+  const p = path.join(__dirname, '..', '..', 'plugins', 'test-mgmt', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // Like the sandbox, it declares agent as the §10 per-manifest default.
+  assert.equal(defaultGranularity(manifest), 'agent');
+  assert.deepEqual(manifest.scopes, ['team', 'agent']);
+  assert.equal(manifest.cli.name, 'aee-test');
+  // Phase-5 firsts exercised through the real validator on the real file:
+  // (1) authorisation-by-granularity — the per-subcommand `policy` field.
+  assert.equal(manifest.policy['create-case'].requiresFlowFinal, true);
+  assert.deepEqual(manifest.policy['create-case'].scopes, ['agent']);
+  assert.deepEqual(manifest.policy['data-delete'].scopes, ['agent']);
+  // (2) the UI-extension surface — `ui.routes[].minRole` reserved contract.
+  assert.equal(manifest.ui.routes.length >= 1, true);
+  assert.ok(manifest.ui.routes.every((r) => typeof r.minRole === 'string' && r.path.startsWith('/')));
+  const adminRoute = manifest.ui.routes.find((r) => r.path === '/admin');
+  assert.equal(adminRoute && adminRoute.minRole, 'team-admin');
+});

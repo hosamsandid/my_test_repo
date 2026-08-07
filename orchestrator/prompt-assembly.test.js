@@ -602,3 +602,24 @@ test('relocated sections are non-empty constants', () => {
   assert.ok(TRIGGER_SECTION.startsWith('## Trigger management'));
   assert.ok(WORKSPACE_SECTION.startsWith('## Workspace'));
 });
+
+// ---- Plugin Capabilities section (#1518) ----------------------------------
+
+test('a non-empty plugin grant injects a Plugin Capabilities section after Skills', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    skills: ['s1'], skillDescriptions: { s1: 'a skill' },
+    plugins: [{ id: 'dummy-echo', name: 'Dummy Echo', cliName: 'aee-echo', promptLine: 'Echo with `aee-echo`.' }],
+  });
+  const hs = headings(md);
+  assert.ok(hs.includes('Plugin Capabilities'), 'section present');
+  // Ordered right after Skills.
+  assert.equal(hs.indexOf('Plugin Capabilities'), hs.indexOf('Skills') + 1);
+  assert.match(md, /Echo with `aee-echo`\./);
+});
+
+test('an empty plugin grant never mentions plugins (gate parity with Skills)', () => {
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(!headings(md).includes('Plugin Capabilities'));
+  assert.ok(!/Plugin Capabilities/.test(md));
+});

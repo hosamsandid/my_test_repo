@@ -547,7 +547,7 @@ before it moves from catalog to roadmap.
 
 ## 9. Rollout
 
-- **Phase 1 — core machinery**: manifest schema + registry + sidecar
+- **Phase 1 — core machinery** *(shipped — #1532)*: manifest schema + registry + sidecar
   lifecycle + scope-token module (**both granularities from the start** — the
   token payload and ownership labels are the same code either way; retrofitting
   agent scoping later would be a data migration) + grant-driven network

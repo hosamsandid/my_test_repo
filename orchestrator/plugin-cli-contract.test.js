@@ -180,3 +180,89 @@ test('aee-podman: compose up with an unreadable file → exit 2 (usage), never a
   const obj = JSON.parse(r.stdout.trim());
   assert.equal(obj.error, 'usage');
 });
+
+// ─── plugin #2: aee-test (Phase 5, #1521) ────────────────────────────────────
+// The same §4.5 contract against the real `aee-test` CLI. Broker-free: `whoami`
+// reads only the seeded config; every broker-touching verb points at an
+// unroutable endpoint so a call attempt deterministically returns exit 3 rather
+// than depending on a live sidecar. `create-case`'s per-scope POLICY (flow-final
+// agent only) is enforced by the broker (broker-sdk/authz.js), not the CLI — the
+// CLI is a privilege-less client — so it is unit-tested there, not here.
+const TEST_CLI = path.join(__dirname, '..', 'plugins', 'test-mgmt', 'bin', 'aee-test.py');
+
+function runTest(args, workspace) {
+  return spawnSync('python3', [TEST_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedTestWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-test-'));
+  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'test-mgmt', scopeId: 't1',
+    endpoint: endpoint || 'http://127.0.0.1:59372/',   // reserved, unroutable
+    token: 'test-mgmt.t1.SIG', cliName: 'aee-test',
+  });
+  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'test-mgmt.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-test is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(TEST_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'time', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-test: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runTest([], grantedTestWorkspace()).status, 2);
+  const help = runTest(['--help'], grantedTestWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /create-case/);
+  assert.match(help.stdout, /trigger/);
+});
+
+test('aee-test: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runTest(['frobnicate'], grantedTestWorkspace()).status, 2);
+});
+
+test('aee-test: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runTest(['whoami', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 't1');
+});
+
+test('aee-test: ungranted → exit 3 with not-granted error', () => {
+  const r = runTest(['trigger', '--plan', 'REGRESSION', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-test: a granted verb against an unreachable broker → exit 3', () => {
+  const r = runTest(['create-case', '--title', 'x', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-test: trigger without --plan/--suite → exit 2 (usage), never a broker call', () => {
+  const r = runTest(['trigger', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-test: data with no subcommand → exit 2 (usage)', () => {
+  assert.equal(runTest(['data'], grantedTestWorkspace()).status, 2);
+});

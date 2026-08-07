@@ -1,0 +1,40 @@
+{
+  "pluginVersion": 1,
+  "id": "test-mgmt",
+  "name": "Test Management",
+  "description": "Plugin #2 (epic #1516, Phase 5): lets a granted agent create test cases, trigger test runs (submit→poll) and manage test data in an external test-management system (Xray/Zephyr/qTest) through a credential-holding broker sidecar. Built on the Broker SDK — the proof that a credential-backed broker is thin: the vendor API token lives ONLY in the sidecar (never reaching the agent, which is why this is a plugin and not a skill), the broker narrows which actions a caller may run per scope, and per-scope resource ownership keeps one team's test artifacts invisible to another's. It is the first plugin to use scope granularity for AUTHORISATION, not just isolation — see `policy` below. Agents drive it with the dependency-free `aee-test` CLI (e.g. `aee-test trigger --plan REGRESSION --wait`).",
+  "sidecar": {
+    "image": "localhost/aee-plugin-test-mgmt:latest",
+    "capabilities": ["egress"],
+    "internalPort": 4005
+  },
+  "cli": {
+    "name": "aee-test",
+    "entrypoint": "bin/aee-test.py",
+    "runtime": "python3"
+  },
+  "credentials": [
+    { "key": "api-token", "description": "Test-management system API token (held only by the broker)", "required": true }
+  ],
+  "platforms": ["any"],
+  "scopes": ["team", "agent"],
+  "defaultScopeGranularity": "agent",
+  "quota": {
+    "maxObjects": 500,
+    "ttlSeconds": 604800
+  },
+  "requiresApproval": ["data-delete"],
+  "policy": {
+    "create-case": { "scopes": ["agent"], "requiresFlowFinal": true },
+    "data-delete": { "scopes": ["agent"] }
+  },
+  "ui": {
+    "title": "Test Management",
+    "routes": [
+      { "path": "/", "minRole": "team-member" },
+      { "path": "/runs", "minRole": "team-member" },
+      { "path": "/admin", "minRole": "team-admin" }
+    ]
+  },
+  "promptLine": "You can create test cases, trigger test runs and manage test data in the team's test-management system with `aee-test` — run `aee-test --help`. The broker holds the vendor credential and enforces per-scope policy: creating test cases is restricted to the final agent in the flow once its cross-checks have passed, and destructive test-data operations wait for a human's confirmation."
+}

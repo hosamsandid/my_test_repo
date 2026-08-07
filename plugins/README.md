@@ -54,3 +54,16 @@ their own compose stacks with the `aee-podman` CLI (`aee-podman compose up -f
 compose.yml`); the broker holds the libpod socket and scopes every container to
 the caller. Declares `defaultScopeGranularity: "agent"` (the §10 decision) and a
 per-scope `quota`. See `podman-sandbox/README.md`.
+
+## `test-mgmt` (plugin #2)
+
+Test management (Phase 5, #1521): a granted agent creates test cases, triggers
+test runs (submit→poll) and manages test data in an external test-management
+system (Xray/Zephyr/qTest) with the `aee-test` CLI. Its broker
+(`../test-mgmt-broker/`) is built on the Broker SDK (`../broker-sdk/`) — the
+proof a credential-backed broker is thin: the vendor token lives only in the
+sidecar. It is the first plugin to use scope granularity for **authorisation**,
+not just isolation (manifest `policy`: create-case is restricted to the
+flow-final agent whose cross-checks passed) and the first real
+`requiresApproval` flow (destructive `data-delete` waits for human confirm). See
+`test-mgmt/README.md`.

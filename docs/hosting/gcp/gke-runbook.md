@@ -198,30 +198,19 @@ curl -s "http://localhost:28449/_matrix/client/v3/directory/room/%23admins%3Aloc
 Update `CONDUWUIT_ADMIN_ROOM` in the env file, re-run `gke-up.sh` (or patch
 the Secret + restart both deployments, §3.6).
 
-### 3.5 Team-creation retry loop: `Cannot extend: team … does not exist yet`, then `M_USER_DEACTIVATED`
+### 3.5 Team-creation retry loop (historical — fixed)
 
-Known bug pair in the team-creation rollback (see the issues *"team-creation
-rollback leaves /workspace/agents dirs"* and *"team-creation rollback
-deactivates Matrix users"*):
-
-- the rollback can leave workspace directories under `/workspace/agents/`,
-  which flips the wizard into extend mode on retry (`Cannot extend: team …
-  does not exist yet`);
-- the rollback **deactivates** the members' Matrix users, and conduwuit
-  deactivation is permanent — any retry re-creating the same user ids fails
-  `M_USER_DEACTIVATED` forever.
-
-Workaround:
-
-```bash
-# remove leftover dirs (list first, then remove what matches your team id)
-kubectl -n <ns> exec deploy/orchestrator -- ls /workspace/agents/
-kubectl -n <ns> exec deploy/orchestrator -- sh -c \
-  "rm -rf /workspace/agents/<teamId> /workspace/agents/<teamId>-*"
-```
-
-…and retry with a **new team id** (the deactivated Matrix localparts are
-burned).
+> **Historical note.** Both halves of this bug pair are now fixed; a same-id
+> `create` retry after a failed team creation recovers on its own — no
+> `kubectl exec` / `rm -rf` and no new team id needed.
+>
+> - The leftover-directory deadlock (`Cannot extend: team … does not exist
+>   yet`) is fixed in *#1525*: a config-less / provisioning-stub dir under
+>   `/workspace/agents/` is now classified as an adoptable orphan (cleaned up
+>   and recreated) instead of a collision, and the rollback hardens the
+>   directory removal + reports any cleanup it could not complete.
+> - The `M_USER_DEACTIVATED` half is fixed in *#1390* (#1413): same-id retries
+>   recover from a deactivated Matrix localpart.
 
 ### 3.6 Chat error: `admin join failed`
 

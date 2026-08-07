@@ -69,6 +69,7 @@ const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
+const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -11730,30 +11731,65 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     : null;
   const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
   const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
-  const existingMembers = planned
-    .filter(p => {
-      const memberDir = path.resolve(teamsAgentsRoot, p.memberId);
-      const memberRel = path.relative(teamsAgentsRoot, memberDir);
-      if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) return false;
-      return fs.existsSync(memberDir);
-    })
-    .map(p => p.memberId);
+  // Read each planned member's config so residue classification is symmetric
+  // with `teamExists` — a bare directory must never outrank a readable config
+  // (#1525). Containment via path.resolve + path.relative is the CodeQL barrier.
+  const memberEntries = planned.map(p => {
+    const memberDir = path.resolve(teamsAgentsRoot, p.memberId);
+    const memberRel = path.relative(teamsAgentsRoot, memberDir);
+    if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
+      return { memberId: p.memberId, exists: false, config: null };
+    }
+    const exists = fs.existsSync(memberDir);
+    return {
+      memberId: p.memberId,
+      exists,
+      config: exists ? readJsonFile(path.join(memberDir, 'config.json'), null) : null,
+    };
+  });
+  const residue = classifyMemberResidue(memberEntries, teamId);
+  const { existingMembers } = residue;
 
-  if (teamIdTakenByOther) {
+  // One shared decision with the streaming handler (#1525) — a config-less /
+  // provisioning-stub leftover is an adoptable orphan, not a collision.
+  const decision = decideTeamCreate({ mode, teamExists, teamIdTakenByOther, residue });
+  if (decision.type === 'conflict-team') {
     return res.status(409).json({
       error: `Cannot use teamId '${teamId}': an agent with this id already exists ` +
         `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
         `the existing agent first.`,
     });
   }
+  if (decision.type === 'conflict-members') {
+    const list = decision.members.map(m => `${m.memberId} (role '${m.role}')`).join(', ');
+    return res.status(409).json({
+      error: `Cannot create team '${teamId}': the id(s) ${list} already belong to ` +
+        `unrelated agent(s). Pick a different teamId or delete the existing agent(s) first.`,
+    });
+  }
+  if (decision.type === 'extend-missing-team') {
+    return res.status(409).json({
+      error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
+    });
+  }
+  if (decision.type === 'collision') {
+    // Real collision = an actual team or member exists. An env-only orphan and
+    // a config-less agent-dir orphan are both adopted (recovered) below.
+    return res.status(409).json({
+      error: 'Resources for this team already exist',
+      existing: {
+        env: envExists ? envId : null,
+        team: teamExists ? teamAgentId : null,
+        members: decision.existingMembers,
+      },
+      suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+    });
+  }
 
+  // decision.type === 'proceed' — leftover orphan dirs to clean before create.
+  const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
-    if (!teamExists) {
-      return res.status(409).json({
-        error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
-      });
-    }
     // Enforce suffix consistency: added roles must use the stored suffix.
     const storedSuffix = existingTeamCfg.labelSuffix || '';
     if (labelSuffix !== storedSuffix) {
@@ -11773,22 +11809,6 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       });
     }
   } else {
-    // Real collision = team or members exist. An env-only orphan is a
-    // recoverable left-over from a prior aborted run (or an out-of-band
-    // delete that didn't reap the env); silently reuse/overwrite it
-    // instead of stranding the caller — same recovery the streaming
-    // endpoint applies, kept in parity here.
-    if (teamExists || existingMembers.length) {
-      return res.status(409).json({
-        error: 'Resources for this team already exist',
-        existing: {
-          env: envExists ? envId : null,
-          team: teamExists ? teamAgentId : null,
-          members: existingMembers,
-        },
-        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
-      });
-    }
     toCreate = planned;
   }
   // Never overwrite a deliberately reused environment — only adopt an orphan
@@ -11822,21 +11842,32 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const created = { env: null, team: null, members: [], dms: [] };
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
+  // A rollback that could not delete something must be loud (#1525 AC3):
+  // record the failed cleanup (with the leftover id) into `rollbackWarnings`
+  // so the caller learns about residue instead of being told all was well.
+  const rollbackWarnings = [];
+  const rollbackDelete = async (id, kind) => {
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        const detail = data.error || `HTTP ${resp.status}`;
+        console.error(`[Team] Rollback: failed to delete ${kind} ${id}: ${detail}`);
+        rollbackWarnings.push({ id, kind, error: detail });
+      }
+    } catch (err) {
+      console.error(`[Team] Rollback: failed to delete ${kind} ${id}: ${err.message}`);
+      rollbackWarnings.push({ id, kind, error: err.message });
+    }
+  };
+
   const rollback = async (reason) => {
     console.warn(`[Team] Rolling back ${teamId}: ${reason}`);
     for (const memberId of [...created.members].reverse()) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team] Rollback: failed to delete member ${memberId}: ${err.message}`);
-      }
+      await rollbackDelete(memberId, 'member');
     }
     if (created.team) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team] Rollback: failed to delete team ${created.team}: ${err.message}`);
-      }
+      await rollbackDelete(created.team, 'team');
     }
     if (created.env) {
       try {
@@ -11854,6 +11885,18 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   };
 
   try {
+    // Phase 0 — adopt orphans. Config-less / provisioning-stub leftover dirs
+    // from a prior aborted create are deleted through the audited agent-delete
+    // choke-point so a same-id retry starts clean (#1525). Not tracked in the
+    // rollback set — they were garbage before this request.
+    for (const orphanId of orphansToClean) {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(orphanId)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(`Cleanup of leftover '${orphanId}': ${data.error || `HTTP ${resp.status}`}`);
+      }
+    }
+
     // Phase A — single shared environment: pure infrastructure (repo, SSH
     // key, PAT, MCP). Skills are team-owned and live on the team agent below.
     if (!envExists || adoptOrphanEnv) {
@@ -12007,7 +12050,11 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       .catch(err => console.warn(`[Team] Label provisioning error for ${teamId}: ${err.message}`));
   } catch (err) {
     await rollback(err.message);
-    res.status(500).json({ error: `Team creation failed: ${err.message}` });
+    res.status(500).json({
+      error: `Team creation failed: ${err.message}`,
+      // A partial rollback is worse when silent (#1525 AC3): name the leftovers.
+      ...(rollbackWarnings.length ? { rollbackWarnings } : {}),
+    });
   }
 });
 
@@ -12268,30 +12315,66 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     : null;
   const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
   const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
-  const existingMembers = planned
-    .filter((p) => {
-      const memberPath = path.resolve(agentsRoot, p.memberId);
-      const memberRel = path.relative(agentsRoot, memberPath);
-      if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
-        fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
-        return false;
-      }
-      return fs.existsSync(memberPath);
-    })
-    .map(p => p.memberId);
+  // Read each planned member's config so residue classification is symmetric
+  // with `teamExists` — a bare directory must never outrank a readable config
+  // (#1525). The path.resolve + path.relative containment is the CodeQL-
+  // recognised js/path-injection barrier for the id-derived config read.
+  const memberEntries = [];
+  for (const p of planned) {
+    const memberPath = path.resolve(agentsRoot, p.memberId);
+    const memberRel = path.relative(agentsRoot, memberPath);
+    if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
+      return fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
+    }
+    const exists = fs.existsSync(memberPath);
+    memberEntries.push({
+      memberId: p.memberId,
+      exists,
+      config: exists ? readJsonFile(path.join(memberPath, 'config.json'), null) : null,
+    });
+  }
+  const residue = classifyMemberResidue(memberEntries, teamId);
+  const { existingMembers } = residue;
 
-  if (teamIdTakenByOther) {
+  // One shared decision (with the non-streaming handler) — a config-less /
+  // provisioning-stub leftover is an adoptable orphan, not a collision, so a
+  // partial rollback can never deadlock a same-id retry into extend mode.
+  const decision = decideTeamCreate({ mode, teamExists, teamIdTakenByOther, residue });
+  if (decision.type === 'conflict-team') {
     return fail(409,
       `Cannot use teamId '${teamId}': an agent with this id already exists ` +
       `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
       `the existing agent first.`);
   }
+  if (decision.type === 'conflict-members') {
+    const list = decision.members.map(m => `${m.memberId} (role '${m.role}')`).join(', ');
+    return fail(409,
+      `Cannot create team '${teamId}': the id(s) ${list} already belong to ` +
+      `unrelated agent(s). Pick a different teamId or delete the existing agent(s) first.`);
+  }
+  if (decision.type === 'extend-missing-team') {
+    return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
+  }
+  if (decision.type === 'collision') {
+    // Real collision = a genuine team or member exists. An ENV-ONLY orphan is
+    // a different beast (adopted below); a config-less agent-dir orphan is now
+    // adopted too, so this only fires for an actual working team.
+    emit({
+      type: 'collision',
+      existing: {
+        env: envExists ? envId : null,
+        team: teamExists ? teamAgentId : null,
+        members: decision.existingMembers,
+      },
+      suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+    });
+    return res.end();
+  }
 
+  // decision.type === 'proceed' — leftover orphan dirs to clean before create.
+  const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
-    if (!teamExists) {
-      return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
-    }
     // Enforce suffix consistency on extend — mirror the non-streaming handler.
     const storedSuffix = existingTeamCfg.labelSuffix || '';
     if (labelSuffix !== storedSuffix) {
@@ -12313,26 +12396,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       return res.end();
     }
   } else {
-    // Real collision = team or members already exist (the user actually
-    // has a working team to deal with). An ENV-ONLY orphan is a different
-    // beast: it's left over from a prior aborted create / out-of-band
-    // delete and there's no UI path to clean it up. Blocking mode:create
-    // on it strands the user (the original wizard freeze report). Recover
-    // by reusing/overwriting it instead — the user's freshly submitted
-    // settings win, and we adopt the env so rollback removes it cleanly
-    // if the rest of the create fails.
-    if (teamExists || existingMembers.length) {
-      emit({
-        type: 'collision',
-        existing: {
-          env: envExists ? envId : null,
-          team: teamExists ? teamAgentId : null,
-          members: existingMembers,
-        },
-        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
-      });
-      return res.end();
-    }
     toCreate = planned;
   }
 
@@ -12363,6 +12426,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // step as `pending` — gives the user the full progress shape, not a
   // tickertape that only reveals work as it happens.
   const plan = [];
+  if (orphansToClean.length) {
+    plan.push({ id: 'cleanup', label: `Clean up ${orphansToClean.length} leftover agent director${orphansToClean.length === 1 ? 'y' : 'ies'}` });
+  }
   if (!envExists || adoptOrphanEnv) {
     plan.push({
       id: 'env',
@@ -12383,21 +12449,37 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const created = { env: null, team: null, members: [], dms: [] };
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
+  // A rollback that could not delete something must be LOUD (#1525 AC3): a
+  // silent partial rollback is what leaves the invisible residue in the first
+  // place. Surface a failed cleanup as a warning event naming the leftover id
+  // (and log it) instead of reporting success.
+  const rollbackDelete = async (id, kind) => {
+    const warn = (detail) => {
+      console.error(`[Team:stream] Rollback: failed to delete ${kind} ${id}: ${detail}`);
+      emit({
+        type: 'warning',
+        message: `Rollback could not remove ${kind} '${id}' (${detail}) — a leftover ` +
+          `directory may remain under /workspace/agents/. A same-id retry will clean it up automatically.`,
+      });
+    };
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        warn(data.error || `HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      warn(err.message);
+    }
+  };
+
   const rollback = async (reason) => {
     console.warn(`[Team:stream] Rolling back ${teamId}: ${reason}`);
     for (const memberId of [...created.members].reverse()) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team:stream] Rollback: failed to delete member ${memberId}: ${err.message}`);
-      }
+      await rollbackDelete(memberId, 'member');
     }
     if (created.team) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team:stream] Rollback: failed to delete team ${created.team}: ${err.message}`);
-      }
+      await rollbackDelete(created.team, 'team');
     }
     if (created.env) {
       try {
@@ -12420,6 +12502,23 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   };
 
   try {
+    // Phase 0 — adopt orphans. Config-less / provisioning-stub leftover dirs
+    // (a prior aborted create) are deleted through the same audited choke-point
+    // as any agent delete, so a same-id `create` retry starts from a clean
+    // slate instead of colliding with dead residue (#1525). Not tracked in the
+    // rollback set: they were garbage before this request touched them.
+    if (orphansToClean.length) {
+      emit({ type: 'step', id: 'cleanup', status: 'running' });
+      for (const orphanId of orphansToClean) {
+        const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(orphanId)}`, { method: 'DELETE' });
+        if (!resp.ok && resp.status !== 404) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(`Cleanup of leftover '${orphanId}': ${data.error || `HTTP ${resp.status}`}`);
+        }
+      }
+      emit({ type: 'step', id: 'cleanup', status: 'done' });
+    }
+
     if (!envExists || adoptOrphanEnv) {
       emit({ type: 'step', id: 'env', status: 'running' });
       const env = {

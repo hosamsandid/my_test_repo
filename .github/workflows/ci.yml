@@ -115,7 +115,7 @@ jobs:
           pip install -r agent-image/requirements.txt pytest
       - name: Run unit tests
         working-directory: agent-image/scripts
-        run: python -m pytest test_agent_entrypoint.py test_knowledge.py -q
+        run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py -q
 
   # The walkthrough-video chapter selection (#749) is pure ESM — no @revideo, no
   # ffmpeg, no browser — so its unit tests run on the fast PR lane (like the

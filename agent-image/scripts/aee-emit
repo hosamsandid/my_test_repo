@@ -21,6 +21,13 @@ but the flow is mis-wired; surface that to the user instead of retrying.
 Fail-closed: if the orchestrator is unreachable the hand-off was NOT
 delivered — this tool exits non-zero and says so. Do not fall back to setting
 the label manually; that cannot wake an internal listener.
+
+Pass --json on any invocation for a single machine-readable result object on
+stdout instead of the human lines.
+
+Exit codes (shared CLI contract, docs/cli-contract.md): 0 ok · 1 domain error
+(orchestrator reachable but rejected the emit) · 2 usage error · 3 orchestrator
+unreachable (the hand-off was NOT delivered).
 """
 
 import json
@@ -35,14 +42,25 @@ ORCH = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
         or "http://orchestrator:4002").rstrip("/")
 TIMEOUT_SEC = 20
 
+# Shared CLI-contract exit codes (docs/cli-contract.md).
+EXIT_OK = 0
+EXIT_DOMAIN = 1
+EXIT_USAGE = 2
+EXIT_UNREACHABLE = 3
 
-def die(msg: str, code: int = 2):
-    sys.stderr.write(f"aee-emit: {msg}\n")
+_AS_JSON = False
+
+
+def die(msg: str, code: int = EXIT_USAGE):
+    if _AS_JSON:
+        sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+    else:
+        sys.stderr.write(f"aee-emit: {msg}\n")
     sys.exit(code)
 
 
 def usage():
-    die("usage: aee-emit <label> (--issue <n> | --pr <n>) [--repo <clone-dir>]")
+    die("usage: aee-emit <label> (--issue <n> | --pr <n>) [--repo <clone-dir>] [--json]")
 
 
 def resolve_repo_full_name(clone_dir: str | None) -> str:
@@ -70,6 +88,10 @@ def resolve_repo_full_name(clone_dir: str | None) -> str:
 
 
 def main(argv: list[str]):
+    global _AS_JSON
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        sys.stdout.write(__doc__)
+        return
     label = None
     kind = None
     number = None
@@ -77,7 +99,9 @@ def main(argv: list[str]):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--issue", "--pr"):
+        if a == "--json":
+            _AS_JSON = True
+        elif a in ("--issue", "--pr"):
             if kind is not None:
                 die("pass exactly one of --issue / --pr")
             i += 1
@@ -128,14 +152,25 @@ def main(argv: list[str]):
             body = exc.read().decode("utf-8", "replace")[:300]
         except Exception:
             pass
-        die(f"orchestrator rejected the emit (HTTP {exc.code}): {body}")
+        die(f"orchestrator rejected the emit (HTTP {exc.code}): {body}", EXIT_DOMAIN)
     except Exception as exc:
         die(f"could not reach the orchestrator at {ORCH} — the hand-off was "
             f"NOT delivered ({exc}). Do not fall back to setting the label "
-            f"manually; that cannot wake an internal listener.")
+            f"manually; that cannot wake an internal listener.", EXIT_UNREACHABLE)
 
     matched = data.get("matched", 0)
     ref = f"{payload['repo']}#{number}"
+    if _AS_JSON:
+        sys.stdout.write(json.dumps({
+            "ok": True,
+            "label": label,
+            "ref": ref,
+            "matched": matched,
+            "listeners": data.get("listeners", []),
+            "labelStamped": bool(data.get("labelStamped")),
+            "warnings": data.get("warnings", []),
+        }) + "\n")
+        return
     if matched:
         who = ", ".join(
             f"{l.get('agentId')}({l.get('triggerId')})"

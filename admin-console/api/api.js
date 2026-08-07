@@ -141,6 +141,9 @@ fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
 fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
 
 const app = express();
+// Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
+// the real client IP from X-Forwarded-For without throwing a ValidationError.
+app.set('trust proxy', 1);
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which

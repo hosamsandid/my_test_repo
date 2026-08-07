@@ -23,13 +23,15 @@ const crypto = require('crypto');
 
 const IAP_JWT_HEADER = 'x-goog-iap-jwt-assertion';
 const IAP_ISSUER = 'https://cloud.google.com/iap';
-const JWKS_URL = 'https://www.gstatic.com/iap/verify/public_key-jwks';
+// PEM-format endpoint; the JWK endpoint (public_key-jwks) has been retired.
+const KEYS_URL = 'https://www.gstatic.com/iap/verify/public_key';
 const KEYS_TTL_MS = 12 * 60 * 60 * 1000;
 const CLOCK_SKEW_MS = 30 * 1000;
 
+// Returns { kid: "-----BEGIN PUBLIC KEY-----\n..." } — EC public keys in PEM.
 async function defaultFetchKeys() {
-  const resp = await fetch(JWKS_URL);
-  if (!resp.ok) throw new Error(`IAP JWKS fetch failed: HTTP ${resp.status}`);
+  const resp = await fetch(KEYS_URL);
+  if (!resp.ok) throw new Error(`IAP key fetch failed: HTTP ${resp.status}`);
   return resp.json();
 }
 
@@ -52,12 +54,12 @@ function makeIapVerifier({ audience, fetchKeys = defaultFetchKeys } = {}) {
     const stale = !cache.keys || now - cache.at >= KEYS_TTL_MS;
     if (stale || !cache.keys.has(kid)) {
       try {
-        const jwks = await fetchKeys();
+        const pems = await fetchKeys();
         const keys = new Map();
-        for (const jwk of (jwks && jwks.keys) || []) {
-          if (!jwk || !jwk.kid || jwk.kty !== 'EC') continue;
+        for (const [kid, pem] of Object.entries(pems || {})) {
+          if (!kid || typeof pem !== 'string') continue;
           try {
-            keys.set(jwk.kid, crypto.createPublicKey({ key: jwk, format: 'jwk' }));
+            keys.set(kid, crypto.createPublicKey({ key: pem, format: 'pem' }));
           } catch {
             // skip unparsable keys
           }

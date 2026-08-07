@@ -1,0 +1,189 @@
+journeyVersion: 1
+id: review-gate
+title: The review gate — one gesture, one triangle
+order: 46
+# CI lane only. Authors a process DRAFT and stops before materialising — no
+# team/Matrix side effects. This is the S3 acceptance journey of the
+# flow-wiring UX unification epic (#999/#1010, concept §3): the canonical
+# agent → person → agent pattern, built along BOTH assembly paths, asserting
+# they persist IDENTICAL wiring (§4.5 convergence) — with the D1–D4 regression
+# assertions that started the whole epic. Also covers S10 (rejection path).
+lanes: [ci]
+timeoutMs: 150000
+
+fixtures:
+  - fixture: flowsDraft
+    params:
+      draftName: Review Gate
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      The most common pattern in any real flow is the review gate: one agent
+      authors a piece of work, a person approves it, and only then does the
+      next agent start. This journey builds that triangle twice — once as a
+      single gesture, once as two separate hand-offs — and proves both paths
+      persist exactly the same wiring, with a single-event, claimed listener
+      and no false warnings anywhere.
+
+  - action:
+      do: flows.newDraft
+  - action:
+      do: flows.renameDraft
+      name: Review Gate
+  - action:
+      do: flows.addAgentFromScratch
+      name: Business Analyst
+      notes: Refine requirements into a GitHub issue with acceptance criteria.
+  - action:
+      do: flows.addAgentFromScratch
+      name: Developer
+      notes: Implement a ready issue and open a pull request.
+
+  # ── A named person, not an anonymous hub ────────────────────────────────────
+  - id: named-human
+    narrative: |
+      The reviewer is a named human role — "Product Owner" — added from the
+      toolbar. People are first-class boxes on the canvas, never an anonymous
+      hub.
+    action:
+      do: flows.addHuman
+      name: Product Owner
+    assert:
+      do: flows.expectHumanNode
+      name: Product Owner
+    screenshot: review-gate-human-box
+
+  # ── Path A: the whole triangle in ONE dialog ────────────────────────────────
+  - id: path-a
+    narrative: |
+      Path A is one gesture: drag the Business Analyst onto the Developer,
+      pick "Issue channel", enter the gate label `ready`, tick the human
+      approval gate — and pick WHO approves. One dialog wires all three sides:
+      the delivery to the Product Owner, the gate label they apply, and the
+      Developer's claimed listener.
+    action:
+      do: flows.wireIssueChannelWithApproval
+      from: Business Analyst
+      to: Developer
+      label: ready
+      approver: Product Owner
+    screenshot: review-gate-path-a
+
+  # D1 + D3: the created listener is single-event and claims its wake label.
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Developer
+      event: issues.labeled
+      labelFilter: ready
+      claimed: true
+
+  # D4: the BA's outcome shows its human reviewer, never a false "no consumer".
+  - id: reviewed-by
+    narrative: |
+      The Business Analyst's "Opens issue" outcome now reads "reviewed by
+      👤 Product Owner" — a bound human reviewer counts as the consumer. The
+      false "no consumer" warning that motivated this epic is gone.
+    assert:
+      do: flows.expectOutcomeReviewer
+      name: Business Analyst
+      reviewer: Product Owner
+    # No screenshot: this assert opens and closes the BA inspector, leaving the
+    # bare canvas — identical to review-gate-path-a. The "reviewed by Product
+    # Owner" detail is carried in the gate-editor slide's notes below.
+
+  # D2: editing the triangle opens the ONE review-gate editor with no legacy
+  # multi-event migration warning about wiring the engine itself just created.
+  - id: gate-editor
+    narrative: |
+      The Business Analyst's "Opens issue" outcome now reads "reviewed by 👤 Product Owner" — a bound human reviewer counts as the consumer, so the false "no consumer" warning that motivated this epic is gone.
+
+      Clicking any edge of the triangle opens the same "Review gate" editor: producer, reviewer, gate label, consumer and the claim — one object, not three disconnected dialogs. And no migration warning: the engine never creates the multi-event listeners it used to warn about.
+    # Capture the editor WHILE it is open: openReviewGate leaves it visible, and
+    # the expectReviewGate assertion (which closes it) runs in the next step —
+    # so the screenshot shows the editor dialog, not the canvas behind it.
+    action:
+      do: flows.openReviewGate
+      gateLabel: ready
+    screenshot: review-gate-editor
+  - assert:
+      do: flows.expectReviewGate
+      gateLabel: ready
+      reviewer: Product Owner
+
+  - assert:
+      do: flows.expectNoLints
+  # The claim badge is visible on the gate edge chip: "ready · Issue+ ⇥ wip".
+  - assert:
+      do: flows.expectInputClaim
+      label: ready
+
+  # ── Convergence (§4.5): capture, rebuild along path B, compare ─────────────
+  - action:
+      do: flows.captureDraftWiring
+      as: pathA
+  - action:
+      do: flows.openReviewGate
+      gateLabel: ready
+  - action:
+      do: flows.deleteReviewGate
+
+  - id: path-b
+    narrative: |
+      Path B builds the same triangle as two gestures: first the delivery —
+      dragged from the Business Analyst's "Opens issue" OUTCOME PORT onto the
+      Product Owner, which must open "Product Owner reviews Business Analyst's
+      work" (a person is never mis-wired as a channel) — then the gate:
+      Product Owner dragged onto the Developer, approving with `ready`.
+      Different order, same sentences, identical persisted state.
+    action:
+      do: flows.wireHumanDeliveryFromOutcome
+      from: Business Analyst
+      outcome: Opens issue
+      human: Product Owner
+      artifact: Issue
+  - action:
+      do: flows.wireHumanGate
+      human: Product Owner
+      to: Developer
+      label: ready
+      kind: Issue label
+    # No screenshot: path B rebuilds the SAME triangle as path A — the canvas is
+    # a near-duplicate of review-gate-path-a. The convergence proof is the
+    # assertion below; this path's story is carried in the notes.
+
+  - action:
+      do: flows.captureDraftWiring
+      as: pathB
+  - id: convergence
+    narrative: |
+      The proof: both assembly paths persist byte-identical wiring — the same
+      listener, the same claim, the same reviewer binding, the same registry
+      entries. The gesture order does not matter; the persisted state is one.
+    assert:
+      do: flows.expectDraftWiringEqual
+      a: pathA
+      b: pathB
+
+  # ── S10: the rejection path ────────────────────────────────────────────────
+  - action:
+      do: flows.openReviewGate
+      gateLabel: ready
+  - id: rejection
+    narrative: |
+      A gate can also bounce work back: the editor's rejection path adds a
+      `rework` label that wakes the producer when the Product Owner requests
+      changes instead of approving.
+    action:
+      do: flows.addRejectionPath
+      label: rework
+    # No screenshot: addRejectionPath closes the editor on a successful add, so a
+    # capture here would show the bare canvas. The rejection-path story is kept
+    # in the notes; the wiring is proven by the assertion below.
+  - assert:
+      do: flows.expectDraftTrigger
+      role: Business Analyst
+      event: issues.labeled
+      labelFilter: rework
+      claimed: true

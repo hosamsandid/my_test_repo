@@ -44,7 +44,7 @@ records written atomically (write-temp + rename):
 | Path | Record shape |
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
-| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, createdAt, updatedAt }` |
+| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, chatFontSize?, createdAt, updatedAt }` |
 | `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
@@ -71,6 +71,29 @@ Every agent construct, Working Environment, and credential carries a `teamId`:
 
 Creation paths accept an optional `teamId`; when supplied it must reference an
 existing team, otherwise the request is rejected (400). Absent = default team.
+
+### Resolving an agent's tenant
+
+**`parentTeamId` is never a tenant.** It names the **Agent Team** construct — a
+different namespace from the human Team ids in `teams/index.json`. Using it as a
+tenant only appears to work while an Agent Team happens to share its id with a
+human Team; otherwise it names a team that does not exist and every team-scoped
+lookup (credential entitlement, agent visibility, management gates) fails closed
+on an empty result — e.g. an empty Model Provider list in the chat's provider
+switcher.
+
+A team-member's tenant is therefore resolved by dereferencing its parent Agent
+Team and reading *that* agent's `teamId`, falling back to the member's own stamp
+when the parent is missing or unstamped. The rule lives in two pure, mirrored
+modules (the containers do not share code): `resolveAgentTenant` in
+`admin-console/api/scope.js` (used by `agentTeamId` → `agentMetaForScope`,
+`usableEndpointsForTeam`) and `orchestrator/agent-tenant.js` (used by
+`resolveAssistBindingForTeam`). `backfillResourceOwnership()` additionally
+realigns any member whose stored `teamId` disagrees with its parent, so the
+on-disk value matches what the resolver reports.
+
+Deliberately *not* covered: the usage records and PR-event log, which group by
+Agent Team on purpose — those metrics are per squad, not per tenant.
 
 ## Bootstrap & migration
 
@@ -116,9 +139,9 @@ PUT    /internal/admin/teams/:id                    { name?, description? }
 DELETE /internal/admin/teams/:id                    (409 if it still owns resources; default team protected)
 
 GET    /internal/admin/users        [?subject=]
-POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin? }
+POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
 GET    /internal/admin/users/:id
-PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin? }
+PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
 DELETE /internal/admin/users/:id                    (cascades memberships)
 
 GET    /internal/admin/memberships  [?userId=&teamId=]

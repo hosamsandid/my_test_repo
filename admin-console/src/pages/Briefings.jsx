@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { useSearchParams, Link } from 'react-router';
+import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload, Sparkles } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
@@ -10,17 +11,51 @@ const ProcessGraphPanel = lazy(() =>
   import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
 const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
+const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
+const SIDEBAR_WIDTH_KEY = 'flowsPaneWidth';
+const SIDEBAR_MIN = 160;
+const SIDEBAR_MAX = 600;
+const DETAILS_MIN = 300;
+const DIVIDER_W = 12;
 
-const BP_LIFECYCLE_ROWS = [
-  { state: 'draft',      desc: 'Work item created but not yet scoped.' },
-  { state: 'ready',      desc: 'Scoped and waiting to be picked up.' },
-  { state: 'dispatched', desc: 'Suggested to an agent; awaiting confirmation.' },
-  { state: 'claimed',    desc: 'Agent actively working on it.' },
-  { state: 'completed',  desc: 'Work finished; awaiting review.' },
-  { state: 'reviewed',   desc: 'Accepted and closed.' },
-  { state: 'stale',      desc: 'A dependency changed — may need revisiting.' },
-  { state: 'archived',   desc: 'No longer active.' },
-];
+function loadSidebarWidth() {
+  try {
+    const v = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+    return Number.isFinite(v) ? v : 260;
+  } catch { return 260; }
+}
+
+function ResizeDivider({ onMouseDown, disabled = false }) {
+  const [hovered, setHovered] = React.useState(false);
+  const showGrab = hovered && !disabled;
+  return (
+    <div
+      onMouseDown={disabled ? undefined : onMouseDown}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: DIVIDER_W,
+        flexShrink: 0,
+        cursor: disabled ? 'default' : 'col-resize',
+        position: 'relative',
+        zIndex: 5,
+        userSelect: 'none',
+      }}
+    >
+      <div style={{
+        position: 'absolute',
+        left: '50%',
+        top: 0,
+        bottom: 0,
+        width: showGrab ? 3 : 1,
+        transform: 'translateX(-50%)',
+        background: showGrab ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+        transition: 'background 0.15s, width 0.15s',
+        pointerEvents: 'none',
+      }} />
+    </div>
+  );
+}
 
 function HelpPanel({ onClose }) {
   useEffect(() => {
@@ -65,103 +100,83 @@ function HelpPanel({ onClose }) {
               What can I do here?
             </h3>
             <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-              Flows hosts two kinds of orchestration, selectable in the left list:
+              Flows is where you design and run <strong>flow graphs</strong>: teams of agents wired
+              together so work hands off from one to the next automatically. Pick an item in the left list:
             </p>
             <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Flow graphs</strong> — for each <strong>Team</strong> (and editable <strong>Drafts</strong>),
-                a label-driven graph of which agent reacts to which event, in what order.</li>
-              <li><strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a
-                directory of BriefingPacks and renders their dependency graph.</li>
+              <li><strong>Teams</strong> — a live flow graph you can inspect and edit in place.</li>
+              <li><strong>Drafts</strong> — editable flows you're still designing; click <strong>New flow</strong>
+                to start one from scratch.</li>
             </ul>
           </section>
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Flow graphs (Teams &amp; Drafts)
+              How agents are wired
             </h3>
             <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-              Selecting a <strong>Team</strong> shows its live orchestration graph. Agents don't call each other
-              directly — they communicate through labels: one trigger <em>emits</em> a label, another
-              <em> listens</em> on it, and that wiring is the graph.
+              Agents don't call each other directly. Instead:
             </p>
+            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-2)' }}>
+              <li>An agent finishes with an <strong>Outcome</strong>, which sets a <strong>Label</strong>.</li>
+              <li>A <strong>Consumer</strong> agent is waiting on that label and wakes up when it appears.</li>
+            </ul>
             <p style={{ margin: 0 }}>
-              Click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch (add agents, then
-              wire hand-offs — GitHub PR/Issue channels, labels, data flows, human-approval gates on the
-              edges), then <strong>Materialize</strong> it into a real team.
+              Every arrow you see on the canvas is one of these <em>Outcome → Label → Consumer</em> hand-offs.
+              Wiring the flow means deciding who sets which label and who reacts to it.
             </p>
           </section>
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              What is a BriefingPack flow?
+              Building a flow
             </h3>
-            <p style={{ margin: 0 }}>
-              A <strong>BriefingPack flow</strong> is an Orchestrator agent bound to a directory of BriefingPacks.
-              It continuously monitors that directory, renders the dependency graph of all BriefingPacks,
-              and manages their lifecycle — dispatching, claiming, and tracking work state across your team.
+            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
+              You always edit a <strong>Draft</strong> first — a live <strong>Team</strong> keeps running while
+              you design. Add agents, draw the hand-offs between them, then <strong>Materialize</strong> the
+              draft to turn it into a real, running team.
             </p>
+            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
+              <li><strong>Flow Copilot</strong> — describe the process in plain language and it drafts the whole
+                flow for you to review before applying.</li>
+              <li><strong>Import / Export</strong> — save a flow to a portable JSON bundle, or bring one in to
+                reuse or share.</li>
+            </ul>
           </section>
 
           <section style={{ marginBottom: 'var(--eb-space-5)' }}>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              What is a BriefingPack?
+              Concepts you'll meet in the editor
             </h3>
-            <p style={{ margin: 0 }}>
-              A <strong>BriefingPack (BP)</strong> is a discrete unit of work. Each BP moves through a defined
-              lifecycle from creation to completion, and can declare dependencies on other BPs.
-            </p>
-          </section>
-
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              What does the dependency graph show?
-            </h3>
-            <p style={{ margin: 0 }}>
-              Each node is a BriefingPack work-unit. Edges show how work hands off:
-              red dashed edges are <em>dependencies</em> (a BP can only start once its
-              upstream BPs are done) and green edges are <em>data flow</em> (one BP's
-              output artifact is another's input). It is the same unified viewer used
-              for flow graphs.
-            </p>
-          </section>
-
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              How do you create one?
-            </h3>
-            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>Flow graph</p>
-            <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-3)' }}>
-              <li>Click <strong>New flow</strong> to start a draft, or pick an existing <strong>Team</strong>.</li>
-              <li>Add agents and wire hand-offs, then <strong>Materialize</strong> the draft into a team.</li>
-            </ol>
-            <p style={{ margin: '0 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>BriefingPack flow</p>
-            <ol style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li>Go to the <strong>Agents</strong> page and create an <strong>Orchestrator</strong> agent.</li>
-              <li>Set the <strong>Briefings Path</strong> to the directory containing your BriefingPacks.</li>
-              <li>The new flow appears under <strong>BriefingPack flows</strong> once the agent is enabled.</li>
-            </ol>
+            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
+              <li><strong>Labels</strong> — the small tokens agents set and wait on; they are what the arrows
+                carry.</li>
+              <li><strong>Stages</strong> — optional columns that group the flow into phases (e.g. build → review
+                → release) so a big graph stays readable.</li>
+              <li><strong>Human-approval gates</strong> — a point where the flow pauses until a person approves,
+                drawn as a red gate on the edge. No agent can set a gate's label.</li>
+              <li><strong>Named human roles</strong> — real people placed on the canvas (a reviewer, an approver)
+                that gates and hand-offs can be wired to, instead of an anonymous "human".</li>
+              <li><strong>GitHub PR / Issue channels</strong> — wire a consumer to react when an upstream agent
+                opens a pull request or issue, so the flow follows your GitHub workflow.</li>
+              <li><strong>Data-flow / artifact hand-offs</strong> — pass a named output (an artifact) from one
+                agent to another, matched by logical name rather than file path.</li>
+              <li><strong>Anomalies</strong> — on a live team, a check that surfaces stalls (a wake that was never
+                picked up, a gate sitting idle) so you can spot a stuck flow.</li>
+            </ul>
           </section>
 
           <section>
             <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              BP lifecycle states
+              Special solution: BriefingPack flows
             </h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-xs)' }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)' }}>State</th>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)' }}>Meaning</th>
-                </tr>
-              </thead>
-              <tbody>
-                {BP_LIFECYCLE_ROWS.map(({ state, desc }) => (
-                  <tr key={state}>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', fontFamily: 'monospace', color: 'var(--eb-accent-primary)' }}>{state}</td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)' }}>{desc}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <p style={{ margin: 0 }}>
+              An advanced, niche mode also lives here: a <strong>BriefingPack flow</strong> is an
+              <strong> Orchestrator</strong> agent that monitors a directory of BriefingPacks (discrete units of
+              work) and renders their dependency graph. Most teams don't need it. To set one up, create an
+              Orchestrator agent on the <strong>Agents</strong> page and point its <strong>Briefings Path</strong>
+              at the directory — the flow then appears under <strong>BriefingPack flows</strong> in the left list.
+            </p>
           </section>
         </div>
       </div>
@@ -198,17 +213,18 @@ function InfoBanner({ onDismiss }) {
         Welcome to Flows
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        Flows hosts two kinds of orchestration, selectable on the left:
+        Flows is where you design and run <strong>flow graphs</strong>: teams of agents wired together so work
+        hands off from one to the next automatically. Pick a <strong>Team</strong> on the left to see its live
+        graph, or click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch and
+        <strong> materialize</strong> it into a team.
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        <strong>Flow graphs</strong> — pick a <strong>Team</strong> to see its label-driven orchestration graph
-        (which agent reacts to which event, in what order), or click <strong>New flow</strong> to author a
-        <strong> Draft</strong> from scratch and materialize it into a team.
+        Agents don't call each other directly: an agent's <strong>Outcome</strong> sets a <strong>Label</strong>,
+        a <strong>Consumer</strong> waits on that label, and that wiring is the graph.
       </p>
       <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        <strong>BriefingPack flows</strong> — an <strong>Orchestrator</strong> agent that monitors a directory of
-        <strong> BriefingPacks</strong> (discrete units of work: draft → ready → dispatched → claimed → completed →
-        reviewed) and renders their dependency graph. Create one from the <strong>Agents</strong> page.
+        A niche <strong>BriefingPack flow</strong> mode also lives here (an Orchestrator agent watching a directory
+        of BriefingPacks) — see the help for details.
       </p>
       <p style={{ margin: 0 }}>
         Open the <HelpCircle size={12} style={{ verticalAlign: 'middle' }} /> help for details.
@@ -363,16 +379,98 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
 }
 
 export default function Briefings() {
+  const { user } = useAuth();
+  const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(
     () => localStorage.getItem(BANNER_KEY) === 'true'
   );
+
+  // Resizable left sidebar — width persisted in localStorage.
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const [resizing, setResizing] = useState(false);
+  const containerRef = useRef(null);
+  const dragRef = useRef(null);
+  const [containerW, setContainerW] = useState(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth)); } catch {}
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width;
+      if (w) setContainerW(w);
+    });
+    ro.observe(el);
+    setContainerW(el.getBoundingClientRect().width || null);
+    return () => ro.disconnect();
+  }, []);
+
+  const effSidebarWidth = navCollapsed
+    ? 40
+    : Math.max(SIDEBAR_MIN, Math.min(
+        SIDEBAR_MAX,
+        containerW ? Math.min(sidebarWidth, containerW - DIVIDER_W - DETAILS_MIN) : sidebarWidth
+      ));
+
+  const startDrag = useCallback((e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = effSidebarWidth;
+    const containerNow = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
+    const upperCap = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, containerNow - DIVIDER_W - DETAILS_MIN));
+    dragRef.current = { startX, startWidth, lowerCap: SIDEBAR_MIN, upperCap };
+
+    setResizing(true);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    const onMove = (ev) => {
+      if (!dragRef.current) return;
+      const { startX: sx, startWidth: sw, lowerCap: lo, upperCap: hi } = dragRef.current;
+      setSidebarWidth(Math.max(lo, Math.min(hi, sw + (ev.clientX - sx))));
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      setResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [effSidebarWidth]);
   // Selection: a process scope (`proc`) takes precedence over a BriefingPack
   // flow (`flow`). `proc` is a team id, 'draft:<id>', or 'import'.
   const proc = searchParams.get('proc');
   const selectedFlow = proc ? null : searchParams.get('flow');
+  // Deep link into a node's inspector tab (#963): `?proc=<team>&node=<agentId>
+  // &tab=routing`, as used by the Agent-Chat right rail's read-only Outcomes tab
+  // to hand editing over to the Flow Editor. Bookmarkable query params rather
+  // than router state, so the link survives a cold navigation (the pattern
+  // established for `?session=` in #642). Consumed once by the graph panel,
+  // which then asks us to strip them so a later scope change or reload doesn't
+  // re-apply a stale selection.
+  const focusNode = searchParams.get('node');
+  const focusTab = searchParams.get('tab');
+  // Flow Copilot (#1069): `?copilot=1` opens the docked chat panel on mount —
+  // set by the "Describe flow…" entry below and by scope changes that should
+  // keep the panel open (draft re-key on rename, team → draft bridge).
+  const copilotParam = searchParams.get('copilot') === '1';
+  const pendingFocus = useMemo(
+    () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
+    [proc, focusNode, focusTab],
+  );
+  const clearPendingFocus = useCallback(() => {
+    if (!focusNode && !focusTab) return;
+    setSearchParams(copilotParam ? { proc, copilot: '1' } : { proc }, { replace: true });
+  }, [proc, focusNode, focusTab, copilotParam, setSearchParams]);
 
   // The former read-only "Role templates" blueprint scope was removed; an old
   // bookmark on ?proc=templates would otherwise render a broken graph, so drop
@@ -390,18 +488,67 @@ export default function Briefings() {
   const drafts = Array.isArray(draftsList) ? draftsList : [];
   const envNameById = new Map((environments || []).map(e => [e.id, e.name]));
 
+  function persistLastSelected(kind, value) {
+    if (!lastSelectedKey) return;
+    try { localStorage.setItem(lastSelectedKey, JSON.stringify({ kind, value })); } catch { /* ignore */ }
+  }
+
   function selectFlow(id) {
+    persistLastSelected('flow', id);
     setSearchParams({ flow: id });
   }
-  function selectProc(scope) {
-    setSearchParams({ proc: scope });
+  function selectProc(scope, opts) {
+    // 'import' is a transient state (reading a file); don't persist it.
+    if (scope !== 'import') persistLastSelected('proc', scope);
+    // `opts.copilot` (#1069) keeps the Copilot panel open across a scope change
+    // (draft rename re-key, team → draft bridge) — the panel is component state
+    // inside the (scope-keyed) graph panel, so it only survives via the param.
+    setSearchParams(opts && opts.copilot ? { proc: scope, copilot: '1' } : { proc: scope });
   }
+
+  // Restore the last-viewed flow on mount when the URL carries no selection.
+  // Mirrors the Agent Chat last-agent restore pattern. Waits for both agents
+  // and drafts to load so the stored id can be validated against live data.
+  useEffect(() => {
+    if (proc || selectedFlow) return;
+    if (!lastSelectedKey) return;
+    if (agents === null || draftsList === null) return;
+
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(lastSelectedKey)); } catch { /* ignore */ }
+    if (!stored) return;
+
+    if (stored.kind === 'proc') {
+      const value = stored.value;
+      if (value === 'import') return; // ephemeral; don't restore
+      const validTeam = teams.find(t => t.id === value);
+      const validDraft = value.startsWith('draft:') && drafts.find(d => `draft:${d.id}` === value);
+      if (validTeam || validDraft) setSearchParams({ proc: value }, { replace: true });
+    } else if (stored.kind === 'flow') {
+      if (orchestrators.find(o => o.id === stored.value)) {
+        setSearchParams({ flow: stored.value }, { replace: true });
+      }
+    }
+  }, [agents, draftsList, proc, selectedFlow, lastSelectedKey,
+      teams, drafts, orchestrators, setSearchParams]);
 
   async function newProcess() {
     try {
       const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
       refetchDrafts();
       setSearchParams({ proc: `draft:${d.id}` });
+    } catch { /* surfaced elsewhere; keep the list usable */ }
+  }
+
+  // "Describe flow…" (#1069): same empty draft as New flow, but lands with the
+  // Flow Copilot panel open and its composer focused — the natural-language
+  // path to a first flow. The first generation also proposes the draft's name.
+  async function describeFlow() {
+    try {
+      const d = await apiCall('POST', '/api/process/drafts', { name: 'Untitled flow' });
+      refetchDrafts();
+      persistLastSelected('proc', `draft:${d.id}`);
+      setSearchParams({ proc: `draft:${d.id}`, copilot: '1' });
     } catch { /* surfaced elsewhere; keep the list usable */ }
   }
 
@@ -489,24 +636,26 @@ export default function Briefings() {
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 
   return (
-    <div style={{
-      display: 'flex',
-      height: 'calc(100vh - var(--eb-header-height))',
-      margin: 'calc(-1 * var(--eb-space-6))',
-      background: 'var(--eb-bg-app)',
-      overflow: 'hidden',
-    }}>
+    <div
+      ref={containerRef}
+      style={{
+        display: 'flex',
+        height: 'calc(100vh - var(--eb-header-height))',
+        margin: 'calc(-1 * var(--eb-space-6))',
+        background: 'var(--eb-bg-app)',
+        overflow: 'hidden',
+      }}
+    >
       {/* Left column: Flow list */}
       <div style={{
-        width: navCollapsed ? 40 : 260,
-        minWidth: navCollapsed ? 40 : 260,
+        width: effSidebarWidth,
+        minWidth: effSidebarWidth,
         height: '100%',
-        borderRight: '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        transition: 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
+        transition: resizing ? 'none' : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
         flexShrink: 0,
       }}>
         {navCollapsed ? (
@@ -623,6 +772,22 @@ export default function Briefings() {
                   <Upload size={15} /> {importBusy ? 'Importing…' : 'Import'}
                 </button>
               </div>
+              {/* Third creation entry (#1069): describe the flow in plain
+                  language — opens a fresh draft with the Copilot panel focused. */}
+              <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-1)' }}>
+                <button
+                  onClick={describeFlow}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
+                    border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <Sparkles size={15} /> Describe flow…
+                </button>
+              </div>
               {importError && (
                 <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
                   {importError}
@@ -695,6 +860,8 @@ export default function Briefings() {
         )}
       </div>
 
+      <ResizeDivider onMouseDown={startDrag} disabled={navCollapsed} />
+
       {/* Right pane: banner + graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
         {/* AC 1: dismissible info banner — only in the BriefingPack-flow context */}
@@ -715,6 +882,9 @@ export default function Briefings() {
                 pendingImport={pendingImport}
                 onImportConsumed={clearPendingImport}
                 onImportClosed={closeImportPreview}
+                pendingFocus={pendingFocus}
+                onFocusConsumed={clearPendingFocus}
+                autoOpenCopilot={copilotParam}
               />
             </Suspense>
           ) : !selectedAgent ? (

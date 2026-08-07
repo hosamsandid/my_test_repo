@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -15,6 +16,7 @@ import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
+import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
 
 const inputStyle = {
   width: '100%',
@@ -280,6 +282,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
 export default function GithubTokens() {
   const { data: tokens, loading, error, refetch } = useApi('/api/github-tokens');
   const { data: teamsData } = useApi('/api/admin/teams');
+  const { data: envsData } = useApi('/api/environments');
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -293,6 +296,13 @@ export default function GithubTokens() {
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
+
+  // Which Working Environments reference each token (#1141). `envs` is null until
+  // /api/environments resolves (or if the caller may not read it) — the "Used by"
+  // column shows "—" in that case rather than a misleading "None".
+  const envsLoaded = Array.isArray(envsData);
+  const envs = envsLoaded ? envsData : [];
+  const deleteUsage = deleteTarget && envsLoaded ? environmentsUsingGithubToken(envs, deleteTarget.id) : [];
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -316,6 +326,23 @@ export default function GithubTokens() {
     { key: 'preview', label: 'Token', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{v}</span> },
     { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    {
+      key: '_usedBy', label: 'Used by', sortable: false,
+      render: (_, row) => {
+        if (!envsLoaded) {
+          return <span title="Environment usage is loading or unavailable" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>;
+        }
+        const using = environmentsUsingGithubToken(envs, row.id);
+        return (
+          <span
+            title={usageTooltip(using)}
+            style={{ fontSize: 'var(--eb-text-xs)', color: using.length > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+          >
+            {usageCountLabel(using)}
+          </span>
+        );
+      },
+    },
     {
       key: '_actions',
       label: '',
@@ -452,6 +479,15 @@ export default function GithubTokens() {
         {editTarget && (
           <ReassignPanel
             cred={editTarget}
+            secretHelp={(
+              <>
+                The token value can't be changed here — a token secret is set once, at creation.
+                {' '}<strong>To rotate an expiring or leaked token:</strong> create a new GitHub token,
+                then repoint the <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environment</Link>{' '}
+                to it. Any running agents in that environment are restarted so they pick up the new
+                token — in-flight work is interrupted, so rotate at a quiet moment.
+              </>
+            )}
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
@@ -467,7 +503,33 @@ export default function GithubTokens() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete GitHub token"
-        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this token must remove it first.`}
+        message={
+          <>
+            <p style={{ margin: 0 }}>
+              Really delete "<strong>{deleteTarget?.name || deleteTarget?.id}</strong>"?
+            </p>
+            {!envsLoaded ? (
+              <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                Any Working Environment still referencing this token must detach it first.
+              </p>
+            ) : deleteUsage.length > 0 ? (
+              <div style={{ marginTop: 'var(--eb-space-3)' }}>
+                <p style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
+                  {deleteUsage.length === 1
+                    ? '1 Working Environment still uses this token — detach it there first:'
+                    : `${deleteUsage.length} Working Environments still use this token — detach it there first:`}
+                </p>
+                <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: 'var(--eb-text-sm)' }}>
+                  {deleteUsage.map(e => <li key={e.id}>{e.name || e.id}</li>)}
+                </ul>
+              </div>
+            ) : (
+              <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+                Not in use by any Working Environment.
+              </p>
+            )}
+          </>
+        }
         variant="danger"
         confirmLabel="Delete"
         onConfirm={handleDelete}

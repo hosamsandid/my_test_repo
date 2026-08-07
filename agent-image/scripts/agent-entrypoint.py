@@ -38,6 +38,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import deque, namedtuple
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -444,6 +445,86 @@ def _handle_sigterm(signum: int, frame) -> None:
 
 CLAUDE_TIMEOUT_SEC = 3600
 MEMBER_CACHE_TTL_SEC = 30
+
+# Agent-form loop verifier (#933): how long to wait for a delegated verifier's
+# verdict, and how often to poll for it. Overridable for tests / slow reviewers.
+VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
+VERIFY_POLL_SEC = float(os.environ.get("LOOP_VERIFY_POLL_SEC", "10"))
+
+# A triggered run whose claude invocation dies on a transient infra error
+# (API 5xx, connection closed mid-response) gets exactly one retry after this
+# delay; the GitHub event that woke it has already been consumed, so without
+# the retry the whole delivery chain silently stalls (#902 incident).
+TRIGGER_RETRY_DELAY_SEC = int(os.environ.get("TRIGGER_RETRY_DELAY_SEC", "60"))
+
+# Claim-label swap (#957): one `gh issue edit` PATCH. Bounded tightly — the
+# swap sits between the preCheck gate and the invoke, and claiming is
+# observability, so it must never become a slow start gate.
+CLAIM_SWAP_TIMEOUT_SEC = int(os.environ.get("CLAIM_SWAP_TIMEOUT_SEC", "30"))
+
+# The claude CLI already retries transient upstream 5xx up to 10x internally
+# with exponential backoff; our trigger-level retry only helps when that budget
+# was exhausted by a *sustained* outage. A permanent failure (bad model id,
+# auth, a 4xx client error, a missing --resume session) fails identically on the
+# retry, so retrying it just burns a 60s delay and fires a scary failure-notice
+# DM for nothing. We retry unless the cause is positively identified as
+# permanent; an unknown/empty cause stays retryable (preserves the #902 intent —
+# a run that died mid-response with no diagnostic is exactly the transient case).
+_PERMANENT_CLAUDE_ERROR_RE = re.compile(
+    r"no conversation found"                      # stale/missing --resume session
+    r"|invalid[ _-]?(model|api[ _-]?key|request|x-api-key)"
+    r"|authentication|unauthorized|permission denied"
+    r"|not_found_error|invalid_request_error|authentication_error|permission_error"
+    r"|api_error_status[\"= :]+4\d\d"             # any 4xx api_error_status
+    r"|prompt is too long|context (length|window)|too many tokens|max_tokens"
+    r"|credit balance|insufficient|quota|billing",
+    re.IGNORECASE,
+)
+
+
+def _summarize_claude_failure(result_event: dict | None,
+                              last_api_status: int | str | None,
+                              stderr_blob: str | None) -> str:
+    """Concise, bounded cause string for a failed claude run — the api_error /
+    stderr detail the bare exit code hides (#953 follow-up). Best-effort; empty
+    when nothing usable was captured."""
+    parts: list[str] = []
+    if isinstance(result_event, dict):
+        sub = result_event.get("subtype")
+        if sub and sub != "success":
+            parts.append(str(sub))
+        errs = result_event.get("errors")
+        if isinstance(errs, list) and errs:
+            parts.append("; ".join(str(e) for e in errs[:3]))
+        aes = result_event.get("apiErrorStatus")
+        if aes not in (None, "", 0):
+            parts.append(f"api_error_status={aes}")
+    if last_api_status not in (None, "", 0) and not any("api" in p for p in parts):
+        parts.append(f"last_api_retry_status={last_api_status}")
+    if not parts:
+        lines = [ln for ln in (stderr_blob or "").splitlines() if ln.strip()]
+        if lines:
+            parts.append(lines[-1].strip()[:300])
+    return " | ".join(parts).strip()[:500]
+
+
+def _claude_error_detail(err: BaseException) -> str:
+    """Human-readable cause for a failed claude run: the concise cause attached
+    by _call_claude_once when available, else the bare exception text. Used at
+    every error-logging site so the session log stops saying only
+    'exit status 1'."""
+    cause = getattr(err, "claude_cause", None)
+    if cause:
+        return f"{err} — {cause}"
+    return str(err)
+
+
+def _claude_error_is_permanent(err: BaseException) -> bool:
+    """True when a failed claude run will fail identically on a retry (config /
+    4xx / stale session) — so the trigger retry should be skipped."""
+    cause = getattr(err, "claude_cause", None) or ""
+    return bool(_PERMANENT_CLAUDE_ERROR_RE.search(cause))
+
 
 # Module-level state shared with the SIGUSR1 handler.
 _active_claude_proc: subprocess.Popen | None = None
@@ -1252,8 +1333,43 @@ def build_usage_record(ctx: dict) -> dict:
     }
 
 
+def _llm_provenance(requested_model: str | None = None) -> dict | None:
+    """Non-secret Model-Provider provenance for a `system_init` row (#980).
+
+    Read from the AEE_LLM_* env the orchestrator injects at spawn (immutable for
+    the container's life — a provider switch respawns; a model switch is picked
+    up per-invocation via `requested_model`). Returns:
+
+      * None                — no orchestrator provenance in the env (AEE_LLM_BINDING
+                              unset). This is the legacy / pure-unit-test path: the
+                              caller then omits the `provenance` field entirely and
+                              the row renders exactly as pre-#980 (model + session).
+      * a dict with a `binding` discriminator otherwise:
+          'bound'        — a provider resolved; providerName/authType/baseUrl set.
+          'missing'      — an endpoint was configured but could not be resolved.
+          'env-fallback' — no provider configured; the inherited .env values run.
+
+    NEVER carries token / auth-token material — only the display name, auth type,
+    already-sanitized base URL, the opaque endpoint id, and the requested model
+    (the value actually passed to `--model` this run, falling back to the
+    spawn-time AEE_LLM_REQUESTED_MODEL)."""
+    binding = os.environ.get("AEE_LLM_BINDING") or None
+    if not binding:
+        return None
+    req = requested_model or os.environ.get("AEE_LLM_REQUESTED_MODEL") or None
+    return {
+        "binding": binding,
+        "providerId": os.environ.get("AEE_LLM_PROVIDER_ID") or None,
+        "providerName": os.environ.get("AEE_LLM_PROVIDER_NAME") or None,
+        "authType": os.environ.get("AEE_LLM_AUTH_TYPE") or None,
+        "baseUrl": os.environ.get("AEE_LLM_BASE_URL") or None,
+        "requestedModel": req,
+    }
+
+
 def _map_stream_json_line(line: str, correlation_id: str,
-                          usage_sink: dict | None = None) -> list[dict]:
+                          usage_sink: dict | None = None,
+                          requested_model: str | None = None) -> list[dict]:
     """Translate one NDJSON line from `claude --output-format stream-json --verbose`
     into normalized event objects. Mirrors session-log.js mapStreamJsonLine.
 
@@ -1291,12 +1407,21 @@ def _map_stream_json_line(line: str, correlation_id: str,
     if ptype == "system":
         sub = parsed.get("subtype")
         if sub == "init":
-            events.append({
+            init_ev = {
                 "type": "system_init",
                 "sessionId": parsed.get("session_id"),
                 "model": parsed.get("model"),
                 "correlationId": correlation_id,
-            })
+            }
+            # #980: stamp the immutable Model-Provider provenance (provider,
+            # auth type, endpoint, requested model) captured at run time, so a
+            # historical session stays auditable after the endpoint changes.
+            # Omitted entirely (legacy shape) when the runtime has no orchestrator
+            # provenance env — the renderer then never retrofits a current binding.
+            prov = _llm_provenance(requested_model)
+            if prov is not None:
+                init_ev["provenance"] = prov
+            events.append(init_ev)
         elif sub == "task_progress":
             pass  # noisy heartbeat
         else:
@@ -1351,7 +1476,7 @@ def _map_stream_json_line(line: str, correlation_id: str,
 
     elif ptype == "result":
         usage = parsed.get("usage") or {}
-        events.append({
+        result_ev = {
             "type": "result",
             "durationMs": parsed.get("duration_ms"),
             # Turn-wide aggregate — correct for cost accounting (#494's
@@ -1373,7 +1498,20 @@ def _map_stream_json_line(line: str, correlation_id: str,
             "sessionId": parsed.get("session_id"),
             "result": parsed.get("result"),
             "correlationId": correlation_id,
-        })
+        }
+        # Failure detail the bare exit code hides (#953 follow-up): only when the
+        # run actually errored do we carry the real cause — an upstream 5xx
+        # (`apiErrorStatus`), a permanent config error (`errors`), or the
+        # terminal subtype. _call_claude_once reads these to attach a concise
+        # cause to the CalledProcessError instead of "exit status 1". Kept off
+        # the happy path so a successful result event stays byte-identical
+        # (the fake-claude golden fixture asserts it verbatim).
+        if parsed.get("is_error") or (parsed.get("subtype") not in (None, "success")):
+            result_ev["subtype"] = parsed.get("subtype")
+            result_ev["isError"] = parsed.get("is_error")
+            result_ev["apiErrorStatus"] = parsed.get("api_error_status")
+            result_ev["errors"] = parsed.get("errors")
+        events.append(result_ev)
 
     else:
         events.append({"type": "unknown", "raw": parsed, "correlationId": correlation_id})
@@ -1777,10 +1915,19 @@ def _digest_convergence_count(e) -> int:
     return len(c) if isinstance(c, list) and c else 1
 
 
-def fold_visible_entries(entries) -> list:
+def _digest_entry_expired(e, now) -> bool:
+    """Bitemporal expiry (#916): field-derived, plain ISO string comparison —
+    identical in all four fold mirrors. No `now` ⇒ never expired."""
+    vt = e.get("validTo") if isinstance(e, dict) else None
+    return (isinstance(vt, str) and vt != ""
+            and isinstance(now, str) and now != "" and vt < now)
+
+
+def fold_visible_entries(entries, now="") -> list:
     """Collapse copies by id (last writer wins; ties keep the last seen, which
     is the canonical file since callers read shards before canonical), drop
-    hidden statuses. Mirrors foldVisibleEntries() in knowledge-digest.js."""
+    hidden statuses and expired entries (#916 — `now` is the injected clock,
+    the digest's generated_at). Mirrors foldVisibleEntries() in knowledge-digest.js."""
     latest: dict = {}
     order: list = []
     for e in entries if isinstance(entries, list) else []:
@@ -1793,7 +1940,8 @@ def fold_visible_entries(entries) -> list:
         elif _digest_entry_time(e) >= _digest_entry_time(latest[eid]):
             latest[eid] = e
     out = [latest[eid] for eid in order
-           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES]
+           if latest[eid].get("status") not in _DIGEST_HIDDEN_STATUSES
+           and not _digest_entry_expired(latest[eid], now)]
     # Same concatenated-string sort key as the JS comparator.
     out.sort(key=lambda e: f"{e.get('createdAt') or ''} {e.get('id') or ''}")
     return out
@@ -1834,10 +1982,16 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
     budget = (budget_tokens
               if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
               and budget_tokens > 0 else DEFAULT_DIGEST_TOKEN_BUDGET)
-    visible = fold_visible_entries(entries if entries is not None else [])
+    visible = fold_visible_entries(entries if entries is not None else [], now=generated_at)
 
-    # Tier 1: all conventions, chronological (fold order is (createdAt, id)).
+    # Tier 1: all conventions (few, highest value). Ordered like Tier 2 so the
+    # budget truncation keeps the most-confirmed and freshest conventions, not
+    # simply the oldest. Stable multi-pass sorts == the JS comparator
+    # (count desc, then createdAt desc, then id asc).
     conventions = [e for e in visible if e.get("kind") == "convention"]
+    conventions.sort(key=lambda e: e.get("id") or "")
+    conventions.sort(key=lambda e: e.get("createdAt") or "", reverse=True)
+    conventions.sort(key=lambda e: -_digest_convergence_count(e))
     # Tier 2: converged non-conventions, strongest first. Stable multi-pass
     # sorts == the JS comparator (count desc, then createdAt desc, then id asc).
     converged = [e for e in visible
@@ -1925,6 +2079,132 @@ def build_knowledge_digest(*, team_id="", generated_at="", entries=None,
         # Entry ids inside the digest budget, render order — mirrors the JS
         # builder ("in digest" indicator in the Knowledge views).
         "includedIds": [e.get("id") for e, _ in conv_lines + converged_lines + recent_lines],
+    }
+
+
+# ---- Task-scoped knowledge (#917, KM Gap 2) ----
+#
+# The middle layer between the evergreen digest (bulk-injected) and the manual
+# `knowledge search` (agent judgement): entries whose operator-set
+# `loadTriggers` match the CURRENT task load automatically into a separate
+# file, knowledge-scoped.md, `@`-imported by CLAUDE.md next to the digest.
+#
+# SINGLE-WRITER, NO JS MIRROR — deliberately unlike the digest: only the
+# Python runtime ever knows the invocation prompt (the orchestrator's fan-out
+# and seed paths are promptless and only ever write the empty-state stub), so
+# there is exactly one writer and NO byte-identity contract. The digest's
+# mirror doctrine stays clean: its pure cores remain promptless and its golden
+# fixture is untouched.
+
+SCOPED_KNOWLEDGE_FILENAME = "knowledge-scoped.md"  # kept in sync with prompt-assembly.js
+DEFAULT_SCOPED_TOKEN_BUDGET = 1000
+
+_SCOPED_TRIGGER_TYPES = ("keyword", "path")
+
+
+def _prompt_path_tokens(prompt) -> list:
+    """Path-shaped tokens in the task text (trigger prompts embed the GitHub
+    event payload as fenced JSON, so file paths / branch names / repo names all
+    appear as plain tokens containing a slash)."""
+    toks = re.split(r"[\s,;:'\"`()\[\]{}<>|]+", prompt if isinstance(prompt, str) else "")
+    return [t.strip(".") for t in toks if "/" in t.strip(".")]
+
+
+def _scoped_trigger_matches(trigger, prompt, path_tokens) -> bool:
+    """One trigger against one task. `keyword` = case-insensitive whole-word
+    match on the prompt text; `path` = case-insensitive glob against the
+    prompt's path-shaped tokens."""
+    if not isinstance(trigger, dict):
+        return False
+    ttype = trigger.get("type")
+    pattern = trigger.get("pattern")
+    if ttype not in _SCOPED_TRIGGER_TYPES or not isinstance(pattern, str) or not pattern.strip():
+        return False
+    pattern = pattern.strip()
+    if ttype == "keyword":
+        return re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(pattern) + r"(?![A-Za-z0-9_])",
+            prompt if isinstance(prompt, str) else "", re.IGNORECASE,
+        ) is not None
+    import fnmatch
+    low = pattern.lower()
+    return any(fnmatch.fnmatchcase(tok.lower(), low) for tok in path_tokens)
+
+
+def build_scoped_knowledge(*, prompt="", entries=None, now="",
+                           budget_tokens=DEFAULT_SCOPED_TOKEN_BUDGET) -> dict:
+    """Compose knowledge-scoped.md for one invocation. Pure (injected clock).
+
+    Entries fold through fold_visible_entries first (hidden/expired never load —
+    composes with #916); only entries with a matching trigger are injected.
+    Budget priority: converged (count desc) first, then newest; omitted matches
+    are named in a footer so the agent can `knowledge search` them.
+    Returns { markdown, includedIds, matchedCount, omittedIds }.
+    """
+    budget = (budget_tokens
+              if isinstance(budget_tokens, int) and not isinstance(budget_tokens, bool)
+              and budget_tokens > 0 else DEFAULT_SCOPED_TOKEN_BUDGET)
+    visible = fold_visible_entries(entries if entries is not None else [], now=now)
+    path_tokens = _prompt_path_tokens(prompt)
+
+    matched = []  # (entry, trigger)
+    for e in visible:
+        triggers = e.get("loadTriggers")
+        if not isinstance(triggers, list):
+            continue
+        hit = next((t for t in triggers
+                    if _scoped_trigger_matches(t, prompt, path_tokens)), None)
+        if hit is not None:
+            matched.append((e, hit))
+
+    # Converged first (count desc), then newest first — the digest's priority
+    # logic, applied to the matched slice. Stable multi-pass sorts.
+    matched.sort(key=lambda p: p[0].get("id") or "")
+    matched.sort(key=lambda p: p[0].get("createdAt") or "", reverse=True)
+    matched.sort(key=lambda p: -_digest_convergence_count(p[0]))
+
+    header = (
+        "# Task-Scoped Knowledge\n\n"
+        "> GENERATED — do not edit. Auto-built before every run from team knowledge\n"
+        "> whose auto-load triggers match the current task.\n"
+    )
+
+    if not matched:
+        markdown = header + "\nNo task-scoped knowledge for this session.\n"
+        return {"markdown": markdown, "includedIds": [], "matchedCount": 0, "omittedIds": []}
+
+    budget_chars = budget * 4
+    used = 0
+    included = []
+    omitted = []
+    for e, trig in matched:
+        line = (f"- {e.get('kind')}: {_digest_one_line(e.get('text'))} "
+                f"(matched {trig.get('type')}:`{trig.get('pattern')}`, "
+                f"{_digest_convergence_count(e)}×, {_digest_entry_date(e)})")
+        if included and used + _utf16_len(line) + 1 > budget_chars:
+            omitted.append(e)
+            continue
+        if not included and used + _utf16_len(line) + 1 > budget_chars:
+            # Never emit an empty section when something matched: the first
+            # match always fits (a single line can't reasonably bust 4k chars).
+            pass
+        used += _utf16_len(line) + 1
+        included.append((e, line))
+
+    blocks = [header.rstrip("\n")]
+    blocks.append(
+        f"Matched for this task ({len(included)} of {len(matched)}):\n\n"
+        + "\n".join(line for _, line in included)
+    )
+    if omitted:
+        ids = ", ".join(str(e.get("id")) for e in omitted)
+        blocks.append(f"_…{len(omitted)} more matched beyond the scoped budget "
+                      f"— `knowledge search` them by id: {ids}_")
+    return {
+        "markdown": "\n\n".join(blocks) + "\n",
+        "includedIds": [e.get("id") for e, _ in included],
+        "matchedCount": len(matched),
+        "omittedIds": [e.get("id") for e in omitted],
     }
 
 
@@ -2028,8 +2308,64 @@ def _rebuild_knowledge_digest() -> None:
         tmp = target.with_suffix(".md.tmp")
         tmp.write_text(res["markdown"], encoding="utf-8")
         tmp.replace(target)
+        # #915 read-side telemetry: the digest's includedIds are inlined into the
+        # agent's context this invocation — report them as the weak `digest`
+        # retrieval signal (once per rebuild, after the atomic write). Strictly
+        # best-effort: a telemetry outage must never break the invocation.
+        _report_retrieval("digest", res.get("includedIds") or [])
     except Exception as exc:  # noqa: BLE001 — never break an invocation
         print(f"[Runner] knowledge digest rebuild failed: {exc}", file=sys.stderr)
+
+
+def _rebuild_scoped_knowledge(prompt: str) -> None:
+    """Regenerate knowledge-scoped.md (#917) for THIS invocation — the single
+    writer of the file (only the runtime knows the prompt; the orchestrator
+    seeds a stub). Same gating as the digest rebuild; atomic write; best-effort:
+    any failure leaves the previous file in place and never blocks the run."""
+    try:
+        if _knowledge_autonomy_level() < 1:
+            return
+        root = _knowledge_checkout_root()
+        if not (root / ".git").is_dir():
+            return
+        res = build_scoped_knowledge(
+            prompt=prompt,
+            entries=_read_kb_entries(),
+            now=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+        target = _agent_workdir() / SCOPED_KNOWLEDGE_FILENAME
+        tmp = target.with_suffix(".md.tmp")
+        tmp.write_text(res["markdown"], encoding="utf-8")
+        tmp.replace(target)
+        # #915/#917: report the injected slice as the `scoped` retrieval signal.
+        _report_retrieval("scoped", res.get("includedIds") or [])
+    except Exception as exc:  # noqa: BLE001 — never break an invocation
+        print(f"[Runner] scoped knowledge rebuild failed: {exc}", file=sys.stderr)
+
+
+def _report_retrieval(source: str, included_ids) -> None:
+    """POST {source, entryIds} to the orchestrator's retrieval endpoint (#915).
+    Fire-and-forget: short timeout, every failure silent."""
+    try:
+        ids = [i for i in included_ids
+               if isinstance(i, str) and re.fullmatch(r"[0-9a-f]{12}", i)]
+        agent_id = os.environ.get("AGENT_ID", "")
+        if not ids or not agent_id:
+            return
+        base = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
+                or "http://orchestrator:4002").rstrip("/")
+        url = f"{base}/internal/agents/{agent_id}/knowledge/retrieval"
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        payload = json.dumps({"source": source, "entryIds": ids,
+                              "hitCount": len(ids), "ts": ts}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+    except Exception:  # noqa: BLE001 — telemetry never breaks an invocation
+        pass
 
 
 # ---- Memory hint (port from agent-runner.js) ----
@@ -2237,6 +2573,114 @@ def _usage_github_and_key(gh: dict | None) -> tuple[dict | None, str | None]:
     return block, key
 
 
+# --- Claim labels (#957) ---------------------------------------------------
+# "An agent is working on this" used to exist only inside a container's session
+# log. Swapping the wake label for a claim label ("ready" -> "ready:wip") when a
+# run starts turns GitHub itself into the state machine and separates the three
+# stall modes that are otherwise indistinguishable from outside: never started
+# (wake label still set), died after claiming (claim label stuck), finished
+# without emitting (claim label gone, no outcome label).
+#
+# The claim is deliberately a DECLARATIVE trigger field executed mechanically by
+# the runner, never prompt prose — a claim the agent is *asked* to perform just
+# moves "the agent forgot the label" one step earlier.
+
+def _claim_plan(trigger: dict, gh: dict | None) -> dict | None:
+    """Resolve a `github-event` trigger's optional declarative claim field
+    (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) against the event
+    that fired it, into `{repo, number, remove, add}`.
+
+    Returns None when there is nothing to claim: no (or a malformed) `claim`
+    field, a non-`github-event` trigger (`cron`/`once`/`http` have no wake label
+    to swap or restore), or an event carrying no issue/PR to label. Pure — does
+    no I/O, so the decision is unit-testable without a `gh` binary."""
+    if not isinstance(trigger, dict) or trigger.get("type") != "github-event":
+        return None
+    claim = trigger.get("claim")
+    if not isinstance(claim, dict):
+        return None
+    remove, add = claim.get("remove"), claim.get("add")
+    if not (isinstance(remove, str) and remove.strip()):
+        return None
+    if not (isinstance(add, str) and add.strip()):
+        return None
+    gh = gh if isinstance(gh, dict) else {}
+    repo = gh.get("repo")
+    if not (isinstance(repo, str) and "/" in repo):
+        return None
+    payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+    pr = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else {}
+    number = issue.get("number")
+    if number is None:
+        number = pr.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        return None
+    return {"repo": repo, "number": number,
+            "remove": remove.strip(), "add": add.strip()}
+
+
+def _gh_swap_labels(repo: str, number: int, remove: str, add: str,
+                    create_color: str = "FBCA04",
+                    create_description: str = "work in progress "
+                    "(auto-created claim label)") -> bool:
+    """Swap one label for another on an issue/PR via the `gh` CLI (the
+    spawn-time PAT is already in the container env). A single `gh issue edit` is
+    one PATCH, so there is no window in which neither label is set; `gh issue
+    edit` accepts PR numbers too, so one code path covers both.
+
+    `gh issue edit` does not auto-create labels: adding a label that was never
+    defined in the repo fails the whole PATCH with `'<name>' not found`. Claim
+    labels (`<wake>:wip`, `<wake>:completed`) are derived, not authored, so
+    nobody creates them up front — on that specific failure the missing label is
+    created (`create_color`/`create_description` let the completion swap paint
+    its `:completed` label green) and the swap retried once. A lost create race
+    (concurrent claimer) still retries, since the label exists by then.
+
+    Best-effort: returns False on any failure instead of raising, because
+    claiming is observability and must never gate the start of a run. The catch
+    is deliberately broad — this runs inside `asyncio.to_thread`, so anything
+    escaping it would abort the run before the invoke, and at the rollback site
+    it would mask the CalledProcessError the failure notice reports on."""
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        print("[Runner] label swap skipped: no GH_TOKEN/GITHUB_TOKEN in env",
+              file=sys.stderr)
+        return False
+    what = f"{repo}#{number} -{remove} +{add}"
+
+    def _edit():
+        return subprocess.run(
+            ["gh", "issue", "edit", str(number), "--repo", repo,
+             "--remove-label", remove, "--add-label", add],
+            capture_output=True, text=True, env={**os.environ},
+            timeout=CLAIM_SWAP_TIMEOUT_SEC,
+        )
+
+    try:
+        proc = _edit()
+        if proc.returncode != 0 and f"'{add}' not found" in (proc.stderr or ""):
+            create = subprocess.run(
+                ["gh", "label", "create", add, "--repo", repo,
+                 "--color", create_color,
+                 "--description", create_description],
+                capture_output=True, text=True, env={**os.environ},
+                timeout=CLAIM_SWAP_TIMEOUT_SEC,
+            )
+            if create.returncode != 0:
+                print(f"[Runner] label create '{add}' in {repo} failed "
+                      f"(rc={create.returncode}): "
+                      f"{(create.stderr or '').strip()}", file=sys.stderr)
+            proc = _edit()
+    except Exception as exc:
+        print(f"[Runner] label swap {what} error: {exc}", file=sys.stderr)
+        return False
+    if proc.returncode != 0:
+        print(f"[Runner] label swap {what} failed (rc={proc.returncode}): "
+              f"{(proc.stderr or '').strip()}", file=sys.stderr)
+        return False
+    return True
+
+
 def _resolve_repo_dir() -> Path | None:
     """Best-effort single git repo for the git-context block. /repo when it is a
     git repo (bind/clone/image modes), else the sole git repo directly under the
@@ -2411,6 +2855,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     final_result: str | None = None
     observed_session: str | None = None
     result_event: dict | None = None  # full result event for the usage record (#654)
+    last_api_status: int | str | None = None  # last upstream api_retry error_status (#953 follow-up)
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
@@ -2421,7 +2866,9 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
-        for ev in _map_stream_json_line(line, correlation_id, context_usage):
+        nonlocal last_api_status
+        for ev in _map_stream_json_line(line, correlation_id, context_usage,
+                                        requested_model=model_arg):
             if (ev.get("type") == "system_event"
                     and ev.get("subtype") == "thinking_tokens"):
                 # Throttle: persist only a sampled subset, never one line per
@@ -2430,6 +2877,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 if gated is not None:
                     _append_event(room_id, gated)
                 continue
+            if (ev.get("type") == "system_event"
+                    and ev.get("subtype") == "api_retry"
+                    and isinstance(ev.get("raw"), dict)):
+                # Remember the upstream status of the CLI's own internal retries
+                # so a run that ultimately exhausts them carries the real cause
+                # (e.g. a sustained 500) rather than a bare exit code.
+                last_api_status = ev["raw"].get("error_status") or last_api_status
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
@@ -2510,7 +2964,18 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 "git": git_block,
                 "resultEvent": result_event,
             })
-            _spool_usage_record(build_usage_record(ctx))
+            record = build_usage_record(ctx)
+            _spool_usage_record(record)
+            # Loop token budget (#934): accumulate this invocation's output-token
+            # spend back onto the caller's run_context (by reference) so
+            # _execute_inner can feed a loop's cumulative total to the stop
+            # contract. Retries (_call_claude calling this twice) add up. This is
+            # additive and inert for every non-loop caller.
+            if isinstance(run_context, dict):
+                run_context["_loopOutputTokens"] = (
+                    run_context.get("_loopOutputTokens", 0)
+                    + _record_output_tokens(record)
+                )
         except Exception as exc:  # telemetry must never break the run
             print(f"[Runner] usage-record emit failed: {exc}", file=sys.stderr)
 
@@ -2532,6 +2997,10 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
             return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]
+        # Concise cause the bare exit code hides, so every logging site (session
+        # log, DM notice) and the retry gate can see *why* the run failed.
+        err.claude_cause = _summarize_claude_failure(  # type: ignore[attr-defined]
+            result_event, last_api_status, stderr_blob)
         raise err
 
     if ask_reply is not None:
@@ -2548,6 +3017,9 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
+    # Level 1.5 (#917): task-scoped knowledge for THIS prompt — the one place
+    # in the whole system where the task text and the KB meet.
+    _rebuild_scoped_knowledge(prompt)
     resume_id, resume_requested = _read_session_pointer_full(room_id)
     if resume_id:
         try:
@@ -2647,6 +3119,60 @@ _MATRIX_ROOM_ID_RE = re.compile(r"^![a-zA-Z0-9._~-]+(:[a-zA-Z0-9._:-]+)?$")
 _MAX_EVENT_FIELD_CHARS = 4000
 
 
+# The claim-label convention `<wake>:wip` (#958) — a documented mirror of
+# admin-console/api/process-template.js CLAIM_SUFFIX. Keep in sync.
+CLAIM_SUFFIX = ":wip"
+
+# The success mirror (#1163): a claimed run that reaches normal completion swaps
+# `<wake>:wip` for `<wake>:completed`, so "finished" becomes a visibly distinct
+# third state instead of a stuck `:wip`. Kept in sync with the `COMPLETED_SUFFIX`
+# mirror in orchestrator/flow-anomaly-detector.js (which must NOT treat it as an
+# active claim) and admin-console/api/process-template.js. Auto-created green,
+# distinct from the `:wip` amber.
+CLAIM_COMPLETED_SUFFIX = ":completed"
+CLAIM_COMPLETED_COLOR = "0E8A16"
+CLAIM_COMPLETED_LABEL_DESC = "run completed (auto-created claim label)"
+
+
+def _nonconformant_trigger_reason(trigger) -> str | None:
+    """Raw-layer wiring guard (#1006, concept §4.8) — a DOCUMENTED MIRROR of
+    `rawTriggerError` in admin-console/api/process-template.js (the orchestrator
+    and this runtime cannot require an admin-console module; keep the two in
+    sync). A self-managed `triggers.json` edit MAY deviate from the wiring
+    rules — self-management is a feature — but the deviation must be VISIBLE:
+    the trigger still runs; the runner posts a one-time advisory DM and the
+    graph shows the `raw-trigger-nonconformant` lint.
+
+    Rules: a github-event trigger carries exactly ONE event; a `claim` must be
+    `{remove: <labelFilter>, add: "<labelFilter>:wip"}` on a label listener.
+    Returns a human-readable reason, or None when conformant.
+    """
+    if not isinstance(trigger, dict) or trigger.get("type") != "github-event":
+        return None
+    events = trigger.get("events")
+    if isinstance(events, list) and len(events) > 1:
+        return (
+            f"it listens on {len(events)} events ({', '.join(map(str, events))}) — "
+            "a github-event trigger carries exactly ONE event; create one trigger per event"
+        )
+    claim = trigger.get("claim")
+    if claim is None:
+        return None
+    if not isinstance(claim, dict):
+        return "its claim must be an object"
+    label = trigger.get("labelFilter")
+    wake = label.strip() if isinstance(label, str) else ""
+    if not wake:
+        return "its claim requires a labelFilter (only a label listener can be claimed)"
+    remove = claim.get("remove")
+    add = claim.get("add")
+    if not isinstance(remove, str) or remove.strip() != wake:
+        return f"its claim.remove must equal the labelFilter (`{wake}`)"
+    if not isinstance(add, str) or add.strip() != f"{wake}{CLAIM_SUFFIX}":
+        return f"its claim.add must follow the `<wakeLabel>{CLAIM_SUFFIX}` convention (`{wake}{CLAIM_SUFFIX}`)"
+    return None
+
+
 def _load_triggers() -> list[dict]:
     p = _agent_workdir() / _TRIGGERS_FILENAME
     try:
@@ -2737,6 +3263,327 @@ def _run_pre_check(script_path: str, env: dict) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "")[:4000]
 
 
+def _validate_loop_trigger(trigger: dict) -> tuple[bool, str]:
+    """Validate a `loop` trigger's stop contract (#932).
+
+    Returns ``(ok, reason)``. ``maxIterations`` is **required** and must be a
+    positive integer — the guardrail that forbids an unbounded loop being
+    authored (concept §4.4). ``until`` (optional) must be an object whose
+    ``command`` — when present — is a non-empty string and whose ``env`` is an
+    object; ``minGapSeconds`` (optional) a non-negative number. Booleans are
+    rejected explicitly since ``bool`` is an ``int`` subclass in Python.
+    """
+    max_iterations = trigger.get("maxIterations")
+    if (not isinstance(max_iterations, int) or isinstance(max_iterations, bool)
+            or max_iterations < 1):
+        return False, "maxIterations is required and must be a positive integer"
+
+    until = trigger.get("until")
+    if until is not None:
+        if not isinstance(until, dict):
+            return False, "until must be an object"
+        cmd = until.get("command")
+        if cmd is not None and not (isinstance(cmd, str) and cmd.strip()):
+            return False, "until.command must be a non-empty string"
+        env = until.get("env")
+        if env is not None and not isinstance(env, dict):
+            return False, "until.env must be an object"
+
+    min_gap = trigger.get("minGapSeconds")
+    if min_gap is not None and (isinstance(min_gap, bool)
+                                or not isinstance(min_gap, (int, float))
+                                or min_gap < 0):
+        return False, "minGapSeconds must be a non-negative number"
+
+    verify = trigger.get("verify")
+    if verify is not None:
+        ok, reason = _validate_verify_spec(verify)
+        if not ok:
+            return False, reason
+
+    # Optional token budget (#934): the whole loop stops as `exhausted` once
+    # cumulative output tokens exceed it. Must be a positive integer when set;
+    # bool rejected explicitly (bool is an int subclass in Python).
+    max_tokens = trigger.get("maxTokens")
+    if max_tokens is not None and (not isinstance(max_tokens, int)
+                                   or isinstance(max_tokens, bool)
+                                   or max_tokens < 1):
+        return False, "maxTokens must be a positive integer"
+
+    return True, ""
+
+
+def _validate_verify_spec(verify) -> tuple[bool, str]:
+    """Validate a loop trigger's optional ``verify`` block (#933, concept §4.2).
+
+    A verifier takes exactly one of four shapes:
+
+    - ``{"command": "<sh>", "env": {}}`` — an exit-code gate (reuses
+      ``_run_pre_check``).
+    - ``{"agentId": "<other-agent>"}`` — delegate the check to a *different*
+      agent and block on its verdict.
+    - ``{"flow": true}`` — hand-off to the flow: no inline gate, verification
+      happens downstream through the team's wired QS chain (the reviewer the
+      loop's own hand-off — PR / label — wakes anyway). Honoured for team
+      agents: the separation still holds, it is just asynchronous, and choosing
+      it is explicit — so it never counts as *silently* removing the verifier.
+    - ``{"selfGraded": true}`` — an explicit "no separate verifier" opt-out
+      (permitted for standalone agents; a team agent's empty/self-graded verify
+      is re-enforced to a sibling at resolve time — the separation can never be
+      *silently* removed, concept §4.6 decision 1).
+
+    Shape only — the team-vs-standalone enforcement lives in
+    ``_resolve_loop_verify`` where the roster is known.
+    """
+    if not isinstance(verify, dict):
+        return False, "verify must be an object"
+    cmd = verify.get("command")
+    agent_id = verify.get("agentId")
+    self_graded = verify.get("selfGraded")
+    flow = verify.get("flow")
+    forms = sum(1 for present in (
+        cmd is not None, agent_id is not None, self_graded is True,
+        flow is True) if present)
+    if forms == 0:
+        return False, "verify must set one of command, agentId, flow or selfGraded"
+    if forms > 1:
+        return False, "verify must set exactly one of command, agentId, flow or selfGraded"
+    if cmd is not None and not (isinstance(cmd, str) and cmd.strip()):
+        return False, "verify.command must be a non-empty string"
+    if agent_id is not None and not (isinstance(agent_id, str) and agent_id.strip()):
+        return False, "verify.agentId must be a non-empty string"
+    if self_graded is not None and not isinstance(self_graded, bool):
+        return False, "verify.selfGraded must be a boolean"
+    if flow is not None and not isinstance(flow, bool):
+        return False, "verify.flow must be a boolean"
+    env = verify.get("env")
+    if env is not None and not isinstance(env, dict):
+        return False, "verify.env must be an object"
+    return True, ""
+
+
+# Markers a reviewer/quality-gate agent ends its reply with so the loop can read
+# a machine verdict from a free-form review (#933). Fail-closed: a reply with no
+# recognised marker does NOT count as verified progress.
+_VERIFY_PASS_RE = re.compile(r"\[PASS\]|ace:pass|VERDICT:\s*PASS", re.IGNORECASE)
+_VERIFY_FAIL_RE = re.compile(r"\[FAIL\]|ace:fail|VERDICT:\s*FAIL", re.IGNORECASE)
+
+
+def _parse_verify_verdict(reply: str | None) -> tuple[bool, str]:
+    """Interpret a verifier agent's free-form reply into ``(passed, output)``.
+
+    A ``FAIL`` marker wins over a ``PASS`` marker (a reviewer who lists problems
+    then writes both should block). With neither marker the verdict is
+    **fail-closed** — an unparseable review must not be mistaken for a green
+    light. The trimmed reply is returned as the feedback output either way.
+    """
+    text = (reply or "").strip()
+    if _VERIFY_FAIL_RE.search(text):
+        return False, text
+    if _VERIFY_PASS_RE.search(text):
+        return True, text
+    return False, (text or "verifier returned no verdict")
+
+
+def _sibling_roster_entry_id(entry: dict) -> str | None:
+    """Normalise a roster entry's id (accepts ``agentId`` or ``id``)."""
+    for key in ("agentId", "id"):
+        val = entry.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return None
+
+
+_REVIEWER_HINT_RE = re.compile(
+    r"review|quality[-_ ]?gate|\bqa\b|verif|assess|approver", re.IGNORECASE)
+
+
+def _select_sibling_verifier(agent_id: str, roster: list) -> dict:
+    """Pick a sibling to verify a team loop agent's work (#933, concept §4.2/§4.6).
+
+    Never returns the worker itself. Prefers a reviewer / quality-gate sibling
+    (id, role or displayName hinting at review/QA); ties break deterministically
+    by id so the pick is stable across runs. Falls back to any other sibling —
+    AC3 requires a *different* sibling to be pre-filled, and any non-self sibling
+    still enforces "an agent must not grade its own work". Returns::
+
+        {"agentId": <str|None>, "reviewer": <bool>, "ambiguous": <bool>,
+         "candidates": <int>}
+
+    ``agentId`` is ``None`` only when the agent has no sibling at all (a
+    lone-member team) — the caller then falls back to a self-graded ack.
+    ``ambiguous`` flags "several equally-good reviewers" so the caller can note
+    that the pick could be overridden.
+    """
+    candidates = []
+    for entry in roster or []:
+        if not isinstance(entry, dict):
+            continue
+        rid = _sibling_roster_entry_id(entry)
+        if not rid or rid == agent_id:
+            continue
+        hay = " ".join(str(entry.get(k, "")) for k in ("agentId", "id", "role", "displayName"))
+        candidates.append((rid, bool(_REVIEWER_HINT_RE.search(hay)), entry))
+
+    if not candidates:
+        return {"agentId": None, "reviewer": False, "ambiguous": False, "candidates": 0}
+
+    reviewers = sorted((c for c in candidates if c[1]), key=lambda c: c[0])
+    if reviewers:
+        return {"agentId": reviewers[0][0], "reviewer": True,
+                "ambiguous": len(reviewers) > 1, "candidates": len(candidates)}
+    fallback = sorted(candidates, key=lambda c: c[0])
+    return {"agentId": fallback[0][0], "reviewer": False,
+            "ambiguous": len(fallback) > 1, "candidates": len(candidates)}
+
+
+def _resolve_loop_verify(trigger: dict, agent_id: str, *, is_team: bool,
+                         roster: list | None = None) -> dict:
+    """Resolve a loop's *effective* verifier (#933, concept §4.6 decision 1).
+
+    The enforced-separate-role default: a team loop agent that leaves ``verify``
+    empty (or tries to grade itself / opt out) gets a *different* sibling
+    pre-filled — the separation can be overridden but never silently removed.
+    Standalone agents fall back to a self-graded acknowledgement.
+
+    Returns a plan the runner acts on::
+
+        {"mode": "command"|"agent"|"flow"|"self-graded",
+         "command": <str>, "env": <dict>,        # mode == command
+         "agentId": <str>,                        # mode == agent
+         "source": <str>, "note": <str>}          # provenance / human-readable
+
+    Invariant: ``mode == "agent"`` always targets an agent other than
+    ``agent_id`` — the worker can never be its own verifier.
+    """
+    roster = roster or []
+    verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else None
+
+    # 1. Authored command verifier — always honoured.
+    if verify and verify.get("command"):
+        env = verify.get("env") if isinstance(verify.get("env"), dict) else {}
+        return {"mode": "command", "command": verify["command"], "env": env,
+                "source": "authored", "note": "command verifier (authored)"}
+
+    # 2. Authored agent verifier — honoured unless it points at the worker.
+    if verify and verify.get("agentId") and verify.get("agentId") != agent_id:
+        return {"mode": "agent", "agentId": verify["agentId"],
+                "source": "authored",
+                "note": f"agent verifier (authored): {verify['agentId']}"}
+
+    # 3. Authored flow hand-off — honoured for team AND standalone agents.
+    # No inline gate: each iteration ends in the loop's own hand-off (PR /
+    # label) and the flow's wired downstream QS chain verifies asynchronously —
+    # the same reviewer would otherwise run twice (inline verifier + its own
+    # flow trigger). The separation principle holds because a *different*,
+    # explicitly wired consumer still checks the work; it is just not loop
+    # backpressure. Explicitly authored, so it is never a silent removal.
+    if verify and verify.get("flow") is True:
+        return {"mode": "flow", "source": "authored-flow",
+                "note": "verification delegated to the downstream flow "
+                        "(wired QS chain verifies each hand-off)"}
+
+    # Below here: no usable authored verifier (empty, self-graded ack, or an
+    # agentId that illegally pointed at the worker).
+
+    if is_team:
+        # A team agent may not silently self-grade — enforce a sibling.
+        sel = _select_sibling_verifier(agent_id, roster)
+        if sel["agentId"]:
+            kind = "reviewer sibling" if sel["reviewer"] else "sibling"
+            note = f"enforced {kind}: {sel['agentId']}"
+            if sel["ambiguous"]:
+                note += " (several candidates — override to change)"
+            return {"mode": "agent", "agentId": sel["agentId"],
+                    "source": "enforced-sibling", "reviewer": sel["reviewer"],
+                    "ambiguous": sel["ambiguous"], "note": note}
+        # Lone-member team: nobody to separate to — degrade to a self-graded
+        # ack, surfaced honestly rather than pretending separation holds.
+        return {"mode": "self-graded", "source": "team-no-sibling",
+                "note": "team has no sibling to verify — self-graded (no separation possible)"}
+
+    # 4. Standalone agent: self-graded is allowed (explicit ack or default).
+    src = "standalone-ack" if (verify and verify.get("selfGraded")) else "standalone-default"
+    return {"mode": "self-graded", "source": src,
+            "note": "self-graded (standalone agent, no forced verifier)"}
+
+
+def _build_verify_feedback(output: str, *, mode: str) -> str:
+    """Format a failed verifier's output for injection into the next iteration's
+    prompt (#933 self-correction). Kept pure so the runner stays thin."""
+    label = "verifier command" if mode == "command" else "verifier agent"
+    snippet = (output or "").strip()
+    if len(snippet) > 4000:
+        snippet = snippet[:4000] + "\n… [truncated]"
+    return (
+        f"The previous iteration did NOT pass the {label}. Address this feedback "
+        f"before continuing — the iteration does not count until the verifier "
+        f"passes:\n\n{snippet}"
+    )
+
+
+def _loop_stop_decision(iterations: int, max_iterations: int,
+                        until_exit_code: int | None,
+                        tokens_spent: int = 0,
+                        max_tokens: int | None = None,
+                        backstop_tripped: bool = False) -> str | None:
+    """Decide a loop's terminal outcome *after* an iteration (concept §4.2).
+
+    Priority order (#932 + #934):
+
+    - the blast-radius backstop (#611) tripped → ``"paused"`` — the spawn was
+      dropped, no work happened this iteration, so this wins outright and the
+      loop surfaces the runaway backstop as a first-class loop state rather than
+      a silent stderr log.
+    - ``until.command`` exited ``0`` → ``"done"`` (goal met).
+    - ``tokens_spent >= max_tokens`` → ``"exhausted"`` (token budget spent) — the
+      loop budget is the *first* line of defence against compounding token cost.
+    - ``iterations >= max_iterations`` → ``"exhausted"`` (hard cap reached).
+    - otherwise → ``None`` (run another iteration).
+
+    ``until_exit_code`` is ``None`` when the loop has no ``until.command``.
+    ``max_tokens`` is ``None`` when the loop declares no budget. ``done`` is
+    evaluated before either exhaustion path, so a goal met on the iteration that
+    also crosses the budget/cap reports ``done`` rather than ``exhausted``.
+    """
+    if backstop_tripped:
+        return "paused"
+    if until_exit_code == 0:
+        return "done"
+    if max_tokens is not None and tokens_spent >= max_tokens:
+        return "exhausted"
+    if iterations >= max_iterations:
+        return "exhausted"
+    return None
+
+
+def _record_output_tokens(record: dict) -> int:
+    """Sum the output tokens attributable to one usage record (#934).
+
+    Prefers the per-model ``modelUsage`` breakdown (its ``output`` fields summed
+    over every model are the true output-token spend for the invocation); falls
+    back to the top-level ``tokens.output`` when ``modelUsage`` is empty (e.g. a
+    record shaped before per-model capture). Never raises — a malformed record
+    contributes 0 so the loop budget accounting stays robust."""
+    if not isinstance(record, dict):
+        return 0
+    total = 0
+    model_usage = record.get("modelUsage")
+    if isinstance(model_usage, dict) and model_usage:
+        for u in model_usage.values():
+            if isinstance(u, dict):
+                out = u.get("output")
+                if isinstance(out, int) and not isinstance(out, bool):
+                    total += out
+        return total
+    tokens = record.get("tokens")
+    if isinstance(tokens, dict):
+        out = tokens.get("output")
+        if isinstance(out, int) and not isinstance(out, bool):
+            return out
+    return 0
+
+
 def _clamp_event_deep(value, depth: int = 0):
     """Trim string fields in a GitHub webhook payload before injecting into
     the prompt. Mirrors agent-runner.js clampEventDeep (line 59), including
@@ -2802,6 +3649,16 @@ def _int_env(name: str, default: int) -> int:
 _MAX_TRIGGERED_SESSIONS = _int_env("AEE_MAX_TRIGGERED_SESSIONS", 4)
 _TRIGGERED_SPAWN_LIMIT = _int_env("AEE_TRIGGERED_SPAWN_LIMIT", 12)
 _TRIGGERED_SPAWN_WINDOW_SEC = _int_env("AEE_TRIGGERED_SPAWN_WINDOW_SEC", 300)
+
+# Agent-wide serialization (#1157): an agent has ONE workspace (a single repo
+# clone), so no two workspace-touching runs may execute at once. The backstop
+# above is a *ceiling* that deliberately permits parallelism — it is not a
+# mutex. This cap bounds how many chat/DM turns may WAIT behind the gate before
+# new ones are shed with a notice (a running loop can hold the workspace for a
+# long time, so an unbounded chat backlog would flood the room when it ends).
+# Triggers are self-bounded (one runner task per id; the pending drain pauses
+# while a loop holds the workspace) so only the chat side needs an explicit cap.
+_MAX_QUEUED_CHAT = _int_env("AEE_MAX_QUEUED_CHAT", 8)
 
 
 BackstopDecision = namedtuple(
@@ -2887,6 +3744,96 @@ class TriggerBackstop:
             }
 
 
+class WorkspaceGate:
+    """Agent-wide serialization of workspace-touching runs (#1157).
+
+    An agent has exactly one workspace (one repo clone), so a loop iteration,
+    any trigger run (`cron`/`once`/`http`/`github-event`), and a chat/DM run
+    must never overlap in it — concurrent runs interleave git changes and
+    corrupt each other's work. Every such run passes through this single gate.
+
+    Semantics:
+      - **Mutual exclusion.** At most one holder runs at a time; everyone else
+        waits. Backed by ``asyncio.Lock``, whose waiter queue is FIFO, so work
+        is released in arrival order (AC6).
+      - **A loop holds the workspace across ALL its iterations.** ``acquire_loop``
+        is taken once by the loop runner and released (``release_loop``) only
+        when the whole loop ends (natural completion, stop, or cancellation —
+        the runner's ``finally`` releases on any exit). Individual iterations run
+        *inside* that hold via ``_gate_held`` on ``_execute`` and never
+        re-acquire, so queued work is never released between iterations (AC5).
+        ``loop_active`` lets the pending drain pause while a loop owns the
+        workspace.
+      - **Bounded chat queue.** ``chat_full`` sheds a chat turn when too many are
+        already waiting, so a long loop can't build an unbounded chat backlog
+        that floods the room on release (AC8). Trigger callers are self-bounded
+        (one runner task per id; the pending drain pauses under ``loop_active``)
+        and never shed.
+
+    The gate is a self-contained asyncio primitive with no I/O, so it is unit
+    tested directly (``WorkspaceGateTest``) rather than through ``_execute``,
+    which the test-harness guard short-circuits.
+    """
+
+    def __init__(self, *, max_chat_waiters: int = _MAX_QUEUED_CHAT):
+        self._lock = asyncio.Lock()
+        self._max_chat_waiters = max_chat_waiters
+        self._chat_waiters = 0
+        self._loop_depth = 0
+
+    @property
+    def loop_active(self) -> bool:
+        """True while a loop holds the workspace across its iterations."""
+        return self._loop_depth > 0
+
+    @property
+    def busy(self) -> bool:
+        return self._lock.locked()
+
+    def chat_full(self) -> bool:
+        """True when the chat wait-queue is at capacity and a new chat turn
+        should be shed rather than queued. Checked synchronously (no await)
+        before acquiring, so the count is a consistent snapshot."""
+        return self._chat_waiters >= self._max_chat_waiters
+
+    @asynccontextmanager
+    async def acquire(self):
+        """Serialize one workspace-touching run (trigger or non-loop caller)."""
+        await self._lock.acquire()
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    async def acquire_chat_turn(self) -> None:
+        """Take the workspace for one chat/DM turn, counting the turn against the
+        chat wait-queue while it is blocked so ``chat_full`` can shed excess
+        turns. Paired with ``release_chat_turn``. Manual (not a context manager)
+        so the chat handler keeps its existing ``try/except/finally`` shape."""
+        self._chat_waiters += 1
+        try:
+            await self._lock.acquire()
+        finally:
+            self._chat_waiters -= 1
+
+    def release_chat_turn(self) -> None:
+        self._lock.release()
+
+    async def acquire_loop(self) -> None:
+        """Take the workspace for a whole loop. Acquired once by the loop runner
+        and released with ``release_loop`` only when the loop ends — iterations
+        run inside this hold and must not re-acquire (they pass
+        ``_gate_held=True``). Paired manually rather than as a context manager so
+        the loop runner keeps its existing ``try/except CancelledError`` shape;
+        the runner guards the pairing with a ``held`` flag + ``finally``."""
+        await self._lock.acquire()
+        self._loop_depth += 1
+
+    def release_loop(self) -> None:
+        self._loop_depth -= 1
+        self._lock.release()
+
+
 class TriggerScheduler:
     """Schedules cron / once / http triggers for an agent container.
 
@@ -2907,14 +3854,33 @@ class TriggerScheduler:
     """
 
     def __init__(self, *, client, agent_id: str, user_id: str,
-                 send_formatted, blueprint_id: str | None):
+                 send_formatted, blueprint_id: str | None,
+                 workspace_gate: "WorkspaceGate | None" = None):
         self._client = client
         self._agent_id = agent_id
         self._user_id = user_id
         self._send_formatted = send_formatted
         self._blueprint_id = blueprint_id
+        # Agent-wide serialization gate (#1157). Shared with the chat/DM path so
+        # triggers and chat serialize against each other in the one workspace;
+        # constructed here when absent (e.g. in unit tests) so the scheduler is
+        # always self-consistent.
+        self._gate = workspace_gate if workspace_gate is not None else WorkspaceGate()
 
         self._cron_tasks: dict[str, dict] = {}  # triggerId -> {"task": Task, "expr": str}
+        self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task} (#932)
+        # Raw-layer guard (#1006): trigger ids already flagged as deviating
+        # from the wiring rules — each gets ONE advisory DM, never a repeat.
+        self._nonconformant_notified: set[str] = set()
+        self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
+        # Chat-launched loops (#1020): a loop launched from the composer is a
+        # one-off "run until done", NOT a standing subscription. It carries
+        # `launched: true` and, unlike a declarative loop trigger, must never be
+        # re-armed by a container restart (decision 1: no auto-resume). Any
+        # launched loop already present in triggers.json when the scheduler
+        # starts was interrupted (crash/restart) — its id is captured here so
+        # the sync loop prunes it instead of re-running it from iteration 0.
+        self._stale_launched_loops: set[str] = set()
         self._running: set[str] = set()
         self._fired_once: set[str] = set()  # once-triggers already fired this lifetime (#185)
         # Blast-radius backstop (#611): caps concurrent + per-window triggered
@@ -2942,6 +3908,7 @@ class TriggerScheduler:
             print(f"[Runner:{self._agent_id}] SIGUSR2 handler not installed: {exc}",
                   file=sys.stderr)
         await self._reconcile_in_flight()
+        self._capture_stale_launched_loops()
         await self._sync()
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._pending_task = asyncio.create_task(self._pending_loop())
@@ -2950,7 +3917,7 @@ class TriggerScheduler:
 
     async def stop(self) -> None:
         self._shutdown_event.set()
-        for entry in list(self._cron_tasks.values()):
+        for entry in (*self._cron_tasks.values(), *self._loop_tasks.values()):
             task = entry.get("task")
             if task and not task.done():
                 task.cancel()
@@ -2959,7 +3926,9 @@ class TriggerScheduler:
                 t.cancel()
         # Best-effort await so cancellation propagates before the event loop
         # exits.
-        for t in (self._sync_task, self._pending_task, *(e.get("task") for e in self._cron_tasks.values())):
+        for t in (self._sync_task, self._pending_task,
+                  *(e.get("task") for e in self._cron_tasks.values()),
+                  *(e.get("task") for e in self._loop_tasks.values())):
             if t is None:
                 continue
             try:
@@ -2967,6 +3936,7 @@ class TriggerScheduler:
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         self._cron_tasks.clear()
+        self._loop_tasks.clear()
         try:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR2)
         except (NotImplementedError, RuntimeError, ValueError):
@@ -3084,6 +4054,49 @@ class TriggerScheduler:
 
         _save_in_flight([])
 
+    # -- launched-loop reconciliation (#1020) --------------------------------
+
+    def _capture_stale_launched_loops(self) -> None:
+        """Snapshot chat-launched loops present at startup as *stale* (#1020).
+
+        A `launched` loop in triggers.json at process start was left behind by
+        an interrupted run (container restart / crash). Decision 1 says a
+        launched loop runs once as launched — it is never auto-resumed — so the
+        sync loop prunes these ids instead of arming them. Called once, before
+        the first `_sync`, so a fresh launch that arrives later (via SIGUSR2)
+        is NOT in the set and arms normally.
+        """
+        stale = {
+            t.get("id")
+            for t in _load_triggers()
+            if isinstance(t, dict) and t.get("type") == "loop"
+            and t.get("launched") and t.get("id")
+        }
+        self._stale_launched_loops = stale
+        if stale:
+            print(f"[Runner:{self._agent_id}] launched loops from a prior "
+                  f"lifetime will not be resumed (#1020): {sorted(stale)}",
+                  file=sys.stderr)
+
+    def _remove_trigger_locally(self, tid: str) -> None:
+        """Drop a single trigger id from triggers.json + the canonical copy.
+
+        Mirrors the `once` self-removal path so a completed/interrupted
+        launched loop leaves no lingering `enabled` entry in the list (#1020
+        AC6). On the shared volume the local write is authoritative; on an
+        isolated volume the orchestrator owns the canonical copy, so also POST
+        `/consumed` to keep the next pull from bringing it back.
+        """
+        remaining = [t for t in _load_triggers() if t.get("id") != tid]
+        _save_triggers(remaining)
+        if _PER_AGENT_VOLUME:
+            asyncio.create_task(asyncio.to_thread(
+                self._orch_post_json,
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}"
+                f"/triggers/{urllib.parse.quote(tid, safe='')}/consumed",
+                {},
+            ))
+
     # -- signal --------------------------------------------------------------
 
     def _on_sigusr2(self) -> None:
@@ -3164,6 +4177,7 @@ class TriggerScheduler:
         await self._pull_config_dm()
         triggers = _load_triggers()
         active_ids: set[str] = set()
+        active_loop_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
@@ -3176,6 +4190,17 @@ class TriggerScheduler:
             tid = trigger.get("id")
             if not isinstance(tid, str) or not tid:
                 continue
+
+            # Raw-layer guard (#1006, §4.8): a self-managed edit that deviates
+            # from the wiring rules is flagged ONCE (stderr + advisory DM) and
+            # then left alone — the trigger still runs, nothing is rewritten
+            # (self-management is a feature; workspace-transparency principle).
+            reason = _nonconformant_trigger_reason(trigger)
+            if reason and tid not in self._nonconformant_notified:
+                self._nonconformant_notified.add(tid)
+                print(f"[Runner:{self._agent_id}] trigger {tid} deviates from "
+                      f"the wiring rules: {reason}", file=sys.stderr)
+                await self._notify_nonconformant_trigger(tid, reason)
 
             ttype = trigger.get("type")
             if ttype == "cron":
@@ -3259,6 +4284,46 @@ class TriggerScheduler:
                 # tick — same drift behaviour as the Node reference, and
                 # self-healing across container restarts.
 
+            elif ttype == "loop":
+                # Loop trigger (#932): a continuation primitive that re-arms
+                # itself on completion until `until.command` exits 0 (done) or
+                # `maxIterations` is reached (exhausted). Scheduled like cron —
+                # one long-lived runner task per id — but the runner terminates
+                # on the stop contract rather than sleeping to a wall clock.
+                ok, reason = _validate_loop_trigger(trigger)
+                if not ok:
+                    print(f"[Runner:{self._agent_id}] Invalid loop trigger "
+                          f"{tid}: {reason} — skipping", file=sys.stderr)
+                    continue
+                # A chat-launched loop (#1020) is a one-off run, not a standing
+                # subscription: if it was already in triggers.json at startup it
+                # was interrupted, so prune it instead of resuming (decision 1,
+                # no auto-resume). A freshly-launched loop is never in the stale
+                # set, so it falls through and arms normally.
+                if trigger.get("launched") and tid in self._stale_launched_loops:
+                    print(f"[Runner:{self._agent_id}] pruning interrupted "
+                          f"launched loop (no auto-resume, #1020): {tid}",
+                          file=sys.stderr)
+                    self._remove_trigger_locally(tid)
+                    continue
+                active_loop_ids.add(tid)
+                # A loop that already reached a terminal state this lifetime is
+                # not re-armed (mirrors _fired_once for one-shots). A container
+                # restart re-runs it — same self-heal posture as cron/once.
+                if tid in self._loop_done:
+                    continue
+                existing = self._loop_tasks.get(tid)
+                if existing and not existing["task"].done():
+                    continue
+                # Snapshot so later edits to triggers.json don't mutate the
+                # running task's view (same as the cron path).
+                snapshot = dict(trigger)
+                task = asyncio.create_task(self._loop_runner(snapshot))
+                self._loop_tasks[tid] = {"task": task}
+                print(f"[Runner:{self._agent_id}] Loop scheduled: {tid} "
+                      f"(maxIterations={trigger.get('maxIterations')})",
+                      file=sys.stderr)
+
             # http / github-event triggers are scheduled by the pending-poll
             # loop (see _process_pending), not here.
 
@@ -3268,6 +4333,17 @@ class TriggerScheduler:
                 entry = self._cron_tasks.pop(tid)
                 entry["task"].cancel()
                 print(f"[Runner:{self._agent_id}] Trigger removed: {tid}",
+                      file=sys.stderr)
+
+        # Stop loop tasks that disappeared / got disabled (#932). A terminal
+        # loop's task is already done — dropping it here just tidies the map.
+        for tid in list(self._loop_tasks.keys()):
+            if tid not in active_loop_ids:
+                entry = self._loop_tasks.pop(tid)
+                task = entry.get("task")
+                if task and not task.done():
+                    task.cancel()
+                print(f"[Runner:{self._agent_id}] Loop removed: {tid}",
                       file=sys.stderr)
 
     async def _cron_runner(self, trigger: dict, expr: str) -> None:
@@ -3311,6 +4387,615 @@ class TriggerScheduler:
                           file=sys.stderr)
         except asyncio.CancelledError:
             return
+
+    async def _loop_runner(self, trigger: dict) -> None:
+        """Run a `loop` trigger (#932): a continuation primitive.
+
+        Sibling of `_cron_runner`, but instead of sleeping to a wall clock it
+        runs one iteration through the existing `_execute` chokepoint and, on
+        return, immediately arms the next — no overlap by construction
+        (strictly sequential), so `_running` stays only as a backstop. After
+        each iteration the stop contract is evaluated (concept §4.2):
+
+          - `until.command` exits 0 → done
+          - `maxIterations` reached → exhausted
+
+        On any terminal state a single outcome DM is posted. Maintenance Mode
+        is honoured exactly like cron (pause inside the window, one catch-up
+        iteration once it ends).
+        """
+        tid = trigger.get("id", "?")
+        max_iterations = trigger.get("maxIterations")
+        max_tokens = trigger.get("maxTokens")
+        max_tokens = max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else None
+        until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
+        until_cmd = until.get("command")
+        until_cmd = until_cmd if isinstance(until_cmd, str) and until_cmd.strip() else None
+        until_env = until.get("env") if isinstance(until.get("env"), dict) else {}
+        try:
+            min_gap = float(trigger.get("minGapSeconds") or 0)
+        except (TypeError, ValueError):
+            min_gap = 0.0
+
+        # Resolve the effective verifier once at loop start (#933): a team
+        # agent that left `verify` empty gets a *different* sibling enforced —
+        # the worker can never grade its own work (concept §4.6 decision 1).
+        verify_plan = await self._resolve_verify_plan(trigger)
+        print(f"[Runner:{self._agent_id}] loop {tid} verifier: {verify_plan.get('note')}",
+              file=sys.stderr)
+
+        iterations = 0
+        tokens_spent = 0
+        outcome: str | None = None
+        last_until_output = ""
+        pending_feedback: str | None = None   # verifier feedback → next iteration
+        last_verify_output = ""
+        verify_failures = 0
+        held = False
+        try:
+            # Reserve the single workspace for the WHOLE loop (#1157): acquired
+            # once here and released only in the `finally` below, so every
+            # iteration runs without any other trigger or chat turn interleaving
+            # — and the reservation is NOT dropped between iterations (AC5).
+            # Other work queues on the gate and drains in arrival order once the
+            # loop ends (natural completion, stop, or cancellation).
+            await self._gate.acquire_loop()
+            held = True
+            while not self._shutdown_event.is_set():
+                # Maintenance Mode parity with cron (#504): pause inside the
+                # window, then run exactly one catch-up iteration once it ends.
+                if await self._maintenance_active():
+                    print(f"[Runner:{self._agent_id}] loop {tid} paused "
+                          f"(maintenance mode active) — will resume once it ends",
+                          file=sys.stderr)
+                    while (not self._shutdown_event.is_set()
+                           and await self._maintenance_active()):
+                        await asyncio.sleep(5.0)
+                    if self._shutdown_event.is_set():
+                        break
+                    print(f"[Runner:{self._agent_id}] loop {tid} resuming "
+                          f"after maintenance mode ended", file=sys.stderr)
+
+                # One iteration through the shared chokepoint. A failed
+                # verifier's output from the previous pass is fed in via ctx
+                # (#933); `sink` carries back this iteration's output-token
+                # spend (#934 budget) and a backstop-tripped flag
+                # (#611 → paused loop state).
+                # Carry the iteration counters into the shared chokepoint so the
+                # `trigger.fired` session-log row is numbered (#1155 AC7) and the
+                # chat composer can show "Iteration N of M" (#1155 AC5). The
+                # iteration about to run is `iterations + 1` (completed count so
+                # far, plus this one). Feedback (if any) rides in the same ctx.
+                ctx = {
+                    "loopIteration": iterations + 1,
+                    "loopMaxIterations": max_iterations,
+                }
+                if pending_feedback:
+                    ctx["loopFeedback"] = pending_feedback
+                sink: dict = {}
+                try:
+                    # `_gate_held=True`: the gate is already held for the whole
+                    # loop (above), so the iteration must not re-acquire it.
+                    await self._execute(trigger, ctx, loop_sink=sink,
+                                        _gate_held=True)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] loop _execute({tid}) error: {exc}",
+                          file=sys.stderr)
+
+                # The blast-radius backstop dropped the spawn — no work ran, so
+                # don't count the iteration or evaluate `until`; surface it as a
+                # first-class `paused` loop state and stop (concept §4.2/§4.4).
+                if sink.get("backstopTripped"):
+                    outcome = _loop_stop_decision(
+                        iterations, max_iterations, None,
+                        tokens_spent, max_tokens, backstop_tripped=True)
+                    break
+
+                # The user pressed Stop (#1231): the in-flight iteration was
+                # aborted (SIGUSR1) — surfaced via the sink. Terminate as
+                # `stopped` so a persistent record is left (the finished-loop
+                # card), rather than silently re-arming. The aborted iteration
+                # is not counted (no verified work), so the record reads
+                # "stopped · <completed> of <cap>".
+                if sink.get("userAborted"):
+                    outcome = "stopped"
+                    break
+
+                iterations += 1
+                tokens_spent += int(sink.get("outputTokens", 0) or 0)
+
+                # Verifier gate (#933): the iteration only "counts" as progress
+                # when `verify` passes. On failure, feed the verifier output
+                # into the next iteration and DON'T evaluate the goal — but the
+                # attempt still consumes the maxIterations budget (the guardrail
+                # against an unbounded loop stays intact even if verify never
+                # passes).
+                #
+                # An `agent` verifier runs in a *different* container and returns
+                # its verdict through the store, so nothing surfaces in this
+                # agent's chat during the round-trip — post a note so the loop
+                # doesn't look stalled between iterations (transparency).
+                gate_mode = verify_plan.get("mode")
+                if gate_mode == "agent":
+                    await self._post_loop_note(
+                        trigger,
+                        f"🔍 Iteration {iterations} complete — independent "
+                        f"verification by `{verify_plan.get('agentId')}` is "
+                        f"running …")
+                verified, verify_output = await self._run_loop_verify(
+                    verify_plan, trigger, iterations)
+                if gate_mode == "agent":
+                    await self._post_loop_note(
+                        trigger,
+                        f"✅ Verification of iteration {iterations} passed."
+                        if verified else
+                        f"❌ Verification of iteration {iterations} did not pass.")
+                if not verified:
+                    verify_failures += 1
+                    last_verify_output = verify_output
+                    pending_feedback = _build_verify_feedback(
+                        verify_output, mode=verify_plan.get("mode", ""))
+                    if iterations >= max_iterations:
+                        outcome = "exhausted"
+                        break
+                    if min_gap > 0:
+                        await asyncio.sleep(min_gap)
+                    continue
+
+                # Verified progress — clear feedback, then evaluate the goal.
+                pending_feedback = None
+                until_code: int | None = None
+                if until_cmd:
+                    until_code, last_until_output = await asyncio.to_thread(
+                        _run_pre_check, until_cmd, until_env)
+                outcome = _loop_stop_decision(
+                    iterations, max_iterations, until_code,
+                    tokens_spent, max_tokens)
+                if outcome:
+                    break
+
+                if min_gap > 0:
+                    await asyncio.sleep(min_gap)
+        except asyncio.CancelledError:
+            # The runner task was cancelled. Two causes:
+            #  - container shutdown → not a terminal state; leave no record and
+            #    let the loop re-run on the next start (unchanged behaviour).
+            #  - the trigger was removed mid-flight (a user Stop that beat the
+            #    SIGUSR1 sink signal, or a disable) → treat as `stopped` (#1231)
+            #    so the finished loop still leaves a persistent, re-runnable
+            #    record. Best-effort: falls through to the post block below.
+            # The `finally` still releases the workspace so queued work drains
+            # even when the loop is stopped by the user (#1157 AC4).
+            if self._shutdown_event.is_set() or outcome:
+                return
+            outcome = "stopped"
+        finally:
+            # Release the workspace the instant the loop's work is done — before
+            # the outcome DM below (a plain post that doesn't touch the
+            # workspace), so queued triggers/chat can start immediately.
+            if held:
+                self._gate.release_loop()
+
+        if not outcome:
+            # Exited via the shutdown check, not the stop contract.
+            return
+
+        self._loop_done.add(tid)
+        # A chat-launched loop is a run that simply ends — on any terminal
+        # outcome it leaves NO enabled entry behind (#1020 AC6). Remove it
+        # before the outcome DM so the trigger list is clean immediately; the
+        # DM below reads the in-memory snapshot, not the file.
+        if trigger.get("launched"):
+            try:
+                self._remove_trigger_locally(tid)
+                print(f"[Runner:{self._agent_id}] launched loop finished, "
+                      f"removed from triggers (#1020): {tid}", file=sys.stderr)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] launched loop {tid} "
+                      f"self-remove failed: {exc}", file=sys.stderr)
+        try:
+            await self._post_loop_outcome(
+                trigger, outcome, iterations, last_until_output,
+                tokens_spent, max_tokens,
+                verify_plan=verify_plan, verify_failures=verify_failures,
+                last_verify_output=last_verify_output)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop {tid} outcome DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _notify_nonconformant_trigger(self, tid: str, reason: str) -> None:
+        """One-time advisory DM for a wiring-rule deviation (#1006). Best-effort:
+        no DM room yet → the stderr log line is the only trace this pass."""
+        room_id = _load_dm_room_id()
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(
+                room_id,
+                f"⚠️ **Trigger `{tid}` deviates from the wiring rules** — {reason}.\n\n"
+                "It still runs unchanged (self-managed triggers are never rewritten). "
+                "Edit it in the Flow Editor or `triggers.json` to conform.",
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] nonconformant-trigger DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _post_loop_outcome(self, trigger: dict, outcome: str,
+                                 iterations: int, last_until_output: str,
+                                 tokens_spent: int = 0,
+                                 max_tokens: int | None = None,
+                                 *, verify_plan: dict | None = None,
+                                 verify_failures: int = 0,
+                                 last_verify_output: str = "") -> None:
+        """Post the single terminal outcome DM for a finished loop (#932/#933/#934).
+
+        This is the "completed" signal agents lack today: outcome
+        (done/exhausted/paused), iterations used vs the cap, output tokens spent
+        vs the budget, the last `until` output, and — when a verifier was in
+        effect (#933) — the verifier used, how many iterations it blocked, and
+        the last failing verifier output. Best-effort — a missing DM room just
+        skips it.
+        """
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            print(f"[Runner:{self._agent_id}] loop outcome: no DM room available "
+                  "— skipping", file=sys.stderr)
+            return
+
+        tid = trigger.get("id", "?")
+        max_iterations = trigger.get("maxIterations")
+        heading = {
+            "done": "✅ **Loop done**",
+            "exhausted": "🛑 **Loop exhausted**",
+            "paused": "⏸️ **Loop paused**",
+            "stopped": "⏹️ **Loop stopped**",
+        }.get(outcome, f"**Loop {outcome}**")
+        desc = f" — {trigger['description']}" if trigger.get("description") else ""
+        # Budget-aware report (#934): iterations used vs cap AND output tokens
+        # spent vs budget (the budget line only names a limit when one is set).
+        tokens_line = f"- Output tokens: {tokens_spent}"
+        if max_tokens is not None:
+            tokens_line += f" / {max_tokens}"
+        lines = [
+            f"{heading} — `{tid}`{desc}",
+            "",
+            f"- Outcome: `{outcome}`",
+            f"- Iterations: {iterations} / {max_iterations}",
+            tokens_line,
+        ]
+        if outcome == "paused":
+            # The runaway backstop (#611) tripped — make the terminal state and
+            # its cause legible instead of leaving it a stderr log + one-off DM.
+            lines.append(
+                "- Paused by the runaway backstop (#611): this agent hit its "
+                "concurrency ceiling / spawn-rate limit, so the loop stopped "
+                "rather than fanning out. Re-enable it once the pressure eases."
+            )
+        until = trigger.get("until") if isinstance(trigger.get("until"), dict) else {}
+        if isinstance(until.get("command"), str) and until.get("command").strip():
+            snippet = (last_until_output or "").strip()
+            if len(snippet) > 500:
+                snippet = snippet[:500] + " …"
+            if snippet:
+                lines += ["", "Last stop-check (`until`) output:", "```",
+                          snippet, "```"]
+            else:
+                verdict = "passed" if outcome == "done" else "not met"
+                lines.append(f"- Stop check (`until`): {verdict} (no output)")
+
+        # Flow hand-off: no inline gate ran, but the outcome should say where
+        # verification actually happens so "0 blocked iterations" is not read
+        # as "unverified".
+        if isinstance(verify_plan, dict) and verify_plan.get("mode") == "flow":
+            lines.append(
+                "- Verification: delegated to the downstream flow — each "
+                "iteration's hand-off is checked by the wired QS chain.")
+
+        # Verifier gate summary (#933) — only when a real gate was in effect.
+        if isinstance(verify_plan, dict) and verify_plan.get("mode") in ("command", "agent"):
+            lines.append(f"- Verifier: {verify_plan.get('note') or verify_plan.get('mode')}")
+            lines.append(f"- Verifier-blocked iterations: {verify_failures}")
+            if verify_failures and (last_verify_output or "").strip():
+                snippet = last_verify_output.strip()
+                if len(snippet) > 500:
+                    snippet = snippet[:500] + " …"
+                lines += ["", "Last verifier output:", "```", snippet, "```"]
+
+        body = "\n".join(lines)
+        # Persist the loop's configuration + terminal outcome as a structured
+        # payload on this message (#1231). A launched loop self-removes on any
+        # terminal outcome, so its config (chiefly the full prompt) would
+        # otherwise vanish from the chat; carrying it here makes the finished
+        # loop reviewable in scrollback and re-runnable (the Admin Console
+        # renders a "Start again" card, pre-filling the loop launcher). Only the
+        # fields the loop-summary model / launcher understand are recorded, so
+        # the persisted record and the running card show the same configuration.
+        extra_content = {"io.aee.loop-record": self._loop_record_payload(
+            trigger, outcome, iterations)}
+        await self._send_formatted(room_id, body, extra_content=extra_content)
+        print(f"[Runner:{self._agent_id}] loop {tid} → {outcome} "
+              f"after {iterations} iteration(s)", file=sys.stderr)
+
+    @staticmethod
+    def _loop_record_payload(trigger: dict, outcome: str,
+                             iterations: int) -> dict:
+        """Structured, JSON-serialisable record of a finished loop (#1231).
+
+        Carries exactly the config fields the composer's loop-summary model and
+        the loop launcher form consume (`prompt`, `maxIterations`, `until`,
+        `maxTokens`, `minGapSeconds`, `verify`) plus the terminal outcome and the
+        number of iterations that ran — so the persisted card renders the same
+        configuration as the running "Loop running" card and the "Start again"
+        button can seed the launcher with an identical loop. Optional fields are
+        omitted when they were not configured (parity with the running card)."""
+        config: dict = {}
+        prompt = trigger.get("prompt")
+        if isinstance(prompt, str):
+            config["prompt"] = prompt
+        max_it = trigger.get("maxIterations")
+        if isinstance(max_it, int) and not isinstance(max_it, bool):
+            config["maxIterations"] = max_it
+        until = trigger.get("until")
+        if (isinstance(until, dict) and isinstance(until.get("command"), str)
+                and until["command"].strip()):
+            config["until"] = {"command": until["command"]}
+        max_tokens = trigger.get("maxTokens")
+        if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
+            config["maxTokens"] = max_tokens
+        gap = trigger.get("minGapSeconds")
+        if isinstance(gap, (int, float)) and not isinstance(gap, bool) and gap > 0:
+            config["minGapSeconds"] = gap
+        verify = trigger.get("verify")
+        if isinstance(verify, dict):
+            config["verify"] = verify
+        return {
+            "triggerId": trigger.get("id"),
+            "description": trigger.get("description"),
+            "outcome": outcome,
+            "iterations": iterations,
+            "config": config,
+        }
+
+    async def _post_loop_note(self, trigger: dict, body: str) -> None:
+        """Best-effort progress DM into the loop's room (transparency).
+
+        Makes the otherwise-silent phases *between* iterations legible in chat —
+        chiefly the independent verifier gate, which runs a full pass in a
+        *different* agent's container, so without a note the loop looks stalled
+        for the round-trip. A missing/invalid room just skips the note.
+        """
+        raw_room_id = trigger.get("roomId") or _load_dm_room_id()
+        room_id = (
+            raw_room_id
+            if isinstance(raw_room_id, str) and _MATRIX_ROOM_ID_RE.match(raw_room_id)
+            else None
+        )
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(room_id, body)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop note post failed: {exc}",
+                  file=sys.stderr)
+
+    # -- loop verifier gate (#933) -------------------------------------------
+
+    async def _resolve_verify_plan(self, trigger: dict) -> dict:
+        """Resolve a loop's effective verifier at start-up (#933).
+
+        Threads this agent's team membership + sibling roster into the pure
+        ``_resolve_loop_verify``. The roster is only fetched when it's actually
+        needed (a team agent with no usable authored verifier), so an authored
+        command/agent verifier costs no orchestrator round-trip.
+        """
+        cfg = _load_dm_agent_config()
+        is_team = bool(cfg.get("parentTeamId")) or cfg.get("role") in ("team", "team-member")
+        verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else None
+        has_authored = bool(
+            verify and (
+                verify.get("command")
+                or verify.get("flow") is True
+                or (verify.get("agentId") and verify.get("agentId") != self._agent_id)
+            )
+        )
+        roster = [] if (has_authored or not is_team) else await self._fetch_team_roster()
+        return _resolve_loop_verify(trigger, self._agent_id,
+                                    is_team=is_team, roster=roster)
+
+    async def _fetch_team_roster(self) -> list:
+        """Fetch this agent's sibling roster from the orchestrator (#933).
+
+        Returns the ``siblings`` list (``[{agentId, role, displayName}, …]``,
+        excluding self) or ``[]`` on any failure — a missing roster just means
+        no sibling can be enforced, handled by the caller.
+        """
+        route = f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/team-roster"
+        status, body = await asyncio.to_thread(self._orch_get, route)
+        if status != 200:
+            return []
+        try:
+            data = json.loads(body)
+        except Exception:
+            return []
+        sibs = data.get("siblings") if isinstance(data, dict) else None
+        return sibs if isinstance(sibs, list) else []
+
+    async def _run_loop_verify(self, plan: dict, trigger: dict,
+                               iteration: int) -> tuple[bool, str]:
+        """Run one iteration's verifier gate (#933). Returns ``(passed, output)``.
+
+        - ``command`` → exit-code gate via ``_run_pre_check`` (0 == pass).
+        - ``agent``   → delegate to a different agent and block on its verdict.
+        - ``flow``    → no inline gate; the downstream flow QS chain verifies
+          each hand-off asynchronously.
+        - ``self-graded`` → no gate; the iteration always counts.
+        """
+        mode = plan.get("mode")
+        if mode == "command":
+            code, out = await asyncio.to_thread(
+                _run_pre_check, plan["command"], plan.get("env") or {})
+            return code == 0, out
+        if mode == "agent":
+            return await self._run_agent_verify(plan["agentId"], trigger, iteration)
+        return True, ""
+
+    async def _run_agent_verify(self, target_id: str, trigger: dict,
+                                iteration: int) -> tuple[bool, str]:
+        """Route the iteration's artifact to a *different* agent and block on its
+        verdict (#933, AC2). Delivery reuses the existing pending queue; the
+        verdict comes back through the orchestrator's loop-verify rendezvous.
+
+        Fail-closed: an undeliverable request or a timeout blocks progress (the
+        iteration doesn't count) rather than silently passing unverified work.
+        """
+        tid = trigger.get("id", "?")
+        token = f"lv:{self._agent_id}:{tid}:{iteration}:{int(time.time() * 1000)}"
+        verify = trigger.get("verify") if isinstance(trigger.get("verify"), dict) else {}
+        entry = {
+            "kind": "loop-verify",
+            "token": token,
+            "loopId": tid,
+            "iteration": iteration,
+            "requestedBy": self._agent_id,
+            "roomId": trigger.get("roomId"),
+            "task": trigger.get("prompt", ""),
+            "artifactHint": verify.get("artifact"),
+        }
+        route = f"/internal/agents/{urllib.parse.quote(target_id, safe='')}/enqueue-pending"
+        status, _body = await asyncio.to_thread(self._orch_post_json, route, entry)
+        if status not in (200, 202):
+            return False, (f"could not deliver verify request to {target_id} "
+                           f"(HTTP {status}) — treating iteration as unverified")
+        return await self._poll_verify_verdict(token, target_id)
+
+    async def _poll_verify_verdict(self, token: str,
+                                   target_id: str) -> tuple[bool, str]:
+        """Poll the orchestrator's loop-verify store for a verdict (#933)."""
+        route = f"/internal/loop-verify/verdict?token={urllib.parse.quote(token, safe='')}"
+        deadline = time.monotonic() + VERIFY_WAIT_SEC
+        while time.monotonic() < deadline and not self._shutdown_event.is_set():
+            status, body = await asyncio.to_thread(self._orch_get, route)
+            if status == 200:
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    data = {}
+                if isinstance(data, dict) and data.get("found"):
+                    return bool(data.get("passed")), str(data.get("output") or "")
+            await asyncio.sleep(VERIFY_POLL_SEC)
+        return False, (f"verifier {target_id} did not return a verdict in time "
+                       f"— treating iteration as unverified")
+
+    async def _execute_loop_verify(self, entry: dict) -> None:
+        """Handle a `loop-verify` pending entry (#933, verifier side).
+
+        Runs a fresh Claude pass over the requester's artifact/task, parses a
+        pass/fail verdict from the reply, and posts it back to the orchestrator's
+        loop-verify store for the waiting loop to read. Best-effort; on any
+        failure a fail-closed verdict is still posted so the loop never hangs.
+        """
+        token = entry.get("token")
+        if not isinstance(token, str) or not token:
+            print(f"[Runner:{self._agent_id}] loop-verify: no token — skipping",
+                  file=sys.stderr)
+            return
+        requester = entry.get("requestedBy") or "?"
+        loop_id = entry.get("loopId") or "?"
+        iteration = entry.get("iteration")
+        task = entry.get("task") or ""
+        hint = entry.get("artifactHint")
+        prompt = (
+            "You are acting as the independent VERIFIER for another agent's "
+            f"work loop (`{loop_id}`, iteration {iteration}), requested by "
+            f"`{requester}`. An agent must not grade its own work — that is why "
+            "this check was routed to you.\n\n"
+            "Review the latest work for this task (inspect the repository: recent "
+            "commits, the open PR, and whether the stated goal is actually met "
+            "and correct). Do NOT do the work yourself — only judge it.\n\n"
+            f"The loop's task was:\n{task}\n"
+        )
+        if isinstance(hint, str) and hint.strip():
+            prompt += f"\nArtifact to focus on: {hint}\n"
+        prompt += (
+            "\nEnd your reply with a single verdict line: `[PASS]` if the "
+            "iteration's work is correct and complete, or `[FAIL]` followed by "
+            "the specific problems to fix. Without an explicit verdict the "
+            "iteration is treated as NOT passed."
+        )
+
+        # Use the verifier's OWN DM room for the run's session/log context — the
+        # requester's `roomId` belongs to another agent's container. The verdict
+        # travels back through the store, not Matrix, so no cross-room post.
+        own_room = _load_dm_room_id()
+        room_id = (
+            own_room
+            if isinstance(own_room, str) and _MATRIX_ROOM_ID_RE.match(own_room)
+            else None
+        )
+        correlation_id = f"loop-verify:{token}"
+
+        # Transparency: the verifier runs a full Claude pass here, but the
+        # verdict travels back through the store — not Matrix — so historically
+        # nothing showed up in the verifier's OWN chat. Post a start + result
+        # note into the verifier's own room (never the requester's) so the
+        # review is legible where it actually happens.
+        if room_id:
+            try:
+                await self._send_formatted(
+                    room_id,
+                    f"🔍 **Loop verification** requested by `{requester}` "
+                    f"(loop `{loop_id}`, iteration {iteration}) — reviewing the "
+                    f"work …")
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] loop-verify start note failed: "
+                      f"{exc}", file=sys.stderr)
+
+        passed, output = False, "verifier did not run"
+        try:
+            # #1157: a verifier run is a real Claude pass over THIS agent's
+            # workspace, so it serializes on the same gate as every other run.
+            # (The pending drain that delivers this entry is already paused while
+            # a local loop owns the workspace, so this can only contend with a
+            # cron/once/chat run — never self-deadlock against our own loop.)
+            async with self._gate.acquire():
+                reply = await asyncio.to_thread(
+                    _call_claude, prompt, room_id or "", correlation_id,
+                    self._blueprint_id, CLAUDE_TIMEOUT_SEC,
+                )
+            passed, output = _parse_verify_verdict(reply)
+        except Exception as exc:
+            output = f"verifier run failed: {exc}"
+            print(f"[Runner:{self._agent_id}] loop-verify Claude call failed: {exc}",
+                  file=sys.stderr)
+
+        if room_id:
+            badge = ("✅ **Verification verdict: PASS**" if passed
+                     else "❌ **Verification verdict: FAIL**")
+            snippet = (output or "").strip()
+            try:
+                await self._send_formatted(
+                    room_id, f"{badge}\n\n{snippet}" if snippet else badge)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] loop-verify result note failed: "
+                      f"{exc}", file=sys.stderr)
+
+        # Post the verdict back to the rendezvous — always, so the loop never
+        # blocks waiting on a crashed verifier (fail-closed above).
+        try:
+            await asyncio.to_thread(
+                self._orch_post_json, "/internal/loop-verify/verdict",
+                {"token": token, "passed": passed, "output": output},
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] loop-verify verdict post failed: {exc}",
+                  file=sys.stderr)
+        print(f"[Runner:{self._agent_id}] loop-verify {token} → "
+              f"{'PASS' if passed else 'FAIL'}", file=sys.stderr)
 
     # -- orchestrator HTTP (control→agent pull channel, #185) ----------------
 
@@ -3381,7 +5066,16 @@ class TriggerScheduler:
                 # entries keep queuing on the orchestrator/pending-file side
                 # (unaffected by this check) but are left undrained here, so
                 # they're processed normally once maintenance ends.
-                if not await self._maintenance_active():
+                #
+                # #1157: while a loop holds the single workspace, leave the
+                # pending queue undrained too — http/github-event (and
+                # handover/digest/loop-verify) entries stay durably queued on
+                # the orchestrator/file side, retained and un-double-counted,
+                # and drain in order once the loop releases the workspace. This
+                # mirrors the maintenance skip and is why the trigger side needs
+                # no in-memory queue: the durable pending queue *is* the buffer.
+                if (not await self._maintenance_active()
+                        and not self._gate.loop_active):
                     await self._process_pending()
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending error: {exc}",
@@ -3391,95 +5085,101 @@ class TriggerScheduler:
             except asyncio.TimeoutError:
                 pass
 
-    async def _drain_pending(self) -> list:
-        """Read-and-clear the pending queue. With per-agent volume isolation the
-        orchestrator owns the queue and we pull it over HTTP (it clears on read);
-        otherwise we read+clear our own local file, byte-identical to before."""
+    async def _drain_pending_one(self) -> dict | None:
+        """Pop and return ONLY the head of the pending queue, leaving the tail
+        durably queued until its turn (#1195 follow-up). A triggered run can
+        take many minutes; pulling the whole queue up front would strand
+        entries 2..N in a volatile in-memory list for the entire first run, so
+        a container restart mid-run lost them (the poller won't re-fire — the
+        event id is already seen). Draining one at a time keeps the tail on
+        disk / in the orchestrator's queue until it's actually about to run, so
+        a crash loses at most this single in-flight entry (its #506 marker
+        flags it on next startup). Returns None when the queue is empty. With
+        per-agent volume isolation the orchestrator owns the queue and pops the
+        head over HTTP; otherwise we pop our own local file."""
         if _PER_AGENT_VOLUME:
             status, body = await asyncio.to_thread(
                 self._orch_get,
-                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain",
+                f"/internal/agents/{urllib.parse.quote(self._agent_id, safe='')}/pending-drain-one",
             )
             if status != 200:
                 if status != 0:  # 0 == orchestrator unreachable; stay quiet, retry next tick
-                    print(f"[Runner:{self._agent_id}] pending-drain HTTP {status}",
+                    print(f"[Runner:{self._agent_id}] pending-drain-one HTTP {status}",
                           file=sys.stderr)
-                return []
+                return None
             try:
                 data = json.loads(body)
             except Exception:
-                return []
-            entries = data.get("entries") if isinstance(data, dict) else data
-            entries = entries if isinstance(entries, list) else []
-            # #506: the orchestrator's pending-drain endpoint already cleared
-            # the canonical queue in the same round trip, so this is the
-            # earliest point we can persist a marker under per-agent-volume
-            # isolation — still closes almost all of the crash window.
-            self._attach_pending_markers(entries)
-            return entries
+                return None
+            entry = data.get("entry") if isinstance(data, dict) else None
+            if not isinstance(entry, dict):
+                return None
+            # #506: the orchestrator's pending-drain-one endpoint already popped
+            # this entry from the canonical queue in the same round trip, so this
+            # is the earliest point we can persist its marker under per-agent-
+            # volume isolation — still closes almost all of the crash window.
+            self._attach_pending_markers([entry])
+            return entry
 
         pending_path = _agent_workdir() / _PENDING_FILENAME
         if not pending_path.exists():
-            return []
+            return None
         try:
             entries = json.loads(pending_path.read_text(encoding="utf-8"))
         except Exception:
-            return []
+            return None
         if not isinstance(entries, list) or not entries:
-            return []
-        # #506: persist a durable marker for each in-scope entry *before* the
-        # queue is cleared, so a crash between the clear and a completed
-        # execution is detectable on the next startup.
-        self._attach_pending_markers(entries)
-        # Clear before firing so a slow run can't double-process the queue
-        # (matches agent-runner.js:501).
+            return None
+        entry = entries.pop(0)
+        # Persist the remaining tail *before* handing this entry off, so a slow
+        # run can't double-process it and a crash mid-execution loses at most
+        # this one entry — never the still-queued tail (matches agent-runner.js
+        # semantics, one entry at a time).
         try:
-            _atomic_write_json(pending_path, [])
+            _atomic_write_json(pending_path, entries)
         except Exception as exc:
-            print(f"[Runner:{self._agent_id}] pending clear failed: {exc}",
+            print(f"[Runner:{self._agent_id}] pending tail persist failed: {exc}",
                   file=sys.stderr)
-        return entries
+        if not isinstance(entry, dict):
+            return None
+        # #506: persist a durable marker for the in-scope entry we're about to
+        # hand off, so a crash before it completes is detectable on startup.
+        self._attach_pending_markers([entry])
+        return entry
 
     async def _process_pending(self) -> None:
-        entries = await self._drain_pending()
-        if not entries:
-            return
+        triggers: list | None = None
+        while not self._shutdown_event.is_set():
+            # #1157: if a loop grabbed the single workspace between entries, stop
+            # pulling — the tail stays durably queued and drains once the loop
+            # releases the workspace. Cheap in-memory check, no round-trip.
+            if self._gate.loop_active:
+                return
+            entry = await self._drain_pending_one()
+            if entry is None:
+                return
+            if triggers is None:
+                triggers = _load_triggers()
+            await self._handle_pending_entry(entry, triggers)
 
-        triggers = _load_triggers()
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            # #506: clear this entry's in-flight marker (if any — only
-            # http/github-event trigger entries get one) once it's been
-            # handled, whichever branch below that turns out to be.
-            marker_id = entry.pop("_inFlightMarkerId", None)
-            try:
-                kind = entry.get("kind")
-                if kind == "session-reset":
-                    # Control→agent reset command (#185): the admin can't delete our
-                    # pointer on an isolated volume, so it asks us to drop it.
-                    rid = entry.get("roomId")
-                    if rid:
-                        _clear_session_pointer(rid)
-                        print(f"[Runner:{self._agent_id}] session-reset for {rid}",
-                              file=sys.stderr)
-                    continue
-                if kind == "session-set":
-                    # Control→agent resume command (#574): the admin can't write our
-                    # pointer on an isolated volume, so it asks us to re-point the
-                    # room at a chosen finished session. resumeRequested is persisted
-                    # so a failed resume surfaces an error instead of a fresh session.
-                    rid = entry.get("roomId")
-                    sid = entry.get("sessionId")
-                    if rid and isinstance(sid, str) and sid:
-                        _write_session_pointer(
-                            rid, sid, resume_requested=bool(entry.get("resumeRequested")))
-                        print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
-                              file=sys.stderr)
-                    continue
-                if kind == "handover-dm":
-                    print(f"[Runner:{self._agent_id}] handover-dm from queue",
+    async def _handle_pending_entry(self, entry: dict, triggers: list) -> None:
+        """Dispatch one drained queue entry (extracted from the old
+        ``_process_pending`` for-loop body so the drain can pull one at a time
+        — #1195 follow-up). Every early exit is a ``return`` (not a loop
+        ``continue``); the caller loops to the next entry."""
+        # #506: clear this entry's in-flight marker (if any — only
+        # http/github-event trigger entries get one) once it's been
+        # handled, whichever branch below that turns out to be.
+        marker_id = entry.pop("_inFlightMarkerId", None)
+        try:
+            kind = entry.get("kind")
+            if kind == "session-reset":
+                # Control→agent reset command (#185): the admin can't delete our
+                # pointer on an isolated volume, so it asks us to drop it.
+                rid = entry.get("roomId")
+                if rid:
+                    _clear_session_pointer(rid)
+                    print(f"[Runner:{self._agent_id}] session-reset for {rid}",
                           file=sys.stderr)
                     try:
                         await self._execute_handover_dm(entry)
@@ -3551,12 +5251,92 @@ class TriggerScheduler:
                 exec_ctx = {"github": gh} if gh else ({"jira": jira} if jira else None)
                 try:
                     await self._execute(dict(match), ctx=exec_ctx)
-                except Exception as exc:
-                    print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
+                return
+            if kind == "session-set":
+                # Control→agent resume command (#574): the admin can't write our
+                # pointer on an isolated volume, so it asks us to re-point the
+                # room at a chosen finished session. resumeRequested is persisted
+                # so a failed resume surfaces an error instead of a fresh session.
+                rid = entry.get("roomId")
+                sid = entry.get("sessionId")
+                if rid and isinstance(sid, str) and sid:
+                    _write_session_pointer(
+                        rid, sid, resume_requested=bool(entry.get("resumeRequested")))
+                    print(f"[Runner:{self._agent_id}] session-set {rid} -> {sid}",
                           file=sys.stderr)
-            finally:
-                if marker_id:
-                    self._clear_in_flight(marker_id)
+                return
+            if kind == "handover-dm":
+                print(f"[Runner:{self._agent_id}] handover-dm from queue",
+                      file=sys.stderr)
+                try:
+                    await self._execute_handover_dm(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
+                          file=sys.stderr)
+                return
+            if kind == "loop-verify":
+                # #933: another agent asked us to verify its loop iteration.
+                try:
+                    await self._execute_loop_verify(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] loop-verify error: {exc}",
+                          file=sys.stderr)
+                return
+            if kind == "github-digest":
+                # #449-D: a burst of GitHub events for one (agent, conversation)
+                # was collapsed by the poller into a single lossless digest.
+                # Deliver it as a plain DM (no Claude call) — the burst is an
+                # exceptional/loop-ish signal, so we surface it and let the human
+                # decide rather than auto-acting on a batched backlog.
+                try:
+                    await self._execute_github_digest(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
+                          file=sys.stderr)
+                return
+            if kind in _PENDING_OUT_OF_SCOPE_KINDS:
+                print(
+                    f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
+                    f"in Python — skipping",
+                    file=sys.stderr,
+                )
+                return
+
+            entry_tid = entry.get("triggerId")
+            if not entry_tid:
+                return
+            match = next(
+                (
+                    t for t in triggers
+                    if t.get("id") == entry_tid
+                    and t.get("type") in ("http", "github-event")
+                    and t.get("enabled", True)
+                ),
+                None,
+            )
+            if not match:
+                print(
+                    f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
+                    f"not found or disabled — skipping",
+                    file=sys.stderr,
+                )
+                return
+
+            gh = entry.get("github")
+            label = (
+                f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
+                if match.get("type") == "github-event"
+                else "HTTP trigger"
+            )
+            print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
+            try:
+                await self._execute(dict(match), ctx={"github": gh} if gh else None)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
+                      file=sys.stderr)
+        finally:
+            if marker_id:
+                self._clear_in_flight(marker_id)
 
     # -- handover DM ---------------------------------------------------------
 
@@ -3685,9 +5465,9 @@ class TriggerScheduler:
         conv = entry.get("convKey") or "?"
 
         lines = [
-            f"⚠️ **Event-Burst geklammert** — {count} GitHub-Events auf "
-            f"`{conv}` in einem Poll-Zyklus. Statt {count} Einzel-Sessions "
-            f"fasse ich sie hier zusammen und starte **keinen** automatischen Lauf.",
+            f"⚠️ **Event burst clamped** — {count} GitHub events on "
+            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"instead of starting **{count}** separate sessions.",
             "",
         ]
         # Render oldest-first; cap the visible lines so a large burst doesn't
@@ -3699,15 +5479,15 @@ class TriggerScheduler:
             if ev.get("eventId"):
                 parts.append(f"({ev.get('eventId')})")
             if ev.get("actor"):
-                parts.append(f"von {ev.get('actor')}")
+                parts.append(f"by {ev.get('actor')}")
             if ev.get("createdAt"):
-                parts.append(f"um {ev.get('createdAt')}")
+                parts.append(f"at {ev.get('createdAt')}")
             lines.append("- " + " ".join(parts))
         hidden = len(events) - len(shown)
         if hidden > 0:
-            lines.append(f"- … und {hidden} weitere")
+            lines.append(f"- … and {hidden} more")
         lines.append("")
-        lines.append("Schau bei Bedarf selbst im Repo nach.")
+        lines.append("Check the repo directly if you need more detail.")
 
         body = "\n".join(lines)
         try:
@@ -3898,7 +5678,9 @@ class TriggerScheduler:
             content=content,
         )
 
-    async def _execute(self, trigger: dict, ctx: dict | None = None) -> None:
+    async def _execute(self, trigger: dict, ctx: dict | None = None,
+                       loop_sink: dict | None = None, *,
+                       _gate_held: bool = False) -> None:
         tid = trigger.get("id", "?")
         if _under_test_harness():
             # Safety net (#606): never spawn a real Claude run, post to Matrix,
@@ -3912,6 +5694,26 @@ class TriggerScheduler:
                 file=sys.stderr,
             )
             return
+        # Agent-wide serialization (#1157): every workspace-touching run passes
+        # through the one gate so no two overlap in the single clone. A loop
+        # iteration runs *inside* the loop's own hold (`_gate_held`) and must
+        # NOT re-acquire — re-acquiring would release the workspace between
+        # iterations and let queued work interleave. The backstop / `_running`
+        # guards are evaluated only once the gate is actually held (not while
+        # parked waiting), so a run queued behind a loop doesn't burn a
+        # concurrency slot for the whole wait.
+        if _gate_held:
+            await self._execute_guarded(trigger, ctx, loop_sink)
+            return
+        async with self._gate.acquire():
+            await self._execute_guarded(trigger, ctx, loop_sink)
+
+    async def _execute_guarded(self, trigger: dict, ctx: dict | None,
+                               loop_sink: dict | None) -> None:
+        """The workspace-touching body of ``_execute`` — runs only while the
+        serialization gate is held (by ``_execute`` for a non-loop caller, or by
+        the loop runner's ``acquire_loop`` for a loop iteration)."""
+        tid = trigger.get("id", "?")
         if tid in self._running:
             print(f"[Runner:{self._agent_id}] Trigger {tid} still running — skipping",
                   file=sys.stderr)
@@ -3922,6 +5724,11 @@ class TriggerScheduler:
         # (log always, one DM), then silent until the pressure eases.
         decision = self._backstop.try_acquire()
         if not decision.allowed:
+            # #934: tell a loop runner its spawn was dropped so it can terminate
+            # with the `paused` outcome instead of silently counting a no-op
+            # iteration. Inert for every non-loop caller (loop_sink is None).
+            if loop_sink is not None:
+                loop_sink["backstopTripped"] = True
             print(
                 f"[Runner:{self._agent_id}] Trigger {tid} dropped by backstop "
                 f"(reason={decision.reason}, active={decision.active}, "
@@ -3940,8 +5747,15 @@ class TriggerScheduler:
             return
         self._running.add(tid)
         try:
-            await self._execute_inner(trigger, ctx)
+            await self._execute_inner(trigger, ctx, loop_sink)
         except Exception as exc:
+            # A user Stop aborts the in-flight iteration (#1231): surface it to
+            # the loop runner via the sink so the loop terminates with a
+            # `stopped` outcome (and leaves a persistent record) instead of
+            # silently swallowing the abort and re-arming. Inert for non-loop
+            # callers (loop_sink is None).
+            if loop_sink is not None and getattr(exc, "user_aborted", False):
+                loop_sink["userAborted"] = True
             print(f"[Runner:{self._agent_id}] Trigger {tid} error: {exc}",
                   file=sys.stderr)
         finally:
@@ -3966,19 +5780,19 @@ class TriggerScheduler:
         if decision.reason == "rate":
             window_min = max(1, int(round(snap["windowSec"] / 60)))
             detail = (
-                f"mehr als {snap['maxPerWindow']} getriggerte Sessions in "
-                f"{window_min} min gestartet"
+                f"more than {snap['maxPerWindow']} triggered sessions started "
+                f"in {window_min} min"
             )
         else:
             detail = (
-                f"bereits {snap['maxConcurrent']} getriggerte Sessions laufen "
-                f"parallel"
+                f"already {snap['maxConcurrent']} triggered sessions running "
+                f"concurrently"
             )
         body = (
-            f"⚠️ **Trigger-Backstop aktiv** — {detail}. Weitere getriggerte "
-            f"Läufe werden vorerst verworfen (Schutz gegen Runaway-Schleifen, "
-            f"#611). Ich melde das einmal und unterdrücke weitere Meldungen, "
-            f"bis sich die Lage entspannt."
+            f"⚠️ **Trigger backstop active** — {detail}. Further triggered "
+            f"runs will be dropped for now (runaway-loop protection, "
+            f"#611). Reporting once and suppressing further notices "
+            f"until the rate settles."
         )
         content = {
             "msgtype": "m.notice",
@@ -3997,6 +5811,66 @@ class TriggerScheduler:
             content=content,
         )
 
+    async def _post_trigger_failure_notice(self, trigger: dict, room_id: str,
+                                           err: Exception,
+                                           permanent: bool = False,
+                                           restored_label: str | None = None
+                                           ) -> None:
+        """Post one plain DM notice when a triggered run is given up. Best-effort,
+        no Claude call — the triggering event is consumed and will not re-fire,
+        so a silent failure would leave the delivery chain stalled with nobody
+        the wiser.
+
+        `permanent` distinguishes a config/4xx failure (retrying is pointless,
+        so the run was not retried) from a transient one that failed both
+        attempts. When the run had claimed the item and the claim was rolled
+        back (#957), `restored_label` names the wake label that is back on it:
+        the poller re-fires the chain by itself, so the notice must not ask for
+        a manual re-issue that would double-run the work."""
+        if not (isinstance(room_id, str) and _MATRIX_ROOM_ID_RE.match(room_id)):
+            return
+        tid = trigger.get("id", "?")
+        desc = trigger.get("description") or trigger.get("type") or "trigger"
+        gave_up = (
+            "failed with a permanent error and was not retried (a retry would "
+            "fail the same way)" if permanent else
+            "crashed twice and was given up"
+        )
+        detail = _claude_error_detail(err)
+        if restored_label:
+            body = (
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The claim was rolled back: the `{restored_label}` "
+                f"label is back on the item, which re-fires this chain on its "
+                f"own — no manual step needed. If it keeps crashing, the "
+                f"conversation throttle stops the retries and it needs a human."
+                f"\n\nLast error: {detail}"
+            )
+        else:
+            body = (
+                f"⚠️ **Triggered run failed** — trigger `{tid}` ({desc}) "
+                f"{gave_up}. The event that fired it is consumed and will NOT "
+                f"re-fire on its own — the work it should have done is still "
+                f"open. Please re-issue the event (e.g. toggle the label) or "
+                f"hand me the task directly.\n\nLast error: {detail}"
+            )
+        failure_block = {
+            "triggerId": tid,
+            "triggerType": trigger.get("type"),
+        }
+        if restored_label:
+            failure_block["claimRolledBack"] = restored_label
+        content = {
+            "msgtype": "m.notice",
+            "body": body,
+            "io.aee.triggerFailure": failure_block,
+        }
+        await self._client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
     async def _execute_and_clear_marker(self, trigger: dict, marker_id: str,
                                         ctx: dict | None = None) -> None:
         """Wrap `_execute` so the #506 in-flight marker is cleared once the
@@ -4008,7 +5882,8 @@ class TriggerScheduler:
         finally:
             self._clear_in_flight(marker_id)
 
-    async def _execute_inner(self, trigger: dict, ctx: dict | None) -> None:
+    async def _execute_inner(self, trigger: dict, ctx: dict | None,
+                             loop_sink: dict | None = None) -> None:
         tid = trigger.get("id", "?")
 
         # Optional preCheck — gates the LLM call.
@@ -4067,6 +5942,11 @@ class TriggerScheduler:
         task_body = trigger.get("prompt", "")
         if pre_check_output:
             task_body += f"\n\nPre-check context:\n{pre_check_output}"
+        # Loop self-correction (#933): a failed verifier's output from the
+        # previous iteration is threaded in here so this iteration can fix it.
+        loop_feedback = (ctx or {}).get("loopFeedback")
+        if isinstance(loop_feedback, str) and loop_feedback.strip():
+            task_body += f"\n\n---\n{loop_feedback}"
         if gh:
             clamped = _clamp_event_deep(gh)
             task_body += (
@@ -4126,9 +6006,48 @@ class TriggerScheduler:
                 "triggerId": tid,
                 "triggerType": trigger.get("type"),
             }
+            # Loop iteration counters (#1155): make a loop iteration identifiable
+            # and numbered in the session log, and expose live progress to the
+            # chat composer. Only present for loop runs (ctx set by _loop_runner).
+            loop_iteration = (ctx or {}).get("loopIteration")
+            if isinstance(loop_iteration, int) and not isinstance(loop_iteration, bool) and loop_iteration >= 1:
+                fired_event["loopIteration"] = loop_iteration
+                loop_max = (ctx or {}).get("loopMaxIterations")
+                if isinstance(loop_max, int) and not isinstance(loop_max, bool) and loop_max >= 1:
+                    fired_event["loopMaxIterations"] = loop_max
             if gh:
                 fired_event["github"] = gh
             _append_event(room_id, fired_event)
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] session-log warning: {exc}",
+                  file=sys.stderr)
+
+        # Claim the work (#957) — after the preCheck gate, before the invoke.
+        # A failed swap is logged and the run proceeds; `claimed` then stays
+        # False so nothing is rolled back later either — the wake label was
+        # never removed, so there is nothing to restore.
+        claim = _claim_plan(trigger, gh)
+        claimed = False
+        if claim:
+            claimed = await asyncio.to_thread(
+                _gh_swap_labels, claim["repo"], claim["number"],
+                claim["remove"], claim["add"],
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "trigger.claimed",
+                    "correlationId": correlation_id,
+                    "triggerId": tid,
+                    "repo": claim["repo"],
+                    "number": claim["number"],
+                    "removed": claim["remove"],
+                    "added": claim["add"],
+                    "ok": claimed,
+                })
+            except Exception:
+                pass
+
+        try:
             _append_event(room_id, {
                 "type": "claude.invoke",
                 "correlationId": correlation_id,
@@ -4158,32 +6077,155 @@ class TriggerScheduler:
             # pointer — otherwise the DM's resume id gets stolen. Bypass the
             # _call_claude wrapper for that case and call _call_claude_once
             # directly with resume_id=None.
-            try:
-                if is_per_invocation:
-                    result, _observed = await asyncio.to_thread(
-                        _call_claude_once,
-                        prompt, room_id, correlation_id, None,
-                        self._blueprint_id, timeout_sec, run_context,
-                    )
-                else:
-                    result = await asyncio.to_thread(
-                        _call_claude,
-                        prompt, room_id, correlation_id, self._blueprint_id, timeout_sec,
-                        run_context,
-                    )
-            except subprocess.CalledProcessError as err:
+            #
+            # The claude invocation gets one retry on transient failure: the
+            # triggering event is already consumed at this point, so giving up
+            # on the first API hiccup permanently stalls the delivery chain.
+            # A user-requested stop is never retried, and a run that fails both
+            # attempts is announced in the room instead of dying silently.
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
-                    _append_event(room_id, {
-                        "type": "error",
-                        "correlationId": correlation_id,
-                        "stage": "claude",
-                        "message": str(err),
-                    })
-                except Exception:
-                    pass
-                raise
+                    if is_per_invocation:
+                        result, _observed = await asyncio.to_thread(
+                            _call_claude_once,
+                            prompt, room_id, correlation_id, None,
+                            self._blueprint_id, timeout_sec, run_context,
+                        )
+                    else:
+                        result = await asyncio.to_thread(
+                            _call_claude,
+                            prompt, room_id, correlation_id, self._blueprint_id,
+                            timeout_sec, run_context,
+                        )
+                    break
+                except subprocess.CalledProcessError as err:
+                    detail = _claude_error_detail(err)
+                    try:
+                        _append_event(room_id, {
+                            "type": "error",
+                            "correlationId": correlation_id,
+                            "stage": "claude",
+                            "attempt": attempt,
+                            "message": detail,
+                        })
+                    except Exception:
+                        pass
+                    user_aborted = bool(getattr(err, "user_aborted", False))
+                    if user_aborted:
+                        raise
+                    # A permanent failure (bad model id, auth, 4xx, stale
+                    # --resume session) fails identically on the retry — skip the
+                    # 60s wait and give up now. Unknown/transient causes keep the
+                    # one retry (the #902 intent). Either way the event is
+                    # consumed, so on give-up we roll the claim back and notify.
+                    permanent = _claude_error_is_permanent(err)
+                    if attempt >= 2 or permanent:
+                        # Roll the claim back (#957): the run is given up, so
+                        # leave the item the way we found it. Re-adding the wake
+                        # label re-emits a fresh `issues.labeled` event through
+                        # the poller, so the chain restarts itself event-natively
+                        # with no reconciler involved; the conversation throttle
+                        # (5 events/h per issue) is the crash-loop brake. Only
+                        # when we actually claimed — a failed swap already left
+                        # the wake label in place. A user abort re-raises above,
+                        # so an aborted run never rolls back.
+                        restored_label = None
+                        if claim and claimed:
+                            rolled_back = await asyncio.to_thread(
+                                _gh_swap_labels, claim["repo"], claim["number"],
+                                claim["add"], claim["remove"],
+                            )
+                            if rolled_back:
+                                restored_label = claim["remove"]
+                            try:
+                                _append_event(room_id, {
+                                    "type": "trigger.claim-rolled-back",
+                                    "correlationId": correlation_id,
+                                    "triggerId": tid,
+                                    "repo": claim["repo"],
+                                    "number": claim["number"],
+                                    "removed": claim["add"],
+                                    "added": claim["remove"],
+                                    "ok": rolled_back,
+                                })
+                            except Exception:
+                                pass
+                        try:
+                            await self._post_trigger_failure_notice(
+                                trigger, room_id, err, permanent=permanent,
+                                restored_label=restored_label)
+                        except Exception as exc:
+                            print(
+                                f"[Runner:{self._agent_id}] Could not post "
+                                f"failure notice for {tid}: {exc}",
+                                file=sys.stderr,
+                            )
+                        raise
+                    delay = TRIGGER_RETRY_DELAY_SEC
+                    print(
+                        f"[Runner:{self._agent_id}] Trigger {tid}: claude run "
+                        f"failed (attempt {attempt}) — retrying in {delay}s: "
+                        f"{detail}",
+                        file=sys.stderr,
+                    )
+                    try:
+                        _append_event(room_id, {
+                            "type": "trigger.retry",
+                            "correlationId": correlation_id,
+                            "triggerId": tid,
+                            "delaySec": delay,
+                        })
+                    except Exception:
+                        pass
+                    await asyncio.sleep(delay)
         finally:
             _bump_active(-1, session)
+
+        # Mark the claim done (#1163) — the success mirror of the double-failure
+        # rollback above. Reaching this point means the invoke loop broke
+        # normally: every failure path (double-failure, user abort, permanent
+        # error) `raise`s out of the loop and never gets here, so this runs on a
+        # successful completion only — including a `[PASS]` or empty-after-harvest
+        # reply, since the claim lifecycle tracks the run, not whether a message
+        # was posted. Swap `<wake>:wip` -> `<wake>:completed` so the finished
+        # ticket stops looking in-progress. Only when we actually claimed
+        # (`claimed` True): a non-claimed trigger or a failed initial swap left
+        # the wake label in place, so there is nothing to complete. Best-effort,
+        # off the critical path — a create/swap failure is logged inside
+        # `_gh_swap_labels` and never gates the result posting below (same
+        # contract as claiming).
+        if claim and claimed:
+            completed_label = f"{claim['remove']}{CLAIM_COMPLETED_SUFFIX}"
+            completed = await asyncio.to_thread(
+                _gh_swap_labels, claim["repo"], claim["number"],
+                claim["add"], completed_label,
+                CLAIM_COMPLETED_COLOR, CLAIM_COMPLETED_LABEL_DESC,
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "trigger.claim-completed",
+                    "correlationId": correlation_id,
+                    "triggerId": tid,
+                    "repo": claim["repo"],
+                    "number": claim["number"],
+                    "removed": claim["add"],
+                    "added": completed_label,
+                    "ok": completed,
+                })
+            except Exception:
+                pass
+
+        # Loop token budget (#934): surface this iteration's output-token spend
+        # (accumulated onto run_context by _call_claude_once, including any
+        # --resume retry) to the loop runner via the sink it passed in. Inert
+        # for every non-loop trigger (loop_sink is None).
+        if loop_sink is not None:
+            loop_sink["outputTokens"] = (
+                loop_sink.get("outputTokens", 0)
+                + int(run_context.get("_loopOutputTokens", 0) or 0)
+            )
 
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
@@ -4518,7 +6560,11 @@ async def run_dm_listener() -> None:
 
     # Member cache for DM detection.
     member_cache: dict[str, tuple[list[str], float]] = {}
-    processing = {"flag": False}  # mutable closure
+    # Agent-wide serialization gate (#1157). Constructed here — before the
+    # scheduler, and independent of it — so the chat/DM path always has one and
+    # so both paths share the *same* gate: chat turns queue behind a running
+    # loop or an in-flight trigger, and vice versa, in the one workspace.
+    workspace_gate = WorkspaceGate()
 
     async def joined_members(room_id: str) -> list[str]:
         cached = member_cache.get(room_id)
@@ -4544,20 +6590,27 @@ async def run_dm_listener() -> None:
             return False
         return user_id in members and sender in members
 
-    async def send_formatted(room_id: str, text: str) -> str:
+    async def send_formatted(room_id: str, text: str,
+                             extra_content: dict | None = None) -> str:
         try:
             html_body = md_lib.markdown(text)
         except Exception:
             html_body = text
+        content = {
+            "msgtype": "m.text",
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html_body,
+        }
+        # Optional structured payload merged onto the message content (e.g. the
+        # finished-loop record `io.aee.loop-record`, #1231) so the Admin Console
+        # can render a richer card while other Matrix clients still see `body`.
+        if isinstance(extra_content, dict):
+            content.update(extra_content)
         resp = await client.room_send(
             room_id=room_id,
             message_type="m.room.message",
-            content={
-                "msgtype": "m.text",
-                "body": text,
-                "format": "org.matrix.custom.html",
-                "formatted_body": html_body,
-            },
+            content=content,
         )
         return getattr(resp, "event_id", "")
 
@@ -4593,14 +6646,36 @@ async def run_dm_listener() -> None:
         if not await is_dm_from_human(room_id, sender):
             return
 
-        if processing["flag"]:
-            print(f"[Runner:{agent_id}] Busy — dropping direct message", file=sys.stderr)
+        # #1157: a chat turn is a workspace-touching run, so it serializes on
+        # the same agent-wide gate as triggers and loops — it no longer runs
+        # concurrently with them in the one clone. While a loop (or another
+        # trigger/chat turn) holds the workspace this turn WAITS its turn rather
+        # than being dropped. But a loop can hold the workspace for a long time,
+        # so cap how many turns may queue: beyond the cap, shed the newest with
+        # a visible notice instead of growing an unbounded backlog that would
+        # flood the room when the loop ends (AC8). Out-of-band Stop is unaffected
+        # — it is a signal, not a queued chat message (AC10).
+        if workspace_gate.chat_full():
+            print(f"[Runner:{agent_id}] Busy — chat queue full, shedding message",
+                  file=sys.stderr)
+            try:
+                await send_formatted(
+                    room_id,
+                    "_(Ich bin gerade ausgelastet und habe schon mehrere Nachrichten "
+                    "in der Warteschlange. Bitte sende diese gleich noch einmal.)_",
+                )
+            except Exception:
+                pass
             return
-        processing["flag"] = True
 
         correlation_id = getattr(event, "event_id", None) or str(uuid.uuid4())
         print(f"[Runner:{agent_id}] Direct message ({len(body)} chars)...", file=sys.stderr)
 
+        # Queue behind whatever currently owns the workspace (a loop, a trigger,
+        # or an earlier chat turn); released in the `finally` below. This gate
+        # also serializes chat-vs-chat, so a per-turn busy flag is no longer
+        # needed.
+        await workspace_gate.acquire_chat_turn()
         try:
             _append_event(room_id, {
                 "type": "message.received",
@@ -4669,33 +6744,35 @@ async def run_dm_listener() -> None:
                     print(f"[Runner:{agent_id}] Could not post abort notice: {post_exc}",
                           file=sys.stderr)
             else:
+                detail = _claude_error_detail(err)
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,
-                    "stage": "claude", "message": str(err),
+                    "stage": "claude", "message": detail,
                 })
-                print(f"[Runner:{agent_id}] Error: {err}", file=sys.stderr)
+                print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
                 try:
                     await send_formatted(
                         room_id,
-                        f"⚠️ **Agent error**\n\n```\n{str(err)[:800]}\n```",
+                        f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                     )
                 except Exception:
                     pass
         except Exception as err:
+            detail = _claude_error_detail(err)
             _append_event(room_id, {
                 "type": "error", "correlationId": correlation_id,
-                "stage": "claude", "message": str(err),
+                "stage": "claude", "message": detail,
             })
-            print(f"[Runner:{agent_id}] Error: {err}", file=sys.stderr)
+            print(f"[Runner:{agent_id}] Error: {detail}", file=sys.stderr)
             try:
                 await send_formatted(
                     room_id,
-                    f"⚠️ **Agent error**\n\n```\n{str(err)[:800]}\n```",
+                    f"⚠️ **Agent error**\n\n```\n{detail[:800]}\n```",
                 )
             except Exception:
                 pass
         finally:
-            processing["flag"] = False
+            workspace_gate.release_chat_turn()
 
     async def save_token_callback(response):
         if isinstance(response, SyncResponse) and response.next_batch:
@@ -4723,6 +6800,9 @@ async def run_dm_listener() -> None:
                 user_id=user_id,
                 send_formatted=send_formatted,
                 blueprint_id=blueprint_id,
+                # Share the one gate with the chat path (#1157) so triggers and
+                # chat serialize against each other in the single workspace.
+                workspace_gate=workspace_gate,
             )
             await scheduler.start()
         except Exception as exc:

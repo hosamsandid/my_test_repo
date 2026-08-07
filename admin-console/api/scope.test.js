@@ -6,10 +6,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   computeScope, visibleTeam, visibleAgent,
-  canManageTeam, visibleUser, describeAuthz,
+  canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
-  canViewUsageStatistics,
+  canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
 } = require('./scope');
 
 const users = [
@@ -171,6 +171,55 @@ test('describeAuthz: unknown subject fails closed', () => {
   assert.deepEqual(a.teams, []);
 });
 
+test('describeAuthz: chatFontSize surfaces the caller\'s own preference (#1437)', () => {
+  const withPref = [
+    { id: 'u-a', subject: 'alice@corp.com', chatFontSize: 16 },
+    { id: 'u-b', subject: 'bob@corp.com' }, // no preference → default
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', adminUsername: 'admin', users: withPref, memberships: [] });
+  assert.equal(alice.chatFontSize, 16);
+  const bob = describeAuthz({ username: 'bob@corp.com', adminUsername: 'admin', users: withPref, memberships: [] });
+  assert.equal(bob.chatFontSize, 12); // default when unset
+});
+
+test('describeAuthz: env admin (no user record) gets the 12px default (#1437)', () => {
+  const a = describeAuthz({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(a.chatFontSize, 12);
+});
+
+test('isKnownPrincipal: registered user or env admin, fail-closed otherwise (#1415)', () => {
+  assert.equal(isKnownPrincipal({ envAdmin: true, userId: null }), true);
+  assert.equal(isKnownPrincipal({ envAdmin: false, userId: 'u1' }), true);
+  assert.equal(isKnownPrincipal({ envAdmin: false, userId: null }), false);
+  assert.equal(isKnownPrincipal({}), false);
+  assert.equal(isKnownPrincipal(null), false);
+  assert.equal(isKnownPrincipal(undefined), false);
+
+  // Composed through describeAuthz — the production IAP-gate path.
+  const authz = (username, u = users) => describeAuthz({ username, adminUsername: 'admin', users: u, memberships });
+  assert.equal(isKnownPrincipal(authz('alice@corp.com')), true);  // registered, memberships
+  assert.equal(isKnownPrincipal(authz('ALICE@corp.com')), true);  // subject match is case-insensitive
+  assert.equal(isKnownPrincipal(authz('sys@corp.com')), true);    // registered System Admin
+  assert.equal(isKnownPrincipal(authz('admin')), true);           // env admin
+  assert.equal(isKnownPrincipal(authz('ghost@corp.com')), false); // stranger
+  assert.equal(isKnownPrincipal(authz('alice@corp.com', [])), false); // degraded users-index read → unknown
+});
+
+test('describeAuthz: surfaces the caller\'s own githubHandle (#1385)', () => {
+  const withHandle = [
+    { id: 'u-a', subject: 'alice@corp.com', githubHandle: 'alice-gh' },
+    { id: 'u-b', subject: 'bob@corp.com' }, // no handle set
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(alice.githubHandle, 'alice-gh');
+  // A user with no handle set reports the empty string, not undefined.
+  const bob = describeAuthz({ username: 'bob@corp.com', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(bob.githubHandle, '');
+  // The env single-admin credential has no user record → empty handle.
+  const admin = describeAuthz({ username: 'admin', adminUsername: 'admin', users: withHandle, memberships });
+  assert.equal(admin.githubHandle, '');
+});
+
 // ── Credentials scope & management gate (#798) ─────────────────────────────
 // alice = team-admin of 'payments', team-member of 'default'.
 // bob   = team-member of 'risk'. sys = System Admin. admin = env admin.
@@ -209,6 +258,52 @@ test('visibleCredential: plain team-member sees no credentials (access deferred)
   const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
   assert.equal(visibleCredential(bob, { scope: 'team', teamId: 'risk' }), false);
   assert.equal(visibleCredential(bob, { scope: 'system', assignedTeamIds: ['risk'] }), false);
+});
+
+// ── assistSelectableEndpoint (#1210) — selection visibility, NOT management ──
+
+test('assistSelectableEndpoint: plain team-member CAN select their team providers (unlike visibleCredential)', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // team-member of risk
+  // The whole point: a member who may NOT manage the credential may still select it.
+  assert.equal(visibleCredential(bob, { authType: 'api-key', scope: 'team', teamId: 'risk' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'team', teamId: 'risk' }), true);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: ['risk'] }), true);
+  // Other teams / unassigned system providers stay non-selectable.
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'team', teamId: 'payments' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: ['payments'] }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', scope: 'system', assignedTeamIds: [] }), false);
+});
+
+test('assistSelectableEndpoint: oauth-token providers are never selectable (even for admins)', () => {
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(sys, { authType: 'oauth-token', scope: 'system', assignedTeamIds: [] }), false);
+  assert.equal(assistSelectableEndpoint(env, { authType: 'oauth-token', scope: 'team', teamId: 'risk' }), false);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'oauth-token', scope: 'team', teamId: 'risk' }), false);
+});
+
+test('assistSelectableEndpoint: scope.all (System Admin / env admin) selects any non-oauth provider', () => {
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(sys, { authType: 'api-key', scope: 'system', assignedTeamIds: [] }), true);
+  assert.equal(assistSelectableEndpoint(env, { authType: 'api-key', scope: 'team', teamId: 'risk' }), true);
+});
+
+test('assistSelectableEndpoint: pre-#800 legacy record (no scope) is team-scoped via normalizeCredential', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // risk member
+  // Legacy entry carries only teamId, no scope → treated as team-scoped owned by that team.
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'risk' }), true);
+  assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'payments' }), false);
+  // A legacy record with no teamId at all collapses to the default team.
+  const legacyDefault = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships }); // member of default
+  assert.equal(assistSelectableEndpoint(legacyDefault, { authType: 'api-key' }), true);
+});
+
+test('assistSelectableEndpoint: fail-closed on missing scope/endpoint', () => {
+  assert.equal(assistSelectableEndpoint(null, { authType: 'api-key', scope: 'team', teamId: 'risk' }), false);
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(bob, null), false);
 });
 
 test('canManageCredential: team-admin manages own team creds, never system creds', () => {
@@ -285,6 +380,55 @@ test('provider gating: team-admin sees/manages own team provider, only uses assi
   assert.equal(canReassignCredential(alice), false);
 });
 
+// ── Config-write authorization for agents / environments (#989) ─────────────
+// alice = team-admin of 'payments', team-member of 'default'.
+// bob   = team-member of 'risk'. sys = System Admin. admin = env admin.
+
+test('canManageAgent: team-admin manages agents of their admin team only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(alice, { teamId: 'payments' }), true);   // team-admin
+  assert.equal(canManageAgent(alice, { teamId: 'default' }), false);   // only a member (AC1)
+  assert.equal(canManageAgent(alice, { teamId: 'risk' }), false);      // not a member
+  assert.equal(canManageAgent(alice, {}), false);                      // missing → default, not admin
+});
+
+test('canManageAgent: plain team-member manages no agent (AC1)', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(bob, { teamId: 'risk' }), false); // member, not admin
+});
+
+test('canManageAgent: env admin & System-Admin user manage any agent', () => {
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(env, { teamId: 'risk' }), true);
+  assert.equal(canManageAgent(sys, { teamId: 'anything' }), true);
+});
+
+test('canManageAgent: missing scope / unknown subject fail closed', () => {
+  const unknown = computeScope({ username: 'ghost@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(unknown, { teamId: 'default' }), false);
+  assert.equal(canManageAgent(null, { teamId: 'default' }), false);
+  assert.equal(canManageAgent(undefined, { teamId: 'payments' }), false);
+});
+
+test('canManageEnvironment: team-admin manages own team env; member/other denied', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob   = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageEnvironment(alice, { teamId: 'payments' }), true);
+  assert.equal(canManageEnvironment(alice, { teamId: 'default' }), false); // only a member
+  assert.equal(canManageEnvironment(alice, { teamId: 'risk' }), false);    // other team
+  assert.equal(canManageEnvironment(bob, { teamId: 'risk' }), false);      // member, not admin
+  assert.equal(canManageEnvironment(alice, {}), false);                    // missing → default
+});
+
+test('canManageEnvironment: env admin & System-Admin manage any env (no regression)', () => {
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageEnvironment(env, { teamId: 'risk' }), true);
+  assert.equal(canManageEnvironment(sys, { teamId: 'payments' }), true);
+  assert.equal(canManageEnvironment(null, { teamId: 'payments' }), false); // missing scope fails closed
+});
+
 // ── Token-usage statistics visibility (#801) ────────────────────────────────
 
 test('canViewUsageStatistics: env admin & System-Admin user may view (AC3/AC6)', () => {
@@ -307,4 +451,99 @@ test('canViewUsageStatistics: unknown subject / missing scope fail closed', () =
   assert.equal(canViewUsageStatistics(unknown), false);
   assert.equal(canViewUsageStatistics(null), false);
   assert.equal(canViewUsageStatistics(undefined), false);
+});
+
+// ── Per-agent Model-Provider switch: curated target set (agent-provider-switch)
+//
+// The provider switcher must build its allowed target set from
+// credentialVisibleToTeam (does the AGENT's team own/get-assigned this
+// provider?), NOT from visibleCredential (which gates on the *caller's*
+// team-admin role and is intentionally closed to Team Members). These tests pin
+// that a plain Team Member can switch within their team's providers even though
+// the general credential listing shows them nothing.
+test('provider switch: a Team Member gets the team-usable set though visibleCredential is closed', () => {
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships }); // team-member of 'risk'
+  const teamEp   = { id: 'ep-risk', scope: 'team', teamId: 'risk' };
+  const otherEp  = { id: 'ep-pay', scope: 'team', teamId: 'payments' };
+  const systemEp = { id: 'ep-shared', scope: 'system', assignedTeamIds: ['risk'] };
+
+  // The curated set is by the agent's team — bob's team is 'risk'.
+  assert.equal(credentialVisibleToTeam(teamEp, 'risk'), true);
+  assert.equal(credentialVisibleToTeam(systemEp, 'risk'), true);
+  assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false); // no cross-team leak
+
+  // …yet the member's own credential listing (role-gated) shows none of them.
+  assert.equal(visibleCredential(bob, teamEp), false);
+  assert.equal(visibleCredential(bob, systemEp), false);
+});
+
+test('provider switch: even a System Admin cannot target a provider the agent team lacks', () => {
+  // System Admin sees every credential (visibleCredential true) …
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const otherEp = { id: 'ep-pay', scope: 'team', teamId: 'payments' };
+  assert.equal(visibleCredential(sys, otherEp), true);
+  // … but the switch is gated on the AGENT team's entitlement, not the caller's
+  // visibility: a 'risk' agent still can't be bound to a 'payments' provider.
+  assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false);
+});
+
+// ── Agent → human tenant resolution ─────────────────────────────────────────
+// A team-member's tenant is its parent Agent Team's `teamId`. `parentTeamId`
+// itself is an Agent-Team id in a different namespace and must never be used as
+// a tenant — doing so silently empties every team-scoped lookup whenever the
+// Agent Team's id is not also a human Team id.
+
+const tenantAgents = {
+  // Agent Team 'sdlc-2-0' is owned by the human team 'default'.
+  'sdlc-2-0': { id: 'sdlc-2-0', role: 'team', teamId: 'default' },
+  'sdlc-2-0-analyst': { id: 'sdlc-2-0-analyst', role: 'team-member', teamId: 'default', parentTeamId: 'sdlc-2-0' },
+  // A member whose own stamp drifted away from its parent's tenant.
+  'sdlc-2-0-dev': { id: 'sdlc-2-0-dev', role: 'team-member', teamId: 'stale', parentTeamId: 'sdlc-2-0' },
+  // Agent Team whose id coincides with a human team id (the case that hid the bug).
+  payments: { id: 'payments', role: 'team', teamId: 'payments' },
+  'payments-dev': { id: 'payments-dev', role: 'team-member', teamId: 'payments', parentTeamId: 'payments' },
+  standalone: { id: 'standalone', role: 'agent', teamId: 'risk' },
+};
+const loadTenantAgent = (id) => tenantAgents[id] || null;
+
+test('tenant: a team-member resolves to its parent Agent Team\'s human team, not the Agent-Team id', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent), 'default');
+  // The regression this guards: 'sdlc-2-0' is an Agent Team, not a human team,
+  // so using it as a tenant made every provider invisible.
+  assert.notEqual(resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent), 'sdlc-2-0');
+});
+
+test('tenant: the parent wins over a drifted own stamp', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0-dev'], loadTenantAgent), 'default');
+});
+
+test('tenant: the coinciding-id case keeps resolving as before', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['payments-dev'], loadTenantAgent), 'payments');
+});
+
+test('tenant: agents without a parent use their own teamId', () => {
+  assert.equal(resolveAgentTenant(tenantAgents.standalone, loadTenantAgent), 'risk');
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0'], loadTenantAgent), 'default');
+});
+
+test('tenant: falls back to the own stamp when the parent is missing or unstamped', () => {
+  const orphan = { id: 'orphan', role: 'team-member', teamId: 'risk', parentTeamId: 'gone' };
+  assert.equal(resolveAgentTenant(orphan, loadTenantAgent), 'risk');
+  const unstamped = { id: 'u', role: 'team-member', teamId: 'risk', parentTeamId: 'no-team' };
+  assert.equal(resolveAgentTenant(unstamped, () => ({ id: 'no-team', role: 'team' })), 'risk');
+});
+
+test('tenant: defaults to the default team on missing input', () => {
+  assert.equal(resolveAgentTenant(null, loadTenantAgent), 'default');
+  assert.equal(resolveAgentTenant({ id: 'x' }, loadTenantAgent), 'default');
+  assert.equal(resolveAgentTenant({ id: 'x', parentTeamId: 'sdlc-2-0' }, undefined), 'default');
+});
+
+test('tenant: the resolved tenant is what unlocks the team-scoped provider set', () => {
+  // End-to-end of the reported bug: the providers assigned to 'default' are
+  // reachable for a member of an Agent Team whose id is not a human team.
+  const systemEp = { id: 'ep-shared', scope: 'system', assignedTeamIds: ['default'] };
+  const tenant = resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent);
+  assert.equal(credentialVisibleToTeam(systemEp, tenant), true);
+  assert.equal(credentialVisibleToTeam(systemEp, 'sdlc-2-0'), false); // pre-fix behaviour
 });

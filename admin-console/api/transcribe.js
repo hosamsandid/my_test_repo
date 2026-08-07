@@ -1,7 +1,20 @@
 'use strict';
 
-function createTranscribeRoute({ fetchFn = globalThis.fetch, sttUrl } = {}) {
+// STT request timeout. A meeting segment (up to 120 s of audio, #1296) can
+// take longer to transcribe on CPU than the old hard-coded 15 s, so the
+// timeout is env-configurable and defaults to 60 s. For short quick-dictation
+// clips the timeout is only an upper bound, so raising the default is harmless.
+const DEFAULT_STT_TIMEOUT_MS = 60_000;
+
+function resolveTimeoutMs(explicit) {
+  const raw = explicit ?? process.env.STT_TIMEOUT_MS;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_STT_TIMEOUT_MS;
+}
+
+function createTranscribeRoute({ fetchFn = globalThis.fetch, sttUrl, timeoutMs } = {}) {
   const url = sttUrl || process.env.STT_URL || 'http://stt:9000';
+  const timeout = resolveTimeoutMs(timeoutMs);
 
   return async function handleTranscribe(req, res) {
     if (!req.file) {
@@ -15,7 +28,7 @@ function createTranscribeRoute({ fetchFn = globalThis.fetch, sttUrl } = {}) {
       const response = await fetchFn(`${url}/asr?output=json&vad_filter=true`, {
         method: 'POST',
         body: form,
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(timeout),
       });
 
       if (!response.ok) {
@@ -30,4 +43,4 @@ function createTranscribeRoute({ fetchFn = globalThis.fetch, sttUrl } = {}) {
   };
 }
 
-module.exports = { createTranscribeRoute };
+module.exports = { createTranscribeRoute, resolveTimeoutMs, DEFAULT_STT_TIMEOUT_MS };

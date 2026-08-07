@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { PanelRightOpen, MessageCircle, Loader2 } from 'lucide-react';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router';
+import { MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
+import { resolveRailWidths } from './agent-chat/rail-layout';
 
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
@@ -21,18 +22,22 @@ function loadPanelWidth(key, fallback) {
   } catch { return fallback; }
 }
 
-function ResizeDivider({ onMouseDown }) {
+// `disabled` keeps the divider in the layout (so the flanking panes don't jump
+// by 12 px) while making it inert — used for the right divider while the rail
+// is collapsed to its icon strip, which has no width to drag.
+function ResizeDivider({ onMouseDown, disabled = false }) {
   const [hovered, setHovered] = React.useState(false);
+  const showGrab = hovered && !disabled;
   return (
     <div
-      onMouseDown={onMouseDown}
+      onMouseDown={disabled ? undefined : onMouseDown}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      title="Ziehen zum Anpassen der Breite"
+      title={disabled ? undefined : 'Drag to resize'}
       style={{
         width: 12,
         flexShrink: 0,
-        cursor: 'col-resize',
+        cursor: disabled ? 'default' : 'col-resize',
         position: 'relative',
         zIndex: 5,
         userSelect: 'none',
@@ -43,9 +48,9 @@ function ResizeDivider({ onMouseDown }) {
         left: '50%',
         top: 0,
         bottom: 0,
-        width: hovered ? 3 : 1,
+        width: showGrab ? 3 : 1,
         transform: 'translateX(-50%)',
-        background: hovered ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
+        background: showGrab ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)',
         transition: 'background 0.15s, width 0.15s',
         pointerEvents: 'none',
       }} />
@@ -114,7 +119,7 @@ export default function AgentChat() {
   const manuallyUnreadRef = useRef(new Set());
 
   // Map agentId -> effective display state
-  // ('busy'|'unread'|'idle'|'problem')
+  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline')
   const [agentStatuses, setAgentStatuses] = useState({});
   const statusTimerRef = useRef(null);
   useEffect(() => {
@@ -136,8 +141,15 @@ export default function AgentChat() {
           const map = {};
           for (const { id, activityState, lastResponseAt, hasSession } of list) {
             let effective;
-            if (activityState === 'disabled' || activityState === 'offline') {
-              effective = 'problem';
+            if (activityState === 'disabled') {
+              // Intentionally turned off — a one-click enable brings it back.
+              // Kept distinct from 'offline' so the list can tell the user
+              // whether they need to just enable the agent or investigate a
+              // down container (#1119).
+              effective = 'disabled';
+            } else if (activityState === 'offline') {
+              // Container is not running / crashed — a real problem to look at.
+              effective = 'offline';
             } else if (activityState === 'busy') {
               effective = 'busy';
             } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
@@ -224,25 +236,25 @@ export default function AgentChat() {
   }, []);
 
   // Effective (rendered) widths: the stored preference, clamped so that
-  // left + right + dividers + CHAT_MIN never exceeds the container. The
-  // right rail gives way first, then the left one; the stored values stay
-  // untouched so the layout springs back when space returns.
-  const dividersW = logOpen ? 24 : 12;
-  let effLeftWidth  = leftWidth;
-  let effRightWidth = rightWidth;
-  if (containerW != null) {
-    const available = Math.max(0, containerW - dividersW - CHAT_MIN);
-    const rightUsed = logOpen ? effRightWidth : 0;
-    if (effLeftWidth + rightUsed > available) {
-      if (logOpen) {
-        effRightWidth = Math.max(RIGHT_MIN, available - effLeftWidth);
-      }
-      const rightNow = logOpen ? effRightWidth : 0;
-      if (effLeftWidth + rightNow > available) {
-        effLeftWidth = Math.max(LEFT_MIN, available - rightNow);
-      }
-    }
-  }
+  // left + rail + dividers + CHAT_MIN never exceeds the container. Both
+  // dividers are always in the layout now that the rail collapses to an icon
+  // strip rather than unmounting. See rail-layout.js for the give-way order.
+  const dividersW = 24;
+  const { left: effLeftWidth, right: effRightWidth } = resolveRailWidths({
+    containerW,
+    leftWidth,
+    rightWidth,
+    collapsed: !logOpen,
+    chatMin: CHAT_MIN,
+    leftMin: LEFT_MIN,
+    rightMin: RIGHT_MIN,
+    dividersW,
+  });
+
+  // True while a divider is being dragged. The rail carries a width transition
+  // for the collapse/expand animation, which would otherwise make the drag lag
+  // ~200 ms behind the pointer — so the transition is suspended mid-drag.
+  const [resizing, setResizing] = useState(false);
 
   const startDrag = useCallback((panel) => (e) => {
     e.preventDefault();
@@ -250,8 +262,8 @@ export default function AgentChat() {
     const startWidth = panel === 'left' ? effLeftWidth : effRightWidth;
     const otherWidth = panel === 'left' ? effRightWidth : effLeftWidth;
     const containerNow = containerRef.current?.getBoundingClientRect().width || window.innerWidth;
-    // Both dividers (12 px each) when right rail is open; only one otherwise.
-    const dividers   = logOpen ? 24 : 12;
+    // Both dividers (12 px each) are always in the layout.
+    const dividers   = 24;
     const railMin    = panel === 'left' ? LEFT_MIN : RIGHT_MIN;
     const railMax    = panel === 'left' ? LEFT_MAX : RIGHT_MAX;
     // Dynamic upper bound: the rail can grow until the chat panel hits CHAT_MIN.
@@ -260,6 +272,7 @@ export default function AgentChat() {
     const lowerCap   = railMin;
     dragRef.current  = { panel, startX, startWidth, lowerCap, upperCap };
 
+    setResizing(true);
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
 
@@ -276,6 +289,7 @@ export default function AgentChat() {
     };
     const onUp = () => {
       dragRef.current = null;
+      setResizing(false);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMove);
@@ -283,7 +297,7 @@ export default function AgentChat() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
-  }, [effLeftWidth, effRightWidth, logOpen]);
+  }, [effLeftWidth, effRightWidth]);
 
   // Cross-panel hover correlation: ChatPanel sets this when the user hovers
   // a bubble; SessionLogPanel sets it on row hover. The other side dims rows
@@ -482,19 +496,8 @@ export default function AgentChat() {
             margin: 0,
             color: 'var(--eb-text-primary)',
           }}>
-            Agents
+            {loading || !agents ? 'Agents' : `Agents (${agents.length})`}
           </h1>
-          <div style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-muted)',
-            marginTop: 'var(--eb-space-1)',
-          }}>
-            {loading
-              ? 'Loading…'
-              : agents
-                ? `${agents.length} agent${agents.length === 1 ? '' : 's'}`
-                : ''}
-          </div>
           {agents && agents.length > 0 && (
             <FilterSelect
               agents={agents}
@@ -550,10 +553,41 @@ export default function AgentChat() {
               color: 'var(--eb-text-muted)',
               textAlign: 'center',
               lineHeight: 1.5,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 'var(--eb-space-3)',
             }}>
-              No agents available.
-              <br />
-              Create one in <strong>Agent Manager</strong>.
+              <span>No agents yet. Get started:</span>
+              <Link
+                to="/quickstart"
+                style={{
+                  display: 'block', width: '100%', boxSizing: 'border-box',
+                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
+                  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                  fontWeight: 600, textDecoration: 'none',
+                }}
+              >
+                Create a single agent
+              </Link>
+              <Link
+                to="/team-setup"
+                style={{
+                  display: 'block', width: '100%', boxSizing: 'border-box',
+                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
+                  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+                  border: '1px solid var(--eb-border-default)',
+                  fontWeight: 600, textDecoration: 'none',
+                }}
+              >
+                Set up a team
+              </Link>
+              <Link
+                to="/getting-started"
+                style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none', fontSize: 'var(--eb-text-xs)' }}
+              >
+                New here? Read the Getting Started overview →
+              </Link>
             </div>
           )}
 
@@ -601,68 +635,47 @@ export default function AgentChat() {
         )}
       </div>
 
-      {/* Right rail: tabbed Session Log / Workspace browser */}
-      {logOpen && (
-        <>
-          <ResizeDivider onMouseDown={startDrag('right')} />
-          <div style={{
-            width: effRightWidth,
-            minWidth: effRightWidth,
-            height: '100%',
-            background: 'var(--eb-bg-app)',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            flexShrink: 0,
-          }}>
-          <RightRail
-            agentId={selectedAgent?.id || null}
-            roomId={effectiveRoomId}
-            hoveredCorrelationId={hoveredCorrelationId}
-            onHoverCorrelation={setHoveredCorrelationId}
-            onClose={() => setLogOpen(false)}
-            onCostUpdate={handleCostUpdate}
-            onContextUpdate={handleContextUpdate}
-            todoCloseSignal={todoCloseSignal}
-            workspaceRefreshKey={workspaceRefreshKey}
-            knowledgeRefreshKey={knowledgeRefreshKey}
-            openTabRequest={railTabRequest}
-            onResumeSession={handleResumeSession}
-            sessionSelectRequest={sessionSelectRequest}
-          />
-        </div>
-        </>
-      )}
-
-      {/* Floating "Show log" button when the panel is hidden */}
-      {!logOpen && (
-        <button
-          onClick={() => setLogOpen(true)}
-          title="Show log panel (Cmd+Shift+L)"
-          aria-label="Show log panel"
-          style={{
-            position: 'fixed',
-            right: 'var(--eb-space-4)',
-            bottom: 'var(--eb-space-4)',
-            width: 36,
-            height: 36,
-            borderRadius: 'var(--eb-radius-full)',
-            background: 'var(--eb-bg-surface)',
-            color: 'var(--eb-text-secondary)',
-            border: '1px solid var(--eb-border-default)',
-            boxShadow: 'var(--eb-shadow-md)',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
-        >
-          <PanelRightOpen size={18} />
-        </button>
-      )}
+      {/* Right rail: tabbed Session Log / Workspace browser.
+          Always mounted — collapsing animates its width down to the same slim
+          icon rail the left navigation sidebar uses (#905) instead of
+          unmounting it behind a floating re-open button, so the chat panel
+          reflows smoothly and the active tab survives the cycle. */}
+      <ResizeDivider onMouseDown={startDrag('right')} disabled={!logOpen} />
+      <div style={{
+        width: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+        minWidth: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+        height: '100%',
+        background: 'var(--eb-bg-app)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        flexShrink: 0,
+        transition: resizing
+          ? 'none'
+          : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
+      }}>
+        <RightRail
+          agentId={selectedAgent?.id || null}
+          // Outcomes are team hand-offs, so that tab only applies to a team
+          // member (#963 AC1). `/api/matrix/agents` already carries the
+          // membership, so the rail needs no extra fetch to decide.
+          agentTeamId={selectedAgent?.parentTeamId || null}
+          roomId={effectiveRoomId}
+          hoveredCorrelationId={hoveredCorrelationId}
+          onHoverCorrelation={setHoveredCorrelationId}
+          collapsed={!logOpen}
+          onClose={() => setLogOpen(false)}
+          onOpen={() => setLogOpen(true)}
+          onCostUpdate={handleCostUpdate}
+          onContextUpdate={handleContextUpdate}
+          todoCloseSignal={todoCloseSignal}
+          workspaceRefreshKey={workspaceRefreshKey}
+          knowledgeRefreshKey={knowledgeRefreshKey}
+          openTabRequest={railTabRequest}
+          onResumeSession={handleResumeSession}
+          sessionSelectRequest={sessionSelectRequest}
+        />
+      </div>
     </div>
   );
 }

@@ -16,11 +16,11 @@ const { normalizeTitle } = require('./walkthrough');
 
 // Which nav page(s) a step namespace drives. A journey "touches" a nav page when
 // any of its action/assert steps live in the matching step-library module
-// (wizard.* ⇒ the Team Wizard, templates.* ⇒ Agent Templates, …). Namespaces that
+// (wizard.* ⇒ the Agent Team Wizard, templates.* ⇒ Agent Templates, …). Namespaces that
 // are pure plumbing (env/teardown fixtures) map to nothing so they never claim
 // coverage. Extend this map when a new step module drives a new page.
 const NAMESPACE_TO_NAV = {
-  wizard: ['Team Wizard'],
+  wizard: ['Agent Team Wizard'],
   templates: ['Agent Templates'],
   chat: ['Agent Chat'],
   agents: ['Agents'],
@@ -28,6 +28,8 @@ const NAMESPACE_TO_NAV = {
   flows: ['Flows'],
   triggers: ['Triggers'],
   credentials: ['SSH Keys', 'GitHub Tokens'],
+  // context.* drives the Agent Chat page's workspace rail (#1319 journey).
+  context: ['Agent Chat'],
 };
 
 // The set of nav-page labels a single journey touches, derived from the

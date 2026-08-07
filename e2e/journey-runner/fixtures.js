@@ -10,6 +10,7 @@ const env = require('../steps/env');
 const teardown = require('../steps/teardown');
 const gh = require('../steps/gh');
 const team = require('../steps/team');
+const context = require('../steps/context');
 
 /**
  * teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
@@ -117,6 +118,73 @@ const ibanStoryTeam = {
   },
 };
 
+
+/**
+ * liveWiringTeam: the review-gate-live journey's precondition (#1010). A
+ * MINIMAL live team (Business Analyst + Developer) materialised from an inline
+ * bundle on a credential-less env pointing at the in-stack git remote — enough
+ * for the Flow editor's live scope to wire a review gate against real member
+ * configs, with no GitHub polling (token-less env) and no label chain to run.
+ * FIXED ids: setup pre-cleans a leftover team+env; teardown removes both.
+ *
+ * @param {string} params.teamId - Team slug id to create.
+ * @param {string} params.teamName - Team display name (the Flows list row).
+ * @param {string} params.envId - Fixture environment id to create.
+ * @param {string} params.envName - Fixture environment display name.
+ * @param {string} params.repoUrl - Git URL the environment points at.
+ * @example
+ * fixtures:
+ *   - fixture: liveWiringTeam
+ *     params:
+ *       teamId: wiring-demo
+ *       teamName: Wiring Demo
+ *       envId: wiring-demo-env
+ *       envName: Wiring Demo
+ *       repoUrl: "http://git-remote/e2e/fixture.git"
+ */
+const liveWiringTeam = {
+  async setup(ctx, params = {}) {
+    const { teamId, teamName, envId, envName, repoUrl, branch = 'main' } = params;
+    if (!teamId || !envId || !envName || !repoUrl) {
+      throw new Error('liveWiringTeam fixture requires { teamId, envId, envName, repoUrl }');
+    }
+    await teardown.teardownTeam(ctx, { teamId, envId });
+    await env.createFixtureEnv(ctx, { id: envId, name: envName, repoUrl, branch });
+    await team.materializeBundleTeam(ctx, {
+      teamId, teamName: teamName || teamId, envId,
+      bundle: {
+        processTemplateVersion: 1,
+        name: teamName || teamId,
+        level: 'template',
+        roles: [
+          {
+            id: 'business-analyst', displayName: 'Business Analyst', role: 'team-member',
+            sessionPolicy: 'persistent',
+            systemPrompt: 'You are the Business Analyst. You refine requirements into GitHub issues with acceptance criteria.',
+            triggers: [],
+            outcomes: { mode: 'anyOf', options: [
+              { id: 'opens-issue', title: 'Opens issue', when: 'The issue is authored and ready for review', actions: [{ type: 'openIssue' }] },
+            ] },
+          },
+          {
+            id: 'developer', displayName: 'Developer', role: 'team-member',
+            sessionPolicy: 'per-invocation',
+            systemPrompt: 'You are the Developer. You implement a ready issue and open a pull request.',
+            triggers: [],
+          },
+        ],
+        gates: [],
+        labels: [],
+      },
+    });
+    return { teamId, envId };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId, envId } = params;
+    if (teamId && envId) await teardown.teardownTeam(ctx, { teamId, envId });
+  },
+};
+
 /**
  * triggerAgent: the `triggers` journey's precondition (#733). Stands up ONE
  * Business-Analyst agent to hang triggers on, as cheaply as possible: a
@@ -204,7 +272,99 @@ const flowsDraft = {
   },
 };
 
-const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft };
+/**
+ * contextMountAgent: the context-mount journey's precondition (#1319).
+ * KIND-LANE ONLY — the mount is a k8s hostPath, so "host" is the kind node
+ * container: setup shells into it (docker/podman exec from the Playwright
+ * host, the same engine that runs the kind provider) to seed the folder, then
+ * stands up one standalone agent on a repo-less env and sets a READ-WRITE
+ * multi-folder context mount via the real PATCH route (#1290 shape — the
+ * folder gets a slug and mounts at /context/<slug> in the agent pod).
+ * The agent is enabled last; the journey's first browse poll absorbs the pod
+ * startup window.
+ *
+ * ENSURE, NEVER DELETE: deleting an agent deactivates its Matrix user, and a
+ * conduwuit deactivation is permanent — recreating the same fixed id then
+ * fails with M_USER_DEACTIVATED. So setup treats an existing agent/env as
+ * reusable (409 = fine) and teardown only DISABLES the agent (pod gone, node
+ * folder removable) — same lifecycle as stack-up.sh's standalone e2e-agent.
+ * The pre-clean also disables first: re-seeding the node folder while a live
+ * pod bind-mounts it would leave that pod staring at the deleted inode.
+ *
+ * @param {string} params.agentId - Standalone agent id to create.
+ * @param {string} params.envId - Repo-less fixture environment id.
+ * @param {string} params.envName - Environment display name.
+ * @param {string} params.hostDir - Absolute folder path INSIDE the kind node.
+ * @param {string} params.mountName - Mount display name (also its slug).
+ * @param {string} params.seedFile - File seeded into the folder before mount.
+ * @param {string} params.seedContent - Its content (asserted in the viewer).
+ * @example
+ * fixtures:
+ *   - fixture: contextMountAgent
+ *     params:
+ *       agentId: ctx-demo-agent
+ *       envId: ctx-demo-env
+ *       envName: Context Demo
+ *       hostDir: /opt/e2e-context/specs
+ *       mountName: specs
+ *       seedFile: brief.md
+ *       seedContent: "Context briefing — seeded on the kind node."
+ */
+const contextMountAgent = {
+  async setup(ctx, params = {}) {
+    const { agentId, envId, envName, hostDir, mountName, seedFile, seedContent } = params;
+    if (!agentId || !envId || !envName || !hostDir || !mountName || !seedFile) {
+      throw new Error('contextMountAgent fixture requires { agentId, envId, envName, hostDir, mountName, seedFile }');
+    }
+    // Pre-clean: stop a leftover pod BEFORE recreating the node folder it
+    // bind-mounts, then re-seed fresh. 404 (never existed) is fine.
+    await ctx.request.put(`/api/agents/${encodeURIComponent(agentId)}`, { data: { enabled: false } });
+    context.removeHostDir(hostDir);
+    context.seedHostDir(hostDir, seedFile, seedContent || '');
+
+    // Repo-less env (no clone, no poller) — the mount is the point here.
+    // 409 = left over from a prior run, reused as-is.
+    const envRes = await ctx.request.post('/api/environments', { data: { id: envId, name: envName } });
+    if (!envRes.ok() && envRes.status() !== 409) {
+      throw new Error(`contextMountAgent: create env ${envId} failed HTTP ${envRes.status()}: ${await envRes.text()}`);
+    }
+    const agentRes = await ctx.request.post('/api/agents', {
+      data: {
+        id: agentId,
+        displayName: envName,
+        role: 'agent',
+        environmentId: envId,
+        systemPrompt: 'You are a test agent with a mounted context folder.',
+      },
+    });
+    if (!agentRes.ok() && agentRes.status() !== 409) {
+      throw new Error(`contextMountAgent: create agent ${agentId} failed HTTP ${agentRes.status()}: ${await agentRes.text()}`);
+    }
+    // The rw mount, set BEFORE enabling — it is baked at pod spawn time.
+    const mountRes = await ctx.request.patch(`/api/agents/${encodeURIComponent(agentId)}/context-mount`, {
+      data: { mounts: [{ path: hostDir, name: mountName, readWrite: true }] },
+    });
+    if (!mountRes.ok()) {
+      throw new Error(`contextMountAgent: set context mount failed HTTP ${mountRes.status()}: ${await mountRes.text()}`);
+    }
+    const enableRes = await ctx.request.put(`/api/agents/${encodeURIComponent(agentId)}`, {
+      data: { enabled: true },
+    });
+    if (!enableRes.ok()) {
+      throw new Error(`contextMountAgent: enable agent failed HTTP ${enableRes.status()}: ${await enableRes.text()}`);
+    }
+    return { agentId, envId, hostDir };
+  },
+  async teardown(ctx, params = {}) {
+    const { agentId, hostDir } = params;
+    // Disable only (see the ensure-never-delete note above); agent + env stay
+    // for the next run to reuse. Folder removal is safe once the pod is gone.
+    if (agentId) await ctx.request.put(`/api/agents/${encodeURIComponent(agentId)}`, { data: { enabled: false } });
+    if (hostDir) context.removeHostDir(hostDir);
+  },
+};
+
+const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam, contextMountAgent };
 
 function resolveFixture(name) {
   const fx = FIXTURES[name];

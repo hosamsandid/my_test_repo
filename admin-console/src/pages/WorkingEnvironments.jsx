@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
+import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 
 const labelStyle = {
@@ -96,6 +97,10 @@ function RepoStatusIcon({ status, error }) {
 
 function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove }) {
   const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
+  const isHttpsUrl = /^https:\/\//i.test((repo.url || '').trim());
+  // A private HTTPS repo fails the reachability check when no GitHub Token is set;
+  // SSH keys don't apply to HTTPS URLs, so point the user at the token section below.
+  const showTokenHint = check.status === 'error' && isHttpsUrl && !githubTokenId;
 
   return (
     <div style={{
@@ -126,7 +131,7 @@ function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove 
           ))}
         </select>
         <div style={helpTextStyle}>
-          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs. Manage SSH keys on the <em>SSH Keys</em> page.
+          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs — private HTTPS repositories authenticate with the <em>GitHub Token</em> set below, not an SSH key. Manage SSH keys on the <em>SSH Keys</em> page.
         </div>
       </div>
 
@@ -160,9 +165,14 @@ function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove 
             {check.error}
           </div>
         )}
+        {showTokenHint && (
+          <div style={{ ...helpTextStyle, color: 'var(--eb-text-secondary)' }}>
+            If this is a private HTTPS repository, select a <em>GitHub Token</em> in the section below to authenticate — SSH keys don't apply to HTTPS URLs.
+          </div>
+        )}
         {check.status !== 'error' && (
           <div style={helpTextStyle}>
-            The repository is checked for reachability in real time. Use SSH format for private repositories.
+            The repository is checked for reachability in real time. Use an SSH URL with an SSH key, or an HTTPS URL with the <em>GitHub Token</em> set below, for private repositories.
           </div>
         )}
       </div>
@@ -422,7 +432,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         <div style={helpTextStyle}>
           Repositories listed here are cloned into the agent's workspace when the agent is first created.
           You can add multiple repositories — for example the main codebase and a separate documentation repo.
-          For private repositories, select an SSH key from the dropdown on each repository card.
+          For a private SSH URL, select an SSH key on the repository card; for a private HTTPS URL, set the <em>GitHub Token</em> below instead.
         </div>
 
         {form.repositories.map((repo, idx) => (
@@ -455,6 +465,17 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         >
           <Plus size={13} /> Add repository
         </button>
+
+        {isEdit && initial?.id && form.repositories.length > 0 && (initial.agents || []).length > 0 && (
+          <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px dashed var(--eb-border-default)' }}>
+            <SyncReposPanel
+              endpoint={`/api/environments/${encodeURIComponent(initial.id)}/sync-agents`}
+              actionLabel="Sync all agents"
+              description={`Clone the repositories above into every agent already using this environment (${(initial.agents || []).length} agent${(initial.agents || []).length === 1 ? '' : 's'}) — repositories are otherwise only cloned when an agent is first created. Already-cloned repositories are left untouched.`}
+              showAgentHeaders
+            />
+          </div>
+        )}
       </div>
 
       <div style={{

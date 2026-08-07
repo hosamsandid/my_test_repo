@@ -72,16 +72,29 @@ async function selectProcessTemplate(ctx, { templateName }) {
 
 /**
  * Assert the Process step's live flow preview + wiring check rendered lint-clean
- * (StepProcess.jsx: "Flow preview — N agents" + "Wiring is clean").
+ * (StepProcess.jsx: "Flow preview — N agents" + "Wiring is clean"). Optionally
+ * spot-check the SERVER-derived rendering (#1009): the preview draws the same
+ * edge set as the Flows view, so a known edge label and its legend entry must
+ * be visible in the preview SVG.
  *
+ * @param {string} [params.edgeLabel] - An edge label expected inside the preview SVG (e.g. the gate label).
+ * @param {string} [params.legendEntry] - A legend entry expected under the preview (e.g. "human approval").
  * @example
  * - assert:
  *     do: wizard.expectFlowPreview
+ *     edgeLabel: ready-for-implementation
+ *     legendEntry: human approval
  */
-async function expectFlowPreview(ctx) {
+async function expectFlowPreview(ctx, { edgeLabel, legendEntry } = {}) {
   const { page } = ctx;
   await expect(page.getByText(/Flow preview —/)).toBeVisible();
   await expect(page.getByText('Wiring is clean')).toBeVisible();
+  if (edgeLabel) {
+    await expect(page.locator('svg text', { hasText: edgeLabel }).first()).toBeVisible();
+  }
+  if (legendEntry) {
+    await expect(page.getByText(legendEntry, { exact: true })).toBeVisible();
+  }
 }
 
 /**

@@ -7,7 +7,7 @@ const { readChapters, normalizeTitle } = require('./walkthrough');
 test('readNavPages returns the ordered nav labels from the F0 spec', () => {
   const labels = readNavPages();
   assert.ok(labels.length >= 15, `expected the full nav list, got ${labels.length}`);
-  assert.ok(labels.includes('Team Wizard'));
+  assert.ok(labels.includes('Agent Team Wizard'));
   assert.ok(labels.includes('Agent Templates'));
   assert.ok(labels.includes('Knowledge'));
 });

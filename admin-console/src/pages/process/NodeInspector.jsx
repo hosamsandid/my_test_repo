@@ -6,6 +6,7 @@ import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
+import PromptHistory from '../agent-chat/PromptHistory';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
 // modes so the first-page layout, tab set, and routing wiring live in a single
@@ -37,6 +38,8 @@ export default function NodeInspector({
   stages = [],
   lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
   labels = [],      // known label registry (label-name suggestions in the Add-input chooser)
+  humans = [],      // named human roles (#987) — the delivery-target picker in Routing
+  humanOps,         // scope-bound human wiring ops (#987): wire/unwireHumanConsume
   ops,
   teamId,           // live: binds a brand-new stage to the team's ordered list
   level,            // live: 'template' renders read-only
@@ -157,7 +160,7 @@ export default function NodeInspector({
                     <input value={id}
                       onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
                       style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all connections to this agent.</span>
+                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all of this agent's inputs and hand-offs.</span>
                   </>
                 )}
               </Field>
@@ -235,6 +238,8 @@ export default function NodeInspector({
               peers={peers}
               lints={lints}
               labels={labels}
+              humans={humans}
+              humanOps={humanOps}
               ops={ops}
               mode={mode}
               focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
@@ -261,6 +266,8 @@ function LivePromptEditor({ agentId, onChanged }) {
   const [text, setText] = useState('');
   const [inherit, setInherit] = useState(false);
   const [inheritedPreview, setInheritedPreview] = useState('');
+  // Bumped on save / revert so the editor text + history list re-fetch.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -291,7 +298,7 @@ function LivePromptEditor({ agentId, onChanged }) {
       }
     })();
     return () => { alive = false; };
-  }, [agentId]);
+  }, [agentId, reloadKey]);
 
   async function save() {
     setSaving(true); setError(null); setSaved(false);
@@ -302,6 +309,7 @@ function LivePromptEditor({ agentId, onChanged }) {
         await apiCall('PUT', `/api/agents/${agentId}/prompt`, { content: text });
       }
       setSaved(true);
+      setReloadKey(k => k + 1);   // refresh the history list with the new version
       onChanged?.();
     } catch (e) {
       setError(e.message);
@@ -352,6 +360,14 @@ function LivePromptEditor({ agentId, onChanged }) {
         </button>
         {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
       </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PromptHistory
+          agentId={agentId}
+          reloadKey={reloadKey}
+          onReverted={() => { setReloadKey(k => k + 1); onChanged?.(); }}
+        />
+      </div>
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
@@ -362,7 +378,7 @@ function TemplateReadonly({ node }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         This is an <strong>agent template</strong> (blueprint view). Editing happens on live agents —
-        switch the scope to a team, or materialise this agent via the Team Wizard.
+        switch the scope to a team, or materialise this agent via the Agent Team Wizard.
       </div>
       <div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 4 }}>Triggers</div>

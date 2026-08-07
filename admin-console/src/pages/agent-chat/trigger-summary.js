@@ -56,6 +56,105 @@ export function eventsAreLabelFilterable(events) {
   return (Array.isArray(events) ? events : []).some(e => LABEL_FILTERABLE_EVENTS.has(e));
 }
 
+// Compact one-line summary of a `loop` trigger's stop contract, for the
+// trigger-row header (`TriggerRow` in TriggersPanel.jsx). Surfaces the three
+// loop-defining facts the design calls out (concept §4.5): budget (`≤N iter`,
+// optional token cap), stop condition (`until: <cmd>`) and verifier
+// (`✓ <role|command>`). Framework-free so it has a single source of truth and
+// its own unit tests. Returns a string (never blank — falls back to "loop").
+export function summarizeLoopTrigger(trigger) {
+  const parts = [];
+  const max = trigger?.maxIterations;
+  if (Number.isFinite(max) && max > 0) parts.push(`≤${max} iter`);
+  const maxTokens = trigger?.maxTokens;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) parts.push(`≤${compactTokens(maxTokens)} tok`);
+  const untilCmd = trigger?.until && typeof trigger.until === 'object'
+    ? trigger.until.command : null;
+  if (untilCmd && String(untilCmd).trim()) parts.push(`until: ${String(untilCmd).trim()}`);
+  const v = trigger?.verify;
+  if (v && typeof v === 'object') {
+    if (v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
+    else if (v.command && String(v.command).trim()) parts.push(`✓ ${String(v.command).trim()}`);
+    else if (v.flow === true) parts.push('→ flow');
+  }
+  return parts.length ? parts.join(' · ') : 'loop';
+}
+
+// Compact a token budget for a badge: 2000000 → "2M", 500000 → "500k",
+// 750 → "750". Shared by the trigger-row and canvas loop summaries.
+function compactTokens(n) {
+  return n >= 1_000_000
+    ? `${+(n / 1_000_000).toFixed(1)}M`
+    : n >= 1_000
+      ? `${Math.round(n / 1_000)}k`
+      : String(n);
+}
+
+// Compact one-line summary of a `loop` self-edge for the Flows-canvas
+// stop-contract badge (#936). It takes the *graph-edge* loop summary emitted by
+// `process-graph.js` (`buildProcessGraph` → `unified-graph`), which redacts the
+// verifier internals: `verify` here is `{ mode, agentId? }` (never the command
+// string), not the raw trigger's `{ command | agentId | selfGraded }`. Surfaces
+// the three loop-defining facts (concept §4.5): budget (`≤N iter`, optional
+// token cap), stop condition (`until: <cmd>`) and verifier (`✓ <role>` for an
+// agent verifier, `✓ check` for a command verifier, `✓ self` when self-graded,
+// `→ flow` when verification is delegated to the downstream QS chain).
+// Returns a string (never blank — falls back to "loop").
+export function summarizeLoopEdge(loop) {
+  if (!loop || typeof loop !== 'object') return 'loop';
+  const parts = [];
+  const max = loop.maxIterations;
+  if (Number.isFinite(max) && max > 0) parts.push(`≤${max} iter`);
+  const maxTokens = loop.maxTokens;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) parts.push(`≤${compactTokens(maxTokens)} tok`);
+  const untilCmd = loop.until && typeof loop.until === 'object' ? loop.until.command : null;
+  if (untilCmd && String(untilCmd).trim()) parts.push(`until: ${String(untilCmd).trim()}`);
+  const v = loop.verify;
+  if (v && typeof v === 'object') {
+    if (v.mode === 'agent' && v.agentId && String(v.agentId).trim()) parts.push(`✓ ${String(v.agentId).trim()}`);
+    else if (v.mode === 'command') parts.push('✓ check');
+    else if (v.mode === 'self-graded') parts.push('✓ self');
+    else if (v.mode === 'flow') parts.push('→ flow');
+  }
+  return parts.length ? parts.join(' · ') : 'loop';
+}
+
+// ── claim labels (#958, concept §3.4–§3.5) ───────────────────────────────────
+// A label listener's claim is what it TAKES OVER when it wakes: the runtime swaps
+// the wake label for `<wake>:wip` before the Claude call, so a stalled run is
+// visible on GitHub. These helpers are the single source of the editor's claim
+// wording, mirroring summarizeLoopEdge above (pure, unit-tested, no JSX).
+
+// The glyph used for the claim badge on a listener edge. Deliberately one
+// character wide: it is appended to an already-crowded edge chip.
+export const CLAIM_MARKER = '⇥';
+
+// Whether a claim blob is well-formed enough to render.
+export function hasClaim(claim) {
+  return !!(claim && typeof claim === 'object'
+    && typeof claim.remove === 'string' && claim.remove.trim()
+    && typeof claim.add === 'string' && claim.add.trim());
+}
+
+// Compact edge-badge text, e.g. `⇥ wip`. Kept short so the chip stays readable —
+// the full swap goes in the tooltip via claimTooltip().
+export function summarizeClaimEdge(claim) {
+  if (!hasClaim(claim)) return '';
+  const add = claim.add.trim();
+  const remove = claim.remove.trim();
+  // `ready` → `ready:wip` is the convention, so show only the distinguishing
+  // suffix; a hand-authored claim that doesn't extend the wake label is shown
+  // whole rather than mis-abbreviated.
+  const suffix = add.startsWith(`${remove}:`) ? add.slice(remove.length + 1) : add;
+  return `${CLAIM_MARKER} ${suffix}`;
+}
+
+// Full, human-readable claim for a tooltip / read-only readout.
+export function claimTooltip(claim) {
+  if (!hasClaim(claim)) return '';
+  return `Claims the label when it wakes: ${claim.remove.trim()} → ${claim.add.trim()}`;
+}
+
 // Structured, human-readable summary of a github-event trigger's firing
 // condition. Returns `{ events: string[] (friendly labels), label: string|null }`.
 // The label is present only when a `labelFilter` is set AND at least one of the
@@ -67,4 +166,49 @@ export function summarizeGithubEventTrigger(trigger) {
     ? String(trigger.labelFilter)
     : null;
   return { events, label };
+}
+
+// The claim payload a TriggersPanel save carries (#1006): the raw layer follows
+// the same `<wake>:wip` convention as the engine paths. Returns the claim
+// object when the listener is a claimed `.labeled` label listener, `null` to
+// clear a stored claim on edit, and `undefined` (field omitted) on an
+// unclaimed create. Pure — unit-tested against the server-side validator's
+// expectations.
+export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
+  const lf = String(labelFilter || '').trim();
+  const labeled = (Array.isArray(events) ? events : [])
+    .some(e => e === 'issues.labeled' || e === 'pull_request.labeled');
+  if (lf && labeled && claimOn) return { remove: lf, add: `${lf}:wip` };
+  return isEdit ? null : undefined;
+}
+
+// Delivery-transport field for a saved github-event trigger body (#1189). Pure
+// mirror of the TriggerForm decision so it is unit-testable:
+//   - a label listener (`showTransport`) writes an EXPLICIT value — 'github'
+//     too, never omitted, so toggling internal → github clears a stored
+//     'internal' on the PUT `{...prev, ...body}` merge;
+//   - a trigger that is not (or no longer) a label listener but carried a stale
+//     transport gets it cleared to 'github' on edit;
+//   - a plain non-label trigger keeps no transport key (undefined drops).
+// Returns the value to assign to `body.transport`, or undefined to omit it.
+export function transportBodyFor({ showTransport, transport, isEdit, priorTransport }) {
+  if (showTransport) return transport === 'internal' ? 'internal' : 'github';
+  if (isEdit && priorTransport) return 'github';
+  return undefined;
+}
+
+// A chat-launched loop (#1020): a one-off "run until done" started from the
+// composer, not a standing subscription. It is a `loop`-type trigger tagged
+// `launched: true` while it runs (the runtime removes it on any terminal
+// outcome). Pure predicate — used to reflect the composer's running state.
+export function isLaunchedLoop(trigger) {
+  return !!trigger && trigger.type === 'loop' && !!trigger.launched;
+}
+
+// Whether a trigger belongs in the chat Triggers list (#1020 AC4). A loop is a
+// launched run, not a standing subscription, so it never appears there — the
+// list holds only cron / once / http / github-event / data-flow. Loops are
+// authored from the composer (chat-launched) or the Flows canvas (declarative).
+export function isStandingSubscription(trigger) {
+  return !!trigger && trigger.type !== 'loop';
 }

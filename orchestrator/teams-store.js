@@ -14,7 +14,7 @@
 // collections that back the model:
 //
 //   /workspace/teams/index.json        [{ id, name, description, createdAt, updatedAt }]
-//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, createdAt, updatedAt }]
+//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, createdAt, updatedAt }]
 //   /workspace/memberships/index.json  [{ id, userId, teamId, role, createdAt }]
 //
 // Roles:
@@ -48,6 +48,55 @@ function nowIso() {
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
+}
+
+// GitHub handle (#1385). Optional per-user field so a parent tracker ticket can
+// be assigned to the human who requested the work (the platform otherwise has
+// no GitHub username for an AEE subject). Kept byte-compatible with the pure
+// frontend module `admin-console/src/pages/teams-github-handle.js` — the two
+// live in disjoint images so they cannot share code, but the rules must agree.
+
+// Strip a leading "@" and surrounding whitespace; empty/whitespace-only → ''.
+function normalizeGithubHandle(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.trim().replace(/^@/, '').trim();
+}
+
+// Validate + normalize a GitHub handle. Returns the normalized handle, '' to
+// clear it, or throws badRequest on a malformed value. GitHub username rules:
+// 1–39 chars, letters/digits/hyphens, may not start or end with a hyphen. The
+// regex has no nested quantifiers (linear — no polynomial-ReDoS surface).
+function coerceGithubHandle(raw) {
+  const h = normalizeGithubHandle(raw);
+  if (!h) return '';
+  if (h.length > 39) throw badRequest('githubHandle must be 39 characters or fewer');
+  if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(h)) {
+    throw badRequest('githubHandle may only contain letters, digits, and hyphens, and may not start or end with a hyphen');
+  }
+  return h;
+}
+
+// Per-user Agent-Chat transcript font size (#1437). A discoverable +/- control
+// lets each user tune the chat font on their own profile; the value is stored
+// server-side on the user record so it follows the user across browsers,
+// devices and screen resolutions and never leaks into another user's view.
+const CHAT_FONT_SIZE_MIN = 10;
+const CHAT_FONT_SIZE_MAX = 18;
+const CHAT_FONT_SIZE_DEFAULT = 12;
+
+// Validate a chat font size. Returns an integer in [MIN,MAX], or `undefined`
+// when the value is absent/blank (leave the field unset — the session default
+// of 12px applies). Throws badRequest on a non-integer or out-of-range value.
+function coerceChatFontSize(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n)) {
+    throw badRequest('chatFontSize must be an integer');
+  }
+  if (n < CHAT_FONT_SIZE_MIN || n > CHAT_FONT_SIZE_MAX) {
+    throw badRequest(`chatFontSize must be between ${CHAT_FONT_SIZE_MIN} and ${CHAT_FONT_SIZE_MAX}`);
+  }
+  return n;
 }
 
 function createTeamsStore({ root } = {}) {
@@ -169,7 +218,7 @@ function createTeamsStore({ root } = {}) {
     return listUsers().find(u => (u.subject || '').toLowerCase() === s) || null;
   }
 
-  function createUser({ subject, email, displayName, systemAdmin } = {}) {
+  function createUser({ subject, email, displayName, systemAdmin, githubHandle, chatFontSize } = {}) {
     if (!isNonEmptyString(subject)) {
       throw badRequest('user subject is required');
     }
@@ -183,9 +232,14 @@ function createTeamsStore({ root } = {}) {
       email: isNonEmptyString(email) ? email.trim() : '',
       displayName: isNonEmptyString(displayName) ? displayName.trim() : subject.trim(),
       systemAdmin: systemAdmin === true,
+      githubHandle: coerceGithubHandle(githubHandle),
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
+    // Optional per-user chat font size — persisted only when explicitly set, so
+    // an unset record keeps the 12px session default (#1437).
+    const cfs = coerceChatFontSize(chatFontSize);
+    if (cfs !== undefined) user.chatFontSize = cfs;
     users.push(user);
     writeArray(USERS_INDEX, users);
     return user;
@@ -205,6 +259,15 @@ function createTeamsStore({ root } = {}) {
     }
     if (patch.systemAdmin !== undefined) {
       user.systemAdmin = patch.systemAdmin === true;
+    }
+    if (patch.githubHandle !== undefined) {
+      user.githubHandle = coerceGithubHandle(patch.githubHandle);
+    }
+    if (patch.chatFontSize !== undefined) {
+      const cfs = coerceChatFontSize(patch.chatFontSize);
+      // A blank/absent value clears the override back to the 12px default.
+      if (cfs === undefined) delete user.chatFontSize;
+      else user.chatFontSize = cfs;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -402,6 +465,12 @@ function conflict(m) { return tagged(m, 409); }
 
 module.exports = {
   createTeamsStore,
+  normalizeGithubHandle,
+  coerceGithubHandle,
+  coerceChatFontSize,
+  CHAT_FONT_SIZE_MIN,
+  CHAT_FONT_SIZE_MAX,
+  CHAT_FONT_SIZE_DEFAULT,
   DEFAULT_TEAM_ID,
   DEFAULT_TEAM_NAME,
   MEMBERSHIP_ROLES,

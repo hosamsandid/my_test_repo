@@ -7,6 +7,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | Page | Route | Purpose |
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
+| **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, and import agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
@@ -15,9 +16,9 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Skills Registry** | `/skills` | Browse available skills; click to view skill content |
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, GitHub event, and Jira event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
-| **MCP Servers** | `/mcp` | View Model Context Protocol servers configured in the Claude settings file |
+| **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
 | **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
-| **Flows** | `/flows` | BriefingPack graph: visualize BP dependencies, claim/activate/deactivate orchestrator-managed BPs |
+| **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
 
@@ -75,7 +76,7 @@ handling, gate middleware, or the login UI/routing.
 
 The **Teams** page (`/teams`) is the UI for the human **Team** scope (the
 tenant) introduced by the teams data model (#299). It is distinct from the
-*Agent Team* squad created by the **Team Wizard** — see
+*Agent Team* squad created by the **Agent Team Wizard** — see
 [docs/teams-data-model.md](./teams-data-model.md).
 
 A System Admin can:
@@ -88,6 +89,34 @@ The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 (proxied to the orchestrator's teams store). Per-role *enforcement* of these
 actions — and per-resource visibility — arrive with later tickets (#302/#304);
 today any authenticated operator can manage teams.
+
+## Agent Teams — surfacing missing blueprint roles (#1375)
+
+An **Agent Team** assembled piecewise from a reference process template (dev +
+reviewer only, say) runs part of the SDLC loop and then stalls at the first
+missing role's terminal label — a missing `merger` leaves `ready-to-merge` idle
+(the final merge stays a manual click); a missing `reworker` leaves
+`revisions-required` idle. The Agents page (`/agents`) surfaces that gap on the
+expanded **Agent Team** card: below the member list it lists the roles the team
+is missing relative to its source template, each with an **Add `<role>` role**
+button.
+
+- **Source-template inference.** The team config does *not* persist which template
+  it came from (`POST /api/teams` flattens the bundle into members and discards the
+  template identity). It is inferred client-side (pure `src/pages/missing-roles-view.js`,
+  unit-tested) from two signals the team agent *does* persist: the gate/brake **label
+  registry** (`team.labels[]`, #928 — the strongest fingerprint, since each shipped
+  template has a distinct registry; matched by containment, suffix-stripped for #902)
+  and the **present member role-ids** (recovered from each member id `<teamId>-<roleId>`).
+  When nothing clearly matches, nothing is shown — the hint is purely additive, so
+  unrelated or fully-covered teams sprout no buttons.
+- **One-click add.** The button reuses the existing member-create endpoint via its
+  process-template branch — `POST /api/agents/:teamId/members { processTemplateId, roleId }`
+  — which mirrors the Team-Setup wizard's per-role materialisation (systemPrompt +
+  `{{var}}` substitution, `sessionPolicy`, triggers with repo/claim/transport, the
+  team's own `labelSuffix`) for that one role, so the added member is identical to one
+  created at team-setup time. The new member is then **disabled** (`PUT enabled:false`)
+  so nothing wakes until the operator enables it; a toast confirms.
 
 ## Audit trail (#305)
 
@@ -119,14 +148,18 @@ The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a 
 
 ### Left panel — Agent list
 
-Pick any enabled agent. The status indicator shows current state (Unread / Busy / Idle / Offline).
+Pick any enabled agent. The status indicator shows current state: **Unread** (new message), **Busy** (active run), **Idle** (waiting), **Disabled** (amber — intentionally off, one-click enable to resume), **Offline** (red — container not running).
+
+Each row shows the agent's Working Environment name below its display name. Inside a team group whose members all share one environment, that name is shown once on the collapsible group header instead of repeating on every row; a member on a different environment keeps its own line. Standalone agents (outside any group) always show their own environment line.
+
+Reorder the list by dragging the grip handle (⠿, visible on hover) to relocate an item in one gesture; keyboard users can reorder the focused item with `Alt+↑`/`Alt+↓`. Groups, standalone agents, and members within a group each reorder independently; a drag cannot move an item out of its own list. Order persists in `localStorage` (`agentChat.sidebarOrder`) and survives reload. Reordering is disabled while a filter is active.
 
 ### Middle panel — Chat
 
-Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar shows whether a Claude session is active and offers:
+Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar offers (session-active status is not repeated here — it is shown per agent in the left list):
 
-- **Reset** — drop the session pointer so the next message starts fresh
-- **Reset & Learn** — send a learn prompt then auto-drop the session
+- **Reset Session** — drop the session pointer so the next message starts fresh
+- **Save & Learn** — summarize the conversation to memory and push durable lessons to the team knowledge base; the session stays open
 
 ### Right rail — Three tabs
 

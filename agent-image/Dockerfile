@@ -90,6 +90,15 @@ RUN chmod +x /opt/ace/scripts/gh-as-agent \
 RUN chmod +x /opt/ace/scripts/knowledge \
     && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
 
+# `aee-emit` — announce a label hand-off over the internal channel (#1173).
+# On PATH so agents wired with `transport: 'internal'` deliver their wake via
+# the orchestrator queue (enqueue first, GitHub label mirrored as decoration)
+# instead of the lossy Events-API round trip. Fail-closed when the
+# orchestrator is unreachable — a manual `gh` label can't wake an internal
+# listener, so the CLI never falls back to it.
+RUN chmod +x /opt/ace/scripts/aee-emit \
+    && ln -sf /opt/ace/scripts/aee-emit /usr/local/bin/aee-emit
+
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
 # orchestrator's read-only usage endpoint across the volume-isolation boundary

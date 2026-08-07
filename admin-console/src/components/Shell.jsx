@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch, Workflow,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import AccentureLogo from './AccentureLogo';
+import AssistModelSelector from './AssistModelSelector';
+import TranscriptionOverlay from './TranscriptionOverlay';
 import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
@@ -46,24 +48,25 @@ function NavBadge({ count, color }) {
 
 const NAV = [
   { items: [
-    { path: '/chats',        label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
+    { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
   ]},
   { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
-    { path: '/team-setup',   label: 'Team Wizard',         Icon: Users2 },
+    { path: '/team-setup',   label: 'Agent Team Wizard',   Icon: Users2, subtitle: 'Build a squad of agents' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',         label: 'Flows',               Icon: GitBranch },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
   ]},
-  { section: 'WORKSPACES', items: [
+  { section: 'INFRASTRUCTURE', items: [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
     { path: '/jira-tokens',   label: 'Jira Credentials',     Icon: Workflow, credAdmin: true },
     { path: '/environments',  label: 'Working Environments', Icon: Boxes },
   ]},
   { section: 'CONFIGURATION', items: [
-    { path: '/teams',        label: 'Teams',               Icon: Building2 },
+    { path: '/teams',        label: 'Teams',               Icon: Building2, subtitle: 'Human members & access' },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
@@ -78,7 +81,7 @@ const NAV = [
 
 const BREADCRUMBS = {
   '/quickstart':   'Single Agent',
-  '/team-setup':   'Team Wizard',
+  '/team-setup':   'Agent Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/knowledge':    'Knowledge',
@@ -394,6 +397,7 @@ export default function Shell({ children }) {
             {breadcrumbFor(location.pathname)}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+            <AssistModelSelector />
             <button
               onClick={toggleLightDark}
               title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
@@ -462,6 +466,10 @@ export default function Shell({ children }) {
           {children}
         </main>
       </div>
+
+      {/* Persistent Meeting Note-Taker overlay (#1296) — portaled to body, so
+          it floats over every page while a meeting transcription runs. */}
+      <TranscriptionOverlay />
     </div>
   );
 }

@@ -1,9 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
   Loader2, Circle, XCircle,
-  Layers,
+  Layers, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SkillPicker from '../components/SkillPicker';
@@ -171,6 +171,36 @@ function suggestTeamNaming(envName, agents) {
   return { teamName: baseName, teamId: baseSlug };
 }
 
+function SuggestSuffixButton({ onSuggest }) {
+  const [busy, setBusy] = useState(false);
+  async function suggest() {
+    setBusy(true);
+    try {
+      const r = await fetch('/api/teams/suggest-suffix');
+      if (r.ok) { const { suffix } = await r.json(); onSuggest(suffix); }
+    } catch { /* ignore */ } finally { setBusy(false); }
+  }
+  return (
+    <button
+      type="button"
+      title="Suggest a random 4-char suffix"
+      onClick={suggest}
+      disabled={busy}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 4,
+        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)', padding: '0 var(--eb-space-3)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
+        cursor: busy ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+        fontFamily: 'inherit', height: '100%',
+      }}
+    >
+      <RefreshCw size={13} style={busy ? { animation: 'team-setup-spin 0.9s linear infinite' } : {}} />
+      Suggest
+    </button>
+  );
+}
+
 // ─── Step 3 — Team basics (name + id only) ────────────────────────────
 // Comes after the Working-Environment pick so both fields can be pre-filled
 // from the environment's name (with a uniqueness-resolving suggestion). The
@@ -223,6 +253,27 @@ function StepProject({ form, setForm, environments, takenAgentIds, error }) {
               <AlertCircle size={12} /> This ID is already used by an existing agent or team — pick a different one.
             </div>
           )}
+        </div>
+
+        <div>
+          <label htmlFor="ts-label-suffix" style={labelStyle}>
+            Label suffix <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>(optional)</span>
+          </label>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', height: 38 }}>
+            <input
+              id="ts-label-suffix"
+              type="text"
+              placeholder="e.g. k3f9"
+              value={form.labelSuffix}
+              maxLength={8}
+              onChange={e => setForm(f => ({ ...f, labelSuffix: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, '') }))}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <SuggestSuffixButton onSuggest={suffix => setForm(f => ({ ...f, labelSuffix: suffix }))} />
+          </div>
+          <div style={hintStyle}>
+            <strong>Leave this blank</strong> unless another agent team already uses the <strong>same GitHub repo</strong>. In that case, a short suffix is added to every label this team uses so the two teams&apos; issue/PR labels don&apos;t wake each other&apos;s agents.
+          </div>
         </div>
 
         <ErrorBox message={error} />
@@ -460,23 +511,42 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
 
         {/* Knowledge learning configuration (#567) — same sections/copy/controls
             as the Knowledge page panel (#566), pre-filled with today's defaults. */}
-        <div>
-          <div style={labelStyle}>How this team learns and shares knowledge</div>
-          <div style={{ ...hintStyle, marginTop: 0 }}>
-            These are the defaults every new team starts on. Adjust them here if you like — the result is the
-            same as configuring them on the Knowledge page right after the team is created. You can change all
-            of them later. <strong style={{ color: 'var(--eb-text-primary)' }}>Optional</strong> — leave them as-is to keep the defaults.
+        {/* Knowledge learning configuration (#567). Collapsed by default (#1131):
+            autonomy levels + promotion gates are advanced concepts that overwhelm
+            a first-time team creator, and the step is optional with sensible
+            defaults — so hide them behind a closed disclosure with a one-line
+            summary, keeping the skill picker above always visible. */}
+        <details
+          style={{
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            background: 'var(--eb-bg-surface)',
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+          }}
+        >
+          <summary style={{ cursor: 'pointer' }}>
+            <span style={{ ...labelStyle, display: 'inline', marginBottom: 0 }}>Advanced: knowledge learning</span>
+            <span style={{ ...hintStyle, marginTop: 'var(--eb-space-1)', display: 'block' }}>
+              Controls how much the team auto-learns from its work — defaults are fine to start.
+            </span>
+          </summary>
+          <div style={{ marginTop: 'var(--eb-space-3)' }}>
+            <div style={{ ...hintStyle, marginTop: 0 }}>
+              These are the defaults every new team starts on. Adjust them here if you like — the result is the
+              same as configuring them on the Knowledge page right after the team is created. You can change all
+              of them later. <strong style={{ color: 'var(--eb-text-primary)' }}>Optional</strong> — leave them as-is to keep the defaults.
+            </div>
+            <KnowledgeLearningSections
+              showDefaults
+              autonomy={form.knowledgeConfig.autonomy}
+              review={form.knowledgeConfig.review}
+              gates={form.knowledgeConfig.gates}
+              onAutonomy={(level) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, autonomy: level } }))}
+              onReview={(enabled) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, review: enabled } }))}
+              onGate={(transition, mode) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, gates: { ...f.knowledgeConfig.gates, [transition]: mode } } }))}
+            />
           </div>
-          <KnowledgeLearningSections
-            showDefaults
-            autonomy={form.knowledgeConfig.autonomy}
-            review={form.knowledgeConfig.review}
-            gates={form.knowledgeConfig.gates}
-            onAutonomy={(level) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, autonomy: level } }))}
-            onReview={(enabled) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, review: enabled } }))}
-            onGate={(transition, mode) => setForm(f => ({ ...f, knowledgeConfig: { ...f.knowledgeConfig, gates: { ...f.knowledgeConfig.gates, [transition]: mode } } }))}
-          />
-        </div>
+        </details>
 
         <ErrorBox message={error} />
       </div>
@@ -547,18 +617,57 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
         {form.processBundle && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
             <div style={compactLabelStyle}>
-              {/* Composed bundles are woven before the team name exists (#428) —
-                  show the name the materialised bundle will carry. */}
-              Process: {form.processMode === 'compose' ? (form.teamName?.trim() || form.processBundle.name) : form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
+              Process: {form.processBundle.name} ({(form.processBundle.roles || []).length} agents)
             </div>
             <BundleFlowPreview bundle={form.processBundle} />
             <LintBadges lints={form.processLints} loading={false} />
             <BundleRolesSummary bundle={form.processBundle} teamId={form.teamId} />
           </div>
         )}
+        {/* #1129: the Review step showed the wiring but never stated the
+            consequence of "Create team" — that it provisions live containers
+            which immediately start watching the repo and act on issues/PRs on
+            their own. Make that explicit before the irreversible-feeling click. */}
+        <GoLiveNotice
+          agentCount={(form.processBundle?.roles || []).length}
+          repoLabel={repoSlug(form.repoUrl) || form.repoUrl}
+        />
         <ErrorBox message={error} />
       </div>
     </Card>
+  );
+}
+
+// "What happens next" callout on the Review step (#1129): creating the team
+// spins up autonomous agents that go live at once. Uses the repo convention for
+// warning text-on-bg (color:--eb-status-warning on --eb-status-warning-bg; no
+// -text token exists — see Agents.jsx truncation banner).
+function GoLiveNotice({ agentCount, repoLabel }) {
+  const agents = agentCount > 0 ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : 'the team’s agents';
+  return (
+    <div style={{
+      display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start',
+      padding: 'var(--eb-space-3) var(--eb-space-4)',
+      background: 'var(--eb-status-warning-bg)',
+      border: '1px solid var(--eb-status-warning)',
+      borderRadius: 'var(--eb-radius-md)',
+      fontSize: 'var(--eb-text-sm)',
+      color: 'var(--eb-text-secondary)',
+      lineHeight: 1.6,
+    }}>
+      <AlertTriangle size={18} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+      <div>
+        <div style={{ fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', marginBottom: 'var(--eb-space-1)' }}>
+          What happens next
+        </div>
+        <p style={{ margin: 0 }}>
+          Creating the team provisions {agents} that go live immediately and begin watching{' '}
+          {repoLabel ? <code>{repoLabel}</code> : 'the bound repository'} for issues and pull requests,
+          acting autonomously from that moment. You can disable individual agents afterwards on the{' '}
+          <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> page.
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -679,6 +788,7 @@ export default function TeamSetup() {
   const [result, setResult] = useState(null);
   const [progressSteps, setProgressSteps] = useState(null);
   const [progressError, setProgressError] = useState(null);
+  const [matWarnings, setMatWarnings] = useState([]);
 
   const [form, setForm] = useState({
     teamName: '',
@@ -691,6 +801,7 @@ export default function TeamSetup() {
     readyLabel: 'ready',
     dispatchLabel: 'dispatch',
     maxParallel: 1,
+    labelSuffix: '',
     sshKeyId: '',
     githubTokenId: '',
     mcpSelections: [],
@@ -703,14 +814,12 @@ export default function TeamSetup() {
       review: KNOWLEDGE_LEARNING_DEFAULTS.review,
       gates: { ...KNOWLEDGE_LEARNING_DEFAULTS.gates },
     },
-    // Process step (#422): the selected/woven process-template bundle drives
+    // Process step (#422): the selected process-template bundle drives
     // team creation.
-    processMode: null,        // null | 'template' | 'compose'
+    processMode: null,        // null | 'template' | 'describe'
     processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
     processBundle: null,      // processTemplateVersion-1 bundle
-    weaveNotes: [],           // gap-rule explanations from the Flow-Weaver
     processLints: null,       // authoritative lints for the current bundle
-    composerStages: [],       // composer state
   });
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
@@ -769,7 +878,7 @@ export default function TeamSetup() {
   function validateStep() {
     if (step === 0) {
       if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
-        return 'Pick a process template or compose a process first';
+        return 'Pick a process template or describe a flow first';
       }
       if ((form.processLints || []).some(l => l.severity === 'error')) {
         return 'The process has wiring errors — fix them before continuing';
@@ -785,6 +894,7 @@ export default function TeamSetup() {
       if (!form.teamName.trim()) return 'Team name required';
       if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
       if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add agents to an existing team, open it in the Flow Editor)`;
+      if (form.labelSuffix && !/^[a-z0-9]{1,8}$/.test(form.labelSuffix)) return 'Label suffix must be 1–8 lowercase base36 chars [a-z0-9]';
       return null;
     }
     // Step 3 — Knowledge sources are inherited from the environment and
@@ -818,6 +928,7 @@ export default function TeamSetup() {
     setCollisionInfo(null);
     setProgressError(null);
     setProgressSteps(null);
+    setMatWarnings([]);
     setSubmitting(true);
 
     const body = {
@@ -837,6 +948,7 @@ export default function TeamSetup() {
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
+      ...(form.labelSuffix ? { labelSuffix: form.labelSuffix } : {}),
       mode,
       // Initial team skill set — placed on the team agent.
       skills: form.skills || [],
@@ -846,8 +958,8 @@ export default function TeamSetup() {
     // defaults (no behaviour change vs today's wizard, AC-4).
     if (form.knowledgeConfig) body.knowledgeConfig = form.knowledgeConfig;
     // Ship the Process step's bundle (#422). With Process as step 1 the team
-    // name isn't known at weave time — bind the bundle name to the team name at
-    // submit time instead (#428).
+    // name isn't known when the bundle is selected — bind the bundle name to
+    // the team name at submit time instead (#428).
     if (form.processBundle) {
       body.processTemplate = { ...form.processBundle, name: form.teamName.trim() || form.processBundle.name };
     }
@@ -896,6 +1008,8 @@ export default function TeamSetup() {
           if (land) navigate(`/chats/${land}`);
           else navigate('/agents');
         }, 1500);
+      } else if (ev.type === 'warning') {
+        setMatWarnings(prev => [...prev, ev.message]);
       } else if (ev.type === 'error') {
         // Backend already marked any in-flight step as `error`; surface the
         // top-level message in the progress card and as the form-level error
@@ -945,7 +1059,7 @@ export default function TeamSetup() {
           margin: 0,
           color: 'var(--eb-text-primary)',
         }}>
-          Team Setup
+          Agent Team Wizard
         </h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
@@ -954,6 +1068,15 @@ export default function TeamSetup() {
           marginBottom: 0,
         }}>
           Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.
+        </p>
+        <p style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-muted)',
+          marginTop: 'var(--eb-space-2)',
+          marginBottom: 0,
+        }}>
+          This builds an <strong>Agent Team</strong> (a squad of agents) — not the same as a human{' '}
+          <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (members &amp; access scope).
         </p>
       </div>
 
@@ -1007,6 +1130,38 @@ export default function TeamSetup() {
         <ProgressCard steps={progressSteps} error={progressError} />
       )}
 
+      {/* Creation failed: reassure that the backend rolled everything back
+          (members → team → env, so no half-built team lingers) and offer a
+          one-click Retry that re-runs the same create. Collisions have their
+          own card, so this stays out of their way. */}
+      {progressError && !result && !collisionInfo && (
+        <Card accent="var(--eb-status-error)">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertTriangle size={20} style={{ color: 'var(--eb-status-error)', flexShrink: 0, marginTop: 2 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
+                Team creation failed
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
+                No partial team was left behind — every resource created during this attempt
+                (members, then the team, then the working environment) was rolled back. Fix the
+                issue above and try again.
+              </div>
+              <div style={{ marginTop: 'var(--eb-space-3)' }}>
+                <button
+                  type="button"
+                  onClick={() => submit('create')}
+                  disabled={submitting}
+                  style={primaryButtonStyle(submitting)}
+                >
+                  {submitting ? 'Retrying…' : <><RefreshCw size={16} /> Retry</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {collisionInfo && (
         <Card accent="var(--eb-status-warning)">
           <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>
@@ -1044,6 +1199,16 @@ export default function TeamSetup() {
               </div>
             </div>
           </div>
+        </Card>
+      )}
+      {matWarnings.length > 0 && (
+        <Card accent="var(--eb-status-warning)">
+          <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-2)' }}>
+            Label suffix — coverage warnings
+          </div>
+          <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+            {matWarnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
         </Card>
       )}
 

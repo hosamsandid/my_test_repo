@@ -1,0 +1,77 @@
+// Derived, read-only consumers of an outcome — the "who listens for this?"
+// column shared by the Flow-Editor Routing tab (RoutingSection.jsx, where this
+// logic originated in #828) and the Agent-Chat right rail's read-only Outcomes
+// tab (#963). Extracted so the two surfaces cannot drift: the rail is meant to
+// show exactly what the editor shows, minus the editing.
+//
+// `peers` are the sibling nodes of the same flow graph — anything with
+// `{ id, displayName?, triggers?, channels? }`. Both call sites feed it the
+// graph nodes from `GET /api/process/graph` (or the draft-derived equivalent),
+// so `labelFilter` / `channels` are already projected.
+//
+// Pure + framework-free so it is unit-testable under `node --test`.
+
+// Peers that consume an outcome's signal: they either listen on one of the
+// labels the outcome sets, or (openPr / openIssue) consume a PR/issue channel
+// from this node.
+export function consumersFor(option, node, peers) {
+  const names = new Set();
+  const actions = Array.isArray(option?.actions) ? option.actions : [];
+  const labels = actions.filter(a => a.type === 'setLabel' && a.label).map(a => a.label);
+  const opensPr = actions.some(a => a.type === 'openPr');
+  const opensIssue = actions.some(a => a.type === 'openIssue');
+  for (const p of (Array.isArray(peers) ? peers : [])) {
+    if (!p || p.id === node?.id) continue;
+    const listensLabel = (p.triggers || []).some(t => typeof t.labelFilter === 'string' && labels.includes(t.labelFilter));
+    const chans = Array.isArray(p.channels) ? p.channels : [];
+    const consumesPr = opensPr && chans.some(c => c.artifact === 'pr' && c.from === node?.id);
+    const consumesIssue = opensIssue && chans.some(c => c.artifact === 'issue' && c.from === node?.id);
+    if (listensLabel || consumesPr || consumesIssue) names.add(p.displayName || p.id);
+  }
+  return [...names];
+}
+
+// Peers that listen on a bare label token. The legacy flat-`emits` counterpart
+// of consumersFor: an unstructured emit carries no actions, only a label.
+export function labelConsumers(label, node, peers) {
+  if (typeof label !== 'string' || !label) return [];
+  return consumersFor({ actions: [{ type: 'setLabel', label }] }, node, peers);
+}
+
+// Named human reviewers of an outcome's artifact (#1001, concept §1 D4): a
+// bound human role counts as a consumer of an `openPr`/`openIssue` action when
+// the humans registry carries a matching `{artifact: 'pr'|'issue', from:
+// thisAgent}` consume — the same binding that draws the delivery edge and
+// suppresses `producer-unconsumed` server-side (process-graph.js, #987), so
+// the Routing tab and the Flows lint list agree. Returns display names.
+// `humans` accepts the raw registry (graph.humans / bundle.humans) or the
+// graph's `kind: 'human'` nodes — both carry `consumes` and a name.
+export function outcomeHumanReviewers(option, node, humans) {
+  const actions = Array.isArray(option?.actions) ? option.actions : [];
+  const opensPr = actions.some(a => a && a.type === 'openPr');
+  const opensIssue = actions.some(a => a && a.type === 'openIssue');
+  if (!opensPr && !opensIssue) return [];
+  const names = new Set();
+  for (const h of (Array.isArray(humans) ? humans : [])) {
+    if (!h || !h.id) continue;
+    const consumed = (Array.isArray(h.consumes) ? h.consumes : []).some(c => c
+      && c.from === node?.id
+      && ((opensPr && c.artifact === 'pr') || (opensIssue && c.artifact === 'issue')));
+    if (consumed) names.add(h.displayName || h.name || h.id);
+  }
+  return [...names];
+}
+
+// Does this outcome hand off to a PERSON (#981)? True when any of its setLabel
+// actions sets a brake-flagged label (`labels` = the graph's label registry,
+// [{ name, humanGate, brake }]). A brake is the agent pausing the flow for a
+// human decision — a consumer by design, so "no consumer" warnings must not
+// fire for it. Gate labels don't count: an agent may not set those at all
+// (that is a validation error, not a hand-off).
+export function outcomeHandsOffToHuman(option, labels) {
+  const regs = Array.isArray(labels) ? labels : [];
+  const actions = Array.isArray(option?.actions) ? option.actions : [];
+  return actions.some(a => a && a.type === 'setLabel' && typeof a.label === 'string'
+    && regs.some(l => l && typeof l.name === 'string'
+      && l.name.trim() === a.label.trim() && l.brake && !l.humanGate));
+}

@@ -6,8 +6,24 @@ import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
-import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
-import { partitionTriggers, scheduleText } from './input-rows.js';
+import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
+import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
+import { consumersFor, outcomeHandsOffToHuman, outcomeHumanReviewers } from './outcome-consumers.js';
+import {
+  moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
+} from './wiring-engine.js';
+import {
+  rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker,
+} from './outcome-routing.js';
+import { consumeKey } from './humans-registry-ops';
+
+// The human role currently wired to consume `entry` (or '' if none). #987.
+function humanConsuming(humans, entry) {
+  const key = consumeKey(entry);
+  if (!key) return '';
+  const h = (humans || []).find(r => (r.consumes || []).some(c => consumeKey(c) === key));
+  return h ? h.id : '';
+}
 
 // Routing tab (#828, agent-outcomes concept §5.2; absorbs the retired
 // Connections tab in #865) — ONE place for an agent's whole routing decision.
@@ -39,7 +55,7 @@ import { partitionTriggers, scheduleText } from './input-rows.js';
 // The Outcomes editor holds a local draft and persists only on Save (or when a
 // suggestion is confirmed) — nothing is written implicitly, so a declined
 // suggestion persists nothing (AC4).
-export default function RoutingSection({ node, peers = [], lints = [], labels = [], ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
+export default function RoutingSection({ node, peers = [], lints = [], labels = [], humans = [], humanOps, ops, onChanged, focusOutcome = null, focusSection = null, mode }) {
   const [outcomes, setOutcomes] = useState(null);   // { mode, options[] } local draft
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -142,6 +158,10 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
               option={o}
               highlight={suggested || (focusOutcome && o.id === focusOutcome)}
               consumers={consumersFor(o, node, peers)}
+              humanHandoff={outcomeHandsOffToHuman(o, labels)}
+              humanReviewers={outcomeHumanReviewers(o, node, humans)}
+              node={node} peers={peers} labels={labels} humans={humans}
+              ops={ops} humanOps={humanOps} dirty={dirty} onChanged={onChanged}
               onChange={(next) => mutate({ ...outcomes, options: outcomes.options.map((x, j) => j === i ? next : x) })}
               onRemove={() => mutate({ ...outcomes, options: outcomes.options.filter((_, j) => j !== i) })}
             />
@@ -167,9 +187,7 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
         </div>
       </div>
 
-      <ArtifactsBlock node={node} peers={peers} ops={ops} onChanged={onChanged} focus={focusSection === 'artifacts'} />
-
-      <LegacyDisclosure node={node} ops={ops} onChanged={onChanged} focus={focusSection === 'legacy'} />
+      <ArtifactsBlock node={node} peers={peers} ops={ops} humans={humans} humanOps={humanOps} onChanged={onChanged} focus={focusSection === 'artifacts'} />
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -205,10 +223,6 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
   const closeEdits = () => { setEditTrigger(null); setEditChannel(null); setEditInput(null); };
   const afterEdit = () => { closeEdits(); onChanged?.(); };
 
-  // channel edit: how many channels consume THIS producer (for the #412 orphan-
-  // produce-flag cleanup offered on remove).
-  const producerChannelCount = (from) => channels.filter(c => c.from === from).length;
-
   const hasAny = channels.length || deps.length || inputs.length || manual.length || derived.length;
 
   async function saveTriggerEdit(body) {
@@ -224,7 +238,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       </div>
       {!hasAny && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Nothing wakes this agent yet — add an input below, or drag a connection onto it on the canvas.
+          Nothing wakes this agent yet — add an input below, or drag a hand-off onto it on the canvas.
         </div>
       )}
 
@@ -233,6 +247,20 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       {channels.map(c => {
         const key = `ch:${c.artifact}:${c.from}:${c.label || ''}`;
         const noun = c.artifact === 'pr' ? 'pull request' : 'issue';
+        // Claim (#958): only a LABELLED channel derives one — an "opened" channel
+        // has no wake label to take over, so the toggle would be meaningless.
+        // The claim shown is READ BACK from the derived listener the backend
+        // actually generated (never re-derived here): the `<wake>:wip` convention
+        // has exactly one implementation, in process-template.js.
+        const claimable = !!(c.label && c.label.trim());
+        const autoClaim = c.autoClaim !== false;
+        const claim = claimable ? (derivedChannelTrigger(derived, c)?.claim || null) : null;
+        // Delivery transport (#1194): a labelled, agent-set channel may opt into
+        // internal delivery (poller-excluded, woken by aee-emit). Like the claim
+        // opt-out, the flag lives on the PORT (the derived trigger is regenerated).
+        // A human gate stays poller-only — a person sets the label on GitHub.
+        const internalable = claimable && c.gate !== 'human';
+        const internal = c.transport === 'internal';
         return (
           <InputRow key={key} busy={busy === key}
             icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
@@ -240,7 +268,52 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
             onRemove={ops.removeChannel ? () => run(key, () => ops.removeChannel(node.id, { artifact: c.artifact, from: c.from, label: c.label || '' })) : null}
             text={<>Reacts to <strong>{nameOf(c.from)}</strong>'s {noun}
               {c.label ? <> when labeled <code style={codeChip}>{c.label}</code></> : null}
-              {c.gate === 'human' ? ' · 👤 human gate' : null}</>} />
+              {c.gate === 'human' ? ' · 👤 human gate' : null}
+              {/* Derived claim, read-only (auto) + per-listener opt-out. The flag
+                  lives on the PORT because the derived trigger is regenerated on
+                  every reconcile — a trigger-level flag would be wiped. */}
+              {claimable ? (
+                <>
+                  {' · '}
+                  {claim
+                    ? <span title={claimTooltip(claim)}>⇥ claims <code style={codeChip}>{claim.add}</code></span>
+                    : <span style={{ color: 'var(--eb-text-muted)' }}>⇥ claim off</span>}
+                  {ops.updateChannel ? (
+                    <button type="button" disabled={busy === key}
+                      onClick={() => run(key, () => ops.updateChannel(node.id, { ...c, autoClaim: !autoClaim ? undefined : false }))}
+                      title={autoClaim
+                        ? 'Turn the auto-claim off for this listener — it will keep the wake label instead of taking it over.'
+                        : 'Turn the auto-claim back on (derived by convention).'}
+                      style={{ marginLeft: 6, background: 'none', border: 'none', padding: 0,
+                        color: 'var(--eb-text-muted)', cursor: 'pointer', font: 'inherit',
+                        fontSize: 'var(--eb-text-xs)', textDecoration: 'underline' }}>
+                      {autoClaim ? 'disable' : 'enable'}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              {/* Delivery transport (#1194) — read-out + inline toggle, mirroring
+                  the claim opt-out. Shown only for a labelled, agent-set channel. */}
+              {internalable ? (
+                <>
+                  {' · '}
+                  {internal
+                    ? <span title="Woken directly by the orchestrator (the producer runs aee-emit); the label is still mirrored onto GitHub as visible status.">⚡ internal</span>
+                    : <span style={{ color: 'var(--eb-text-muted)' }}>via GitHub</span>}
+                  {ops.updateChannel ? (
+                    <button type="button" disabled={busy === key}
+                      onClick={() => run(key, () => ops.updateChannel(node.id, { ...c, transport: internal ? undefined : 'internal' }))}
+                      title={internal
+                        ? 'Switch back to GitHub-poller delivery for this listener.'
+                        : 'Deliver this wake directly over the internal channel (label mirrored to GitHub).'}
+                      style={{ marginLeft: 6, background: 'none', border: 'none', padding: 0,
+                        color: 'var(--eb-text-muted)', cursor: 'pointer', font: 'inherit',
+                        fontSize: 'var(--eb-text-xs)', textDecoration: 'underline' }}>
+                      {internal ? 'use GitHub' : 'make internal'}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}</>} />
         );
       })}
 
@@ -292,6 +365,8 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
               </span>
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
                 {s.events.join(', ') || t.type}{s.label ? ` · 🏷 ${s.label}` : ''}
+                {/* Derived claim (#958), read-only — toggled on the owning port. */}
+                {t.claim ? <span title={claimTooltip(t.claim)}> · ⇥ {t.claim.add}</span> : null}
               </span>
             </div>
           </div>
@@ -308,7 +383,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
           <div key={i} style={warn}>
             <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
             <div style={{ flex: 1 }}>
-              <div>{l.message || `Duplicate listener${l.label ? ` on "${l.label}"` : ''}.`}</div>
+              <div>{l.message || `Duplicate input${l.label ? ` on "${l.label}"` : ''}.`}</div>
               {target && ops.deleteTrigger && (
                 <button onClick={() => removeTrigger(target)} disabled={busy === `t:${target}`} style={{ ...ghost, marginTop: 4, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)' }}>
                   <Trash2 size={12} /> Delete duplicate trigger
@@ -338,7 +413,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       {editTrigger && (
         <SidePanel open onClose={closeEdits} title="Edit input" width="520px">
           <TriggerForm agentId={node.id} ops={ops} initialValues={editTrigger} saving={savingEdit}
-            onSave={saveTriggerEdit} onCancel={closeEdits} />
+            labels={labels} onSave={saveTriggerEdit} onCancel={closeEdits} />
         </SidePanel>
       )}
 
@@ -346,7 +421,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
         <EditHandoffDialog
           edge={{ on: 'github', from: editChannel.from, to: node.id, artifact: editChannel.artifact, label: editChannel.label || '', gate: editChannel.gate }}
           fromName={nameOf(editChannel.from)} toName={node.displayName || node.id}
-          ops={ops} producerChannelCount={producerChannelCount(editChannel.from)}
+          ops={ops}
           onClose={closeEdits} onDone={afterEdit} />
       )}
 
@@ -491,7 +566,38 @@ function InputRow({ icon, text, subtitle, onEdit, onRemove, busy }) {
 // The data-flow outputs this agent produces (dataFlow.outputs) — name, hint,
 // computed consumers, remove (#865). Below Outcomes so the reader goes
 // inputs → decisions → produced artifacts top to bottom.
-function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
+// A dropdown that wires an artifact delivery to a NAMED human role (#987) — the
+// replacement for the #981 "a person consumes this" checkbox. Selecting a role
+// adds the delivery to that role's `consumes`; switching moves it; "— none —"
+// removes it. Mode-agnostic through humanOps. Hidden when no human roles exist
+// (add one via the toolbar's "Add human" first).
+function HumanDeliveryPicker({ humans = [], humanOps, entry, onChanged, disabled }) {
+  const [busy, setBusy] = useState(false);
+  if (!humanOps || !humans.length) return null;
+  const current = humanConsuming(humans, entry);
+  const change = async (next) => {
+    if (busy || next === current) return;
+    setBusy(true);
+    try {
+      // The engine moves the delivery between roles (unwire old, wire new).
+      await moveHumanDelivery({ humanOps }, { entry, fromHuman: current, toHuman: next });
+      onChanged?.();
+    } catch (e) { window.alert(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+      reviewed by
+      <select value={current} disabled={busy || disabled} onChange={e => change(e.target.value)}
+        style={{ ...input, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+        <option value="">— nobody —</option>
+        {humans.map(h => <option key={h.id} value={h.id}>👤 {h.name || h.id}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function ArtifactsBlock({ node, peers, ops, humans = [], humanOps, onChanged, focus }) {
   const ref = useRef(null);
   useFocusScroll(ref, focus);
   const outputs = Array.isArray(node.outputs) ? node.outputs : [];
@@ -524,11 +630,52 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
         const key = `out:${artifactKey(a)}`;
         const h = a && typeof a === 'object' && a.name && a.hint ? a.hint : '';
         const consumers = artifactConsumers(a, node, peers);
+        // Human delivery picker (#987, replaces the #981 audience checkbox): a
+        // named person reads this output (a report, a review document). Wiring a
+        // role clears the unconsumed-output lint and draws producer → role.
+        const deliveryEntry = { artifact: 'file', name: artifactKey(a) };
+        const reviewer = humanConsuming(humans, deliveryEntry);
+        // Open-end marker (#1004): a declared terminal/external output is a
+        // proper endpoint, not "no consumer yet".
+        const marker = a && typeof a === 'object' ? (a.terminal === true ? 'terminal' : (a.external ? 'external' : null)) : null;
+        const setMarker = (m) => ops.setArtifactMarker
+          && run(key, () => ops.setArtifactMarker(node.id, { name: a && a.name, path: a && a.path, marker: m }));
+        const subtitle = (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {marker === 'terminal' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                ⏹ Terminal by design — the end product.
+                {ops.setArtifactMarker && <button type="button" onClick={() => setMarker(null)} title="Unmark" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>}
+              </span>
+            ) : marker === 'external' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                ↗ external{a.external && a.external.note ? `: ${a.external.note}` : ' — consumed outside this flow'}
+                {ops.setArtifactMarker && <button type="button" onClick={() => setMarker(null)} title="Unmark" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>}
+              </span>
+            ) : consumers.length ? `consumers: ${consumers.join(', ')}${reviewer ? ' + a person' : ''}`
+              : reviewer ? 'read by a person 👤' : (
+                // Open-end CTA (#1004): wire a person below, or declare the end.
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  no consumer yet
+                  {ops.setArtifactMarker && (
+                    <>
+                      — <button type="button" onClick={() => setMarker({ terminal: true })} style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark terminal</button>
+                      <button type="button" onClick={() => {
+                        const note = window.prompt('Who consumes this outside the flow? (optional note)') || '';
+                        setMarker({ external: note.trim() ? { note: note.trim() } : {} });
+                      }} style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark external…</button>
+                    </>
+                  )}
+                </span>
+              )}
+            <HumanDeliveryPicker humans={humans} humanOps={humanOps} entry={deliveryEntry} onChanged={onChanged} disabled={busy === key} />
+          </span>
+        );
         return (
           <InputRow key={key} busy={busy === key} icon={<Package size={14} />}
             onRemove={ops.removeArtifact ? () => run(key, () => ops.removeArtifact(node.id, { direction: 'output', name: a && a.name, path: a && a.path })) : null}
             text={<><code style={codeChip}>{artifactKey(a)}</code>{h ? ` · ${h}` : ''}</>}
-            subtitle={consumers.length ? `consumers: ${consumers.join(', ')}` : 'no consumer yet'} />
+            subtitle={subtitle} />
         );
       })}
 
@@ -559,103 +706,9 @@ function ArtifactsBlock({ node, peers, ops, onChanged, focus }) {
   );
 }
 
-// ── Legacy ───────────────────────────────────────────────────────────────────
-// Collapsed disclosure holding the emitted-labels editor and the GitHub-outputs
-// checkboxes, relocated from the retired Connections tab so nothing is lost
-// mid-transition (#865); these move to their final home in phase 3.
-function LegacyDisclosure({ node, ops, onChanged, focus }) {
-  const ref = useRef(null);
-  useFocusScroll(ref, focus);
-  const [open, setOpen] = useState(!!focus);
-  useEffect(() => { if (focus) setOpen(true); }, [focus]);
-  const gh = node.github || {};
-  const [producesPr, setPr] = useState(!!gh.producesPr);
-  const [producesIssue, setIssue] = useState(!!gh.producesIssue);
-  const hasEmits = !!ops.setRoleEmits;
-  const hasGithub = !!ops.setGithubProduces;
-  if (!hasEmits && !hasGithub) return null;
-
-  const saveProduces = async (pr, issue) => {
-    setPr(pr); setIssue(issue);
-    try { await ops.setGithubProduces(node.id, { pr, issue }); onChanged?.(); }
-    catch (e) { window.alert(e?.message || String(e)); }
-  };
-
-  return (
-    <div ref={ref} style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)', ...(focus ? focusRing : {}) }}>
-      <button onClick={() => setOpen(o => !o)} style={{
-        display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer',
-        color: 'var(--eb-text-secondary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', padding: 0,
-      }}>
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Legacy
-        <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
-          — emitted labels &amp; GitHub outputs (moving in a later phase)
-        </span>
-      </button>
-      {open && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
-          {hasEmits && <EmitsEditor node={node} ops={ops} onChanged={onChanged} />}
-          {hasGithub && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>GitHub outputs</div>
-              <label style={check}>
-                <input type="checkbox" checked={producesPr} onChange={e => saveProduces(e.target.checked, producesIssue)} />
-                Opens pull requests
-              </label>
-              <label style={check}>
-                <input type="checkbox" checked={producesIssue} onChange={e => saveProduces(producesPr, e.target.checked)} />
-                Opens issues
-              </label>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Role-level emits editor (#414), relocated from ConnectionsSection (#865): the
-// labels this agent sets during its work, independent of any trigger.
-function EmitsEditor({ node, ops, onChanged }) {
-  const [emits, setEmits] = useState(Array.isArray(node.emits) ? node.emits : []);
-  const [newLabel, setNewLabel] = useState('');
-  const save = async (next) => {
-    try {
-      await ops.setRoleEmits(node.id, next);
-      setEmits(next);
-      onChanged?.();
-    } catch (e) { window.alert(e?.message || String(e)); }
-  };
-  const add = () => {
-    const l = newLabel.trim();
-    if (l && !emits.includes(l)) save([...emits, l]);
-    setNewLabel('');
-  };
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Emits labels</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-        {emits.map(l => (
-          <button key={l} onClick={() => save(emits.filter(x => x !== l))} title="Remove" style={{
-            fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
-            background: '#3b82f61a', color: '#3b82f6', border: '1px solid #3b82f6',
-            borderRadius: 'var(--eb-radius-sm)', padding: '0 5px', cursor: 'pointer',
-            display: 'inline-flex', alignItems: 'center', gap: 3,
-          }}>{l} <X size={10} /></button>
-        ))}
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-          <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-            placeholder="add label…" style={{ ...input, width: 130, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }} />
-          <button onClick={add} title="Add emitted label" style={{
-            background: 'none', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-            padding: '1px 5px', cursor: 'pointer', color: 'var(--eb-text-secondary)', display: 'inline-flex',
-          }}><Plus size={11} /></button>
-        </span>
-      </div>
-    </div>
-  );
-}
+// The "GitHub artifacts — who reviews them" block was retired (#1003, concept
+// §4.2): the reviewer picker lives on the owning outcome row now, and the
+// produce badge is a projection of the openPr/openIssue outcome actions.
 
 // Scroll a focused section into view when the inspector opens on it (jump link).
 function useFocusScroll(ref, focus) {
@@ -683,10 +736,60 @@ function artifactConsumers(output, node, peers) {
 }
 
 // ── one outcome row ──────────────────────────────────────────────────────────
-function OutcomeRow({ index, option, consumers, highlight, onChange, onRemove }) {
+// Besides editing the outcome's content (title / when / actions — explicit
+// Save), the row routes its signal in place (#1003, concept §4.2): a consumer
+// picker wiring the listener/channel via the engine, and — for openPr/openIssue
+// actions — the reviewer picker that used to live in the retired GitHub-
+// artifacts block. Routing applies immediately; content stays save-gated.
+function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [], highlight, node, peers = [], labels = [], humans = [], ops, humanOps, dirty, onChanged, onChange, onRemove }) {
   const actions = Array.isArray(option.actions) && option.actions.length ? option.actions : [{ type: 'none' }];
   const setActions = (next) => onChange({ ...option, actions: next });
   const isNone = actions.every(a => a.type === 'none');
+  const [busy, setBusy] = useState(false);
+  const [wireError, setWireError] = useState(null);
+
+  const artifact = rowArtifact(option);
+  const wireSpec = wireConsumerSpec(option);
+  const wired = currentConsumers(option, node, peers);
+  const wiredIds = new Set(wired.map(w => w.id));
+  const candidates = consumerCandidates(node, peers).filter(c => !wiredIds.has(c.id));
+
+  const run = async (fn) => {
+    setBusy(true); setWireError(null);
+    try { await fn(); onChanged?.(); }
+    catch (e) { setWireError(e?.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  const wireTo = (targetId) => run(async () => {
+    const target = peers.find(p => p.id === targetId);
+    if (wireSpec.kind === 'label') {
+      await wireLabelHandoff({ ops }, {
+        from: node.id, to: targetId, label: wireSpec.label, labels,
+        fromName: node.displayName || node.id, toName: target?.displayName || targetId,
+      });
+    } else {
+      await wireChannel({ ops }, { from: node.id, to: targetId, artifact: wireSpec.artifact });
+    }
+  });
+  const unwire = (w) => run(async () => {
+    if (w.spec.kind === 'label') {
+      await unwireLabelHandoff({ ops }, {
+        from: node.id, to: w.id, triggerId: w.spec.triggerId, label: w.spec.label,
+        removeListener: true, removeEmit: false, // the emit IS this outcome — keep it
+      });
+    } else {
+      await unwireChannel({ ops }, { from: node.id, to: w.id, artifact: w.spec.artifact, label: w.spec.label || '' });
+    }
+  });
+
+  // Routing is disabled while the outcome content has unsaved edits — the
+  // engine must wire against the persisted label/action, not a draft.
+  const routingDisabled = busy || dirty;
+  // Open-end markers (#1004, concept §4.7): a declared endpoint is content
+  // (edited via onChange + explicit Save), not wiring.
+  const marker = option.terminal === true ? 'terminal' : (option.external ? 'external' : null);
+  const noConsumerYet = !isNone && !humanHandoff && !marker && !wired.length && !humanReviewers.length;
+
   return (
     <div style={{ ...rowBox, ...(highlight ? { borderColor: 'var(--eb-accent-primary)', boxShadow: '0 0 0 1px var(--eb-accent-primary)' } : {}) }}>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -707,12 +810,71 @@ function OutcomeRow({ index, option, consumers, highlight, onChange, onRemove })
           <Plus size={12} /> Add action
         </button>
       </div>
-      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {isNone
           ? 'Terminal outcome — no signal (dead-end by design).'
-          : consumers.length
-            ? <>consumers: {consumers.join(', ')}</>
-            : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer — nothing listens for this outcome's signal</span>}
+          : humanHandoff
+            // Brake label (#981): the hand-off to a person IS the consumer.
+            ? <>hands off to a person 👤 — the flow pauses for a decision{consumers.length ? <> · also wakes {consumers.join(', ')}</> : null}</>
+            : (
+              <>
+                {marker === 'terminal' && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    ⏹ Terminal by design — the end product.
+                    <button type="button" onClick={() => { const { terminal, ...rest } = option; onChange(rest); }}
+                      title="Unmark — this outcome is not the end product" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                )}
+                {marker === 'external' && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    ↗ external:
+                    <input value={option.external?.note || ''} placeholder="who consumes this (e.g. CI workflow)"
+                      onChange={e => onChange({ ...option, external: e.target.value ? { note: e.target.value } : {} })}
+                      style={{ ...input, width: 180, padding: '1px 4px', fontSize: 'var(--eb-text-xs)' }} />
+                    <button type="button" onClick={() => { const { external, ...rest } = option; onChange(rest); }}
+                      title="Unmark — this outcome is consumed inside this flow" style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                )}
+                {noConsumerYet && (
+                  // Open-end CTA (#1004): three ways to close the question —
+                  // wire a consumer, or declare the open end intentional.
+                  <>
+                    <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>no consumer yet —</span>
+                    <button type="button" onClick={() => onChange({ ...option, terminal: true })}
+                      style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark terminal</button>
+                    <button type="button" onClick={() => onChange({ ...option, external: {} })}
+                      style={{ ...ghost, padding: '1px 6px', fontSize: 'var(--eb-text-xs)' }}>mark external…</button>
+                  </>
+                )}
+                {wired.map(w => (
+                  <span key={w.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    wakes <strong>{w.name}</strong>
+                    <button type="button" onClick={() => unwire(w)} disabled={routingDisabled}
+                      title={`Stop waking ${w.name}`} style={{ ...iconBtn, padding: 0 }}><X size={11} /></button>
+                  </span>
+                ))}
+                {wireSpec && candidates.length > 0 && (
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    {wired.length ? 'also wake' : 'wake'}
+                    <select value="" disabled={routingDisabled} onChange={e => e.target.value && wireTo(e.target.value)}
+                      style={{ ...input, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+                      <option value="">— pick an agent —</option>
+                      {candidates.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                {artifact && (
+                  // Reviewer binding, per row (#1003 — replaces the retired
+                  // GitHub-artifacts block): which person reviews the PR/issue.
+                  <HumanDeliveryPicker humans={humans} humanOps={humanOps}
+                    entry={{ artifact, from: node.id }} onChanged={onChanged} disabled={routingDisabled} />
+                )}
+              </>
+            )}
+        {dirty && !isNone && !humanHandoff && (
+          <span style={{ color: 'var(--eb-text-muted)' }}>(save outcomes to route)</span>
+        )}
+        {wireError && <span style={{ color: 'var(--eb-status-error)' }}>{wireError}</span>}
       </div>
     </div>
   );
@@ -759,6 +921,9 @@ function normalize(oc) {
       id: o.id, title: o.title || '', when: o.when || '',
       actions: Array.isArray(o.actions) && o.actions.length ? o.actions.map(a => ({ ...a })) : [{ type: 'none' }],
       ...(o.notify ? { notify: o.notify } : {}),
+      // #1037: hydrate the open-end marker so a persisted terminal/external
+      // outcome re-displays (previously dropped here, so it never re-showed).
+      ...openEndMarker(o),
     })),
   };
 }
@@ -788,28 +953,18 @@ function finalize(oc) {
       ...(o.when && o.when.trim() ? { when: o.when.trim() } : {}),
       actions: actions.length ? actions : [{ type: 'none' }],
       ...(o.notify ? { notify: o.notify } : {}),
+      // #1037: carry the open-end marker into the persisted port so the
+      // declared endpoint survives Save (previously dropped before the payload).
+      ...openEndMarker(o),
     };
   });
   return { mode: oc.mode === 'exactlyOne' ? 'exactlyOne' : 'anyOf', options };
 }
 
-// Derived, read-only consumers of an outcome: peers that listen on any label the
-// outcome sets, or (openPr/openIssue) consume a channel from this node.
-function consumersFor(option, node, peers) {
-  const names = new Set();
-  const labels = (option.actions || []).filter(a => a.type === 'setLabel' && a.label).map(a => a.label);
-  const opensPr = (option.actions || []).some(a => a.type === 'openPr');
-  const opensIssue = (option.actions || []).some(a => a.type === 'openIssue');
-  for (const p of peers) {
-    if (p.id === node.id) continue;
-    const listensLabel = (p.triggers || []).some(t => typeof t.labelFilter === 'string' && labels.includes(t.labelFilter));
-    const chans = Array.isArray(p.channels) ? p.channels : [];
-    const consumesPr = opensPr && chans.some(c => c.artifact === 'pr' && c.from === node.id);
-    const consumesIssue = opensIssue && chans.some(c => c.artifact === 'issue' && c.from === node.id);
-    if (listensLabel || consumesPr || consumesIssue) names.add(p.displayName || p.id);
-  }
-  return [...names];
-}
+// `consumersFor` (derived, read-only consumers of an outcome) moved to the pure
+// ./outcome-consumers.js module in #963 so the read-only Outcomes tab in the
+// Agent-Chat right rail derives the same consumer set from the same code.
+// Imported above.
 
 const input = {
   background: 'var(--eb-bg-app)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',

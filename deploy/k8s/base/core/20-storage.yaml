@@ -1,0 +1,58 @@
+# The four compose volumes as PVCs.
+#
+# POC/single-node note: the shared workspace is conceptually ReadWriteMany
+# (orchestrator + admin-console + bp-explorer + every agent pod mount it), but
+# on a SINGLE-node cluster (kind locally, k3s on one VM) ReadWriteOnce is
+# sufficient — RWO permits many pods on the same node. On multi-node GKE this
+# claim must move to an RWX StorageClass (Filestore CSI) — see
+# docs/hosting/gcp/. conduwuit-db is single-writer and stays RWO everywhere.
+#
+# No storageClassName set: kind (local-path) and k3s both provide a default.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-studio-workspace
+  namespace: agent-studio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Skill pool (compose: skills-pool) — orchestrator reads /template-workspace,
+# admin-console manages it at /pool.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-studio-skills
+  namespace: agent-studio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Control-plane state pushed by agents (#185) — orchestrator + admin-console
+# only, mounted at /control.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-studio-control
+  namespace: agent-studio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Matrix RocksDB — single writer, the one backup-critical asset.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-studio-conduwuit-db
+  namespace: agent-studio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi

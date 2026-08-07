@@ -1,5 +1,5 @@
 #
-# e-vgh-claw stack — Conduwuit + Orchestrator + Admin Console
+# agent-studio stack — Conduwuit + Orchestrator + Admin Console
 #
 # Usage:
 #   make up        # build the agent image + build + start the full stack
@@ -26,7 +26,7 @@ ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace
 SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
 SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 ifeq ($(COMPOSE_PROJECT_NAME),)
-SKILL_POOL_VOLUME      = vgh-claw_claude-workspace
+SKILL_POOL_VOLUME      = agent-studio_claude-workspace
 endif
 
 # Admin Console version footer (#483) — resolved here (not inside the
@@ -41,7 +41,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
+.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -50,7 +50,7 @@ export GIT_COMMIT GIT_DIRTY
 # this is a no-op rebuild when agent-image/ is unchanged and rebuilds on change.
 # `restart` and `update` route through `up`, so they inherit the build too.
 up: agent-image
-	@echo "Starting e-vgh-claw stack..."
+	@echo "Starting agent-studio stack..."
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
 	@echo ""
 	@echo "Stack started. Container status:"
@@ -66,7 +66,13 @@ build:
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console stt
 
 agent-image:
-	podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/
+	@n=0; max=3; \
+	until podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/; do \
+		n=$$((n+1)); \
+		if [ $$n -ge $$max ]; then echo "agent-image: build failed after $$max attempts" >&2; exit 1; fi; \
+		echo "agent-image: build failed (attempt $$n/$$max) — likely a transient registry pull; retrying in 15s…" >&2; \
+		sleep 15; \
+	done
 
 update:
 	@echo "Pulling latest changes from git..."
@@ -84,7 +90,7 @@ logs:
 	$(foreach svc,$(SERVICES),$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 $(svc) &)
 	wait
 
-seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers
+seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -162,6 +168,23 @@ seed-mcp-servers:
 	@echo "Done. Pool mcp-servers contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/mcp-servers/
 
+# Reference plugins (plugin system Phase 1, #1517): each `plugins/<id>/` carries
+# plugin.json + bin/. Seeded into the pool as /pool/plugins/<id>/ (→ the
+# operator registry at /workspace/plugins/<id>/), mirroring seed-mcp-servers.
+# Installing a plugin from the registry grants nothing to any agent.
+seed-plugins:
+	@if [ ! -d "$(CURDIR)/plugins" ]; then \
+	  echo "ERROR: $(CURDIR)/plugins not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding plugins into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm --security-opt label=disable \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(CURDIR)/plugins:/src:ro \
+	  alpine sh -c 'rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/'
+	@echo "Done. Pool plugins contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/plugins/
+
 # ── E2E (Playwright) ────────────────────────────────────────────────────────
 # The disposable `aee-e2e` compose project (#666, docs/e2e-testing-concept.md).
 # `make e2e` is the one-shot lane: Playwright's global-setup/teardown own the
@@ -190,6 +213,27 @@ e2e-up:
 
 e2e-down:
 	./e2e/scripts/stack-down.sh
+
+# ── E2E on kind (#1319) ─────────────────────────────────────────────────────
+# Same journey suite against the DEDICATED e2e kind cluster (agent-studio-e2e)
+# — agents spawn as k8s pods through spawn-kubernetes-pod.js, so this covers
+# the primary (k8s) runtime that the compose lane cannot. kind-stack-up.sh owns
+# the cluster + fakes + port-forwards (console :4110, fake-github :4114);
+# E2E_LANE=ci,kind also picks up kind-only journeys (context-mount). The dev
+# kind cluster (agent-studio) and both compose stacks are untouched.
+e2e-kind:
+	./e2e/scripts/kind-stack-up.sh
+	cd e2e && npm ci && npx playwright install --with-deps chromium && \
+	E2E_SKIP_STACK=1 E2E_BASE_URL=http://localhost:4110 \
+	E2E_FAKE_GITHUB_URL=http://localhost:4114 E2E_LANE=ci,kind \
+	ADMIN_USERNAME=admin ADMIN_PASSWORD=e2e-admin-pass \
+	npx playwright test --project=journeys
+
+e2e-kind-up:
+	./e2e/scripts/kind-stack-up.sh
+
+e2e-kind-down:
+	./e2e/scripts/kind-stack-down.sh
 
 # ── Journey documentation (docs/journey-spec-concept.md §3.2, #707) ─────────
 # Turn the journeys + a green run's screenshot artifacts into the Markdown user
@@ -237,4 +281,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"
+	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

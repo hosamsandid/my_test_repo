@@ -108,10 +108,21 @@ test('oversized label is nudged off the node row', () => {
 // The issue's reproduction case: the curated Extended SDLC template (10 roles,
 // several loops + PR channels) must render with no overlapping labels and no
 // label sitting inside a node box.
-test('extended-sdlc preview: labels neither overlap nor cover node boxes', () => {
+//
+// The edge set comes from the SERVER graph via previewEdgesFromGraph (#1009):
+// since #831 retired flat `emits` in favour of authored outcomes, the local
+// bundleEdges derivation no longer sees the label hand-offs — which is exactly
+// the preview-vs-Flows divergence #1009 closed. This test therefore exercises
+// the same data path the wizard now renders.
+test('extended-sdlc preview: labels neither overlap nor cover node boxes', async () => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const { processTemplateToUnified, buildUnifiedGraph } = require('../../../api/unified-graph.js');
   const bundle = JSON.parse(readFileSync(
     new URL('../../../../orchestrator/skill-pool/process-templates/extended-sdlc.json', import.meta.url), 'utf8'));
-  const layout = computePreviewLayout(bundle);
+  const flow = processTemplateToUnified(bundle);
+  const graph = buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundle.humans || [] });
+  const layout = computePreviewLayout(bundle, previewEdgesFromGraph(graph));
   assert.ok(layout.back.length > 0, 'expected rework/escalation loops');
   const boxes = labelBoxes(layout);
   assert.ok(boxes.length >= 10, 'expected a busy preview');
@@ -185,4 +196,58 @@ test('unstaged roles land in a trailing column', () => {
   assert.equal(xs.get('a'), PAD);
   assert.equal(xs.get('x'), PAD + COL_W);
   assert.equal(layout.width, PAD * 2 + COL_W + NODE_W);
+});
+
+// ─── #1009: the preview renders the SERVER edge set ──────────────────────────
+
+import { previewEdgesFromGraph } from './flow-preview-layout.js';
+
+test('#1009: previewEdgesFromGraph maps server edges onto the preview model', () => {
+  const graph = { edges: [
+    { from: 'ba', to: 'dev', on: 'github', artifact: 'issue', label: 'ready-for-implementation', gate: 'human' },
+    { from: 'dev', to: 'reviewer', on: 'github', artifact: 'pr' },
+    { from: 'reviewer', to: 'rework', on: 'label', label: 'revisions-required' },
+    { from: 'a', to: 'b', on: 'dependency' },
+    { from: 'a', to: 'b', on: 'artifact', label: 'report.md' },
+    { from: 'x', to: 'y', on: 'review' },
+  ] };
+  assert.deepEqual(previewEdgesFromGraph(graph), [
+    { from: 'ba', to: 'dev', label: 'ready-for-implementation', gate: true, styleKey: 'gate' },
+    { from: 'dev', to: 'reviewer', label: 'PR', gate: false, styleKey: 'pr' },
+    { from: 'reviewer', to: 'rework', label: 'revisions-required', gate: false, styleKey: 'label' },
+    { from: 'a', to: 'b', label: 'depends-on', gate: false, styleKey: 'dependency' },
+    { from: 'a', to: 'b', label: 'report.md', gate: false, styleKey: 'artifact' },
+    { from: 'x', to: 'y', label: 'review', gate: false, styleKey: 'review' },
+  ]);
+});
+
+test('#1009: actor/self edges and null endpoints are dropped (no box to attach to)', () => {
+  const graph = { edges: [
+    { from: null, to: 'dev', on: 'label', label: 'approved', kind: 'gate' }, // unbound gate edge
+    { from: '@github', to: 'triage', on: 'event' },
+    { from: '@timer', to: 'curator', on: 'timer' },
+    { from: 'looper', to: 'looper', on: 'loop' },
+  ] };
+  assert.deepEqual(previewEdgesFromGraph(graph), []);
+  assert.deepEqual(previewEdgesFromGraph(null), []);
+  assert.deepEqual(previewEdgesFromGraph({}), []);
+});
+
+test('#1009: computePreviewLayout uses the server edge set when provided', () => {
+  const bundle = {
+    stages: ['S1', 'S2'],
+    roles: [role('a', 'S1', { emits: ['go'] }), role('b', 'S2', {
+      triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' }],
+    })],
+  };
+  // Local derivation sees the label hand-off; the server override replaces it.
+  const local = computePreviewLayout(bundle);
+  assert.equal(local.forward.length, 1);
+  assert.equal(local.forward[0].label, 'go');
+  const server = computePreviewLayout(bundle, [
+    { from: 'a', to: 'b', label: 'ready', gate: false, styleKey: 'issue' },
+  ]);
+  assert.equal(server.forward.length, 1);
+  assert.equal(server.forward[0].label, 'ready');
+  assert.equal(server.forward[0].styleKey, 'issue');
 });

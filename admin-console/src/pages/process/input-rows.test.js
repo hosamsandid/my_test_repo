@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { partitionTriggers, isDerivedTrigger, scheduleText } from './input-rows.js';
+import { partitionTriggers, isDerivedTrigger, scheduleText, derivedChannelTrigger } from './input-rows.js';
 
 test('partitionTriggers separates manual from reconciler-derived triggers', () => {
   const triggers = [
@@ -52,4 +52,46 @@ test('scheduleText renders a plain-language sentence per type', () => {
     scheduleText({ type: 'jira-event', projectKey: 'ENG', statusFilter: 'Ready for Dev' }),
     'Wakes on status change in ENG · to “Ready for Dev”',
   );
+});
+
+// ─── derivedChannelTrigger (#958) ────────────────────────────────────────────
+// The channel row reads the claim back off the listener the backend derived,
+// rather than re-deriving the `<wake>:wip` convention in the UI.
+
+test('derivedChannelTrigger matches on (artifact, label), not on the channel from', () => {
+  const derived = [
+    { id: 'rev-on-pr-dev', channel: true, type: 'github-event',
+      events: ['pull_request.labeled'], labelFilter: 'ready-for-test',
+      claim: { remove: 'ready-for-test', add: 'ready-for-test:wip' } },
+  ];
+  // Consolidation (#826): several producers share ONE listener, so a channel
+  // from a different producer still resolves to it.
+  const t = derivedChannelTrigger(derived, { artifact: 'pr', from: 'someone-else', label: 'ready-for-test' });
+  assert.equal(t.id, 'rev-on-pr-dev');
+  assert.deepEqual(t.claim, { remove: 'ready-for-test', add: 'ready-for-test:wip' });
+});
+
+test('derivedChannelTrigger distinguishes the pr and issue event families', () => {
+  const derived = [
+    { id: 'on-pr', channel: true, events: ['pull_request.labeled'], labelFilter: 'go' },
+    { id: 'on-issue', channel: true, events: ['issues.labeled'], labelFilter: 'go' },
+  ];
+  assert.equal(derivedChannelTrigger(derived, { artifact: 'pr', label: 'go' }).id, 'on-pr');
+  assert.equal(derivedChannelTrigger(derived, { artifact: 'issue', label: 'go' }).id, 'on-issue');
+});
+
+test('derivedChannelTrigger returns null for an unlabelled channel or no match', () => {
+  const derived = [{ id: 'on-pr', channel: true, events: ['pull_request.labeled'], labelFilter: 'go' }];
+  assert.equal(derivedChannelTrigger(derived, { artifact: 'pr' }), null);         // "opened" channel
+  assert.equal(derivedChannelTrigger(derived, { artifact: 'pr', label: '' }), null);
+  assert.equal(derivedChannelTrigger(derived, { artifact: 'pr', label: 'other' }), null);
+  assert.equal(derivedChannelTrigger([], { artifact: 'pr', label: 'go' }), null);
+  assert.equal(derivedChannelTrigger(undefined, { artifact: 'pr', label: 'go' }), null);
+  assert.equal(derivedChannelTrigger(derived, null), null);
+});
+
+test('derivedChannelTrigger ignores a hand-authored trigger with the same label', () => {
+  // Only reconciler-owned (channel: true) listeners are derived from a port.
+  const triggers = [{ id: 'mine', events: ['pull_request.labeled'], labelFilter: 'go' }];
+  assert.equal(derivedChannelTrigger(triggers, { artifact: 'pr', label: 'go' }), null);
 });

@@ -1,0 +1,5 @@
+# kind dev overlay — pass-through: local images (:latest, Never), no ingress.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/app

@@ -49,6 +49,9 @@ const DEFAULT_CONVERGENCE_THRESHOLD = 2;
 // same-lesson convergence: distinct lessons about one topic share some
 // vocabulary but are not near-duplicates.
 const DEFAULT_RELATED_THRESHOLD = 0.3;
+// #918: embedding-cosine threshold for the semantic convergence layer —
+// mirrors knowledge-embeddings.DEFAULT_COSINE_THRESHOLD.
+const DEFAULT_COSINE_THRESHOLD = 0.8;
 
 // Curation / full-autonomy defaults (Phase 4). The promotion transitions the
 // gate policy covers, the two gate modes, and their conservative defaults:
@@ -98,6 +101,12 @@ const DEFAULT_EXTEND_CONFIDENCE_FLOOR = 100;
 // seed/bootstrap a domain list. `skillBudget` is the soft per-team cap (~5–15)
 // above which a new-domain proposal is pushed into the merge/override flow (§3.5).
 const DEFAULT_SKILL_BUDGET = 12;
+
+// #919 automated forgetting. `decayHorizonDays` is the per-team window after
+// which an entry with zero retrievals (#915 aggregate, all sources) gets a
+// RETIRE-SUGGESTION card — proposals only, the human confirms via the same
+// archive path as the manual Retire button (even at autonomy 3). 0 = off.
+const DEFAULT_DECAY_HORIZON_DAYS = 60;
 
 // #781 skill-aggregation Phase 3. `distillAfterAmendments` is X: how many amendments
 // a skill may accrue before the curator proposes (or, at autonomy 3 + auto gate,
@@ -199,7 +208,57 @@ function validateKnowledgeEntry(entry) {
   if (entry.summary !== undefined && typeof entry.summary !== 'string') {
     errors.push('summary must be a string when present');
   }
+  // Bitemporal validity (#916). All three are optional — an entry without them
+  // behaves exactly as before (validFrom semantically defaults to createdAt;
+  // never backfilled onto materialized lines). Expiry is a FIELD, not a status:
+  // readers derive "expired" from validTo, so STATUSES stays untouched.
+  if (entry.validFrom !== undefined && (typeof entry.validFrom !== 'string' || entry.validFrom.trim() === '')) {
+    errors.push('validFrom must be a non-empty string when present');
+  }
+  if (entry.validTo !== undefined && (typeof entry.validTo !== 'string' || entry.validTo.trim() === '')) {
+    errors.push('validTo must be a non-empty string when present');
+  }
+  if (entry.supersededBy !== undefined && (typeof entry.supersededBy !== 'string' || !/^[0-9a-f]{12}$/.test(entry.supersededBy))) {
+    errors.push('supersededBy must be a 12-char hex entry id when present');
+  }
+  // Scoped auto-load triggers (#917). Optional — an entry without them behaves
+  // exactly as today; when present, each trigger is { type: keyword|path,
+  // pattern }. Operator-authored (sidecar-overlaid, like validity), matched at
+  // invocation time by the Python-side scoped-knowledge resolver.
+  if (entry.loadTriggers !== undefined) {
+    if (!Array.isArray(entry.loadTriggers)) {
+      errors.push('loadTriggers must be an array when present');
+    } else {
+      for (const t of entry.loadTriggers) {
+        if (!t || typeof t !== 'object' || !LOAD_TRIGGER_TYPES.includes(t.type)
+          || typeof t.pattern !== 'string' || t.pattern.trim() === '') {
+          errors.push(`loadTriggers entries must be { type: ${LOAD_TRIGGER_TYPES.join('|')}, pattern: <non-empty> }`);
+          break;
+        }
+      }
+    }
+  }
   return { ok: errors.length === 0, errors };
+}
+
+// #917: the closed trigger-type set + a normalizer shared by the sidecar writer.
+// Returns a clean array (deduped, trimmed) or null when nothing valid remains.
+const LOAD_TRIGGER_TYPES = ['keyword', 'path'];
+function normalizeLoadTriggers(input) {
+  if (!Array.isArray(input)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const t of input) {
+    if (!t || typeof t !== 'object') continue;
+    const type = LOAD_TRIGGER_TYPES.includes(t.type) ? t.type : null;
+    const pattern = typeof t.pattern === 'string' ? t.pattern.trim() : '';
+    if (!type || !pattern) continue;
+    const key = `${type}:${pattern.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ type, pattern });
+  }
+  return out.length > 0 ? out : null;
 }
 
 // Build a validated KB entry with defaults filled in. Throws on invalid input
@@ -256,6 +315,20 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
   if (typeof input.summary === 'string' && input.summary.trim() !== '') {
     entry.summary = input.summary.trim();
   }
+  // Bitemporal validity (#916) — optional; absent ⇒ semantics identical to today
+  // (validFrom defaults to createdAt at READ time; nothing is backfilled).
+  if (typeof input.validFrom === 'string' && input.validFrom.trim() !== '') {
+    entry.validFrom = input.validFrom.trim();
+  }
+  if (typeof input.validTo === 'string' && input.validTo.trim() !== '') {
+    entry.validTo = input.validTo.trim();
+  }
+  if (typeof input.supersededBy === 'string' && /^[0-9a-f]{12}$/.test(input.supersededBy)) {
+    entry.supersededBy = input.supersededBy;
+  }
+  // Scoped auto-load triggers (#917) — normalized, emitted only when non-empty.
+  const triggers = normalizeLoadTriggers(input.loadTriggers);
+  if (triggers) entry.loadTriggers = triggers;
 
   const { ok, errors } = validateKnowledgeEntry(entry);
   if (!ok) {
@@ -272,7 +345,8 @@ function makeKnowledgeEntry(input = {}, { idGen = defaultIdGen, now = defaultNow
 const KEY_ORDER = [
   'v', 'id', 'kind', 'text', 'originAgent', 'teamId', 'createdAt',
   'correlationId', 'sessionId', 'sourceRefs', 'convergence', 'tags',
-  'status', 'updatedAt', 'summary',
+  'status', 'updatedAt', 'summary', 'validFrom', 'validTo', 'supersededBy',
+  'loadTriggers',
 ];
 
 function serializeEntry(entry) {
@@ -465,7 +539,24 @@ function knowledgeConvergenceConfig(env) {
   if (!Number.isFinite(rel)) rel = DEFAULT_RELATED_THRESHOLD;
   if (rel < 0) rel = 0;
   if (rel > 1) rel = 1;
-  return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel };
+  // #918: embedding-cosine link threshold (same clamp posture). Only consulted
+  // when the semantic layer has vectors — irrelevant (but stable) otherwise.
+  let cos = Number(raw.cosineThreshold);
+  if (!Number.isFinite(cos)) cos = DEFAULT_COSINE_THRESHOLD;
+  if (cos < 0) cos = 0;
+  if (cos > 1) cos = 1;
+  return { simThreshold: sim, convergenceThreshold: conv, relatedThreshold: rel, cosineThreshold: cos };
+}
+
+// Resolve the per-team decay horizon (#919), read off the (override-merged)
+// environment. 0 disables the sweep; a missing/invalid value falls back to the
+// default 60 so existing teams get forgetting-proposals without any config
+// change (AC5). Clamped to a non-negative integer.
+function resolveDecayHorizonDays(env) {
+  const raw = env && env.decayHorizonDays;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) return DEFAULT_DECAY_HORIZON_DAYS;
+  return n;
 }
 
 // Resolve the per-team, per-transition promotion gate policy (Phase 4), read off
@@ -606,7 +697,7 @@ function buildHarvestHint(autonomyLevel) {
 // onto one set of values. They now live in a per-team overrides document; this
 // list is the single authority for which keys are team-owned (used by both the
 // orchestrator writers and the admin-console read path).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
 
 // Overlay a team's knowledge-config overrides onto its environment, producing an
 // env-shaped object the existing pure readers (knowledgeAutonomyLevel,
@@ -651,6 +742,10 @@ module.exports = {
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   resolveSkillResyncMode,
+  resolveDecayHorizonDays,
+  DEFAULT_DECAY_HORIZON_DAYS,
+  LOAD_TRIGGER_TYPES,
+  normalizeLoadTriggers,
   knowledgeCurationConfig,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,

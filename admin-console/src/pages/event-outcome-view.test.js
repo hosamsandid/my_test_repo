@@ -1,0 +1,58 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  OUTCOME_LEGEND,
+  outcomeLegendKey,
+  outcomeTooltip,
+  noMatchTooltip,
+} from './event-outcome-view.js';
+
+test('OUTCOME_LEGEND covers every rendered outcome with meaning + whatToDo', () => {
+  const keys = OUTCOME_LEGEND.map(e => e.key);
+  for (const expected of ['delivered', 'digest', 'throttle', 'history-horizon', 'label-filter', 'no-match']) {
+    assert.ok(keys.includes(expected), `legend missing ${expected}`);
+  }
+  for (const entry of OUTCOME_LEGEND) {
+    assert.ok(entry.term && entry.meaning && entry.whatToDo, `legend entry ${entry.key} incomplete`);
+  }
+});
+
+test('outcomeLegendKey maps statuses and drop reasons', () => {
+  assert.equal(outcomeLegendKey({ status: 'delivered' }), 'delivered');
+  assert.equal(outcomeLegendKey({ status: 'digest' }), 'digest');
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'throttle' }), 'throttle');
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'history-horizon' }), 'history-horizon');
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'label-filter' }), 'label-filter');
+});
+
+test('outcomeLegendKey falls back to a generic drop for unknown reasons', () => {
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'meteor-strike' }), 'drop-unknown');
+  assert.equal(outcomeLegendKey({ status: 'dropped' }), 'drop-unknown');
+});
+
+test('outcomeLegendKey is null on junk input', () => {
+  assert.equal(outcomeLegendKey(null), null);
+  assert.equal(outcomeLegendKey('nope'), null);
+});
+
+test('outcomeTooltip returns meaning + whatToDo for a known outcome', () => {
+  const t = outcomeTooltip({ status: 'dropped', reason: 'throttle' });
+  assert.match(t, /rate cap/);
+  assert.match(t, /loop-protection/);
+});
+
+test('outcomeTooltip names the raw reason for an unknown drop', () => {
+  const t = outcomeTooltip({ status: 'dropped', reason: 'meteor-strike' });
+  assert.match(t, /meteor-strike/);
+});
+
+test('outcomeTooltip is empty on junk input', () => {
+  assert.equal(outcomeTooltip(null), '');
+  assert.equal(outcomeTooltip('nope'), '');
+});
+
+test('noMatchTooltip explains the no-subscriber case with an action', () => {
+  const t = noMatchTooltip();
+  assert.match(t, /No trigger subscribed/);
+  assert.match(t, /add or fix a github-event trigger/);
+});

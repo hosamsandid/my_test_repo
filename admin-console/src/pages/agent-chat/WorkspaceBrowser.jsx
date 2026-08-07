@@ -11,9 +11,28 @@ import {
 } from 'lucide-react';
 import DiffView from './DiffView';
 import { isImageData, imageSrcUrl } from './workspace-image';
+import {
+  isContextKey, isReadOnlyKey, workspaceUrl, withContextRoot, childKey,
+  mountForKey, sameWritableSource, writeApiBase, apiRelOf,
+} from './workspace-source';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
 const MODE_KEY = 'agentChat.workspaceMode';
+
+// Chip for a mounted host-folder root (#1283/#1289). The label reflects the
+// mount's ACCESS MODE — how the agent sees the folder — so a read-write mount
+// no longer masquerades as read-only. The console itself always browses the
+// folder read-only (there is no write route into the container's mount), which
+// the tooltip keeps honest.
+function contextChip(item) {
+  const rw = !!(item && item.readWrite);
+  const label = rw ? 'host · read-write' : 'host · read-only';
+  const mode = rw
+    ? 'host folder, read-write for the agent; browsed read-only here'
+    : 'host folder, read-only';
+  const title = item && item.hostPath ? `${item.hostPath} (${mode})` : `Host folder (${mode})`;
+  return { label, title };
+}
 
 /**
  * Read-only workspace browser for an agent.
@@ -75,6 +94,12 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   const [dragOverDir, setDragOverDir] = useState(null);
   const [moveError, setMoveError] = useState('');
 
+  // Read-only host context folder (#1283/#1286). When the agent has one, the
+  // tree grows a virtual `context` root next to the real workspace entries; its
+  // contents are read through the agent's container, never from this container.
+  // null = unknown/none.
+  const [contextStatus, setContextStatus] = useState(null);
+
   // Bump generation counter on agent change so a slow response from the
   // previous agent can't poison the new agent's cache.
   const reqIdRef = useRef(0);
@@ -95,8 +120,26 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setDragItem(null);
     setDragOverDir(null);
     setMoveError('');
+    setContextStatus(null);
     return () => { clearTimeout(uploadResetTimerRef.current); };
   }, [agentId]);
+
+  /* ─── Does this agent have a mounted context folder? ─────────────── */
+  useEffect(() => {
+    if (!active || !agentId) return;
+    const reqId = reqIdRef.current;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/context/status`);
+        if (!r.ok) return;
+        const data = await r.json();
+        if (cancelled || reqId !== reqIdRef.current) return;
+        setContextStatus(data && data.enabled ? data : null);
+      } catch { /* no mount surfaced — the tree just stays workspace-only */ }
+    })();
+    return () => { cancelled = true; };
+  }, [active, agentId]);
 
   const fetchDir = useCallback(async (relPath) => {
     if (!agentId) return;
@@ -107,8 +150,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
       return next;
     });
     try {
-      const url = `/api/agents/${encodeURIComponent(agentId)}/workspace/tree?path=${encodeURIComponent(relPath)}`;
-      const r = await fetch(url);
+      const r = await fetch(workspaceUrl(agentId, relPath, 'tree'));
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
         throw new Error(j?.error || `HTTP ${r.status}`);
@@ -176,13 +218,16 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadStatus('uploading');
     setUploadMessage('');
     const form = new FormData();
-    form.append('path', uploadDir);
+    // uploadDir is a tree key — a workspace path, or a `/context…` key for a
+    // read-write mount. Route + relativise accordingly (apiRelOf strips the
+    // leading `/context` for the mount browse API).
+    form.append('path', apiRelOf(uploadDir));
     for (const f of files) {
       form.append('files', f);
       form.append('relativePaths', isFolder && f.webkitRelativePath ? f.webkitRelativePath : '');
     }
     try {
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/upload`, {
+      const r = await fetch(`${writeApiBase(agentId, uploadDir)}/upload`, {
         method: 'POST',
         body: form,
       });
@@ -222,11 +267,14 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setUploadMessage('');
   }, []);
 
-  // Opens the delete-confirmation dialog for one file or directory.
+  // Opens the delete-confirmation dialog for one file or directory. A key under
+  // a read-only context mount is never deletable — the rows don't offer the
+  // action, and this refuses it even if something else calls in.
   const requestDelete = useCallback((relPath, type, name) => {
+    if (isReadOnlyKey(relPath, contextStatus)) return;
     setDeleteError('');
     setDeleteTarget({ path: relPath, type, name });
-  }, []);
+  }, [contextStatus]);
 
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget || !agentId) return;
@@ -234,7 +282,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     setDeleteError('');
     try {
       const r = await fetch(
-        `/api/agents/${encodeURIComponent(agentId)}/workspace/file?path=${encodeURIComponent(deleteTarget.path)}`,
+        `${writeApiBase(agentId, deleteTarget.path)}/file?path=${encodeURIComponent(apiRelOf(deleteTarget.path))}`,
         { method: 'DELETE' },
       );
       const j = await r.json().catch(() => ({}));
@@ -262,13 +310,17 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
   const canDropInto = useCallback((targetDir) => {
     if (!dragItem) return false;
     const src = dragItem.path;
+    // A move is a plain rename within ONE filesystem — allowed only between two
+    // workspace keys or two keys under the SAME read-write context mount. This
+    // rules out read-only mounts, cross-folder and workspace↔context drags.
+    if (!sameWritableSource(src, targetDir, contextStatus)) return false;
     if (targetDir === parentOf(src)) return false;          // already there
     if (dragItem.type === 'dir') {
       if (targetDir === src) return false;                   // into itself
       if (targetDir.startsWith(src + '/')) return false;     // into own descendant
     }
     return true;
-  }, [dragItem]);
+  }, [dragItem, contextStatus]);
 
   const performMove = useCallback(async (targetDir) => {
     const item = dragItem;
@@ -278,10 +330,12 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
     const from = item.path;
     const movedName = from.includes('/') ? from.slice(from.lastIndexOf('/') + 1) : from;
     try {
-      const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/move`, {
+      // from and targetDir share a source (canDropInto), so either both route to
+      // /workspace or both to /context with mount-relative paths.
+      const r = await fetch(`${writeApiBase(agentId, from)}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, toDir: targetDir }),
+        body: JSON.stringify({ from: apiRelOf(from), toDir: apiRelOf(targetDir) }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
@@ -562,6 +616,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
             onRequestDelete={requestDelete}
             dnd={dnd}
             agentId={agentId}
+            contextStatus={contextStatus}
           />
         </div>
       )}
@@ -648,12 +703,18 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, dnd, agentId }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, dnd, agentId, contextStatus, chip }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
   const indent = depth * 12;
   const [hovered, setHovered] = useState(false);
+  // Read-only mounts carry no write actions. A read-write mount's ROOT node is a
+  // valid upload/drop target but is never itself a drag source or deletable —
+  // that would remove the bind-mount point, not a file in it.
+  const readOnly = isReadOnlyKey(relPath, contextStatus);
+  const mount = mountForKey(relPath, contextStatus);
+  const isMountRoot = !!(mount && mount.key === relPath);
 
   const Caret = isOpen ? ChevronDown : ChevronRight;
   const FolderIcon = isOpen ? FolderOpen : Folder;
@@ -681,8 +742,8 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
               source for moving this directory. */}
           <button
             type="button"
-            draggable={!!dnd}
-            onDragStart={dnd ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'dir'); } : undefined}
+            draggable={!!dnd && !readOnly && !isMountRoot}
+            onDragStart={dnd && !readOnly && !isMountRoot ? (e) => { e.dataTransfer.effectAllowed = 'move'; dnd.onDragStart(relPath, 'dir'); } : undefined}
             onDragEnd={dnd ? dnd.onDragEnd : undefined}
             onClick={() => onToggleDir(relPath)}
             style={{
@@ -726,8 +787,24 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
                 {gitBranch}
               </span>
             )}
+            {chip && (
+              <span
+                title={chip.title || undefined}
+                style={{
+                  color: 'var(--eb-text-muted)',
+                  fontFamily: 'var(--eb-font-mono)',
+                  fontSize: '10px',
+                  flexShrink: 0,
+                  opacity: 0.8,
+                }}
+              >
+                {chip.label}
+              </span>
+            )}
           </button>
-          {/* Per-directory upload icon — visible on hover */}
+          {/* Per-directory upload icon — visible on hover. Absent under the
+              read-only context mount: there is no route that could write there. */}
+          {!readOnly && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onUploadToDir(relPath); }}
@@ -746,7 +823,10 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           >
             <Upload size={11} />
           </button>
-          {/* Per-directory delete icon — visible on hover */}
+          )}
+          {/* Per-directory delete icon — visible on hover. Hidden on the mount
+              root: you can delete files IN it, not the mount point itself. */}
+          {!readOnly && !isMountRoot && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onRequestDelete(relPath, 'dir', name); }}
@@ -767,6 +847,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           >
             <Trash2 size={11} />
           </button>
+          )}
         </div>
       )}
       {(isRoot || isOpen) && (
@@ -783,13 +864,14 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onRequestDelete={onRequestDelete}
           dnd={dnd}
           agentId={agentId}
+          contextStatus={contextStatus}
         />
       )}
     </div>
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, dnd, agentId }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, dnd, agentId, contextStatus }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -825,7 +907,12 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
       </div>
     );
   }
-  if (!cache.items || cache.items.length === 0) {
+  // The mounted host folder is grafted onto the workspace root as a virtual
+  // node — it is not part of the listing the API returned (it lives in the
+  // agent's container, not in this volume), so it is added here.
+  const items = relPath === '' ? withContextRoot(cache.items, contextStatus) : (cache.items || []);
+
+  if (items.length === 0) {
     return (
       <div style={{
         paddingLeft: depth * 12 + 16,
@@ -843,8 +930,9 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
 
   return (
     <div>
-      {cache.items.map(item => {
-        const childRel = relPath ? `${relPath}/${item.name}` : item.name;
+      {items.map(item => {
+        const childRel = childKey(relPath, item);
+        const readOnly = isReadOnlyKey(childRel, contextStatus);
         if (item.type === 'dir') {
           return (
             <DirNode
@@ -860,8 +948,11 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
               onRequestDelete={onRequestDelete}
-              dnd={dnd}
+              dnd={readOnly ? null : dnd}
               agentId={agentId}
+              chip={(item.key && isContextKey(item.key))
+                ? contextChip(item)
+                : null}
             />
           );
         }
@@ -877,13 +968,13 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
             onClick={() => onSelectFile(childRel)}
             onDownload={agentId ? () => {
               const a = document.createElement('a');
-              a.href = `/api/agents/${encodeURIComponent(agentId)}/workspace/download?path=${encodeURIComponent(childRel)}`;
+              a.href = workspaceUrl(agentId, childRel, 'download');
               a.download = item.name;
               a.click();
             } : null}
-            onDelete={onRequestDelete ? () => onRequestDelete(childRel, 'file', item.name) : null}
+            onDelete={onRequestDelete && !readOnly ? () => onRequestDelete(childRel, 'file', item.name) : null}
             relPath={childRel}
-            dnd={dnd}
+            dnd={readOnly ? null : dnd}
           />
         );
       })}
@@ -1344,7 +1435,7 @@ function FileViewer({ agentId, path: relPath, onClose }) {
     setLoading(true);
     setError(null);
     setData(null);
-    fetch(`/api/agents/${encodeURIComponent(agentId)}/workspace/file?path=${encodeURIComponent(relPath)}`)
+    fetch(workspaceUrl(agentId, relPath, 'file'))
       .then(r => r.json().then(j => ({ ok: r.ok, j })))
       .then(({ ok, j }) => {
         if (reqId !== reqIdRef.current) return;

@@ -1,0 +1,119 @@
+# E2E fakes for the KIND e2e stack (#1319) — applied ONLY by
+# `deploy/k8s/kind-up.sh --e2e`, never on the dev kind stack or GKE (this file
+# lives under manifests/e2e/ so a plain `kubectl apply -f manifests/` skips it).
+#
+# k8s counterparts of the two docker-compose.e2e.yml fixture services:
+#
+#   fake-github — dependency-free Node server implementing the minimal GitHub
+#     REST surface (Events API with ETag/304, issues/PRs/labels CRUD,
+#     label→event emission) plus a mock Anthropic /v1/messages. The
+#     orchestrator/admin-console reach it as http://fake-github via
+#     GITHUB_API_BASE (Secret key set by kind-up --e2e); the Playwright runner
+#     reaches it through a port-forward (kind-stack-up.sh, :4114). Service and
+#     Deployment names must stay `fake-github` — journey fixtures and
+#     GITHUB_API_BASE address it by DNS name.
+#
+#   git-remote — static dumb-HTTP git server for the fixture repository
+#     (`http://git-remote/e2e/fixture.git` in journey params). Content is baked
+#     into the image at build time (e2e/git-remote/Dockerfile); see the note
+#     there. No host port needed — only in-cluster clones.
+#
+# Unlike the compose overlay there is no AEE_PER_AGENT_NETWORK_SERVICES
+# equivalent: agent pods share the flat cluster network, so they reach both
+# services by DNS with no per-agent wiring.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-github
+  namespace: agent-studio
+  labels:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: fake-github
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-studio
+      app.kubernetes.io/component: fake-github
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-studio
+        app.kubernetes.io/component: fake-github
+    spec:
+      containers:
+        - name: fake-github
+          image: aee-fake-github:latest
+          imagePullPolicy: Never
+          env:
+            - name: PORT
+              value: "80"
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /_state
+              port: 80
+            initialDelaySeconds: 1
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-github
+  namespace: agent-studio
+spec:
+  selector:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: fake-github
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-remote
+  namespace: agent-studio
+  labels:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: git-remote
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-studio
+      app.kubernetes.io/component: git-remote
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-studio
+        app.kubernetes.io/component: git-remote
+    spec:
+      containers:
+        - name: git-remote
+          image: aee-git-remote:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /e2e/fixture.git/info/refs
+              port: 80
+            initialDelaySeconds: 1
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-remote
+  namespace: agent-studio
+spec:
+  selector:
+    app.kubernetes.io/name: agent-studio
+    app.kubernetes.io/component: git-remote
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

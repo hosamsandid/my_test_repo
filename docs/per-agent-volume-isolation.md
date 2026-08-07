@@ -141,8 +141,7 @@ before. Resolvers: `controlOrPoolPath()` (orchestrator, flag-gated read+write) a
   funnel through `enqueuePending()`: hook server, bp-event router, github-poller
   (injected callback), and admin handover (routed through
   `POST /internal/agents/:id/enqueue-pending` so the queue stays single-writer).
-  The agent drains via `GET /internal/agents/:id/pending-drain` (atomic
-  read-and-clear) when isolated, local read+clear otherwise.
+  The agent drains **one entry at a time** via `GET /internal/agents/:id/pending-drain-one` (head-pop, tail stays durably queued on disk) when isolated, local head-pop otherwise — so a crash mid-run loses at most the single in-flight entry, never the still-queued tail. The old `/pending-drain` (read-and-clear all) is retained for compatibility but no longer used by the agent.
 - **`triggers.json`** — canonical copy via `controlOrPoolPath`
   (`loadTriggers`/`saveTriggers`, both disable/deactivate preflights, hook-server
   read, github-poller subscriber scan all repointed). Agent pulls via

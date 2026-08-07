@@ -7,7 +7,7 @@ Covers issue #207. Run against a local stack (`make up`).
 ## Prerequisites
 
 - Stack is running (`make up`, admin console at `http://localhost:4000`).
-- A team agent with at least one `cron` trigger has been created via Team Setup.
+- A team agent with at least one `cron` trigger has been created via the Agent Team Wizard.
 - The team member is active (green dot, process running).
 
 ---
@@ -81,13 +81,13 @@ Covers issue #207. Run against a local stack (`make up`).
 ## TC-6 — Full deactivate (stub reset) with active session
 
 1. Ensure an agent is active and busy (as in TC-2 step 1).
-2. Click the **Deactivate** button on that agent's card.
-3. In the simple confirm dialog, click **Deactivate** to confirm.
-4. Expected: the orchestrator returns 409 and the **"Deactivate agent"** warning dialog appears.
-5. Click **Hard stop + Deactivate**. Expected:
+2. Click the **Reset to stub** (red power) button on that agent's card.
+3. In the simple confirm dialog, click **Reset to stub** to confirm.
+4. Expected: the orchestrator returns 409 and the **"Reset … to stub"** warning dialog appears.
+5. Click **Hard stop + reset**. Expected:
    - Process killed, workspace wiped, agent resets to stub state.
 6. Alternatively, click **Let run**. Expected:
    - Agent is disabled (enabled=false, triggers off) but **not** wiped.
-   - User can deactivate cleanly once idle.
+   - User can reset cleanly once idle.
 
 **Pass:** Deactivation with active state prompts user for drain-vs-hard-stop.

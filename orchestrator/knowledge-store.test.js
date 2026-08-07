@@ -283,23 +283,23 @@ test('knowledgeReviewEnabled defaults off and is tolerant', () => {
 // --- knowledgeConvergenceConfig ---------------------------------------------
 
 test('knowledgeConvergenceConfig defaults for legacy env', () => {
-  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
-  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3 });
+  assert.deepEqual(knowledgeConvergenceConfig(undefined), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3, cosineThreshold: 0.8 });
+  assert.deepEqual(knowledgeConvergenceConfig({}), { simThreshold: 0.6, convergenceThreshold: 2, relatedThreshold: 0.3, cosineThreshold: 0.8 });
 });
 
 test('knowledgeConvergenceConfig honours + clamps overrides', () => {
   assert.deepEqual(
-    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 } }),
-    { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4 },
+    knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4, cosineThreshold: 0.8 } }),
+    { simThreshold: 0.8, convergenceThreshold: 3, relatedThreshold: 0.4, cosineThreshold: 0.8 },
   );
   // clamp: sim out of range, threshold below 2 / non-int
   assert.deepEqual(
     knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: 5, convergenceThreshold: 1, relatedThreshold: 5 } }),
-    { simThreshold: 1, convergenceThreshold: 2, relatedThreshold: 1 },
+    { simThreshold: 1, convergenceThreshold: 2, relatedThreshold: 1, cosineThreshold: 0.8 },
   );
   assert.deepEqual(
     knowledgeConvergenceConfig({ knowledgeConvergence: { simThreshold: -1, convergenceThreshold: 2.5, relatedThreshold: -1 } }),
-    { simThreshold: 0, convergenceThreshold: 2, relatedThreshold: 0 },
+    { simThreshold: 0, convergenceThreshold: 2, relatedThreshold: 0, cosineThreshold: 0.8 },
   );
 });
 
@@ -393,7 +393,7 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
 test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
+    ['decayHorizonDays', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 
@@ -456,4 +456,71 @@ test('mergeTeamKnowledgeConfig: an override key set to a falsy value still wins 
   // explicit 0 must override the env's 2 (hasOwnProperty, not truthiness)
   const merged = mergeTeamKnowledgeConfig(env, { knowledgeAutonomy: 0 });
   assert.equal(knowledgeAutonomyLevel(merged), 0);
+});
+
+// ── #916 bitemporal validity fields ─────────────────────────────────────────
+
+test('#916 AC1: validFrom/validTo/supersededBy round-trip; absent ⇒ byte-identical legacy line', () => {
+  const withValidity = makeKnowledgeEntry({
+    ...baseInput,
+    validFrom: '2026-07-01T00:00:00Z',
+    validTo: '2026-09-01T00:00:00Z',
+    supersededBy: 'dddddddddddd',
+  }, inject);
+  const line = serializeEntry(withValidity);
+  assert.deepEqual(parseEntry(line), withValidity);
+  // validity keys serialize after summary, in KEY_ORDER position
+  const keys = Object.keys(JSON.parse(line));
+  assert.deepEqual(keys.slice(-3), ['validFrom', 'validTo', 'supersededBy']);
+  // a legacy entry (no validity input) emits no validity keys at all
+  const legacy = makeKnowledgeEntry(baseInput, inject);
+  assert.ok(!('validFrom' in legacy) && !('validTo' in legacy) && !('supersededBy' in legacy));
+  const v = validateKnowledgeEntry(legacy);
+  assert.equal(v.ok, true);
+});
+
+test('#916: validation rejects malformed validity fields, tolerates absent ones', () => {
+  const good = makeKnowledgeEntry(baseInput, inject);
+  assert.equal(validateKnowledgeEntry({ ...good, validTo: '' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, validFrom: 42 }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, supersededBy: 'not-hex' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, supersededBy: 'dddddddddddd' }).ok, true);
+  // a malformed supersededBy INPUT is dropped (never emitted), not thrown
+  const dropped = makeKnowledgeEntry({ ...baseInput, supersededBy: 'nope' }, inject);
+  assert.ok(!('supersededBy' in dropped));
+});
+
+// ── #917 auto-load triggers ─────────────────────────────────────────────────
+
+test('#917: loadTriggers round-trip, validation, normalization', () => {
+  const { normalizeLoadTriggers } = require('./knowledge-store');
+  const withTriggers = makeKnowledgeEntry({
+    ...baseInput,
+    loadTriggers: [{ type: 'keyword', pattern: ' jcl ' }, { type: 'path', pattern: 'src/*.jcl' }, { type: 'keyword', pattern: 'JCL' }],
+  }, inject);
+  // normalized: trimmed + case-insensitively deduped
+  assert.deepEqual(withTriggers.loadTriggers, [{ type: 'keyword', pattern: 'jcl' }, { type: 'path', pattern: 'src/*.jcl' }]);
+  const line = serializeEntry(withTriggers);
+  assert.deepEqual(parseEntry(line), withTriggers);
+  assert.equal(Object.keys(JSON.parse(line)).at(-1), 'loadTriggers'); // KEY_ORDER tail
+  // absent input ⇒ no field; invalid shapes rejected by the validator
+  assert.ok(!('loadTriggers' in makeKnowledgeEntry(baseInput, inject)));
+  const good = makeKnowledgeEntry(baseInput, inject);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: 'nope' }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'regex', pattern: 'x' }] }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'keyword', pattern: '' }] }).ok, false);
+  assert.equal(validateKnowledgeEntry({ ...good, loadTriggers: [{ type: 'path', pattern: '*.jcl' }] }).ok, true);
+  // normalizeLoadTriggers: nothing valid ⇒ null (the sidecar clears)
+  assert.equal(normalizeLoadTriggers([]), null);
+  assert.equal(normalizeLoadTriggers([{ type: 'bad', pattern: 'x' }]), null);
+  assert.equal(normalizeLoadTriggers('junk'), null);
+});
+
+test('#918: cosineThreshold joins the convergence config with the same clamp posture', () => {
+  const { knowledgeConvergenceConfig } = require('./knowledge-store');
+  assert.equal(knowledgeConvergenceConfig(null).cosineThreshold, 0.8); // default
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 0.9 } }).cosineThreshold, 0.9);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 7 } }).cosineThreshold, 1);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: -1 } }).cosineThreshold, 0);
+  assert.equal(knowledgeConvergenceConfig({ knowledgeConvergence: { cosineThreshold: 'x' } }).cosineThreshold, 0.8);
 });

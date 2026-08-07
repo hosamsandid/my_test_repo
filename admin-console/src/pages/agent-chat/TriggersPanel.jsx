@@ -1,17 +1,32 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Workflow, Terminal, FileCode2, GitBranch } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Workflow, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import { liveOps } from '../process/edit-adapters';
+import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
+  summarizeLoopTrigger,
+  claimBodyFor,
+  transportBodyFor,
+  isStandingSubscription,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import {
+  STOP_CONDITIONS,
+  TOKEN_BUDGET_PRESETS,
+  GAP_PRESETS,
+  deriveStopCondition,
+  deriveTokenBudget,
+  deriveGap,
+  resolveTokenBudget,
+  resolveGapSeconds,
+} from './loop-form-options.js';
 
 // preCheckScript paths reference an installed binary inside the orchestrator
 // container (e.g. `/usr/local/bin/multi-agent-bid`). The allowlisted name is
@@ -84,9 +99,12 @@ function TypeBadge({ type, dataFlow }) {
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
   const isJira   = type === 'jira-event';
+  const isLoop   = type === 'loop';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isLoop) {
+    bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = 'loop'; Icon = Repeat;
   } else if (isCron) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'cron'; Icon = Clock;
   } else if (isOnce) {
@@ -301,6 +319,8 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   let schedule;
   if (isDataFlow) {
     schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
+  } else if (trigger.type === 'loop') {
+    schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (ghSummary) {
@@ -522,29 +542,66 @@ function generateSecret() {
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Derive the loop verifier editor mode from a persisted `verify` value.
+// `{ agentId }` → 'agent', `{ command }` → 'command', `{ flow: true }` →
+// 'flow' (hand-off to the wired downstream QS chain), anything else → 'none'.
+function deriveVerifyMode(verify) {
+  if (verify && typeof verify === 'object') {
+    if (verify.agentId) return 'agent';
+    if (verify.command) return 'command';
+    if (verify.flow === true) return 'flow';
+  }
+  return 'none';
+}
+
+// `maxIterations` is required and must be a positive whole number (concept
+// §4.4). Accepts the raw string the number input emits.
+function isValidMaxIterations(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0;
+}
+
+// Pick a sensible default sibling verifier from a roster (concept §4.2/§4.6:
+// "an agent must not grade its own work"). Prefer a reviewer / quality-gate
+// role, else the first sibling. Returns an agent id or ''.
+function pickDefaultVerifier(siblings) {
+  const list = Array.isArray(siblings) ? siblings : [];
+  const preferred = list.find(a => /review|quality|qa|test/i.test(`${a.id} ${a.displayName || ''}`));
+  return (preferred || list[0])?.id || '';
+}
+
 /* ── Trigger form (create & edit) ───────────────────────────────────── */
 // Shared by the agent-chat Triggers panel and the Flow-Editor schedule edge
 // editor (EdgeDialogs) — one source of truth for editing every trigger type.
 // `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
 // `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
 // turning a schedule into a different trigger kind, re-deriving the edge).
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, presetType }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, labels = null, presetType = null }) {
   const isEdit = !!initialValues;
   // presetType locks the Type selector in create mode too (e.g. a dedicated
   // "Jira event" Add-input tile) without faking isEdit — faking edit mode would
   // also disable the ID field and drop custom-id support for that tile alone.
   const typeLocked = (isEdit || !!presetType) && !allowTypeChange;
+  // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
+  // a single type, hiding the type selector, the id field and the enabled
+  // toggle — a launched loop is a run you start, not a stored, toggleable
+  // subscription. `lockType` forces the type; `submitLabel` relabels the
+  // primary button (e.g. "Start loop").
+  const lockedMode = !!lockType;
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'jira-event']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'jira-event', 'loop']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
-  const initialType = startedAsDataFlow
-    ? 'data-flow'
-    : knownTypes.has(initialValues?.type) ? initialValues.type
-    : knownTypes.has(presetType) ? presetType
-    : 'cron';
+  const initialType = lockType
+    ? lockType
+    : startedAsDataFlow
+      ? 'data-flow'
+      : knownTypes.has(initialValues?.type) ? initialValues.type
+      : knownTypes.has(presetType) ? presetType
+      : 'cron';
+      
   const [form, setForm] = useState(() => ({
     id:          initialValues?.id          ?? '',
     type:        initialType,
@@ -565,10 +622,51 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
     enabled:     initialValues?.enabled !== false,
+    // ── loop fields (type: 'loop') ───────────────────────────────────────
+    // Kept as strings in the form (number inputs emit strings); parsed on save.
+    maxIterations: initialValues?.maxIterations != null ? String(initialValues.maxIterations) : '',
+    // #1083: the raw `until` / `maxTokens` / `minGapSeconds` inputs are replaced
+    // by plain-language selectors that derive from and resolve back to the same
+    // wire schema (loop-form-options.js). The raw untilCommand string is still
+    // held for the "Custom command" escape hatch.
+    stopCondition: deriveStopCondition(initialValues?.until, deriveVerifyMode(initialValues?.verify) !== 'none'),
+    untilCommand:  (initialValues?.until && typeof initialValues.until === 'object' && initialValues.until.command) || '',
+    tokenPreset:   deriveTokenBudget(initialValues?.maxTokens).preset,
+    tokenRaw:      deriveTokenBudget(initialValues?.maxTokens).raw,
+    gapPreset:     deriveGap(initialValues?.minGapSeconds).preset,
+    gapRaw:        deriveGap(initialValues?.minGapSeconds).raw,
+    // Advanced settings collapse (#1083 AC7): expanded automatically when the
+    // stored trigger already uses a technical option, so an edit never hides
+    // configuration the author set.
+    showAdvanced:  deriveStopCondition(initialValues?.until, deriveVerifyMode(initialValues?.verify) !== 'none') === 'custom'
+                     || initialValues?.maxTokens != null
+                     || initialValues?.minGapSeconds != null,
+    // verify: { command } | { agentId } | absent. Derive the editor mode.
+    verifyMode:    deriveVerifyMode(initialValues?.verify),
+    verifyCommand: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.command) || '',
+    verifyAgentId: (initialValues?.verify && typeof initialValues.verify === 'object' && initialValues.verify.agentId) || '',
+    // Claim (#1006): a label listener takes its wake label over as `<wake>:wip`
+    // when it fires — ON by default for new listeners (the platform convention
+    // the engine/channel paths follow); an edit reflects the stored state.
+    claimOn:       isEdit ? !!initialValues?.claim : true,
+    // Delivery transport (#1189): 'internal' delivers the wake over the
+    // orchestrator queue (label mirrored to GitHub); 'github' is poller
+    // delivery. Only meaningful for a label listener — see `showTransport`.
+    transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
+  // Delivery selector (#1189): a real label listener (label event + a filter),
+  // and NOT a human gate/brake — a person sets those on GitHub, so only the
+  // poller can see them (mirrors the edge dialog's rule). The gate check needs
+  // the label registry; when it isn't provided (e.g. Agent-Chat), fall open and
+  // show the selector — the backend still rejects an invalid transport.
+  const trimmedFilter = (form.labelFilter || '').trim();
+  const gateLikeFilter = labels
+    ? (isGateLabel(labels, trimmedFilter) || isBrakeLabel(labels, trimmedFilter))
+    : false;
+  const showTransport = showLabelFilter && !!trimmedFilter && !gateLikeFilter;
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -645,6 +743,49 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     })();
     return () => { cancelled = true; };
   }, [form.type, agentId, availableProjects, isDraftMode]);
+  // Loop verifier roster — for a team agent, the "separate verifier" default is
+  // enforced by the backend (concept §4.6), so the UI must reflect it: pre-fill
+  // a *sibling* role (never the agent itself) and let the author override. Only
+  // fetched when loop is the active type and there's a live environment (a draft
+  // has no roster — enforcement happens at materialise). `null` = not loaded.
+  const [loopRoster, setLoopRoster] = useState(isDraftMode ? { isTeamAgent: false, siblings: [] } : null);
+  useEffect(() => {
+    if (isDraftMode || form.type !== 'loop' || loopRoster !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agents = await apiCall('GET', '/api/agents');
+        const list = Array.isArray(agents) ? agents : [];
+        const self = list.find(a => a.id === agentId) || null;
+        const parentTeamId = self?.parentTeamId || null;
+        const isTeamAgent = !!parentTeamId;
+        // Siblings = same team, excluding self and the (runtime-less) team agent.
+        const siblings = isTeamAgent
+          ? list.filter(a => a.parentTeamId === parentTeamId && a.id !== agentId && a.role !== 'team')
+              .map(a => ({ id: a.id, displayName: a.displayName || a.id }))
+          : [];
+        if (!cancelled) setLoopRoster({ isTeamAgent, siblings });
+      } catch {
+        if (!cancelled) setLoopRoster({ isTeamAgent: false, siblings: [] });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, loopRoster, isDraftMode]);
+
+  // Enforced separate-verifier default: once the roster is known, a team agent
+  // with no authored verifier gets a sibling pre-filled (not left empty). Runs
+  // once per roster load; the author can still change the mode/target after.
+  const isTeamLoopAgent = !!loopRoster?.isTeamAgent;
+  useEffect(() => {
+    if (form.type !== 'loop' || !isTeamLoopAgent) return;
+    const siblings = loopRoster?.siblings || [];
+    setForm(f => {
+      if (f.verifyMode !== 'none' || f.verifyAgentId) return f; // author already chose
+      const pick = pickDefaultVerifier(siblings);
+      if (!pick) return f; // no sibling to assign — leave the notice to explain
+      return { ...f, verifyMode: 'agent', verifyAgentId: pick };
+    });
+  }, [form.type, isTeamLoopAgent, loopRoster]);
 
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
@@ -680,6 +821,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
+    if (form.type === 'loop') {
+      if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
+      if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
+      if (form.verifyMode === 'agent' && !form.verifyAgentId.trim()) { setFormError('Select the verifier agent, or choose a different verifier mode.'); return; }
+    }
     if (!form.prompt.trim()) { setFormError('Prompt is required.'); return; }
     const body = {
       type:        isDataFlow ? 'github-event' : form.type,
@@ -696,6 +842,33 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.dataFlow = true;
     } else if (form.type === 'cron')       body.cron = form.cron.trim();
     else if (form.type === 'once')         body.at   = form.at.trim();
+    else if (form.type === 'loop') {
+      body.maxIterations = Number(form.maxIterations);
+      // Stop condition (#1083): only the "Custom command" option emits `until`;
+      // the predefined options run to the iteration cap (with the verifier, if
+      // any, gating each pass).
+      if (form.stopCondition === 'custom') {
+        const untilCmd = form.untilCommand.trim();
+        if (untilCmd) body.until = { command: untilCmd };
+      }
+      // verify: command form / agent form / flow hand-off / omitted. A team
+      // agent's blank verifier is (re-)enforced to a sibling server-side
+      // (concept §4.6); the flow form is an explicit delegation to the wired
+      // downstream QS chain, honoured as authored.
+      if (form.verifyMode === 'command' && form.verifyCommand.trim()) {
+        body.verify = { command: form.verifyCommand.trim() };
+      } else if (form.verifyMode === 'agent' && form.verifyAgentId.trim()) {
+        body.verify = { agentId: form.verifyAgentId.trim() };
+      } else if (form.verifyMode === 'flow') {
+        body.verify = { flow: true };
+      }
+      // Token budget + min-gap resolve from their presets (or the advanced raw
+      // fields) back to the exact wire numbers; `undefined` omits the field.
+      const mt = resolveTokenBudget(form.tokenPreset, form.tokenRaw);
+      if (mt != null) body.maxTokens = mt;
+      const mg = resolveGapSeconds(form.gapPreset, form.gapRaw);
+      if (mg != null) body.minGapSeconds = mg;
+    }
     else if (form.type === 'http')         body.secret = form.secret.trim();
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
@@ -707,6 +880,19 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+      // Claim stamping (#1006): the raw layer follows the same convention as
+      // the engine paths — a `.labeled` label listener claims its wake label
+      // unless the author opted out. On edit, `null` clears a stored claim;
+      // on create the field is simply omitted (undefined drops from JSON).
+      body.claim = claimBodyFor({
+        labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
+      });
+      // Delivery transport (#1189) — pure decision in trigger-summary.js so it
+      // stays unit-tested; undefined omits the key for a plain non-label trigger.
+      const tp = transportBodyFor({
+        showTransport, transport: form.transport, isEdit, priorTransport: initialValues?.transport,
+      });
+      if (tp !== undefined) body.transport = tp;
     } else if (form.type === 'jira-event') {
       if (form.projectKey.trim()) body.projectKey = form.projectKey.trim(); // a draft's project lands at materialise
       body.events = ['status_changed'];
@@ -719,38 +905,44 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <FormInput
-        label={isEdit ? 'ID' : 'ID (optional)'}
-        value={form.id}
-        onChange={v => !isEdit && set('id', v)}
-        placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
-        disabled={isEdit}
-      />
+      {!lockedMode && (
+        <FormInput
+          label={isEdit ? 'ID' : 'ID (optional)'}
+          value={form.id}
+          onChange={v => !isEdit && set('id', v)}
+          placeholder={isEdit ? undefined : 'e.g. gh-pr-review (auto-generated if empty)'}
+          disabled={isEdit}
+        />
+      )}
 
-      <div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
-          Type
+      {!lockedMode && (
+        <div>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)' }}>
+            Type
+          </div>
+          <select
+            value={form.type}
+            onChange={e => changeType(e.target.value)}
+            disabled={typeLocked}
+            style={{
+              width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
+              fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
+              opacity: typeLocked ? 0.6 : 1,
+            }}
+          >
+            <option value="cron">Cron (recurring)</option>
+            <option value="once">Once (one-shot)</option>
+            {/* Loop is authored from the composer / Flows canvas, not the chat
+                Triggers form (#1020 AC4) — the chat panel passes allowLoopType=false. */}
+            {allowLoopType && <option value="loop">Loop (re-run until done)</option>}
+            <option value="http">HTTP webhook</option>
+            <option value="github-event">GitHub event</option>
+            <option value="data-flow">Data flow (agent dependency)</option>
+          </select>
         </div>
-        <select
-          value={form.type}
-          onChange={e => changeType(e.target.value)}
-          disabled={typeLocked}
-          style={{
-            width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
-            fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
-            opacity: typeLocked ? 0.6 : 1,
-          }}
-        >
-          <option value="cron">Cron (recurring)</option>
-          <option value="once">Once (one-shot)</option>
-          <option value="http">HTTP webhook</option>
-          <option value="github-event">GitHub event</option>
-          <option value="jira-event">Jira event</option>
-          <option value="data-flow">Data flow (agent dependency)</option>
-        </select>
-      </div>
+      )}
 
       {form.type === 'cron' && (
         <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
@@ -758,6 +950,209 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'loop' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {/* Plain-language banner — no CLI terms (#1083 AC5). */}
+          <div style={{
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}>
+            <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
+            A <strong>loop</strong> runs this agent again and again, feeding each run's
+            result into the next, and stops once the work is done or it reaches the
+            maximum number of tries you set. Use it for tasks that take several passes
+            to finish — like working through a checklist or refining a result.
+          </div>
+
+          {/* ── Core fields (#1083 AC1): iterations + verifier. Everything else
+              lives in Advanced settings below. ─────────────────────────────── */}
+          <FormInput
+            label="Maximum number of tries (required)"
+            type="number"
+            value={form.maxIterations}
+            onChange={v => set('maxIterations', v)}
+            placeholder="e.g. 25"
+            error={formError && !isValidMaxIterations(form.maxIterations) ? 'Required — a positive whole number.' : undefined}
+          />
+
+          {/* Verifier — command form, agent form, or none. For a team agent the
+              separation is enforced (concept §4.6): the picker is pre-filled and
+              cannot be silently emptied. Kept in the core set (out of scope for
+              #1083) as it is already relatively accessible. */}
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Who checks the work? (optional{isTeamLoopAgent ? ', enforced for team agents' : ', recommended'})
+            </div>
+            <select
+              value={form.verifyMode}
+              onChange={e => set('verifyMode', e.target.value)}
+              style={{ ...FIELD_STYLE, width: '100%' }}
+            >
+              <option value="none">No one{isTeamLoopAgent ? ' (a teammate is assigned automatically)' : ' (the agent judges itself)'}</option>
+              <option value="command">A command must pass each try</option>
+              <option value="agent">Another agent reviews each try</option>
+              <option value="flow">The flow checks the hand-off (downstream QS chain)</option>
+            </select>
+
+            {form.verifyMode === 'command' && (
+              <input
+                type="text"
+                value={form.verifyCommand}
+                onChange={e => set('verifyCommand', e.target.value)}
+                placeholder="e.g. npm run lint && npm test"
+                style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+              />
+            )}
+
+            {form.verifyMode === 'agent' && (
+              (loopRoster?.siblings?.length > 0) ? (
+                <select
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                >
+                  <option value="">— Select a verifier agent —</option>
+                  {loopRoster.siblings.map(a => (
+                    <option key={a.id} value={a.id}>{a.displayName}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={form.verifyAgentId}
+                  onChange={e => set('verifyAgentId', e.target.value)}
+                  placeholder="verifier agent id (e.g. team-x-code-reviewer)"
+                  style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+                />
+              )
+            )}
+
+            {form.verifyMode === 'flow' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                No inline check between tries: each try ends by handing its work to
+                the flow (opening a PR, setting a label), and the reviewers wired
+                downstream verify it there. Use this when the loop is the start of a
+                QS chain — otherwise the same reviewer would check the work twice.
+              </div>
+            )}
+
+            {isTeamLoopAgent && form.verifyMode !== 'flow' && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Team agents must not grade their own work — a separate teammate is
+                assigned automatically and re-applied on save even if left blank.
+              </div>
+            )}
+          </div>
+
+          {/* ── Advanced settings (#1083 AC7): collapsed by default. Holds the
+              stop condition, token budget and gap — including every raw/custom
+              escape hatch so power users lose no capability (#1083 AC6). ────── */}
+          <div>
+            <button
+              type="button"
+              onClick={() => set('showAdvanced', !form.showAdvanced)}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+                color: 'var(--eb-text-secondary)', fontFamily: 'inherit',
+              }}
+              aria-expanded={form.showAdvanced}
+            >
+              <span style={{ display: 'inline-block', transform: form.showAdvanced ? 'rotate(90deg)' : 'none', transition: 'transform var(--eb-transition-fast)' }}>▸</span>
+              Advanced settings
+            </button>
+
+            {form.showAdvanced && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
+
+                {/* Stop condition — plain "Done when…" with a custom escape hatch. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    Done when…
+                  </div>
+                  <select
+                    value={form.stopCondition}
+                    onChange={e => set('stopCondition', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {STOP_CONDITIONS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+
+                  {form.stopCondition === 'custom' && (
+                    <>
+                      <input
+                        type="text"
+                        value={form.untilCommand}
+                        onChange={e => set('untilCommand', e.target.value)}
+                        placeholder="e.g. npm test && test ! -s fix_plan.md"
+                        style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
+                      />
+                      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                        A shell command run after each try; the loop finishes as soon as it succeeds.
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Token budget — labelled presets, raw number only under Custom. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    How much work can it do? (budget)
+                  </div>
+                  <select
+                    value={form.tokenPreset}
+                    onChange={e => set('tokenPreset', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {TOKEN_BUDGET_PRESETS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  {form.tokenPreset === 'custom' && (
+                    <input
+                      type="number"
+                      value={form.tokenRaw}
+                      onChange={e => set('tokenRaw', e.target.value)}
+                      placeholder="exact token budget, e.g. 2000000"
+                      style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                    />
+                  )}
+                </div>
+
+                {/* Min gap — human-readable dropdown, raw seconds only under Custom. */}
+                <div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    Wait between tries
+                  </div>
+                  <select
+                    value={form.gapPreset}
+                    onChange={e => set('gapPreset', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    {GAP_PRESETS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  {form.gapPreset === 'custom' && (
+                    <input
+                      type="number"
+                      value={form.gapRaw}
+                      onChange={e => set('gapRaw', e.target.value)}
+                      placeholder="exact seconds, e.g. 120"
+                      style={{ ...FIELD_STYLE, width: '100%', marginTop: 'var(--eb-space-2)' }}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {isDataFlow && (
@@ -890,6 +1285,35 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               />
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Only fire when the {form.events.includes('issues.unlabeled') || form.events.includes('pull_request.unlabeled') ? 'removed' : 'added'} label matches this name exactly. Saves a Claude invocation on every other label change.
+              </div>
+              {form.labelFilter.trim() && form.events.some(e => e === 'issues.labeled' || e === 'pull_request.labeled') && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
+                  Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
+                </label>
+              )}
+              {showTransport && (
+                <div style={{ marginTop: 'var(--eb-space-3)' }}>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                    Delivery
+                  </div>
+                  <select
+                    value={form.transport}
+                    onChange={e => set('transport', e.target.value)}
+                    style={{ ...FIELD_STYLE, width: '100%' }}
+                  >
+                    <option value="github">Via GitHub events — the poller delivers the wake (~30s)</option>
+                    <option value="internal">Direct (internal) — label mirrored to GitHub</option>
+                  </select>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                    {form.transport === 'internal'
+                      ? <>The wake is delivered directly by the orchestrator (no polling latency, no lost events); the producer announces the label with <code>aee-emit</code>, and it is still stamped on GitHub as visible status.</>
+                      : <>The wake rides the GitHub Events API, delivered by the poller.</>}
+                  </div>
+                </div>
+              )}
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.
               </div>
             </div>
           )}
@@ -1057,7 +1481,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       />
 
       <FormInput
-        label="Prompt"
+        label="Wake instruction — what the consumer is told"
         value={form.prompt}
         onChange={v => set('prompt', v)}
         multiline
@@ -1065,12 +1489,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         placeholder="What should the agent do when this trigger fires?"
       />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
-        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          Enabled
-        </span>
-      </div>
+      {!lockedMode && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          <ToggleSwitch checked={form.enabled} onChange={v => set('enabled', v)} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Enabled
+          </span>
+        </div>
+      )}
 
       {formError && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
@@ -1109,7 +1535,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-          {isEdit ? 'Save' : 'Add Trigger'}
+          {submitLabel || (isEdit ? 'Save' : 'Add Trigger')}
         </button>
         <button
           onClick={onCancel}
@@ -1218,6 +1644,12 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     onChanged?.();
   }, [fetchTriggers, agentId, onChanged]);
 
+  // The chat Triggers list holds only standing subscriptions (#1020 AC4): a
+  // loop is a launched run (chat-launched or a declarative Flows self-edge),
+  // not a subscription, so it never appears here. Existing loop entries in
+  // triggers.json keep running — they are just hidden from this list.
+  const listedTriggers = triggers.filter(isStandingSubscription);
+
   /* ── Toolbar ──────────────────────────────────────────────────────── */
   const toolbar = (
     <div style={{
@@ -1229,8 +1661,8 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       <span style={{ flex: 1, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {loading
           ? 'Loading…'
-          : triggers.length > 0
-            ? `${triggers.length} trigger${triggers.length === 1 ? '' : 's'}`
+          : listedTriggers.length > 0
+            ? `${listedTriggers.length} trigger${listedTriggers.length === 1 ? '' : 's'}`
             : agentId ? 'No triggers' : ''}
       </span>
       <button
@@ -1296,13 +1728,13 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           </div>
         )}
 
-        {!loading && !error && triggers.length === 0 && (
+        {!loading && !error && listedTriggers.length === 0 && (
           <div style={{ padding: 'var(--eb-space-6)', textAlign: 'center', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
             No scheduled triggers configured for this agent.
           </div>
         )}
 
-        {triggers.map((t, i) => (
+        {listedTriggers.map((t, i) => (
           <TriggerRow
             key={t.id || i}
             trigger={t}
@@ -1320,6 +1752,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
           agentId={agentId}
           ops={ops}
           saving={saving}
+          allowLoopType={false}
           onSave={handleSave}
           onCancel={() => setAddOpen(false)}
         />
@@ -1332,6 +1765,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             ops={ops}
             initialValues={editTarget}
             saving={saving}
+            allowLoopType={false}
             onSave={handleEditSave}
             onCancel={() => setEditTarget(null)}
           />

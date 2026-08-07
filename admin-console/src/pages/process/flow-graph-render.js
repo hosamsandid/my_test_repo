@@ -14,6 +14,36 @@
 import { computeFlowLayout, assignCrossCoords } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
+import { previewStrokeColor, portRectAnchor, screenPointToCanvas } from './drag-preview-anchor';
+import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
+
+// Single source of truth for edge colours and legend names (#402, #1009).
+// Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
+// read from here so the graph and its keys can never drift apart. Each entry
+// maps a semantic edge type to its stroke colour; the same hue is reused for
+// the node's matching badge/port (Issue = teal, PR = purple) so a node's
+// "opens issues/PRs" chip and the resulting channel edge read as one colour.
+export const EDGE_STYLES = {
+  hierarchy:  { color: 'var(--eb-border-hover)', label: 'hierarchy' },
+  dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
+  artifact:   { color: '#22c55e', label: 'data flow' },
+  label:      { color: '#3b82f6', label: 'label hand-off' },
+  issue:      { color: '#14b8a6', label: 'issue' },
+  pr:         { color: '#8b5cf6', label: 'pull request' },
+  review:     { color: '#f59e0b', label: 'review' },
+  gate:       { color: '#dc2626', label: 'human approval' },
+  // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
+  event:      { color: '#f97316', label: 'GitHub event', dashed: true },
+  timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
+  webhook:    { color: '#eab308', label: 'webhook', dashed: true },
+  // A loop self-edge (#936): an agent re-arming itself. Distinct fuchsia so
+  // the stop-contract badge never reads as a schedule (⏰) or a PR edge.
+  loop:       { color: '#d946ef', label: 'loop' },
+  // Brake hand-off to a human (#981): the flow pauses pending a human
+  // decision. Rose + dashed so "waiting on a person" never reads as a
+  // gate listener (solid red) or a plain label hand-off (blue).
+  handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
+};
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
 
@@ -28,33 +58,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   const ACTOR_ICON  = { github: '🐙', external: '⚡', timer: '⏰' };
   // Placeholder actors (#411): in an editable process view every source is
   // offered as a drag source even before it has edges, so the first event /
-  // label / webhook trigger can be wired on the canvas. @human and @timer are
-  // gone: human actions are GitHub label events (folded into @github) and
-  // schedules render inside the agent card instead of as an actor.
+  // label / webhook trigger can be wired on the canvas. @timer is gone
+  // (schedules render inside the agent card instead of as an actor). @human
+  // (#981) is NOT a drag source either — it appears exactly when the graph
+  // derives a human touchpoint (gate/brake labels, artifact audience).
   const DEFAULT_ACTORS = [
     { id: '@github', kind: 'actor', actor: 'github', displayName: 'GitHub' },
     { id: '@external', kind: 'actor', actor: 'external', displayName: 'External system' },
   ];
 
-  // Single source of truth for edge colours (#402). Every drawer and the legend
-  // read from here so the graph and its key can never drift apart. Each entry
-  // maps a semantic edge type to its stroke colour; the same hue is reused for
-  // the node's matching badge/port (Issue = teal, PR = purple) so a node's
-  // "opens issues/PRs" chip and the resulting channel edge read as one colour.
-  const EDGE_STYLES = {
-    hierarchy:  { color: 'var(--eb-border-hover)', label: 'hierarchy' },
-    dependency: { color: '#ef4444', label: 'depends-on', dashed: true },
-    artifact:   { color: '#22c55e', label: 'data flow' },
-    label:      { color: '#3b82f6', label: 'label hand-off' },
-    issue:      { color: '#14b8a6', label: 'issue' },
-    pr:         { color: '#8b5cf6', label: 'pull request' },
-    review:     { color: '#f59e0b', label: 'review' },
-    gate:       { color: '#dc2626', label: 'human approval' },
-    // Actor-sourced edges (#410): raw GitHub events, schedules, webhooks.
-    event:      { color: '#f97316', label: 'GitHub event', dashed: true },
-    timer:      { color: '#0ea5e9', label: 'schedule', dashed: true },
-    webhook:    { color: '#eab308', label: 'webhook', dashed: true },
-  };
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
 
   // ─── DOM structure ──────────────────────────────────────────────────
@@ -255,6 +267,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     `<span style="display:flex;align-items:center;gap:4px;white-space:nowrap">` +
     `<span style="width:14px;height:0;display:inline-block;border-top:2px ${dashed ? 'dashed' : 'solid'} ${color};"></span>` +
     `<span style="color:var(--eb-text-secondary)">${label}</span></span>`;
+  // Node-kind swatches (#1121): a miniature of the actual card border so the
+  // canvas's distinct node shapes (solid agent card vs dashed purple human
+  // role) are named, not just its edge colours. Borders mirror the card
+  // rendering above (agent: 1px solid --eb-border-default; human: 1px dashed
+  // #7c3aed on a tinted surface).
+  const _mkNodeSwatch = ({ border, bg, icon, label }) =>
+    `<span style="display:flex;align-items:center;gap:4px;white-space:nowrap">` +
+    `<span style="width:14px;height:10px;display:inline-block;border:${border};background:${bg};border-radius:3px;box-sizing:border-box;"></span>` +
+    `<span style="color:var(--eb-text-secondary)">${icon ? icon + ' ' : ''}${label}</span></span>`;
   const _legendToggleBtn = (collapsed) =>
     `<button data-legend-toggle title="${collapsed ? 'Show legend' : 'Hide legend'}" style="`
     + 'background:none;border:none;padding:0;cursor:pointer;font-size:11px;white-space:nowrap;'
@@ -264,7 +285,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       legendEl.innerHTML = _legendToggleBtn(true);
       return;
     }
-    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
     const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
@@ -272,9 +293,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         + `cursor:pointer;font-size:11px;line-height:16px;opacity:${off ? 0.35 : 1};`
         + `color:var(--eb-text-secondary);">${ACTOR_ICON[kind]}</button>`;
     }).join('');
+    const nodeSwatches = [
+      _mkNodeSwatch({ border: '1px solid var(--eb-border-default)', bg: 'var(--eb-bg-surface)', label: 'agent' }),
+      _mkNodeSwatch({ border: '1px dashed #7c3aed', bg: 'rgba(124,58,237,0.06)', icon: '👤', label: 'human role' }),
+    ].join('');
     legendEl.innerHTML =
       _legendToggleBtn(false) +
-      `<span style="color:var(--eb-text-muted);font-size:10px;margin-left:4px">Edges:</span>` +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin-left:4px">Nodes:</span>` +
+      nodeSwatches +
+      `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Edges:</span>` +
       keys.map(k => _mkSwatch(EDGE_STYLES[k])).join('') +
       `<span style="color:var(--eb-text-muted);font-size:10px;margin:0 2px 0 6px">Sources:</span>` +
       actorToggles;
@@ -353,13 +380,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     const g = graph || {};
     const allNodes = Array.isArray(g.nodes) ? g.nodes : [];
     // Actor pseudo-nodes (#410) live in their own "outside world" column —
-    // they never join the tree/layered layout of the agent cards. @timer and
-    // legacy @human actors are dropped here: schedules render inside the card,
-    // human label events come from @github.
-    state.actors = allNodes.filter(n => n && n.kind === 'actor'
-      && n.actor !== 'timer' && n.actor !== 'human');
+    // they never join the tree/layered layout of the agent cards. @timer is
+    // dropped here (schedules render inside the card); @human is back (#981)
+    // as the explicit source/sink of gate labels, brake hand-offs, and
+    // human-audience artifact deliveries.
+    state.actors = allNodes.filter(n => n && n.kind === 'actor' && n.actor !== 'timer');
     state.actorsById = {};
     state.actors.forEach(a => { state.actorsById[a.id] = a; });
+    // #1197: a human's label consume renders as a brake decision only when the
+    // label is flagged `brake`; an unflagged label is a plain notification (they
+    // are told when it is set). Flag-based, never name-based (#928).
+    state.brakeLabels = new Set((Array.isArray(g.labels) ? g.labels : [])
+      .filter(l => l && l.brake).map(l => l.name));
     const nodes = allNodes.filter(n => !n || n.kind !== 'actor');
     // An artifact is keyed by its logical name when it has one, else its path
     // (#382) — matching the backend. The physical path becomes a display `hint`.
@@ -399,6 +431,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       outcomes: (n.outcomes && Array.isArray(n.outcomes.options) && n.outcomes.options.length) ? n.outcomes : null,
       _role: n.role,
       _isParent: n.isParent === true,
+      // Named human role (#987): a first-class, purely-declarative person node.
+      // Rendered as a distinct card (person icon, no trigger/session rows, no
+      // produce badges) and its emits/consumes drive the inspector.
+      _isHuman: n.kind === 'human' || n.role === 'human',
+      _emits: Array.isArray(n.emits) ? n.emits : [],
+      _consumes: Array.isArray(n.consumes) ? n.consumes : [],
+      _description: typeof n.description === 'string' ? n.description : '',
     }));
     state.byId = {};
     state.briefings.forEach(bp => { state.byId[bp.id] = bp; });
@@ -411,13 +450,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
-    // The trigger rows shown inside each card: schedules (⏰, no line) plus
-    // every actor-sourced trigger edge (🐙/🏷/⚡ — each with a 👁 line toggle).
+    // The trigger rows shown inside each card: schedules (⏰, no line), loop
+    // self-edges (↻, no line — #936) plus every actor-sourced trigger edge
+    // (🐙/🏷/⚡ — each with a 👁 line toggle).
     state.nodeTriggerEdges = new Map();
     (Array.isArray(g.edges) ? g.edges : []).forEach(e => {
       if (!e || !e.to) return;
       const fromActor = typeof e.from === 'string' && e.from.startsWith('@');
-      if (e.on === 'timer' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
+      if (e.on === 'timer' || e.on === 'loop' || (fromActor && ['event', 'webhook', 'label'].includes(e.on))) {
         if (!state.nodeTriggerEdges.has(e.to)) state.nodeTriggerEdges.set(e.to, []);
         state.nodeTriggerEdges.get(e.to).push(e);
       }
@@ -476,6 +516,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         if (art.direction === 'output') {
           if (!reg[path].producers.includes(bp.id)) reg[path].producers.push(bp.id);
           if (art.ac && !reg[path].acs.includes(art.ac)) reg[path].acs.push(art.ac);
+          // Audience (#981): a person consumes this output — badge + @human edge.
+          if (art.audience === 'human') reg[path].humanAudience = true;
         } else if (art.direction === 'input') {
           if (!reg[path].consumers.includes(bp.id)) reg[path].consumers.push(bp.id);
         }
@@ -630,7 +672,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // least one edge to a known node and its source kind is not toggled off in
   // the legend. (Editable placeholder actors for empty flows come with #411.)
   function actorHasEdges(a) {
-    return (state.extraEdges || []).some(e => e.from === a.id && state.byId[e.to]);
+    // Actors source edges (@github events) or receive webhooks (@external). The
+    // generic @human hub is gone (#987) — human touchpoints are named role nodes.
+    return (state.extraEdges || []).some(e =>
+      (e.from === a.id && state.byId[e.to]) || (e.to === a.id && state.byId[e.from]));
   }
   function actorsAsSources() {
     return !!(actorSources && state.editable && onConnect);
@@ -1072,15 +1117,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
       const node = document.createElement('div');
       const selected = state.selectedId === n.id;
-      node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '');
+      const isHuman = bp._isHuman === true;
+      node.className = 'bp-node' + (bp.status ? ` bp-node-status-${bp.status}` : '') + (isHuman ? ' bp-node-human' : '');
       node.dataset.id = n.id;
+      // A human role reads as a person, not an agent: a dashed accent border and
+      // a tinted surface set it apart from the solid agent cards (#987).
+      const humanBorder = selected ? '2px solid #7c3aed' : '1px dashed #7c3aed';
       node.style.cssText = `
         position:absolute;
         left:${pos.x}px;
         top:${pos.y}px;
         width:${NODE_W}px;
-        background:var(--eb-bg-surface);
-        border:${selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)'};
+        background:${isHuman ? 'rgba(124,58,237,0.06)' : 'var(--eb-bg-surface)'};
+        border:${isHuman ? humanBorder : (selected ? '2px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)')};
         border-radius:8px;
         padding:10px 12px;
         box-sizing:border-box;
@@ -1089,7 +1138,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         box-shadow:var(--eb-shadow-sm);
         cursor:pointer;
       `;
-      applyStatusBorderColor(node, bp.status);
+      if (!isHuman) applyStatusBorderColor(node, bp.status);
       node.addEventListener('mousedown', e => e.stopPropagation());
       // Select on click — but not when interacting with a button, link or the
       // inline editor inputs inside the card.
@@ -1104,28 +1153,92 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       const header = document.createElement('div');
       header.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
       header.innerHTML = `
-        <span style="flex:1;line-height:1.4;">${esc(bp.title)}</span>
+        <span style="flex:1;line-height:1.4;">${isHuman ? '👤 ' : ''}${esc(bp.title)}</span>
       `;
       node.appendChild(header);
+
+      // Human role subtitle + its emits/consumes chips (#987). A human role has
+      // no triggers, session policy, produce badges or outcome ports — its whole
+      // model is "which labels this person applies, and what lands with them".
+      if (isHuman) {
+        const sub = document.createElement('div');
+        sub.style.cssText = 'font-size:10px;color:#7c3aed;font-weight:600;letter-spacing:0.03em;text-transform:uppercase;margin-bottom:4px;';
+        sub.textContent = 'Human role';
+        node.appendChild(sub);
+        if (bp._description) {
+          const desc = document.createElement('div');
+          desc.style.cssText = 'font-size:11px;color:var(--eb-text-secondary);line-height:1.4;margin-bottom:6px;';
+          desc.textContent = bp._description;
+          node.appendChild(desc);
+        }
+        const chip = (text, title, color) =>
+          `<span title="${esc(title)}" style="font-size:9px;color:${color};background:rgba(124,58,237,0.10);border:1px solid rgba(124,58,237,0.35);border-radius:3px;padding:0 4px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(text)}</span>`;
+        const parts = [];
+        for (const e of bp._emits) parts.push(chip(`↦ ${e}`, `applies label “${e}” (a gate)`, '#6d28d9'));
+        for (const c of bp._consumes) {
+          if (c && c.label) {
+            const isBrake = state.brakeLabels && state.brakeLabels.has(c.label);
+            parts.push(isBrake
+              ? chip(`⏸ ${c.label}`, `decides on brake “${c.label}”`, '#6d28d9')
+              : chip(`⇤ ${c.label}`, `notified when “${c.label}” is set`, '#6d28d9'));
+          }
+          else if (c && (c.artifact === 'pr' || c.artifact === 'issue')) parts.push(chip(`⇤ ${c.artifact} · ${c.from}`, `reviews ${c.artifact} from ${c.from}`, '#6d28d9'));
+          else if (c && c.artifact === 'file') parts.push(chip(`⇤ ${c.name}`, `reads output ${c.name}`, '#6d28d9'));
+        }
+        if (parts.length) {
+          const chips = document.createElement('div');
+          chips.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;';
+          chips.innerHTML = parts.join('');
+          node.appendChild(chips);
+        }
+      }
 
       // Badges
       const badgeParts = [];
       if (bp.rigor)    badgeParts.push(`<span class="bp-badge bp-badge-rigor-${esc(bp.rigor)}">${esc(bp.rigor)}</span>`);
       if (bp.revision && parseInt(bp.revision) > 1)
         badgeParts.push(`<span class="bp-badge bp-badge-revision" title="Revised">Rev ${esc(String(bp.revision))}</span>`);
-      // GitHub produce badges (#380) — visible before any wiring.
-      if (bp.github && bp.github.producesPr)
-        badgeParts.push(`<span class="bp-badge bp-badge-gh-pr" title="Opens pull requests">⇅ PR</span>`);
-      if (bp.github && bp.github.producesIssue)
-        badgeParts.push(`<span class="bp-badge bp-badge-gh-issue" title="Opens issues">◉ Issue</span>`);
+      // GitHub produce badges (#380) — visible before any wiring. Draggable
+      // outcome ports again (#1005 heals the #411 amputation): dragging a badge
+      // onto another node opens the channel form pre-typed by the artifact.
+      const draggableBadges = [];
+      const badgeDraggable = state.editable && !!onConnectOutcome;
+      if (bp.github && bp.github.producesPr) {
+        draggableBadges.push({ cls: 'bp-badge bp-badge-gh-pr', text: '⇅ PR', artifact: 'pr',
+          title: badgeDraggable ? 'Opens pull requests — drag to the agent that reacts to them' : 'Opens pull requests' });
+      }
+      if (bp.github && bp.github.producesIssue) {
+        draggableBadges.push({ cls: 'bp-badge bp-badge-gh-issue', text: '◉ Issue', artifact: 'issue',
+          title: badgeDraggable ? 'Opens issues — drag to the agent that reacts to them' : 'Opens issues' });
+      }
       // Switch badge (#828): an exactlyOne outcomes port picks exactly one branch
       // per run — render the ◇ glyph so the node reads as a switch.
       if (bp.outcomes && bp.outcomes.mode === 'exactlyOne')
         badgeParts.push(`<span class="bp-badge bp-badge-outcome" title="Switch — exactly one outcome per run">◇ switch</span>`);
-      if (badgeParts.length > 0) {
+      if (badgeParts.length > 0 || draggableBadges.length > 0) {
         const badges = document.createElement('div');
         badges.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;';
-        badges.innerHTML = badgeParts.join('');
+        for (const b of draggableBadges) {
+          const el = document.createElement('span');
+          el.className = b.cls;
+          el.textContent = b.text;
+          el.title = b.title;
+          if (badgeDraggable) {
+            el.style.cursor = 'crosshair';
+            el.addEventListener('mousedown', (ev) => {
+              ev.stopPropagation();
+              ev.preventDefault();
+              startConnect(n.id, { artifact: b.artifact }, { el, kind: 'artifact' });
+            });
+          }
+          badges.appendChild(el);
+        }
+        if (badgeParts.length > 0) {
+          const rest = document.createElement('span');
+          rest.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+          rest.innerHTML = badgeParts.join('');
+          badges.appendChild(rest);
+        }
         node.appendChild(badges);
       }
 
@@ -1155,11 +1268,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
                 triggerId: e.triggerId, gate: e.gate,
                 ...(e.events ? { events: e.events } : {}),
                 ...(e.schedule ? { schedule: e.schedule } : {}),
+                ...(e.loop ? { loop: e.loop } : {}),
               });
             });
           }
           row.appendChild(lbl);
-          if (e.on !== 'timer' && e.triggerId) {
+          // ⏰ schedules and ↻ loop self-edges (#936) draw no line on the canvas,
+          // so they have no line to toggle — skip the 👁 button for them.
+          if (e.on !== 'timer' && e.on !== 'loop' && e.triggerId) {
             const hidden = state.hiddenTriggerEdges.has(`${n.id}|${e.triggerId}`);
             const eye = document.createElement('button');
             eye.textContent = '👁';
@@ -1209,7 +1325,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       if (actions.childElementCount > 0) node.appendChild(actions);
 
       // Connect-to-wire port (#362 Phase C2): drag to another node to wire a
-      // hand-off / link. Only when editable and a handler is wired.
+      // hand-off / link. Only when editable and a handler is wired. A human role
+      // carries the same port (#987): dragging FROM it onto an agent wires a
+      // human gate (the person applies a label the agent waits on); dropping an
+      // agent's port ONTO a human box wires a delivery — both handled by the
+      // human-aware CreateEdgeDialog.
       if (state.editable && onConnect) {
         const port = document.createElement('div');
         port.title = 'Drag to another node to connect them';
@@ -1217,7 +1337,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         port.addEventListener('mousedown', (ev) => {
           ev.stopPropagation();
           ev.preventDefault();
-          startConnect(n.id);
+          startConnect(n.id, null, { el: port, kind: 'handoff' });
         });
         node.appendChild(port);
       }
@@ -1240,10 +1360,18 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         bp.outcomes.options.forEach((o) => {
           const title = o.title || o.id;
           const setLabelAction = (o.actions || []).find(a => a.type === 'setLabel' && a.label);
+          // Open-end markers (#1004): a declared endpoint renders as a proper
+          // terminus glyph on the port tag instead of looking unfinished.
+          const marker = o.terminal === true ? 'terminal' : (o.external ? 'external' : null);
           const row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;gap:4px;';
           const tag = document.createElement('span');
-          tag.textContent = title;
+          tag.textContent = marker === 'terminal' ? `⏹ ${title}` : marker === 'external' ? `↗ ${title}` : title;
+          if (marker) {
+            tag.title = marker === 'terminal'
+              ? 'Terminal by design — the end product'
+              : `External consumer${o.external && o.external.note ? `: ${o.external.note}` : ' — consumed outside this flow'}`;
+          }
           tag.style.cssText = 'font-size:9px;color:#a16207;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.4);border-radius:3px;padding:0 4px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
           const dot = document.createElement('div');
           dot.title = `Outcome “${title}” — drag to the agent it routes to`;
@@ -1251,7 +1379,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           dot.addEventListener('mousedown', (ev) => {
             ev.stopPropagation();
             ev.preventDefault();
-            startConnect(n.id, { id: o.id, title, label: setLabelAction ? setLabelAction.label : '' });
+            // Pre-typed drag (#1005): the outcome's action determines the form —
+            // `artifact` set → channel dialog, else the label hand-off.
+            const opensPr = (o.actions || []).some(a => a && a.type === 'openPr');
+            const opensIssue = (o.actions || []).some(a => a && a.type === 'openIssue');
+            startConnect(n.id, {
+              id: o.id, title,
+              label: setLabelAction ? setLabelAction.label : '',
+              artifact: setLabelAction ? null : (opensPr ? 'pr' : (opensIssue ? 'issue' : null)),
+            }, { el: dot, kind: 'outcome' });
           });
           row.appendChild(tag);
           row.appendChild(dot);
@@ -1428,14 +1564,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       el.addEventListener('mousedown', e => e.stopPropagation());
       // The same ● connect handle agents carry (#411): drag onto an agent to
       // create a trigger from this source (schedule, human label, event, hook).
-      if (actorsAsSources()) {
+      // @human (#981) is display-only — its edges are authored via the label
+      // registry (gate/brake flags) and the artifact-audience checkboxes, so it
+      // gets no drag port.
+      if (actorsAsSources() && a.actor !== 'human') {
         const port = document.createElement('div');
         port.title = 'Drag to an agent: it gets a trigger from this source';
         port.style.cssText = 'position:absolute;right:-7px;top:calc(50% - 7px);width:14px;height:14px;border-radius:50%;background:var(--eb-accent-primary);border:2px solid var(--eb-bg-surface);cursor:crosshair;z-index:3;';
         port.addEventListener('mousedown', (ev) => {
           ev.stopPropagation();
           ev.preventDefault();
-          startConnect(a.id);
+          startConnect(a.id, null, { el: port, kind: 'handoff' });
         });
         el.appendChild(port);
       }
@@ -1511,6 +1650,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       reg.acs.forEach(ac => {
         meta.innerHTML += `<span style="background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b55;border-radius:3px;padding:1px 5px;font-size:10px;">${esc(ac)}</span>`;
       });
+
+      // Human audience (#981): a person consumes this artifact.
+      if (reg.humanAudience) {
+        meta.innerHTML += `<span title="A person consumes this artifact" style="background:#e11d4822;color:#e11d48;border:1px solid #e11d4855;border-radius:3px;padding:1px 5px;font-size:10px;">👤 for a person</span>`;
+      }
 
       node.appendChild(meta);
 
@@ -1689,6 +1833,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           });
           return;
         }
+        // Edges INTO an actor (#981): brake hand-offs and human-audience
+        // artifact deliveries terminate on @human. Advisory display only —
+        // no hit payload, so clicking cannot open an edit dialog aimed at a
+        // pseudo-node.
+        const actorTo = state.actorsById[e.to];
+        if (actorTo) {
+          if (state.hiddenActorKinds.has(actorTo.actor)) return;
+          if (!visibleIds.has(e.from) || !state.actorPositions[e.to]) return;
+          const isDelivery = e.on === 'github';
+          const artifactTo = e.artifact === 'issue' ? 'issue' : 'pr';
+          list.push({
+            from: e.from, to: e.to,
+            color: isDelivery ? GH_COLOR[artifactTo] : EDGE_STYLES.handoff.color,
+            width: isDelivery ? 2 : 1.5,
+            dash: isDelivery ? '' : '6 4', opacity: 1,
+            labelText: isDelivery
+              ? `${artifactTo === 'issue' ? 'Issue' : 'PR'} → 👤`
+              : `👤 ${e.label || ''}`.trim(),
+            chip: true, gate: false,
+            hit: null,
+          });
+          return;
+        }
         if (!visibleIds.has(e.from) || !visibleIds.has(e.to)) return;
         const isGithub = e.on === 'github';
         const artifact = e.artifact === 'issue' ? 'issue' : 'pr';
@@ -1696,11 +1863,16 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         // structured outcome. Title the edge with the outcome, colour it like the
         // switch badge, and tag the hit payload so a click focuses the Routing tab.
         const isOutcome = e.on === 'label' && !!e.outcome;
+        // Internal-channel delivery (#1174, extended to labelled PR/issue channels
+        // in #1194): same hue as its label/outcome/github edge family, but dotted —
+        // the wake bypasses the GitHub poller (orchestrator queue), and the dot
+        // pattern is distinct from the 6-4 dash of actor edges.
+        const isInternal = (e.on === 'label' || e.on === 'github') && e.transport === 'internal';
         list.push({
           from: e.from, to: e.to,
           color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),
           width: isGithub ? 2 : 1.5,
-          dash: '',
+          dash: isInternal ? '2 3' : '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
             : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || ''))),
@@ -1708,6 +1880,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
             artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
+            ...(isInternal ? { transport: 'internal' } : {}),
+            // Carry the `audience` tag (#1036): a github delivery to a NAMED
+            // human role (unified-graph tags it `audience:'human'`) must reach
+            // the human-aware review-gate editor via findReviewGate — dropping
+            // it here mis-routes the click to the agent→agent EditChannelDialog,
+            // whose channel ops don't touch bundle.humans (silent no-op remove).
+            ...(e.audience ? { audience: e.audience } : {}),
+            // #1197: a label delivered to a named person (handoff:'human', no
+            // listening trigger) routes to its own delivery editor, not the
+            // agent→agent hand-off editor. Carry `brake` so a brake hand-off is
+            // still distinguished from a plain-label delivery downstream.
+            ...(e.handoff ? { handoff: e.handoff } : {}),
+            ...(e.brake ? { brake: true } : {}),
             ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });
@@ -1758,7 +1943,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         if (e.opacity !== 1) path.setAttribute('opacity', String(e.opacity));
         path.setAttribute('fill', 'none');
         drawArrowHead(r.arrow.x, r.arrow.y, r.arrow.angle, e.color);
-        addEdgeHit(d, e.hit);
+        if (e.hit) addEdgeHit(d, e.hit);
         if (!e.labelText) return;
         const p = placeClearLabel(r.label.x, r.label.y, estChipWidth(e.labelText), e.chip ? 17 : 15);
         if (e.chip) drawEdgeChip(p.cx, p.cy, e.labelText, e.color, e.gate);
@@ -1866,6 +2051,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         : (e.schedule && e.schedule.at ? `once ${e.schedule.at}` : (e.label || 'schedule'));
       return { icon: '⏰', text, color: EDGE_STYLES.timer.color, title: 'Schedule' };
     }
+    if (e.on === 'loop') {
+      // Loop self-edge (#936): the stop-contract badge — budget (≤N iter / token
+      // cap), stop condition (until:) and verifier (✓) at a glance. Click opens
+      // the shared loop TriggerForm for the full contract.
+      return {
+        icon: '↻', text: summarizeLoopEdge(e.loop), color: EDGE_STYLES.loop.color,
+        title: 'Loop — re-arms until the stop contract is met',
+      };
+    }
     if (e.on === 'event') {
       return { icon: '🐙', text: (e.events || []).join(', '), color: EDGE_STYLES.event.color, title: 'GitHub trigger' };
     }
@@ -1875,11 +2069,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // Label listener sourced from GitHub (incl. human-set labels and gates).
     const gate = e.gate === 'human';
     const evs = Array.isArray(e.events) && e.events.length ? ` (${e.events.join(', ')})` : '';
+    // Claim (#958) — the full swap belongs in the tooltip; the chip carries only
+    // the compact `⇥ wip` badge (see labelChipText).
+    const claimTip = claimTooltip(e.claim);
     return {
       icon: gate ? '👤✓' : '🏷',
       text: labelChipText(e),
       color: gate ? EDGE_STYLES.gate.color : EDGE_STYLES.label.color,
-      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs,
+      title: (gate ? 'Human approval gate (GitHub label)' : 'GitHub label trigger') + evs
+        + (claimTip ? ` — ${claimTip}` : ''),
     };
   }
 
@@ -1912,7 +2110,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // the canvas shows WHICH label change (issue vs PR, added vs removed) fires.
   function labelChipText(e) {
     const tag = labelEventTag(e.events);
-    return tag ? `${e.label || ''} · ${tag}` : (e.label || '');
+    const base = tag ? `${e.label || ''} · ${tag}` : (e.label || '');
+    // Claim badge (#958): the listener takes its wake label over as `<wake>:wip`
+    // when it fires. Appended to the same chip rather than drawn as a second
+    // badge — one chip per edge keeps the routed-label placement (and
+    // estChipWidth) honest.
+    const claim = summarizeClaimEdge(e.claim);
+    return claim ? `${base} ${claim}` : base;
   }
   // The producer's title for an outcome-keyed edge (#828): resolve the outcome
   // option's title from the source node so the edge reads `◇ Accepted` rather
@@ -2015,6 +2219,25 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
               EDGE_STYLES.artifact.color, 1.5, '', true, 'horizontal');
         addEdgeHit(d, { on: 'artifact', from: bpId, direction: 'output', path });
       });
+
+      // Delivery to a person (#981): the artifact's declared audience is a
+      // human — draw artifact → @human so the hand-off is explicit (same
+      // dashed consumer-arm styling, rose like the other human hand-offs).
+      const humanPos = state.actorPositions['@human'];
+      if (reg.humanAudience && humanPos && !state.hiddenActorKinds.has('human')) {
+        const hCx = humanPos.x + ACTOR_W / 2;
+        const hCy = humanPos.y + ACTOR_H / 2;
+        const d = vertical
+          ? drawBezierEdge(
+              topAnchorX(artPos, hCx), artPos.y,
+              hCx, humanPos.y + ACTOR_H,
+              EDGE_STYLES.handoff.color, 1.5, '4 3', true, 'vertical')
+          : drawBezierEdge(
+              artPos.x, leftAnchorY(artPos, artH, hCy),
+              humanPos.x + ACTOR_W, hCy,
+              EDGE_STYLES.handoff.color, 1.5, '4 3', true, 'horizontal');
+        void d; // display-only — no edge hit, the audience is edited in the Routing tab
+      }
 
       // Input edges: artifact → BP (data-flow green, dashed to read as the
       // consumer arm), back out of the lane.
@@ -2266,17 +2489,24 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ── Connect-to-wire (#362 UI rework Phase C2) ──────────────────────────────
   let tempEdge = null;
   function toCanvas(clientX, clientY) {
-    const r = viewport.getBoundingClientRect();
-    return {
-      x: (clientX - r.left - state.pan.x) / state.zoom,
-      y: (clientY - r.top - state.pan.y) / state.zoom,
-    };
+    return screenPointToCanvas(clientX, clientY, viewport.getBoundingClientRect(), state.pan, state.zoom);
   }
-  function startConnect(fromId, outcome) {
+  // source (#1029): { el, kind } — the exact port element the drag started on and
+  // its type ('handoff' ● / 'outcome' yellow / 'artifact' GitHub badge). We capture
+  // the port's canvas-space anchor + colour so the preview line starts at, and
+  // visually matches, the grabbed port instead of the hard-coded ● centre. Absent
+  // (or without an element) → fall back to the source node/actor's ● anchor.
+  function startConnect(fromId, outcome, source) {
     state.connecting = { fromId, outcome: outcome || null };
+    const color = previewStrokeColor(source && source.kind);
+    state.connecting.color = color;
+    if (source && source.el) {
+      const r = source.el.getBoundingClientRect();
+      state.connecting.anchor = portRectAnchor(r, viewport.getBoundingClientRect(), state.pan, state.zoom);
+    }
     viewport.style.cursor = 'crosshair';
     tempEdge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    tempEdge.setAttribute('stroke', 'var(--eb-accent-primary)');
+    tempEdge.setAttribute('stroke', color);
     tempEdge.setAttribute('stroke-width', '2');
     tempEdge.setAttribute('stroke-dasharray', '5 4');
     tempEdge.setAttribute('fill', 'none');
@@ -2285,18 +2515,27 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   function updateTempEdge(clientX, clientY) {
     if (!tempEdge) return;
     const fromId = state.connecting.fromId;
-    // The drag source is an agent card or an actor node (#411).
+    // Start the preview at the exact port the drag began on when we captured it
+    // (#1029), stored in canvas coords so it stays glued to the port under
+    // pan/zoom. Fall back to the source node/actor's right-edge vertical centre
+    // (the ● port) — the drag source is an agent card or an actor node (#411).
     let x1, y1;
-    const actorPos = state.actorPositions[fromId];
-    if (actorPos) {
-      x1 = actorPos.x + ACTOR_W;
-      y1 = actorPos.y + ACTOR_H / 2;
+    const anchor = state.connecting.anchor;
+    if (anchor) {
+      x1 = anchor.x;
+      y1 = anchor.y;
     } else {
-      const pos = state.positions[fromId];
-      const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
-      if (!pos || !el) return;
-      x1 = pos.x + NODE_W;
-      y1 = pos.y + el.offsetHeight / 2;
+      const actorPos = state.actorPositions[fromId];
+      if (actorPos) {
+        x1 = actorPos.x + ACTOR_W;
+        y1 = actorPos.y + ACTOR_H / 2;
+      } else {
+        const pos = state.positions[fromId];
+        const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
+        if (!pos || !el) return;
+        x1 = pos.x + NODE_W;
+        y1 = pos.y + el.offsetHeight / 2;
+      }
     }
     const p = toCanvas(clientX, clientY);
     const cx = x1 + (p.x - x1) * 0.4;

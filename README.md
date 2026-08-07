@@ -2,7 +2,16 @@
 
 > A self-hosted platform for AI agents that **remember**, **act on their own**, and **work together as a team** — running entirely inside your own infrastructure, on the model provider you control.
 
-For a guided, visual tour of every concept below, open **[`docs/platform-story.html`](./docs/platform-story.html)** in your browser.
+### New here? Start with one of these
+
+| If you want to… | Go to | Time |
+|---|---|---|
+| **See what it is** — a guided visual tour | [`docs/platform-story.html`](./docs/platform-story.html) *(open in a browser)* | 10 min |
+| **Understand the words** — the vocabulary, incl. the four terms that mean two things | [Glossary](./docs/glossary.md) | 5 min |
+| **Run it on your laptop** | [macOS setup](./docs/guides/mac-setup.md) · [Windows setup](./docs/guides/windows-setup.md) | 45–60 min |
+| **Run it for a team** — hosting options and their limits | [Deployment & hosting](./docs/deployment.md) | 20 min |
+| **Use it** — build your first agent team, narrated | [Walkthrough ch. 1](./docs/walkthrough/01-team-setup.md) | 30 min |
+| **Find any document** | [Documentation index](./docs/README.md) | — |
 
 ---
 
@@ -141,10 +150,21 @@ make logs
 Then:
 
 6. Open **http://localhost:4000** and log in (default `admin` / `admin` — change it in `.env`).
-7. The **Setup Wizard** walks you through connecting a Model Provider, adding an SSH key and GitHub token, defining a Working Environment, and creating your first agent — or jump straight to **Team Setup** to stand up a whole process.
+7. The **Setup Wizard** walks you through connecting a Model Provider, adding an SSH key and GitHub token, defining a Working Environment, and creating your first agent — or jump straight to **Agent Team Wizard** to stand up a whole process.
 8. Open the agent in **Agent Chat**, send it a message, and watch the session log stream on the right.
 
 You now have a live, persistent AI agent running inside your own infrastructure.
+
+> **A note on names.** You will meet three names in this project:
+> **Agent Studio** is the product (what the UI says), **agent-studio** is the compose project
+> (the default container and volume name prefix, configurable via `COMPOSE_PROJECT_NAME`), and
+> `AEE_*` is the environment-variable namespace. See the
+> [Glossary](./docs/glossary.md#what-is-this-thing-called).
+
+**Step-by-step installation guides**, including every prerequisite from scratch:
+[macOS](./docs/guides/mac-setup.md) · [Windows](./docs/guides/windows-setup.md) ·
+[new-joiner onboarding](./docs/guides/onboarding.md).
+For anything beyond a laptop, read [Deployment & hosting](./docs/deployment.md).
 
 ### Windows setup notes
 
@@ -161,13 +181,34 @@ The steps above work on Windows with these additions:
 
 ---
 
+## Repository layout
+
+| Path | What lives here |
+|---|---|
+| `docs/` | All documentation. Start at **[docs/README.md](./docs/README.md)** — it indexes every page by audience |
+| `orchestrator/` | The control-plane service: agent lifecycle, container spawning, trigger scheduler, GitHub poller, internal API |
+| `admin-console/` | The web UI on `:4000` — `src/` is the React app, `api/` the Express backend it talks to |
+| `agent-image/` | The per-agent container image. `scripts/agent-entrypoint.py` is the live agent runtime |
+| `bp-explorer/` | Read-only viewer for Briefing-Pack metadata |
+| `mcp-servers/` | Reference MCP server implementations, seeded into the pool |
+| `e2e/` | Playwright end-to-end suite, journey specs, and the doc/deck/video generators |
+| `docker-compose.yml` · `Makefile` · `.env.example` | How the stack is built, started and configured |
+
 ## Documentation
 
-Start with the visual walkthrough, then dive into the reference docs as needed.
+**[→ Full documentation index](./docs/README.md)** — every page sorted by what you are trying
+to do, including which documents describe shipped behaviour and which are still proposals.
+
+The most-used pages:
 
 | Topic | Document |
 |---|---|
+| Glossary — every term, and the four ambiguous ones | [docs/glossary.md](./docs/glossary.md) |
 | Visual platform walkthrough | [docs/platform-story.html](./docs/platform-story.html) |
+| Narrated product tour (6 chapters) | [docs/walkthrough/](./docs/walkthrough/01-team-setup.md) |
+| Deployment & hosting options | [docs/deployment.md](./docs/deployment.md) |
+| **"My agent doesn't answer"** — troubleshooting | [docs/agent-chat-troubleshooting.md](./docs/agent-chat-troubleshooting.md) |
+| **Collaboration-mode FAQ** — team collaboration open points & answers | [docs/collaboration-mode-faq.md](./docs/collaboration-mode-faq.md) |
 | Agent roles & team patterns | [docs/agent-roles.md](./docs/agent-roles.md) |
 | Working Environments | [docs/working-environments.md](./docs/working-environments.md) |
 | Triggers (cron, once, webhook, GitHub/Jira event) | [docs/triggers.md](./docs/triggers.md) |
@@ -175,13 +216,14 @@ Start with the visual walkthrough, then dive into the reference docs as needed.
 | Process-template bundle format | [docs/process-template-format.md](./docs/process-template-format.md) |
 | Team-Setup wizard & Flow integration | [docs/wizard-flow-integration.md](./docs/wizard-flow-integration.md) |
 | Skills system | [docs/skills-system.md](./docs/skills-system.md) |
-| Persistent memory | [docs/persistent-memory.md](./docs/persistent-memory.md) |
 | SSH keys, GitHub tokens & Jira credentials | [docs/credentials.md](./docs/credentials.md) |
+| Knowledge & memory | [docs/knowledge-store.md](./docs/knowledge-store.md) · [docs/persistent-memory.md](./docs/persistent-memory.md) |
 | Model Providers | [docs/model-providers.md](./docs/model-providers.md) |
 | MCP servers | [docs/mcp-servers.md](./docs/mcp-servers.md) |
 | Admin Console reference | [docs/admin-console.md](./docs/admin-console.md) |
 | Teams & multi-user model | [docs/teams-data-model.md](./docs/teams-data-model.md) · [docs/multi-user-concept.md](./docs/multi-user-concept.md) |
 | GCP hosting (pilot VM): access, deploy, operations | [docs/hosting/gcp/vm-podman-runbook.md](./docs/hosting/gcp/vm-podman-runbook.md) |
+| GKE hosting: bootstrap, deploys, troubleshooting | [docs/hosting/gcp/gke-runbook.md](./docs/hosting/gcp/gke-runbook.md) |
 | Key files & project layout | [docs/key-files.md](./docs/key-files.md) |
 
 ## Third-party Models
@@ -196,3 +238,6 @@ Speech-to-text powered by [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/n
 ## Contributing
 
 Bug reports and pull requests are welcome. Please open an issue first to discuss significant changes before submitting a PR.
+
+When you add a document under `docs/`, add it to [docs/README.md](./docs/README.md) in the
+same commit — an unlinked document is an unread document.

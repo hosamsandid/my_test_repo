@@ -153,12 +153,19 @@ A Playwright project (`journeys`) beside the existing spec project. Same stack, 
 | Lane | What runs | LLM / GitHub |
 |---|---|---|
 | **PR smoke** | F0 + the fast journeys (wizard, CRUD-ish chapters) | fake-claude, fake-GitHub |
-| **Nightly full** | all `lanes: ci` journeys incl. the IBAN story | fake-claude playbooks, fake-GitHub |
+| **Nightly full** | all `lanes: ci` journeys incl. the IBAN story | fake-claude, fake-GitHub |
+| **Kind (k8s) lane** (#1319, `make e2e-kind`) | `lanes: ci` + `lanes: kind` journeys against the dedicated e2e **kind** cluster — agents spawn as k8s pods | fake-claude, in-cluster fake-GitHub |
 | **Live demo lane** (manual/weekly) | `lanes: live` journeys against a real LLM + real GitHub sandbox repo | real — produces the "real content" screenshots/video for the public deck |
 
 The live lane reuses the phase-4 "live-ish" option from the E2E concept. CI journeys
 assert platform wiring (triggers, labels, hand-offs, SSE); they intentionally do *not*
 assert agent intelligence — that is what the live lane's human-reviewed output is for.
+
+Since #1319 the runner **enforces** `lanes:`: `journeys.spec.js` selects journeys whose
+`lanes` intersect the comma-separated `E2E_LANE` env (default `ci`, so `make e2e` is
+unchanged; `make e2e-kind` passes `ci,kind`). A journey with no `lanes` runs everywhere.
+`lanes: [kind]` marks a journey whose fixture depends on the kind stack itself (e.g.
+`context-mount`, which shells into the kind node container).
 
 ### 3.2 Doc generator
 

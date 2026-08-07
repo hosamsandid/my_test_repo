@@ -13,7 +13,7 @@
 // Candidate `source` values the triage view can filter on (issue #775 §3):
 // the collector's convergence clusters, the curator's related-theme bundles
 // (#604), an agent's own nomination, and operator "combine into skill".
-export const SUGGESTION_SOURCES = ['convergence', 'related', 'agent-nominated', 'manual'];
+export const SUGGESTION_SOURCES = ['convergence', 'related', 'agent-nominated', 'manual', 'decay'];
 
 export const INBOX_CAP = 10;                 // top-N shown inline on the Suggested tab
 const RECENCY_HALFLIFE_DAYS = 14;            // evidence recency decay half-life

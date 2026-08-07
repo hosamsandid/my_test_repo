@@ -46,7 +46,7 @@ steps:
     narrative: |
       The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
 
-      Here you have three ways to start: you can use a curated template, you can compose a process from stages yourself, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+      Here you have three ways to start: you can use a curated template, you can describe the flow in plain language and let the Flow Copilot generate it, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
 
       Core SDLC gives us four agents that cover a complete build-and-review loop: the Business Analyst turns ideas into well-defined GitHub issues, the Developer implements a ready issue and opens a pull request, the Code Reviewer checks the change against every acceptance criterion, and the Reworker addresses review feedback and loops until the change is clean. The agents do the heavy lifting, but the human stays in control of the two decisions that matter — what gets built, by approving the issue, and the final merge. Below the selection you also see a small live preview of the flow and a wiring check, so you can confirm the hand-offs actually connect before moving on.
     action:
@@ -54,6 +54,8 @@ steps:
       templateName: Core SDLC
     assert:
       do: wizard.expectFlowPreview
+      edgeLabel: ready-for-implementation
+      legendEntry: human approval
     screenshot: process-step-core-sdlc
 
   - action:

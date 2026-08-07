@@ -23,6 +23,10 @@ WORKDIR /app
 COPY api/package.json ./api/
 RUN cd api && npm install --omit=dev
 COPY api/*.js ./api/
+# Flow Copilot grounding docs (#1068): the conventions addendum plus the
+# vendored copy of docs/process-template-format.md (the repo-root original is
+# outside this build context; a parity test keeps the copy byte-identical).
+COPY api/*.md ./api/
 COPY --from=build /app/dist ./dist/
 ENV NODE_ENV=production
 EXPOSE 4000

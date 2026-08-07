@@ -1,0 +1,378 @@
+{
+  "hashCases": [
+    {
+      "name": "empty",
+      "content": "",
+      "expectedHash": "e3b0c44298fc"
+    },
+    {
+      "name": "simple",
+      "content": "You are a COBOL expert.",
+      "expectedHash": "70b02ca6cd58"
+    },
+    {
+      "name": "unicode",
+      "content": "Röntgen — δ prompt 🚀",
+      "expectedHash": "7bb712c4e034"
+    }
+  ],
+  "stampCases": [
+    {
+      "name": "first-edit-seeds-baseline",
+      "existing": null,
+      "opts": {
+        "field": "systemPrompt",
+        "oldContent": "OLD",
+        "newContent": "NEW",
+        "at": "2026-07-31T10:00:00.000Z",
+        "by": "operator:alice",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "first-save-identical-noop",
+      "existing": null,
+      "opts": {
+        "field": "systemPrompt",
+        "oldContent": "SAME",
+        "newContent": "SAME",
+        "at": "2026-07-31T10:00:00.000Z",
+        "by": "operator:alice",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "d1ed0d26ea9b",
+            "content": "SAME"
+          }
+        ]
+      }
+    },
+    {
+      "name": "second-edit-bumps",
+      "existing": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      },
+      "opts": {
+        "field": "systemPrompt",
+        "newContent": "NEWER",
+        "at": "2026-07-31T11:00:00.000Z",
+        "by": "operator:bob",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 3,
+            "at": "2026-07-31T11:00:00.000Z",
+            "by": "operator:bob",
+            "action": "edited",
+            "hash": "7c5f684cac9b",
+            "content": "NEWER"
+          },
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "resave-head-noop",
+      "existing": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      },
+      "opts": {
+        "field": "systemPrompt",
+        "newContent": "NEW",
+        "at": "2026-07-31T11:00:00.000Z",
+        "by": "operator:bob",
+        "action": "edited"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "inherit-clear",
+      "existing": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      },
+      "opts": {
+        "field": "systemPrompt",
+        "newContent": "",
+        "at": "2026-07-31T11:00:00.000Z",
+        "by": "operator:bob",
+        "action": "inherited"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 3,
+            "at": "2026-07-31T11:00:00.000Z",
+            "by": "operator:bob",
+            "action": "inherited",
+            "hash": "e3b0c44298fc",
+            "content": ""
+          },
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "revert-with-note",
+      "existing": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      },
+      "opts": {
+        "field": "systemPrompt",
+        "newContent": "OLD",
+        "at": "2026-07-31T12:00:00.000Z",
+        "by": "operator:carol",
+        "action": "reverted",
+        "note": "from v2 to v1"
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 3,
+            "at": "2026-07-31T12:00:00.000Z",
+            "by": "operator:carol",
+            "action": "reverted",
+            "hash": "099d90cbee62",
+            "content": "OLD",
+            "note": "from v2 to v1"
+          },
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "operator:alice",
+            "action": "edited",
+            "hash": "a253ff09c5a8",
+            "content": "NEW"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "099d90cbee62",
+            "content": "OLD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "bound-limit-2",
+      "existing": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "u",
+            "action": "edited",
+            "hash": "df7e70e50215",
+            "content": "B"
+          },
+          {
+            "version": 1,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "unknown",
+            "action": "baseline",
+            "hash": "559aead08264",
+            "content": "A"
+          }
+        ]
+      },
+      "opts": {
+        "field": "systemPrompt",
+        "newContent": "C",
+        "at": "2026-07-31T11:00:00.000Z",
+        "by": "u",
+        "action": "edited",
+        "limit": 2
+      },
+      "expected": {
+        "v": 1,
+        "field": "systemPrompt",
+        "history": [
+          {
+            "version": 3,
+            "at": "2026-07-31T11:00:00.000Z",
+            "by": "u",
+            "action": "edited",
+            "hash": "6b23c0d5f35d",
+            "content": "C"
+          },
+          {
+            "version": 2,
+            "at": "2026-07-31T10:00:00.000Z",
+            "by": "u",
+            "action": "edited",
+            "hash": "df7e70e50215",
+            "content": "B"
+          }
+        ]
+      }
+    }
+  ]
+}

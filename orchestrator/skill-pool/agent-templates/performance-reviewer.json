@@ -5,7 +5,6 @@
   "description": "Reviews PRs for hot-path concerns — algorithmic complexity, N+1 queries, blocking I/O, allocations.",
   "icon": "gauge",
   "category": "reactive",
-  "envSuffix": "perf",
   "sessionPolicy": "per-invocation",
   "skills": [],
   "additionalContextSnippet": "Performance reviews need to be specific: name the function, the input size, the cost. Vague \"this might be slow\" comments are worse than no review.",
@@ -15,12 +14,21 @@
       "id": "perf-pr-opened",
       "type": "github-event",
       "events": [
-        "pull_request.opened",
-        "pull_request.reopened"
+        "pull_request.opened"
       ],
       "enabled": true,
       "description": "Performance review of every opened PR",
       "promptTemplate": "A pull request was opened in the repository (payload above). Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
+    },
+    {
+      "id": "perf-pr-reopened",
+      "type": "github-event",
+      "events": [
+        "pull_request.reopened"
+      ],
+      "enabled": true,
+      "description": "Performance review of every reopened PR",
+      "promptTemplate": "A pull request was reopened in the repository (payload above). Review it for performance concerns only — algorithmic complexity, N+1, blocking I/O in async paths, hot-path regressions. Post the result: write the body to a file, run `gh-as-agent stamp <file>`, then `gh pr review <number> --comment --body-file <file>`. Clean diff: a short 'Perf ack'. Concrete findings only — no vague 'this might be slow' comments."
     },
     {
       "id": "self-curation",
@@ -31,5 +39,30 @@
       "description": "Daily memory housekeeping",
       "promptTemplate": "Daily memory curation. Review `memory/log.md` and `memory/context.md` for: (1) contradictory entries → consolidate; (2) task-specific details that should be generalised or deleted; (3) duplicates → merge; (4) entries that have been stale for months and never relevant since → consider deleting. If nothing to do: `[PASS]`."
     }
-  ]
+  ],
+  "outcomes": {
+    "mode": "exactlyOne",
+    "options": [
+      {
+        "id": "perf-ack",
+        "title": "Perf ack",
+        "when": "The diff is performance-clean — a short perf ack is posted on the PR",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      },
+      {
+        "id": "perf-findings",
+        "title": "Reports performance findings",
+        "when": "The review found hot-path concerns — concrete findings are posted on the PR",
+        "actions": [
+          {
+            "type": "none"
+          }
+        ]
+      }
+    ]
+  }
 }

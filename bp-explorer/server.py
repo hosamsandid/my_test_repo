@@ -829,6 +829,35 @@ def _bare_hash(bp_id: str) -> str:
     return bp_id[3:] if bp_id.startswith("bp:") else bp_id
 
 
+def _contain_under(root: Path, candidate: Path) -> Path | None:
+    """Resolve *candidate* and return it only when it stays within *root*.
+
+    Normalizes both paths with ``os.path.realpath`` (removes ``..`` segments and
+    follows symlinks) and then verifies the candidate stays under *root* with a
+    SINGLE, DIRECT ``str.startswith`` check in the guard condition — the exact
+    barrier shape CodeQL models for py/path-injection (normalize, then
+    prefix-check the normalized value; the "contained" branch must be reachable
+    *only* when the check holds).
+
+    A prior form OR-ed ``full == root_resolved`` with the ``startswith`` test.
+    CodeQL only recognises ``str.startswith`` as a path barrier when the safe
+    (return) branch cannot be reached without ``startswith`` being true; the
+    ``== ... or ...`` disjunction left it reachable via the equality alone, so
+    the guard was not modelled and every value returned from here (and the
+    downstream ``.exists()`` / ``.read_text()`` / ``.glob()`` sinks it fed)
+    stayed flagged. The trailing ``os.sep`` keeps prefix-sibling safety
+    (``/root-evil`` is rejected); every caller passes a strict subpath of
+    *root* (``root / <rel>``), never *root* itself, so requiring the separator
+    loses no valid path. Returns the resolved absolute ``Path`` when contained,
+    otherwise ``None`` so callers can skip the path.
+    """
+    root_resolved = os.path.realpath(root)
+    full = os.path.realpath(candidate)
+    if full.startswith(root_resolved + os.sep):
+        return Path(full)
+    return None
+
+
 def _mrp_candidates(bp_id: str, slug: str) -> list[tuple[str, str]]:
     """Return (mrp_dir_rel, mrp_file_rel) candidate paths for an MRP.
 
@@ -866,13 +895,14 @@ def _find_mrp(
 
     # 1. Check named candidates on filesystem
     for dir_rel, file_rel in _mrp_candidates(bp_id, slug):
-        fpath = project_root / file_rel
-        if fpath.exists():
+        fpath = _contain_under(project_root, project_root / file_rel)
+        if fpath is not None and fpath.exists():
             return project_root / dir_rel, fpath, False
 
     # 2. Scan MRP directory for files referencing this BP (own-id naming)
-    if mrp_base.is_dir():
-        for md in mrp_base.glob("*.md"):
+    mrp_base_safe = _contain_under(project_root, mrp_base)
+    if mrp_base_safe is not None and mrp_base_safe.is_dir():
+        for md in mrp_base_safe.glob("*.md"):
             try:
                 head = md.read_text(encoding="utf-8")[:500]
                 fm, _ = parse_frontmatter(head)
@@ -925,7 +955,11 @@ def _collect_mrp_artifacts(
     """
     on_branch = branch is not None
     mrp_rel = str(mrp_path.relative_to(project_root)) if mrp_path.parts else None
-    mrp_on_fs = mrp_path.exists()
+    # Contain the MRP path/dir under project_root before any filesystem access
+    # (paths derive from user-supplied bp_id/slug via _mrp_candidates).
+    mrp_path_safe = _contain_under(project_root, mrp_path)
+    mrp_dir_safe = _contain_under(project_root, mrp_dir)
+    mrp_on_fs = mrp_path_safe is not None and mrp_path_safe.exists()
 
     if not mrp_on_fs and not on_branch:
         return []
@@ -938,8 +972,8 @@ def _collect_mrp_artifacts(
         if rel_path in bp_paths or rel_path in seen_paths:
             return
         seen_paths.add(rel_path)
-        fpath = project_root / rel_path
-        exists = fpath.exists()
+        fpath = _contain_under(project_root, project_root / rel_path)
+        exists = fpath is not None and fpath.exists()
         exists_on_branch = False
         if exists:
             size = fpath.stat().st_size
@@ -961,7 +995,7 @@ def _collect_mrp_artifacts(
     mrp_body: str = ""
     try:
         if mrp_on_fs:
-            mrp_text = mrp_path.read_text(encoding="utf-8")
+            mrp_text = mrp_path_safe.read_text(encoding="utf-8")
         elif on_branch and mrp_rel:
             mrp_text = git_show_file(project_root, branch, mrp_rel)
             if mrp_text is None:
@@ -975,8 +1009,8 @@ def _collect_mrp_artifacts(
     # Source 1: Additional files in the MRP directory
     mrp_dir_rel = str(mrp_dir.relative_to(project_root)) if mrp_dir.parts else None
     skip_names = {"mrp.md", "brief.md"}
-    if mrp_dir.is_dir():
-        for f in sorted(mrp_dir.iterdir()):
+    if mrp_dir_safe is not None and mrp_dir_safe.is_dir():
+        for f in sorted(mrp_dir_safe.iterdir()):
             if f.is_file() and f.name not in skip_names:
                 _add(str(f.relative_to(project_root)), "")
     elif on_branch and mrp_dir_rel:
@@ -1510,9 +1544,31 @@ def parse_mrp_structured(raw_text: str, bp_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def resolve_workspace(path: str) -> Path:
-    p = Path(path).resolve()
-    if not str(p).startswith("/workspace/agents/"):
+    # Normalize the untrusted path with os.path.realpath (removes ".." segments
+    # and follows symlinks), then containment-check with a SINGLE, direct
+    # str.startswith against a constant safe-root prefix — the exact shape from
+    # the py/path-injection query's own recommended remediation ("normalize the
+    # path ... then check that the normalized path starts with the root folder").
+    #
+    # This is the choke point for the `workspace` query parameter: every
+    # bp-explorer handler resolves it here, so sanitising `full` on this branch
+    # kills the taint for the whole family of downstream filesystem accesses.
+    #
+    # A prior form OR-ed `full == agents_root` with the startswith test and
+    # compared against an os.path.realpath()-computed (non-constant) root. CodeQL
+    # only models str.startswith as a path barrier guard when the safe (continue)
+    # branch is reachable *only* when the startswith holds; the `== ... or ...`
+    # disjunction made the continue branch reachable without startswith being
+    # true, so the guard was not recognised and `full` (and everything derived
+    # from it in the callers) stayed tainted. The trailing os.sep on the constant
+    # root keeps prefix-sibling safety ("/workspace/agents-evil" is rejected) — a
+    # valid workspace is always a strict subdirectory, so requiring the separator
+    # loses no real path.
+    agents_root = "/workspace/agents/"
+    full = os.path.realpath(path)
+    if not full.startswith(agents_root):
         raise HTTPException(status_code=403, detail="Access denied")
+    p = Path(full)
     briefings = p / "artifacts" / "briefings"
     if not briefings.is_dir():
         raise HTTPException(status_code=404, detail="No briefings found at this path")
@@ -1547,13 +1603,16 @@ async def lifespan(app: FastAPI):
         print(f"  Agent SDK: not configured ({exc})")
         app.state.agent_bridge = None
         app.state.agent_available = False
-        app.state.agent_unavailable_reason = str(exc)
+        # Do not surface the raw exception text to API clients (stack-trace
+        # exposure); the actionable detail is logged/printed server-side above.
+        app.state.agent_unavailable_reason = "Agent SDK prerequisites not met"
     except Exception as exc:
         logger.warning("Agent bridge init failed: %s", exc)
         print(f"  Agent SDK: unavailable ({exc})")
         app.state.agent_bridge = None
         app.state.agent_available = False
-        app.state.agent_unavailable_reason = str(exc)
+        # Static, non-sensitive reason for clients; full detail is logged above.
+        app.state.agent_unavailable_reason = "Agent SDK initialisation failed"
 
     # --- AEE Bridge startup ---------------------------------------------------
     aee_enabled_env = os.environ.get("AEE_ENABLED", "").strip().lower()
@@ -1669,10 +1728,26 @@ async def monitor_bp_completion(
 
         if status.get("exitedAt"):
             # 1. BP-Status → completed
-            transition_script = workspace / "scripts" / "bp-transition.py"
-            if transition_script.exists():
+            # Containment: normalize the fixed script path with os.path.realpath,
+            # then assert it stays under the (already contained) project root with a
+            # single direct startswith prefix check — the barrier shape CodeQL models
+            # for py/path-injection. The script is a fixed strict subpath
+            # (scripts/bp-transition.py), never the root itself, so a plain startswith
+            # (no equality branch, no boolean-stored commonpath) fully covers
+            # containment before the fs check and the subprocess invocation below.
+            # This runs on a background asyncio task with no HTTP response context, so
+            # a containment breach is a silent skip (no HTTPException 403), preserving
+            # the prior failure mode.
+            root_resolved = os.path.realpath(workspace)
+            script_real = os.path.realpath(workspace / "scripts" / "bp-transition.py")
+            # Keep the guarded, realpath-normalised STRING all the way through to
+            # the fs check and the subprocess: wrapping it in Path() before the
+            # barrier gives CodeQL a second tainted value the startswith guard
+            # does not cover (alert #580). os.path.isfile + create_subprocess_exec
+            # both take the string directly, so no Path() wrapper is needed.
+            if script_real.startswith(root_resolved + os.sep) and os.path.isfile(script_real):
                 proc = await asyncio.create_subprocess_exec(
-                    "python3", str(transition_script),
+                    "python3", script_real,
                     "--workspace", str(workspace),
                     "--bp-id", bp_id,
                     "--action", "complete",
@@ -1704,15 +1779,30 @@ async def monitor_bp_completion(
 
 @app.get("/api/workspace/tree")
 async def workspace_tree(root: str, path: str = ""):
-    base = Path(root).resolve()
-    if not str(base).startswith("/workspace/agents/"):
+    # Normalize the user-supplied paths with os.path.realpath and verify
+    # containment with a SINGLE DIRECT str.startswith check (trailing os.sep for
+    # prefix-sibling safety) — the barrier shape CodeQL models for
+    # py/path-injection: normalize, then prefix-check the normalized value in a
+    # guard whose safe branch is reachable ONLY when the check holds. The prior
+    # ``x == base or x.startswith(base + os.sep)`` disjunction was NOT recognised
+    # as a barrier — its safe branch was reachable through the equality arm
+    # without the prefix test — so the sinks stayed flagged. `root` is always an
+    # agent workspace strictly under /workspace/agents/ (the sole caller passes
+    # safeAgentPath(agentId, '')), and an empty `path` lists that root directly,
+    # so no legitimate request relies on the dropped equality arms.
+    base = os.path.realpath(root)
+    if not base.startswith("/workspace/agents" + os.sep):
         raise HTTPException(status_code=403, detail="Access denied")
-    target = (base / path).resolve()
-    if not str(target).startswith(str(base)):
-        raise HTTPException(status_code=403, detail="Path traversal denied")
-    if not target.is_dir():
+    if path:
+        target = os.path.realpath(os.path.join(base, path))
+        if not target.startswith(base + os.sep):
+            raise HTTPException(status_code=403, detail="Path traversal denied")
+        target_dir = Path(target)
+    else:
+        target_dir = Path(base)
+    if not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Directory not found")
-    dirs = [d.name for d in sorted(target.iterdir()) if d.is_dir()]
+    dirs = [d.name for d in sorted(target_dir.iterdir()) if d.is_dir()]
     return dirs
 
 
@@ -1855,9 +1945,23 @@ async def serve_loopscript_phases(workspace: str):
     """
     project_root: Path = resolve_workspace(workspace)
     loops_dir = project_root / "skills" / "engineering" / "loops"
+    # Containment: loops_dir is a fixed strict sub-path of the (already
+    # contained) project root, but re-assert it under project_root with
+    # os.path.realpath + a single DIRECT str.startswith check in the branch
+    # condition — the exact barrier CodeQL models for py/path-injection
+    # (normalize, then prefix-check the normalized value in the guard). A prior
+    # form OR-ed an `== root_resolved` equality arm onto the startswith; that
+    # was functionally safe but the disjunction is NOT recognised as a barrier
+    # by CodeQL, so the downstream sinks stayed flagged. loops_dir can never
+    # equal the root (it always carries the "skills/engineering/loops" suffix),
+    # so the equality arm was dead — dropping it leaves the bare, recognised
+    # trailing-os.sep prefix test, which also rejects prefix-siblings before
+    # any filesystem access.
+    root_resolved = os.path.realpath(project_root)
+    loops_real = os.path.realpath(loops_dir)
     result = {}
-    if loops_dir.is_dir():
-        for yf in sorted(loops_dir.glob("*.yaml")):
+    if loops_real.startswith(root_resolved + os.sep) and os.path.isdir(loops_real):
+        for yf in sorted(Path(loops_real).glob("*.yaml")):
             try:
                 data = yaml.safe_load(yf.read_text(encoding="utf-8"))
                 phases = [
@@ -1894,8 +1998,27 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
             if a.get("direction") != "output":
                 continue
             fpath = project_root / a["path"]
-            exists = fpath.exists()
-            is_dir = fpath.is_dir() if exists else False
+            # Containment: reject artifact paths that resolve outside the
+            # project root before any filesystem access. os.path.realpath
+            # normalises the path (following symlinks, stripping ``..``); the
+            # single direct ``startswith(root + os.sep)`` check in the guard is
+            # the exact py/path-injection barrier CodeQL recognises. The prior
+            # ``full_real == root_resolved or full_real.startswith(...)``
+            # disjunction was functionally safe but NOT modelled as a sanitizer
+            # (the ``or`` with the equality branch stops the guarded value from
+            # flowing through a recognised barrier), so the fs sinks below stayed
+            # flagged. Output artifacts always carry a real sub-path (never the
+            # root itself), so the equality branch is dead here and dropping it
+            # is behaviour-safe while still rejecting prefix-siblings such as
+            # ``/proj-evil`` that a bare ``startswith(root)`` would accept. The
+            # normalised path is used for every fs operation.
+            root_resolved = os.path.realpath(project_root)
+            full_real = os.path.realpath(fpath)
+            if not full_real.startswith(root_resolved + os.sep):
+                continue
+            full = Path(full_real)
+            exists = full.exists()
+            is_dir = full.is_dir() if exists else False
             if not exists and on_branch:
                 exists_on_branch = (
                     git_show_file(project_root, branch, a["path"]) is not None
@@ -1903,7 +2026,7 @@ async def serve_bp_artifacts(bp_id: str, workspace: str):
             else:
                 exists_on_branch = False
             if exists:
-                size = fpath.stat().st_size if not is_dir else 0
+                size = full.stat().st_size if not is_dir else 0
             elif exists_on_branch:
                 size = git_file_size(project_root, branch, a["path"])
             else:
@@ -2004,7 +2127,18 @@ async def transition_bp(bp_id: str, body: BpTransitionRequest, workspace: str):
 
     loop = asyncio.get_running_loop()
     project_root = resolve_workspace(workspace)
-    script = project_root / "scripts" / "bp-transition.py"
+    # Containment: normalize the fixed script path with os.path.realpath, then
+    # assert it stays under the (already contained) project root with a single
+    # direct startswith prefix check — the barrier shape CodeQL models for
+    # py/path-injection. The script is a fixed strict subpath
+    # (scripts/bp-transition.py), never the root itself, so a plain startswith
+    # (no equality branch, no boolean-stored commonpath) fully covers containment
+    # before the fs check and the subprocess invocation below.
+    root_resolved = os.path.realpath(project_root)
+    script_real = os.path.realpath(project_root / "scripts" / "bp-transition.py")
+    if not script_real.startswith(root_resolved + os.sep):
+        raise HTTPException(status_code=403, detail="Path outside project root")
+    script = Path(script_real)
     if not script.exists():
         raise HTTPException(status_code=500, detail="bp-transition.py not found")
 
@@ -2419,9 +2553,24 @@ async def serve_preview(
     elif filename.lower() not in allowed_names:
         raise HTTPException(status_code=403, detail=f"Preview not allowed for {filename}")
 
-    full = (project_root / path).resolve()
-    if not str(full).startswith(str(project_root.resolve())):
+    # Containment: normalize both the (already contained) project root and the
+    # user-supplied path with os.path.realpath and verify the target stays under
+    # the root with a SINGLE DIRECT str.startswith check in the guard condition
+    # — the exact barrier CodeQL models for py/path-injection (normalize, then
+    # prefix-check the normalized value in the branch). The prior form used a
+    # disjunction `full_real == root_resolved or full_real.startswith(...)`; the
+    # `== root or …` arm makes the safe branch reachable without startswith, so
+    # CodeQL did NOT recognise it as a barrier and every downstream sink stayed
+    # flagged. The preview target is always a FILE strictly under the root (the
+    # `if not path: raise 400` guard above rules out the empty/root case), so
+    # the equality arm was dead and dropping it is behaviour-preserving. The
+    # trailing-os.sep also rejects prefix-siblings such as "/root-evil" that a
+    # bare startswith(root) accepts.
+    root_resolved = os.path.realpath(project_root)
+    full_real = os.path.realpath(project_root / path)
+    if not full_real.startswith(root_resolved + os.sep):
         raise HTTPException(status_code=403, detail="Path outside project root")
+    full = Path(full_real)
 
     # --- Try local filesystem first ---
     if full.exists() and full.is_file():
@@ -2573,12 +2722,14 @@ async def set_agent_config(body: AgentConfigRequest, request: Request):
     except Exception as exc:
         request.app.state.agent_bridge = None
         request.app.state.agent_available = False
-        request.app.state.agent_unavailable_reason = str(exc)
+        # Static, non-sensitive reason for clients; full detail is logged below.
+        reason = "Agent bridge reinitialisation failed"
+        request.app.state.agent_unavailable_reason = reason
         logger.warning("Agent bridge reinit failed after config update: %s", exc)
         return _json_response({
             "ok": False,
             "agent_available": False,
-            "agent_unavailable_reason": str(exc),
+            "agent_unavailable_reason": reason,
             "updated_keys": list(updates.keys()),
         })
 
@@ -2646,9 +2797,14 @@ async def invoke_agent(body: InvokeRequest, request: Request):
                 try:
                     async for event in event_iter:
                         await queue.put(event.to_sse())
-                except Exception as exc:
+                except Exception:
+                    logger.exception("SSE consumer error")
                     error_payload = json.dumps(
-                        {"type": "error", "error": "unexpected", "message": str(exc)},
+                        {
+                            "type": "error",
+                            "error": "unexpected",
+                            "message": "Internal error while streaming events.",
+                        },
                         ensure_ascii=False,
                     )
                     await queue.put(f"data: {error_payload}\n\n")
@@ -2674,10 +2830,14 @@ async def invoke_agent(body: InvokeRequest, request: Request):
             # Ensure the consumer task is cleaned up
             await consumer_task
 
-        except Exception as exc:
+        except Exception:
             logger.exception("SSE generator error")
             error_payload = json.dumps(
-                {"type": "error", "error": "stream_error", "message": str(exc)},
+                {
+                    "type": "error",
+                    "error": "stream_error",
+                    "message": "Internal error while streaming events.",
+                },
                 ensure_ascii=False,
             )
             yield f"data: {error_payload}\n\n"
@@ -2770,9 +2930,14 @@ async def stream_agent_events(
             try:
                 async for event in event_iter:
                     await queue.put(event.to_sse())
-            except Exception as exc:
+            except Exception:
+                logger.exception("SSE consumer error")
                 error_payload = json.dumps(
-                    {"type": "error", "error": "stream_error", "message": str(exc)},
+                    {
+                        "type": "error",
+                        "error": "stream_error",
+                        "message": "Internal error while streaming events.",
+                    },
                     ensure_ascii=False,
                 )
                 await queue.put(f"data: {error_payload}\n\n")

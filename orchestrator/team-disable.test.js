@@ -1,0 +1,172 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  isTeamDisabled,
+  newMemberFieldsForTeam,
+  planTeamDisable,
+  planTeamEnable,
+  isMemberLockedByTeam,
+  deriveBusyState,
+  httpStatusForAgentActionError,
+  httpStatusForTeamActionError,
+} = require('./team-disable');
+
+test('isTeamDisabled: false/undefined enabled or missing config means enabled', () => {
+  assert.equal(isTeamDisabled(null), false);
+  assert.equal(isTeamDisabled(undefined), false);
+  assert.equal(isTeamDisabled({}), false);
+  assert.equal(isTeamDisabled({ enabled: true }), false);
+});
+
+test('isTeamDisabled: enabled === false means disabled', () => {
+  assert.equal(isTeamDisabled({ enabled: false }), true);
+});
+
+test('newMemberFieldsForTeam: enabled (or missing/empty) team → member comes up enabled, untagged', () => {
+  assert.deepEqual(newMemberFieldsForTeam({ enabled: true }), { enabled: true });
+  assert.deepEqual(newMemberFieldsForTeam({}), { enabled: true });
+  assert.deepEqual(newMemberFieldsForTeam(null), { enabled: true });
+});
+
+test('newMemberFieldsForTeam: disabled team → member comes up disabled and tagged disabledByTeam', () => {
+  assert.deepEqual(newMemberFieldsForTeam({ enabled: false }), { enabled: false, disabledByTeam: true });
+});
+
+test('planTeamDisable: enabled members go to toDisable, already-off members are skipped untouched', () => {
+  const members = [
+    { id: 'a', enabled: true },
+    { id: 'b', enabled: false },          // independently disabled before team action
+    { id: 'c' },                           // enabled defaults to true when absent
+    { id: 'd', enabled: false, disabledByTeam: true }, // was already cascade-disabled
+  ];
+  const { toDisable, skip } = planTeamDisable(members);
+  assert.deepEqual(toDisable.sort(), ['a', 'c']);
+  assert.deepEqual(skip.sort(), ['b', 'd']);
+});
+
+test('planTeamDisable: ignores null/undefined entries defensively', () => {
+  const { toDisable, skip } = planTeamDisable([null, { id: 'a', enabled: true }, undefined]);
+  assert.deepEqual(toDisable, ['a']);
+  assert.deepEqual(skip, []);
+});
+
+test('planTeamEnable: only disabledByTeam members come back, everyone else is skipped', () => {
+  const members = [
+    { id: 'a', enabled: false, disabledByTeam: true },  // cascade-disabled → re-enable
+    { id: 'b', enabled: false },                          // independently disabled → stays off
+    { id: 'c', enabled: true },                           // already on (shouldn't happen, but stays on)
+    { id: 'd', enabled: false, disabledByTeam: false },  // explicit false is not true → stays off
+  ];
+  const { toEnable, skip } = planTeamEnable(members);
+  assert.deepEqual(toEnable, ['a']);
+  assert.deepEqual(skip.sort(), ['b', 'c', 'd']);
+});
+
+test('planTeamEnable: ignores null/undefined entries defensively', () => {
+  const { toEnable, skip } = planTeamEnable([null, { id: 'a', enabled: false, disabledByTeam: true }]);
+  assert.deepEqual(toEnable, ['a']);
+  assert.deepEqual(skip, []);
+});
+
+test('isMemberLockedByTeam: non team-member is never locked', () => {
+  assert.equal(isMemberLockedByTeam({ role: 'agent', parentTeamId: 't1' }, { enabled: false }), false);
+  assert.equal(isMemberLockedByTeam({ role: 'team', parentTeamId: 't1' }, { enabled: false }), false);
+});
+
+test('isMemberLockedByTeam: team-member without a parentTeamId is never locked', () => {
+  assert.equal(isMemberLockedByTeam({ role: 'team-member' }, { enabled: false }), false);
+});
+
+test('isMemberLockedByTeam: team-member whose parent team is enabled is not locked', () => {
+  assert.equal(
+    isMemberLockedByTeam({ role: 'team-member', parentTeamId: 't1' }, { enabled: true }),
+    false,
+  );
+  assert.equal(
+    isMemberLockedByTeam({ role: 'team-member', parentTeamId: 't1' }, {}),
+    false,
+  );
+});
+
+test('isMemberLockedByTeam: team-member whose parent team is disabled is locked', () => {
+  assert.equal(
+    isMemberLockedByTeam({ role: 'team-member', parentTeamId: 't1' }, { enabled: false }),
+    true,
+  );
+});
+
+test('isMemberLockedByTeam: null/undefined memberCfg is never locked', () => {
+  assert.equal(isMemberLockedByTeam(null, { enabled: false }), false);
+  assert.equal(isMemberLockedByTeam(undefined, { enabled: false }), false);
+});
+
+test('deriveBusyState: state busy maps to busy true', () => {
+  const { busy } = deriveBusyState({ state: 'busy' }, []);
+  assert.equal(busy, true);
+});
+
+test('deriveBusyState: any other state or missing status maps to busy false', () => {
+  assert.equal(deriveBusyState({ state: 'idle' }, []).busy, false);
+  assert.equal(deriveBusyState({}, []).busy, false);
+  assert.equal(deriveBusyState(null, []).busy, false);
+  assert.equal(deriveBusyState(undefined, []).busy, false);
+});
+
+test('deriveBusyState: triggers are filtered and mapped to id/type/description', () => {
+  const triggers = [
+    { id: 't1', type: 'cron', description: 'nightly build' },
+    { id: 't2', type: 'once', enabled: false },              // dropped: disabled
+    { type: 'http', description: 'no id' },                   // dropped: no id
+    { id: 't3', type: 'github-event' },                        // no description -> null
+  ];
+  const { activeTriggers } = deriveBusyState({ state: 'idle' }, triggers);
+  assert.deepEqual(activeTriggers, [
+    { id: 't1', type: 'cron', description: 'nightly build' },
+    { id: 't3', type: 'github-event', description: null },
+  ]);
+});
+
+test('deriveBusyState: null status and null triggers (missing files) yield idle/no-triggers, no throw', () => {
+  assert.deepEqual(deriveBusyState(null, null), { busy: false, activeTriggers: [] });
+});
+
+test('httpStatusForAgentActionError: team-disabled code maps to 409', () => {
+  const err = new Error("Team 'x' is disabled — enable the team first");
+  err.code = 'team-disabled';
+  assert.equal(httpStatusForAgentActionError(err), 409);
+});
+
+test('httpStatusForAgentActionError: "not found" message maps to 404', () => {
+  assert.equal(httpStatusForAgentActionError(new Error('Agent not found')), 404);
+});
+
+test('httpStatusForAgentActionError: any other error maps to 500', () => {
+  assert.equal(httpStatusForAgentActionError(new Error('boom')), 500);
+});
+
+test('httpStatusForTeamActionError: "not found" message maps to 404', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('Team not found')), 404);
+});
+
+test('httpStatusForTeamActionError: "not a team" message maps to 400', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('agent x is not a team')), 400);
+});
+
+test('httpStatusForTeamActionError: "mode must be" message maps to 400 only when hasMode is true', () => {
+  const err = new Error('mode must be "drain" or "abort"');
+  assert.equal(httpStatusForTeamActionError(err, { hasMode: true }), 400);
+  assert.equal(httpStatusForTeamActionError(err), 500);
+  assert.equal(httpStatusForTeamActionError(err, { hasMode: false }), 500);
+});
+
+test('httpStatusForTeamActionError: any other message maps to 500', () => {
+  assert.equal(httpStatusForTeamActionError(new Error('boom'), { hasMode: true }), 500);
+});
+
+test('httpStatusForTeamActionError: falsy/undefined err maps to 500 without throwing', () => {
+  assert.equal(httpStatusForTeamActionError(undefined), 500);
+  assert.equal(httpStatusForTeamActionError(null, { hasMode: true }), 500);
+});

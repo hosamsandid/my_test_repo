@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
@@ -16,6 +16,7 @@ import KnowledgeLearningSections, {
   AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
 } from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
+import { assistFetch } from '../context/assist-transport.js';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 import { summarizeActivation } from './knowledge-activation-view';
 import { rolloutStatus } from './skill-rollout-view';
@@ -28,6 +29,8 @@ import {
   isResumable, mergeForDomain, planDomainRows, planFoldTotals,
   consolidationStartGate,
 } from './consolidation-view';
+import { hasFrontmatterMeta, syncFrontmatterName, suggestFreeName } from './promotion-frontmatter';
+import { lastUsedLabel, compareLastUsed } from './knowledge-retrieval-view';
 
 /*
  * Knowledge Flow — team-scoped (#560).
@@ -353,6 +356,38 @@ export default function KnowledgeFlow() {
       .catch(() => {});
   }, [teams, loadTeamData]);
 
+  // #916: set/clear an entry's validity window ("this stops being true on X" —
+  // distinct from Retire). Reload posture mirrors archiveItem.
+  const setItemValidity = useCallback((id, teamId, validTo) => {
+    return fetch(`/api/knowledge/item/${encodeURIComponent(id)}/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, validTo }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => {
+        setSelected(null); setDetail(null);
+        const t = (teams || []).find(x => x.id === teamId);
+        return loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+      })
+      .catch(() => {});
+  }, [teams, loadTeamData]);
+
+  // #917: persist an entry's auto-load triggers; reload posture mirrors
+  // setItemValidity, but keeps the detail rail open (re-fetches the item).
+  const setItemTriggers = useCallback((id, teamId, loadTriggers) => {
+    return fetch(`/api/knowledge/item/${encodeURIComponent(id)}/triggers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, loadTriggers }),
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(() => {
+        const t = (teams || []).find(x => x.id === teamId);
+        loadTeamData(teamId, t ? t.members : [], { withPrivate: false });
+        return openItem(id, teamId);
+      })
+      .catch(() => {});
+  }, [teams, loadTeamData, openItem]);
+
   // Bulk retire / un-retire for the overview table. Each id is flipped
   // independently (already-in-target-state ids are filtered out by the caller,
   // so this never errors on a no-op), then the team slice is reloaded once.
@@ -384,7 +419,7 @@ export default function KnowledgeFlow() {
     for (let i = 0; i < 25; i++) {
       let d = null;
       try {
-        const r = await fetch('/api/knowledge/summaries/backfill', {
+        const r = await assistFetch('/api/knowledge/summaries/backfill', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ teamId }),
         });
@@ -522,7 +557,7 @@ export default function KnowledgeFlow() {
         <Chip
           active={filters.showArchived}
           title="Also show retired knowledge — it’s hidden by default but kept for audit"
-          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show archived</Chip>
+          onClick={() => setFilters(f => ({ ...f, showArchived: !f.showArchived }))}>Show retired &amp; expired</Chip>
       </div>
       )}
 
@@ -581,6 +616,9 @@ export default function KnowledgeFlow() {
               onClose={() => { setSelected(null); setDetail(null); }}
               onOpenAgent={(id) => navigate(`/chats/${encodeURIComponent(id)}`)}
               onArchive={(id, teamId, archived) => archiveItem(id, teamId ?? selected.teamId, archived)}
+              onValidity={(id, teamId, validTo) => setItemValidity(id, teamId ?? selected.teamId, validTo)}
+              onTriggers={(id, teamId, loadTriggers) => setItemTriggers(id, teamId ?? selected.teamId, loadTriggers)}
+              onOpenItem={(id, teamId) => openItem(id, teamId ?? selected.teamId)}
             />
           </div>
         )}
@@ -649,6 +687,27 @@ function HowItWorks({ onDismiss }) {
         </button>
       </div>
 
+      {/* Skills vs Knowledge vs Memory — the three concepts placed side by side (#1142) */}
+      <div style={{
+        display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap',
+        margin: '0 0 var(--eb-space-3)', padding: 'var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+      }}>
+        <div style={stepStyle}>
+          <div style={stepTitle}><Brain size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Memory</div>
+          <p style={stepBody}>What <em>one agent</em> privately remembers — its own episodic notebook, not shared with anyone.</p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}><Share2 size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Knowledge</div>
+          <p style={stepBody}>Lessons <em>shared across the team</em>, so every agent benefits from what any one of them learned (this page).</p>
+        </div>
+        <div style={stepStyle}>
+          <div style={stepTitle}><FileText size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Skills</div>
+          <p style={stepBody}>Polished, reusable instruction files agents load automatically — often distilled from the best knowledge.</p>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap' }}>
         <div style={stepStyle}>
           <div style={stepTitle}>{num(1)} Agents learn while they work</div>
@@ -679,6 +738,22 @@ function HowItWorks({ onDismiss }) {
       </div>
 
       <div style={{ marginTop: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
+        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>Once you have a lot of knowledge, you can shape it.</strong>{' '}
+        Group your lessons into <strong>domains</strong> (the themes they cluster into, e.g. “JCL conversion”),
+        then <strong>consolidate</strong> the many small skills in a domain into a single <strong>playbook</strong>,
+        or <strong>distill</strong> one skill to dedupe and tighten it. These are optional power tools —
+        the panels below explain each in place, and nothing is applied without your review.
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
+        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>The most important lessons are always in context.</strong>{' '}
+        Each agent gets a per-agent <strong>digest</strong> — the top knowledge, guaranteed to be loaded every session
+        (the green badge on an agent) — while the rest stays reachable on demand via search.
+      </div>
+
+      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
         <ShieldCheck size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
         <strong style={{ color: 'var(--eb-text-secondary)' }}>You stay in control.</strong>{' '}
         Each team has an <strong>Autonomy</strong> dial (how much happens without you), an optional
@@ -858,6 +933,7 @@ const TeamSection = React.forwardRef(function TeamSection({
             KB not synced yet — reading agents’ local lessons
           </span>
         )}
+        <CurationHealthStrip teamId={team.id} />
       </div>
 
       {/* Learning controls — visible, on the team they govern, with feedback */}
@@ -952,6 +1028,7 @@ const TeamSection = React.forwardRef(function TeamSection({
                 onHover={(on) => setHoverConv(on ? new Set(n.convergence || []) : null)}
                 onRetire={() => onRetireItem(n)}
                 onUnarchive={() => onUnarchiveItem(n)}
+                retrievalOn={!!graph?.retrievalStats}
               />
             ))
           )}
@@ -1060,9 +1137,12 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
 
   // Post an op. `reload:false` (bootstrap) skips onChanged since nothing is persisted.
   // Returns the parsed response so callers can read `proposed`/`fallback`.
+  // `assistFetch` injects the header-selected assist model (#1214: the `bootstrap`
+  // op runs an LLM synthesis in the orchestrator, so it must carry the selection;
+  // the other ops are deterministic and ignore the header server-side).
   const post = useCallback((body, { reload = true } = {}) => {
     setBusy(true); setErr('');
-    return fetch('/api/knowledge/domains', {
+    return assistFetch('/api/knowledge/domains', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ teamId, ...body }),
     }).then(r => r.json().catch(() => ({}))).then((out) => {
@@ -1146,6 +1226,16 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
       )}
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {/* One-line primer so a first-time operator knows what a "domain" is (#1146) */}
+          <div style={{
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55,
+            marginBottom: 'var(--eb-space-2)',
+          }}>
+            A <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> is a theme this team’s
+            lessons cluster into — e.g. “JCL conversion” or “DB2 migration”. Domains are the buckets that
+            Consolidation folds the team’s many small skills into, so the routing stays tidy as knowledge grows.
+            Changing them is always a human decision — seed the defaults, or let AI propose a set you review first.
+          </div>
           {/* Toolbar: LLM bootstrap + merge action */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
             <button disabled={busy} onClick={runBootstrap}
@@ -1409,7 +1499,7 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
     const merge = mergeForDomain(planData && planData.merges, dom.domainId);
     if (!merge) { setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge: null, draft: '' }); return; }
     setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge, loading: true, draft: '' });
-    fetch('/api/skills/merge-draft', {
+    assistFetch('/api/skills/merge-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(merge),
     }).then(r => r.json().catch(() => ({}))).then((out) => {
@@ -1472,6 +1562,15 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
 
       {open && (
         <div style={{ marginTop: 'var(--eb-space-2)' }}>
+          {/* One-line primer: what consolidation produces and why (#1146) */}
+          <div style={{
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55,
+            marginBottom: 'var(--eb-space-2)',
+          }}>
+            Consolidation collapses the many small skills that belong to one <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> into
+            a single <strong style={{ color: 'var(--eb-text-secondary)' }}>playbook</strong> — one well-structured skill
+            replacing a scattered set. You review every playbook before it is applied; nothing is merged automatically.
+          </div>
           {!hasDomains ? (
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
               Confirm this team’s domains first (Domains panel above). Consolidation folds the existing
@@ -1736,6 +1835,20 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
       .catch(e => feedback('error', `Dismiss failed: ${e.message}`));
   }, [teamId, feedback, reload]);
 
+  // #919: confirm a decay card — archive the lesson via the SAME non-destructive
+  // path as the manual Retire button, then resolve the card (dismiss, reason
+  // 'retired' — stamped, never offered in the manual dismiss dialog).
+  const doRetireDecay = useCallback((s) => {
+    fetch(`/api/knowledge/item/${encodeURIComponent(s.canonicalId)}/archive`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, archived: true }),
+    })
+      .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); })
+      .then(() => dismissSuggestion(teamId, s.id, 'retired'))
+      .then(() => { feedback('ok', 'Lesson retired — find it under “Show retired & expired”; un-retirable any time.'); reload(); })
+      .catch(e => feedback('error', `Retire failed: ${e.message}`));
+  }, [teamId, feedback, reload]);
+
   // Basket resets when the team changes underneath us.
   useEffect(() => { setBasket(new Map()); setReviewOpen(false); }, [teamId]);
 
@@ -1934,6 +2047,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
                   onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
+                  onRetire={s.source === 'decay' ? () => doRetireDecay(s) : undefined}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -1946,6 +2060,7 @@ function SkillsColumn({ team, skills, suggestions, pending, autonomy, domains, s
                   selectable selected={selected.has(s.id)} onToggleSelect={() => toggleSel(s.id)}
                   onReview={() => onReviewSuggestion(s, skills)}
                   onAddMerge={() => addToMerge(s)} inBasket={basket.has(s.id)}
+                  onRetire={s.source === 'decay' ? () => doRetireDecay(s) : undefined}
                   onDismiss={() => setDismissing(s)} />
               ))}
 
@@ -2263,12 +2378,16 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
   const graph = data?.graph;
   const skills = useMemo(() => (graph?.nodes || []).filter(n => n.kind === 'skill'), [graph]);
 
+  // #915: the Last-used column is sortable — null keeps the default
+  // newest-created order; 'desc' = most recently used first (never-used last);
+  // 'asc' = the least recently used first (the retire candidates).
+  const [usageSort, setUsageSort] = useState(null);
   const items = useMemo(() => {
     const list = (graph?.nodes || []).filter(n => n.kind === 'item');
     const now = Date.now();
     const DAY = 24 * 3600 * 1000;
     const q = filters.q.trim().toLowerCase();
-    return list
+    const out = list
       .map(n => ({ ...n, id: n.id.slice(5) })) // strip "item:" prefix
       .filter(n => {
         if (filters.kind !== 'all' && n.entryKind !== filters.kind) return false;
@@ -2284,7 +2403,9 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
         return true;
       })
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  }, [graph, filters]);
+    if (usageSort) out.sort((a, b) => (usageSort === 'asc' ? -compareLastUsed(a, b) : compareLastUsed(a, b)));
+    return out;
+  }, [graph, filters, usageSort]);
 
   const [picked, setPicked] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set());
@@ -2398,6 +2519,12 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
                 <th style={{ ...th, width: '55%' }}>Summary</th>
                 <th style={th}>Learned by</th>
                 <th style={th}>Created</th>
+                <th
+                  onClick={() => setUsageSort(s => (s === null ? 'desc' : s === 'desc' ? 'asc' : null))}
+                  title="When agents last retrieved this lesson (search or digest). Click to sort — least-recently-used first is the retire-candidate view."
+                  style={{ ...th, cursor: 'pointer', userSelect: 'none' }}>
+                  Last used{usageSort === 'desc' ? ' ↓' : usageSort === 'asc' ? ' ↑' : ''}
+                </th>
                 <th style={th}>Status</th>
                 <th style={{ ...th, textAlign: 'right' }} title="How many agents learned this independently">Converged</th>
               </tr>
@@ -2447,6 +2574,13 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
                         {n.convergenceCount > 1 ? <span style={{ color: 'var(--eb-text-muted)' }}> +{n.convergenceCount - 1}</span> : ''}
                       </td>
                       <td style={{ ...td, whiteSpace: 'nowrap', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>{fmtWhen(n.createdAt) || '—'}</td>
+                      <td
+                        title={n.lastUsedAt
+                          ? 'Last returned by a knowledge search or inlined into a digest build'
+                          : 'No agent has retrieved this lesson yet'}
+                        style={{ ...td, whiteSpace: 'nowrap', fontSize: 'var(--eb-text-xs)', color: n.lastUsedAt ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)' }}>
+                        {lastUsedLabel(n, Date.now(), !!graph?.retrievalStats) || '—'}
+                      </td>
                       <td style={{ ...td, whiteSpace: 'nowrap' }}>
                         {n.archived ? (
                           <span title="Retired from the active KB — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 6px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
@@ -2530,7 +2664,7 @@ function EmptyKnowledge({ autonomy, counts, filtered }) {
   );
 }
 
-function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive }) {
+function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick, onHover, onRetire, onUnarchive, retrievalOn }) {
   const canRetire = !item.archived && item.status !== 'promoted';
   const pickable = !item.archived && item.status !== 'promoted' && !!onPick;
   return (
@@ -2563,6 +2697,16 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
         {item.archived && (
           <span title="Retired from the active knowledge base — kept in git for audit" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', border: '1px solid var(--eb-border-default)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>retired</span>
         )}
+        {item.expired && !item.archived && (
+          <span title={`No longer valid since ${(item.validTo || '').slice(0, 10)} — dropped from the digest, search and active graph; kept in git`} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', border: '1px solid var(--eb-status-warning)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)' }}>expired</span>
+        )}
+        {(item.loadTriggers || []).length > 0 && (
+          <span
+            title={`Auto-loads into the agent's context when a task matches: ${item.loadTriggers.map(t => `${t.type}:${t.pattern}`).join(', ')}`}
+            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', border: '1px solid var(--eb-accent-primary)', padding: '0 5px', borderRadius: 'var(--eb-radius-full)', cursor: 'help' }}>
+            auto-load
+          </span>
+        )}
         {item.converged && (
           <span
             title={`${item.convergenceCount} agents learned this independently of each other — a strong signal it’s true and important. Converged knowledge is what gets suggested as a skill.`}
@@ -2580,6 +2724,15 @@ function ItemCard({ item, pulsing, selected, picked, anyPicked, onPick, onClick,
           learned by <strong style={{ color: 'var(--eb-text-secondary)' }}>{item.provenance?.originAgent || (item.convergence || [])[0] || '—'}</strong>
           {item.convergenceCount > 1 ? ` + ${item.convergenceCount - 1} more` : ''}
         </span>
+        {(item.lastUsedAt || retrievalOn) && (
+          <span
+            title={item.lastUsedAt
+              ? 'When this lesson was last returned by an agent’s knowledge search or inlined into a digest (#915 read-side telemetry)'
+              : 'No agent has retrieved this lesson yet — neither via knowledge search nor a digest build'}
+            style={{ fontSize: 'var(--eb-text-xs)', color: item.lastUsedAt ? 'var(--eb-text-muted)' : 'var(--eb-status-warning)', whiteSpace: 'nowrap' }}>
+            · {lastUsedLabel(item, Date.now(), retrievalOn)}
+          </span>
+        )}
         {item.archived ? (
           <button onClick={(e) => { e.stopPropagation(); onUnarchive(); }} style={{ ...miniBtn, marginLeft: 'auto' }}>Un-retire</button>
         ) : canRetire && (
@@ -3371,8 +3524,12 @@ const amberCard = {
   marginBottom: 'var(--eb-space-2)',
 };
 
-function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMerge, inBasket, selectable, selected, onToggleSelect }) {
+function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMerge, onRetire, inBasket, selectable, selected, onToggleSelect }) {
   const related = suggestion.source === 'related';
+  // #919: a decay card proposes RETIRING an unused lesson (never promoting) —
+  // its primary action archives via the same path as the manual Retire button.
+  const decay = suggestion.source === 'decay';
+  const evidence = decay && suggestion.evidence && typeof suggestion.evidence === 'object' ? suggestion.evidence : null;
   const dismissed = suggestion.status === 'dismissed';
   const stale = suggestion.status === 'stale';
   const resolved = dismissed || stale; // dimmed + restore-only
@@ -3393,28 +3550,50 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
               : <Circle size={14} style={{ color: 'var(--eb-text-muted)' }} />}
           </button>
         )}
-        {related
-          ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
-          : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
+        {decay
+          ? <Archive size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          : related
+            ? <Combine size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+            : <Sparkles size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />}
         <span
-          title={related
-            ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
-            : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
+          title={decay
+            ? 'No agent has retrieved this lesson for a long time — consider retiring it. Confirming uses the same non-destructive archive as the manual Retire button; nothing is deleted.'
+            : related
+              ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
+              : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
           style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
-          {related ? 'Related lessons — suggested skill' : 'Suggested skill'}
+          {decay ? 'Retire suggestion — unused lesson' : related ? 'Related lessons — suggested skill' : 'Suggested skill'}
         </span>
         <span
           style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
-          title={related
-            ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
-            : suggestion.source === 'agent-nominated'
-              ? 'An agent itself nominated this as worth promoting'
-              : `${suggestion.convergenceCount} agents learned this independently`}>
-          {related
-            ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
-            : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
+          title={decay
+            ? 'How long this lesson has gone unretrieved (searches and digest builds both count as use)'
+            : related
+              ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
+              : suggestion.source === 'agent-nominated'
+                ? 'An agent itself nominated this as worth promoting'
+                : `${suggestion.convergenceCount} agents learned this independently`}>
+          {decay
+            ? (evidence ? `unused ${evidence.unusedDays}d` : 'unused')
+            : related
+              ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
+              : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
         </span>
       </div>
+      {evidence && (
+        <div style={{ fontSize: 10, color: 'var(--eb-text-muted)' }}>
+          not used in {evidence.unusedDays} days · {evidence.searchHits} search{evidence.searchHits === 1 ? '' : 'es'} ·{' '}
+          {evidence.digestCount > 0 ? `${evidence.digestCount} digest inline${evidence.digestCount === 1 ? '' : 's'}` : 'never in a digest'}
+          {' '}· horizon {evidence.horizonDays}d
+        </div>
+      )}
+      {suggestion.semanticMatch && (
+        <div
+          title="Some of these lessons were grouped by meaning (embedding similarity), not word overlap — worth a quick sanity check that they really are the same lesson before promoting."
+          style={{ fontSize: 10, color: 'var(--eb-text-muted)', cursor: 'help' }}>
+          ⚡ semantic match — grouped by meaning, not wording
+        </div>
+      )}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)', wordBreak: 'break-word' }}>
         {suggestion.text}
         {related && suggestion.lessonCount > 1 && (
@@ -3445,12 +3624,20 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
                 <Ban size={11} /> Dismiss
               </button>
             )}
-            {onAddMerge && (
+            {!decay && onAddMerge && (
               <button onClick={onAddMerge} disabled={inBasket} title="Collect this suggestion in the merge basket to combine several into one skill" style={{ ...miniBtn, display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Combine size={11} /> {inBasket ? 'In basket' : 'Add to merge'}
               </button>
             )}
-            <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
+            {decay ? (
+              onRetire && (
+                <button onClick={onRetire} title="Retire this lesson — same non-destructive archive as the manual Retire button (kept in git, un-retirable any time)" style={primaryBtn}>
+                  <Archive size={12} /> Retire lesson
+                </button>
+              )
+            ) : (
+              <button onClick={onReview} title="Open the review dialog — nothing is promoted until you confirm" style={primaryBtn}>Review &amp; promote</button>
+            )}
           </>
         )}
       </div>
@@ -3637,6 +3824,35 @@ function SummaryPill({ label, value, title }) {
 
 // The collapsed strip: a read-only summary of the live configuration plus a
 // single action that opens the slide-out panel (#566). Nothing is edited here.
+/* #919: the curation-health strip — the 30-day counters the nightly pass
+ * persists, amber when the convergence pipeline looks silently dead (pushes
+ * happening, nothing converging). Ambient only: the feed carries one event per
+ * state transition; this strip is the always-visible surface. Renders nothing
+ * until the first nightly pass has produced a record. */
+function CurationHealthStrip({ teamId }) {
+  const [health, setHealth] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setHealth(null);
+    fetch(`/api/knowledge/curation-health?team=${encodeURIComponent(teamId)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(h => { if (alive) setHealth(h); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [teamId]);
+  if (!health || health.status === 'unknown' || !health.windowDays) return null;
+  const silent = health.status === 'silent';
+  return (
+    <span
+      title={silent
+        ? `Agents pushed knowledge ${health.pushesSeen}× in the last ${health.windowDays} days, but nothing was raised or promoted — the convergence pipeline may be silently broken.`
+        : `Curation activity over the last ${health.windowDays} days: suggestions raised, skills promoted, suggestions dismissed.`}
+      style={{ fontSize: 'var(--eb-text-xs)', color: silent ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)', cursor: 'help' }}>
+      {silent ? '⚠ ' : ''}curation {health.windowDays}d: {health.suggestionsRaised} raised · {health.promoted} promoted · {health.dismissed} dismissed
+    </span>
+  );
+}
+
 function ControlStrip({ teamId, gates, onChanged }) {
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -3665,6 +3881,12 @@ function ControlStrip({ teamId, gates, onChanged }) {
               value={tr === 'team>global' ? 'always reviewed' : ((g[tr] || 'review') === 'auto' ? 'automatic' : 'needs review')}
               title={GATE_TIPS[tr]} />
           ))}
+          <SummaryPill
+            label="Forgetting"
+            value={gates.decayHorizonDays === 0 ? 'off' : `${gates.decayHorizonDays ?? 60} days`}
+            title={gates.decayHorizonDays === 0
+              ? 'The nightly sweep never proposes retiring unused lessons for this team.'
+              : `Lessons unused for ${gates.decayHorizonDays ?? 60} days get a retire suggestion — you confirm or dismiss; nothing is archived automatically.`} />
           <SummaryPill
             label="Storage"
             title="Where this team’s shared knowledge is stored."
@@ -3753,18 +3975,48 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
   const [storeError, setStoreError] = useState('');
   const [ack, setAck] = useState(false);
 
+  /* ── Assist synthesis provider (#1213) ── */
+  // The team agent's own model-options carries the set of providers usable by
+  // this team plus the currently-selected `assistLlmEndpointId`. oauth-token
+  // seats are filtered out — they cannot back server-side synthesis calls.
+  const [assistEndpoints, setAssistEndpoints] = useState([]);
+  const [assistEndpointId, setAssistEndpointId] = useState('');
+  const [assistBusy, setAssistBusy] = useState(false);
+
   useEffect(() => {
     let alive = true;
     Promise.all([
       fetch('/api/ssh-keys').then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/github-tokens').then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([keys, toks]) => {
+      fetch(`/api/agents/${encodeURIComponent(teamId)}/model-options`).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([keys, toks, mo]) => {
       if (!alive) return;
       setSshKeys(Array.isArray(keys) ? keys : []);
       setTokens(Array.isArray(toks) ? toks : []);
+      if (mo) {
+        setAssistEndpoints((mo.endpoints || []).filter(e => e && e.authType !== 'oauth-token'));
+        setAssistEndpointId(mo.assistLlmEndpointId || '');
+      }
     });
     return () => { alive = false; };
-  }, []);
+  }, [teamId]);
+
+  const saveAssist = (nextId) => {
+    setAssistBusy(true);
+    setAssistEndpointId(nextId); // optimistic
+    fetch(`/api/agents/${encodeURIComponent(teamId)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assistLlmEndpointId: nextId || null }),
+    })
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        feedback('ok', nextId ? 'Assist provider saved.' : 'Assist provider cleared — synthesis uses the platform default.');
+        onChanged && onChanged();
+      })
+      .catch(e => feedback('error', `Not saved: ${e.message}`))
+      .finally(() => setAssistBusy(false));
+  };
 
   // Did the effective location actually change? (drives the AC-5 confirmation.)
   const origBranch = initial.branch || KB_DEFAULT_BRANCH;
@@ -3819,6 +4071,57 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
         onReview={(enabled) => call('review', '/api/knowledge/review-mode', { teamId, enabled })}
         onGate={(transition, mode) => call(transition, '/api/knowledge/gates', { teamId, transition, mode })}
       />
+
+      {/* Forgetting (#919) — the nightly sweep only PROPOSES; retiring is always
+          a human click, at every autonomy level. */}
+      <PanelSection
+        title="Forgetting"
+        blurb="Propose retiring lessons nobody has used for a while. A lesson counts as used whenever an agent's knowledge search returns it or a digest inlines it — so the conventions and validated lessons the team lives off are never proposed. Stale lessons show up as retire suggestions in the skills inbox; you confirm or dismiss each one, and confirming uses the same reversible archive as the manual Retire button. Nothing is ever archived automatically.">
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+          {[[0, 'Off'], [30, '30 days'], [60, '60 days'], [90, '90 days']].map(([days, label]) => (
+            <Chip
+              key={days}
+              active={(gates.decayHorizonDays ?? 60) === days}
+              title={days === 0
+                ? 'Never propose retiring lessons — today’s behaviour exactly'
+                : `Propose retiring lessons unused for ${days} days${days === 60 ? ' (default)' : ''}`}
+              onClick={() => (gates.decayHorizonDays ?? 60) !== days && busy !== 'decay'
+                && call('decay', '/api/knowledge/decay', { teamId, decayHorizonDays: days })}>
+              {label}{days === 60 ? ' · default' : ''}
+            </Chip>
+          ))}
+        </div>
+      </PanelSection>
+
+      {/* Assist model (#1213) — the provider the team's AUTONOMOUS synthesis
+          (curator auto-promotion + skill distillation) bills against. These runs
+          have no user session, so the console's per-user assist selector can't
+          apply; the choice is team-derived here instead. Unset → platform
+          default (.env). oauth-token seats never appear (not billable). */}
+      <PanelSection
+        title="Assist model"
+        blurb="Which registered Model Provider this team’s automatic knowledge synthesis is billed against — when the curator promotes converged lessons into a skill, or re-distills one. These runs happen on their own, with no person driving them, so they can’t use the per-user model picker in the header. Leave it on the platform default unless this team’s AI spend must be attributed to a specific provider key.">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', maxWidth: 460 }}>
+          <label style={lbl}>Provider</label>
+          <select
+            value={assistEndpointId}
+            disabled={assistBusy}
+            onChange={e => saveAssist(e.target.value)}
+            style={inp}>
+            <option value="">Platform default (.env)</option>
+            {assistEndpoints.map(ep => (
+              <option key={ep.id} value={ep.id}>
+                {ep.name || ep.id}{ep.defaultModelId ? ` · ${ep.defaultModelId}` : ''}
+              </option>
+            ))}
+          </select>
+          {assistEndpoints.length === 0 && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              No selectable providers for this team yet — synthesis uses the platform default. Register an api-key Model Provider for this team to choose one.
+            </div>
+          )}
+        </div>
+      </PanelSection>
 
       {/* Storage */}
       <PanelSection
@@ -3920,10 +4223,32 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
 
 /* ── Provenance drill-down (right rail) ─────────────────────────────────────── */
 
-function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
+function Provenance({ detail, onClose, onOpenAgent, onArchive, onValidity, onTriggers, onOpenItem }) {
   const { entry, links } = detail;
   const archived = entry.status === 'archived';
   const promoted = entry.status === 'promoted';
+  // #916 bitemporal validity: expiry is derived from validTo (field, not status).
+  const expired = typeof entry.validTo === 'string' && entry.validTo !== '' && entry.validTo < new Date().toISOString();
+  const [validDate, setValidDate] = useState((entry.validTo || '').slice(0, 10));
+  useEffect(() => { setValidDate((entry.validTo || '').slice(0, 10)); }, [entry.id, entry.validTo]);
+  // #917: local editing state for the auto-load triggers; Save persists the list.
+  const savedTriggers = Array.isArray(entry.loadTriggers) ? entry.loadTriggers : [];
+  const [triggers, setTriggers] = useState(savedTriggers);
+  const [newType, setNewType] = useState('keyword');
+  const [newPattern, setNewPattern] = useState('');
+  useEffect(() => {
+    setTriggers(Array.isArray(entry.loadTriggers) ? entry.loadTriggers : []);
+    setNewPattern('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry.id]);
+  const triggersDirty = JSON.stringify(triggers) !== JSON.stringify(savedTriggers);
+  const addTrigger = () => {
+    const pattern = newPattern.trim();
+    if (!pattern) return;
+    if (triggers.some(t => t.type === newType && t.pattern.toLowerCase() === pattern.toLowerCase())) { setNewPattern(''); return; }
+    setTriggers([...triggers, { type: newType, pattern }]);
+    setNewPattern('');
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ padding: 'var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)' }}>
@@ -3965,6 +4290,100 @@ function Provenance({ detail, onClose, onOpenAgent, onArchive }) {
             {entry.convergence?.length || 1}× — {(entry.convergence || []).join(', ') || entry.originAgent}
           </div>
         </Lineage>
+        <Lineage label="Validity">
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: expired ? 'var(--eb-status-warning)' : 'var(--eb-text-primary)' }}
+            title="When this fact was (or is) true. Expired entries drop out of the digest, search and the active graph automatically — nothing is deleted.">
+            From {(entry.validFrom || entry.createdAt || '?').slice(0, 10)} · {entry.validTo
+              ? <>until {entry.validTo.slice(0, 10)}{expired ? ' — expired' : ''}</>
+              : 'open-ended'}
+          </div>
+          {entry.supersededBy && (
+            <button
+              onClick={() => onOpenItem && onOpenItem(entry.supersededBy, entry.teamId)}
+              title="This fact was replaced by a newer entry — open it"
+              style={{
+                marginTop: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
+                background: 'var(--eb-accent-muted)', border: 'none', padding: '1px 8px',
+                borderRadius: 'var(--eb-radius-full)', cursor: onOpenItem ? 'pointer' : 'default',
+              }}>
+              superseded by {entry.supersededBy}
+            </button>
+          )}
+          {onValidity && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+              <input
+                type="date"
+                value={validDate}
+                onChange={e => setValidDate(e.target.value)}
+                title="Valid until — the date this stops being true (inclusive)"
+                style={{ ...inp, padding: '2px 6px', fontSize: 'var(--eb-text-xs)', width: 'auto', flex: 1 }}
+              />
+              <button
+                onClick={() => onValidity(entry.id, entry.teamId, validDate)}
+                disabled={!validDate || validDate === (entry.validTo || '').slice(0, 10)}
+                title="Set the valid-until date — the entry expires everywhere active on that date"
+                style={{ ...miniBtn }}>
+                Set
+              </button>
+              {entry.validTo && (
+                <button
+                  onClick={() => onValidity(entry.id, entry.teamId, null)}
+                  title="Clear the valid-until date — the entry is current again everywhere"
+                  style={{ ...miniBtn }}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+        </Lineage>
+        {onTriggers && (
+          <Lineage label="Auto-load when…">
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginBottom: 4 }}
+              title="Trigger patterns (#917): when an incoming task matches, this lesson is injected into the agent's knowledge-scoped.md for that session — visible in the Workspace Browser. No triggers = today's behaviour.">
+              {triggers.length === 0 ? 'No triggers — loads only via digest or search.' : 'Injected when the task matches:'}
+            </div>
+            {triggers.map((t, i) => (
+              <div key={`${t.type}:${t.pattern}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', background: 'var(--eb-accent-muted)', padding: '1px 8px', borderRadius: 'var(--eb-radius-full)' }}>
+                  {t.type}: {t.pattern}
+                </span>
+                <button onClick={() => setTriggers(triggers.filter((_, j) => j !== i))} title="Remove this trigger" style={{ ...miniBtn, padding: '0 6px' }}>✕</button>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 4, marginTop: 4, alignItems: 'center' }}>
+              <select value={newType} onChange={e => setNewType(e.target.value)} style={{ ...inp, width: 'auto', padding: '2px 4px', fontSize: 'var(--eb-text-xs)' }}>
+                <option value="keyword">keyword</option>
+                <option value="path">path</option>
+              </select>
+              <input
+                value={newPattern}
+                onChange={e => setNewPattern(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addTrigger()}
+                placeholder={newType === 'path' ? 'e.g. src/jobs/*.jcl' : 'e.g. jcl'}
+                style={{ ...inp, flex: 1, padding: '2px 6px', fontSize: 'var(--eb-text-xs)' }}
+              />
+              <button onClick={addTrigger} disabled={!newPattern.trim()} style={{ ...miniBtn }}>Add</button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              {(entry.tags || []).length > 0 && triggers.length === 0 && (
+                <button
+                  onClick={() => setTriggers((entry.tags || []).map(tag => ({ type: 'keyword', pattern: tag })))}
+                  title="Pre-fill keyword triggers from this entry's tags — you confirm with Save, nothing is derived silently"
+                  style={{ ...miniBtn }}>
+                  Derive from tags
+                </button>
+              )}
+              {triggersDirty && (
+                <button
+                  onClick={() => onTriggers(entry.id, entry.teamId, triggers)}
+                  title="Save the trigger list"
+                  style={{ ...primaryBtn, padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
+                  Save triggers
+                </button>
+              )}
+            </div>
+          </Lineage>
+        )}
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           {entry.teamId} · {entry.createdAt}{entry.status && entry.status !== 'active' ? ` · ${entry.status}` : ''}
         </div>
@@ -4127,6 +4546,17 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const [targetName, setTargetName] = useState(suggestion.matchedSkill?.name || '');
   const [skills, setSkills] = useState([]); // all eligible skills (every source/tier)
 
+  // #921: the *name field* is the single source of truth for the draft's
+  // frontmatter `name:` — whenever it changes (typing, or a draft arriving), the
+  // preview's header is rewritten to match. The ref lets async draft handlers
+  // read the freshest name without re-subscribing.
+  const nameRef = useRef(name);
+  nameRef.current = name;
+  useEffect(() => {
+    if (mode !== 'create') return;
+    setSkillMd(md => syncFrontmatterName(md, name.trim()));
+  }, [name, mode]);
+
   // manual = operator multi-select (no stored suggestion); aggregated = the
   // lessons are distinct and the skill is their synthesis (manual OR the
   // collector's related-theme card).
@@ -4172,6 +4602,16 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   }, [skills, tier, teamId, columnSkills]);
   const canExtend = eligible.length > 0;
 
+  // #921: exact name collision with a skill already in the target tier — a
+  // non-blocking inline hint with a suggested free suffix ("Add to an existing
+  // skill" stays the intended path for a genuine same-skill collision).
+  const takenNames = useMemo(() => new Set(eligible.map(s => s.name)), [eligible]);
+  const nameCollision = mode === 'create' && !!name.trim() && takenNames.has(name.trim());
+  const suggestedName = nameCollision ? suggestFreeName(name.trim(), takenNames) : '';
+  // #921: advisory only — a frontmatter-less draft still promotes (legacy bodies
+  // keep working) but can't be exported/re-imported until a header is added.
+  const missingFrontmatter = mode === 'create' && !!skillMd.trim() && !hasFrontmatterMeta(skillMd);
+
   // The selected target's INTRINSIC scope drives the effective promotion scope: a
   // team-tier extend of a global/adopted skill still writes the global pool file
   // (validateExtension allows team→global). Create stays governed by the tier
@@ -4211,7 +4651,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   const loadExtendDraft = (useLLM) => {
     if (!targetName) return;
     setBusy('draft'); setError('');
-    fetch('/api/knowledge/extend-draft', {
+    assistFetch('/api/knowledge/extend-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         team: teamId, tier: effectiveTo, targetName,
@@ -4230,14 +4670,15 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   useEffect(() => {
     if (!manual || mode !== 'create') return;
     setBusy('draft');
-    fetch('/api/knowledge/draft', {
+    assistFetch('/api/knowledge/draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds, heuristicOnly: true }),
     })
       .then(r => (r.ok ? r.json() : null))
       .then(d => {
         if (d?.draft) {
-          setSkillMd(md => md || d.draft.skillMd || '');
+          // #921: an operator-typed name wins over the draft's — sync the header.
+          setSkillMd(md => md || syncFrontmatterName(d.draft.skillMd || '', nameRef.current.trim()));
           setName(n => n || d.draft.name || '');
         }
       })
@@ -4256,17 +4697,26 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
     if (mode === 'extend') { loadExtendDraft(true); return; }
     setBusy('draft'); setError('');
     const req = manual
-      ? fetch('/api/knowledge/draft', {
+      ? assistFetch('/api/knowledge/draft', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ team: teamId, entryIds: suggestion.entryIds }),
         })
-      : fetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
+      : assistFetch(`/api/knowledge/promotion-suggestions/${encodeURIComponent(suggestion.id)}/draft`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ team: teamId }),
         });
     req
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d?.draft?.skillMd) { setSkillMd(d.draft.skillMd); if (d.draft.name) setName(d.draft.name); } })
+      .then(d => {
+        if (d?.draft?.skillMd) {
+          // #921: keep the operator's name if one is typed (single source of
+          // truth), syncing the incoming draft's frontmatter to it; only an
+          // empty field adopts the draft's name.
+          const kept = (nameRef.current || d.draft.name || '').trim();
+          setSkillMd(syncFrontmatterName(d.draft.skillMd, kept));
+          if (!nameRef.current.trim() && d.draft.name) setName(d.draft.name);
+        }
+      })
       .catch(() => setError('Draft failed'))
       .finally(() => setBusy(''));
   };
@@ -4406,6 +4856,15 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           <>
             <label style={lbl}>Skill name</label>
             <input value={name} onChange={e => setName(e.target.value)} style={inp} />
+            {nameCollision && (
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+                A skill named “{name.trim()}” already exists here. Consider{' '}
+                <button onClick={() => setName(suggestedName)} style={{ ...btn, display: 'inline-flex', padding: '0 4px' }}>
+                  {suggestedName}
+                </button>
+                {' '}— or use “Add to an existing skill” to fold this knowledge into it.
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -4444,6 +4903,13 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
         </div>
         <textarea value={skillMd} onChange={e => setSkillMd(e.target.value)} rows={12}
           style={{ ...inp, fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)', resize: 'vertical' }} />
+        {missingFrontmatter && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5 }}>
+            This draft has no <code>name</code>/<code>description</code> frontmatter header. It still
+            promotes, but the skill can’t be exported and re-imported until a header is added, and the
+            description is what tells agents when to load it.
+          </div>
+        )}
 
         {/* Activation is the default last step of every pool-filling flow. In
             CREATE it adds the new skill to the team. In EXTEND (#630 AC2) the

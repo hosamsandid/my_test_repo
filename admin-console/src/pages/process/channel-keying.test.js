@@ -42,6 +42,23 @@ test('upsert: label-less and labelled from the same producer coexist', () => {
   assert.equal(ch.length, 2);
 });
 
+test('upsert: an authored wakePrompt override is carried on the port, trimmed (#868)', () => {
+  const ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: '  Review carefully.  ' });
+  assert.equal(ch[0].wakePrompt, 'Review carefully.');
+});
+
+test('upsert: a blank wakePrompt is dropped from the port (#868)', () => {
+  const ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: '   ' });
+  assert.ok(!('wakePrompt' in ch[0]), 'a whitespace-only override is treated as no override');
+});
+
+test('upsert: re-drawing the same channel can clear a prior wakePrompt (#868)', () => {
+  let ch = upsertChannel([], { artifact: 'pr', from: 'dev', wakePrompt: 'Custom.' });
+  ch = upsertChannel(ch, { artifact: 'pr', from: 'dev' }); // same key, no override
+  assert.equal(ch.length, 1);
+  assert.ok(!('wakePrompt' in ch[0]), 'an in-place edit without an override clears the stale one');
+});
+
 test('remove: with a label drops only that fan-in sibling', () => {
   const list = [
     { artifact: 'pr', from: 'rev', label: 'ready-to-merge' },
@@ -71,4 +88,65 @@ test('remove: empty-string label targets the label-less channel specifically', (
   const next = removeChannelFrom(list, { artifact: 'pr', from: 'rev', label: '' });
   assert.equal(next.length, 1);
   assert.equal(next[0].label, 'ready-to-merge');
+});
+
+// ─── claim opt-out on the port (#958) ────────────────────────────────────────
+
+test('upsertChannel persists only an explicit autoClaim:false', () => {
+  const base = { artifact: 'pr', from: 'dev', label: 'ready-for-test' };
+  // Default (auto-claim ON) leaves the port clean — no `autoClaim: true` noise.
+  assert.deepEqual(upsertChannel([], base), [base]);
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: true }), [base]);
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: undefined }), [base]);
+  // Opt-out is recorded, since the reconciler must see it to skip the claim.
+  assert.deepEqual(upsertChannel([], { ...base, autoClaim: false }),
+    [{ ...base, autoClaim: false }]);
+});
+
+test('upsertChannel toggles the claim opt-out in place, on the same (artifact, from, label) key', () => {
+  // The editor toggle is an upsert on the existing port, not a new sibling.
+  const off = upsertChannel([{ artifact: 'pr', from: 'dev', label: 'go' }],
+    { artifact: 'pr', from: 'dev', label: 'go', autoClaim: false });
+  assert.equal(off.length, 1);
+  assert.equal(off[0].autoClaim, false);
+  const on = upsertChannel(off, { artifact: 'pr', from: 'dev', label: 'go' });
+  assert.equal(on.length, 1);
+  assert.equal('autoClaim' in on[0], false, 're-enabling must clear the flag, not set it true');
+});
+
+test('upsertChannel keeps the claim opt-out independent per label sibling', () => {
+  let list = upsertChannel([], { artifact: 'pr', from: 'dev', label: 'a', autoClaim: false });
+  list = upsertChannel(list, { artifact: 'pr', from: 'dev', label: 'b' });
+  assert.equal(list.length, 2);
+  assert.equal(list.find(c => c.label === 'a').autoClaim, false);
+  assert.equal('autoClaim' in list.find(c => c.label === 'b'), false);
+});
+
+test('#1194: upsertChannel persists transport:internal only on a labelled, non-human channel', () => {
+  // Labelled, agent-set → carried.
+  assert.deepEqual(
+    upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }),
+    [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }]);
+  // Unlabelled → dropped (artifact-open stays poller-delivered).
+  assert.deepEqual(
+    upsertChannel([], { artifact: 'pr', from: 'rev', transport: 'internal' }),
+    [{ artifact: 'pr', from: 'rev' }]);
+  // Human gate → dropped (a person applies the label on GitHub).
+  assert.deepEqual(
+    upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', gate: 'human', transport: 'internal' }),
+    [{ artifact: 'pr', from: 'rev', label: 'approved', gate: 'human' }]);
+  // 'github' (the default) is represented by absence, no noise on the port.
+  assert.deepEqual(
+    upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', transport: 'github' }),
+    [{ artifact: 'pr', from: 'rev', label: 'approved' }]);
+});
+
+test('#1194: upsertChannel toggles transport in place; re-drawing without it clears the flag', () => {
+  const on = upsertChannel([{ artifact: 'pr', from: 'rev', label: 'go' }],
+    { artifact: 'pr', from: 'rev', label: 'go', transport: 'internal' });
+  assert.equal(on.length, 1);
+  assert.equal(on[0].transport, 'internal');
+  const off = upsertChannel(on, { artifact: 'pr', from: 'rev', label: 'go' });
+  assert.equal(off.length, 1);
+  assert.equal('transport' in off[0], false, 'switching back to GitHub clears the flag, not sets github');
 });

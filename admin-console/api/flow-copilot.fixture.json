@@ -1,0 +1,159 @@
+{
+  "processTemplateVersion": 1,
+  "name": "Build & review loop",
+  "description": "Motivating example for the Flow Copilot (#1068): a Business Analyst refines requests into issues, a human Product Owner releases them with the `ready` gate, a Developer implements and opens a PR, a Code Reviewer routes to a Reworker loop or approves with `ready-to-merge`, and a Merger merges.",
+  "level": "template",
+  "stages": ["Requirements", "Build", "Release"],
+  "roles": [
+    {
+      "id": "business-analyst",
+      "displayName": "Business Analyst",
+      "role": "team-member",
+      "sessionPolicy": "persistent",
+      "stage": "Requirements",
+      "systemPrompt": "You are the Business Analyst. Humans bring you ideas and bug reports in chat; you turn them into GitHub issues precise enough to be implemented without guesswork: problem statement, scope, numbered acceptance criteria, edge cases. Leave the issue unlabelled — a human applies `ready` when the work may start.",
+      "outcomes": {
+        "mode": "anyOf",
+        "options": [
+          {
+            "id": "opens-issue",
+            "title": "Opens issue",
+            "when": "The request is refined into an implementable issue",
+            "actions": [{ "type": "openIssue" }]
+          }
+        ]
+      },
+      "triggers": []
+    },
+    {
+      "id": "developer",
+      "displayName": "Developer",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Build",
+      "systemPrompt": "You are the Developer. You implement exactly one released issue per run: read the acceptance criteria, implement on a feature branch, keep tests green, then open a pull request and set the `ready-for-review` label on it.",
+      "channels": [
+        { "artifact": "issue", "from": "business-analyst", "label": "ready", "gate": "human" }
+      ],
+      "outcomes": {
+        "mode": "anyOf",
+        "options": [
+          {
+            "id": "opens-pr",
+            "title": "Opens PR",
+            "when": "Implementation is complete and tests are green",
+            "actions": [{ "type": "openPr" }, { "type": "setLabel", "label": "ready-for-review" }]
+          }
+        ]
+      },
+      "triggers": []
+    },
+    {
+      "id": "code-reviewer",
+      "displayName": "Code Reviewer",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Build",
+      "systemPrompt": "You are the Code Reviewer. You review each pull request against its issue's acceptance criteria and the surrounding code. Post concrete, actionable review comments. Decide exactly one outcome per review: accept, or request revisions.",
+      "channels": [
+        { "artifact": "pr", "from": "developer", "label": "ready-for-review" }
+      ],
+      "outcomes": {
+        "mode": "exactlyOne",
+        "options": [
+          {
+            "id": "accepted",
+            "title": "Accepted",
+            "when": "All acceptance criteria are met and no blocking findings remain",
+            "actions": [{ "type": "setLabel", "label": "ready-to-merge" }]
+          },
+          {
+            "id": "revisions-required",
+            "title": "Revisions required",
+            "when": "One or more criteria are unmet or a blocking finding exists",
+            "actions": [{ "type": "setLabel", "label": "revisions-required" }]
+          }
+        ]
+      },
+      "triggers": []
+    },
+    {
+      "id": "reworker",
+      "displayName": "Reworker",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Build",
+      "systemPrompt": "You are the Reworker. You resolve review feedback on a pull request: read every review comment, address each one with a focused change, push the fixes, and hand the pull request back to review.",
+      "outcomes": {
+        "mode": "anyOf",
+        "options": [
+          {
+            "id": "resolved",
+            "title": "Feedback resolved",
+            "when": "All review feedback is addressed and tests are green",
+            "actions": [{ "type": "setLabel", "label": "ready-for-review" }]
+          }
+        ]
+      },
+      "triggers": [
+        {
+          "id": "reworker-on-revisions-required",
+          "type": "github-event",
+          "enabled": true,
+          "events": ["pull_request.labeled"],
+          "labelFilter": "revisions-required",
+          "claim": { "remove": "revisions-required", "add": "revisions-required:wip" },
+          "prompt": "A reviewer requested changes on this pull request. Read every review comment, resolve each one, push the fixes, then set the `ready-for-review` label so the Code Reviewer takes another look."
+        }
+      ]
+    },
+    {
+      "id": "merger",
+      "displayName": "Merger",
+      "role": "team-member",
+      "sessionPolicy": "per-invocation",
+      "stage": "Release",
+      "systemPrompt": "You are the Merger. When a pull request carries the `ready-to-merge` label you perform the final gatekeeping: verify CI is green and the branch is current, then merge it and delete the branch. The merged pull request is the delivered product.",
+      "outcomes": {
+        "mode": "anyOf",
+        "options": [
+          {
+            "id": "merged",
+            "title": "Merged",
+            "when": "CI is green and the merge completed",
+            "terminal": true,
+            "actions": [{ "type": "none" }]
+          }
+        ]
+      },
+      "triggers": [
+        {
+          "id": "merger-on-ready-to-merge",
+          "type": "github-event",
+          "enabled": true,
+          "events": ["pull_request.labeled"],
+          "labelFilter": "ready-to-merge",
+          "claim": { "remove": "ready-to-merge", "add": "ready-to-merge:wip" },
+          "prompt": "This pull request was accepted by the Code Reviewer. Verify CI is green and the branch is up to date with the base branch, then merge the pull request and delete its branch."
+        }
+      ]
+    }
+  ],
+  "gates": [],
+  "labels": [
+    { "name": "ready", "humanGate": true, "brake": false },
+    { "name": "ready-for-review", "humanGate": false, "brake": false },
+    { "name": "revisions-required", "humanGate": false, "brake": false },
+    { "name": "ready-to-merge", "humanGate": false, "brake": false }
+  ],
+  "humans": [
+    {
+      "id": "product-owner",
+      "name": "Product Owner",
+      "description": "Reviews the Business Analyst's refined issues and releases work with the `ready` label.",
+      "stage": "Requirements",
+      "emits": ["ready"],
+      "consumes": [{ "artifact": "issue", "from": "business-analyst" }]
+    }
+  ]
+}

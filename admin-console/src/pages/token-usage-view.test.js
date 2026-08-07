@@ -12,6 +12,9 @@ import {
   buildExportUrl,
   workItemAverages,
   WORK_ITEM_TILE_HELP,
+  STAT_TILE_HELP,
+  TIER_SIGNAL_HELP,
+  COST_NOTE,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -230,4 +233,44 @@ test('Ø …/work item help states per attributed work item, excluding unattribu
     assert.match(WORK_ITEM_TILE_HELP[id], /attributed work item/i, `${id} must say "attributed work item"`);
     assert.match(WORK_ITEM_TILE_HELP[id], /excluded/i, `${id} must state unattributed tokens are excluded`);
   }
+});
+
+
+// The six Statistics-tab tiles that must carry a help affordance (#1151):
+// the two totals plus every TOKEN_CLASS. Guards against a tile losing its
+// InfoTip when the summary row is edited.
+const STAT_TILE_IDS = ['total', 'invocations', ...TOKEN_CLASSES.map((c) => c.key)];
+
+test('STAT_TILE_HELP carries non-empty help for every Statistics tile (#1151 AC2)', () => {
+  assert.deepEqual(Object.keys(STAT_TILE_HELP).sort(), [...STAT_TILE_IDS].sort());
+  for (const id of STAT_TILE_IDS) {
+    const text = STAT_TILE_HELP[id];
+    assert.equal(typeof text, 'string', `${id} help must be a string`);
+    assert.ok(text.trim().length > 0, `${id} help must not be empty`);
+  }
+});
+
+test('STAT_TILE_HELP explains the Cache write/read jargon in plain language (#1151 AC2)', () => {
+  assert.match(STAT_TILE_HELP.cacheCreationInput, /cache/i);
+  assert.match(STAT_TILE_HELP.cacheReadInput, /cache/i);
+  // The whole point is that a read is cheaper than re-sending the context.
+  assert.match(STAT_TILE_HELP.cacheReadInput, /re-sent|costs less|cheap/i);
+});
+
+test('TIER_SIGNAL_HELP names all four TIER_LABEL signals, strongest first (#1151 AC3)', () => {
+  for (const label of ['flow', 'created', 'event', 'branch']) {
+    assert.match(TIER_SIGNAL_HELP, new RegExp(label, 'i'), `must mention "${label}"`);
+  }
+  // "flow" is the strongest signal, "branch" the weakest — order matters.
+  assert.ok(
+    TIER_SIGNAL_HELP.indexOf('flow') < TIER_SIGNAL_HELP.indexOf('branch'),
+    'signals must be listed strongest-first',
+  );
+  assert.match(TIER_SIGNAL_HELP, /attribution/i);
+});
+
+test('COST_NOTE states figures are token counts, not costs (#1151 AC1)', () => {
+  assert.equal(typeof COST_NOTE, 'string');
+  assert.match(COST_NOTE, /not cost/i);
+  assert.match(COST_NOTE, /pric/i);
 });

@@ -2,7 +2,7 @@
 
 ## Chapter intro (slide 1)
 
-Let's walk through the Team Setup wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
+Let's walk through the Agent Team Wizard. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository.
 
 So what exactly is a team here? A team is a coordinated group of AI agents — think of a Business Analyst, a Developer, a Code Reviewer — each with its own role, its own system prompt. They all share one working environment, which means they all work against the same GitHub repository with the same credentials and the same knowledge sources. What makes it a team rather than just a collection of agents is that they're wired together: one agent's output becomes the next agent's trigger. The Business Analyst writes an issue, a human approves it, the Developer picks it up, opens a pull request, the Code Reviewer reacts to that pull request, and so on. The hand-offs happen automatically over GitHub labels and events.
 
@@ -16,7 +16,7 @@ Screenshot: wizard Process step with the Core SDLC template selected; flow previ
 
 The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
 
-Here you have three ways to start: you can use a curated template, you can compose a process from stages yourself, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+Here you have three ways to start: you can use a curated template, you can describe the flow in plain language and let the Flow Copilot generate it, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
 
 Core SDLC gives us four agents that cover a complete build-and-review loop:
 
@@ -39,23 +39,25 @@ This separation is deliberate: the same environment can be reused across many te
 
 ## Step 3: Team identity (slide 4)
 
-Screenshot: wizard Team step — name and ID fields pre-filled from the environment.
+Screenshot: wizard Team step — name, ID, and optional label suffix fields; name and ID pre-filled from the environment.
 
-Step three is where we give the team its identity — really just two fields: a team name and a team ID.
+Step three is where we give the team its identity. There are two required fields and one optional one.
 
-The wizard is helpful here: both fields are pre-filled and suggested from the working environment we just picked, and the ID is a slug — lowercase, dashes only — that gets derived automatically from the name as we type. You can override either one, but you usually don't have to.
+The two required fields — team name and team ID — are pre-filled and suggested from the working environment we just picked. The ID is a slug — lowercase, dashes only — that gets derived automatically from the name as we type. You can override either one, but you usually don't have to.
 
 Why does the ID matter? Because it becomes the prefix for every resource the team creates. So a team with the ID "acme" will produce agents like acme-developer, acme-code-reviewer, and so on. The wizard also checks the ID against everything that already exists — if it collides with an existing agent or team, it tells you right away and asks for a different one. That naming scheme is what keeps a multi-team setup clean and predictable.
 
+The optional **label suffix** field is for when you are running two or more teams against the same GitHub repository at the same time. Every label-based hand-off in the process — the ones that wake agents and gate human approvals — has to be unique per team, otherwise one team's events trigger the wrong team's agents. A suffix (1–8 lowercase letters and digits) is stamped onto every label token before the team is created, so "ready" becomes "ready-abc1" and "revisions-required" becomes "revisions-required-abc1". The wizard offers a **Suggest** button that generates a random four-character suffix, and it shows you a live list of any label mentions in prompts it could not stamp automatically (so you can fix them yourself). If you are the only team on the repository, leave this blank — there is no cost to omitting it, and the label names stay readable.
+
 ## Step 4: Knowledge (slide 5)
 
-Screenshot: wizard Knowledge step — skills picker, read-only MCP list, autonomy level selector.
+Screenshot: wizard Knowledge step — skills picker, read-only MCP list, "Advanced: knowledge learning" disclosure (collapsed by default).
 
 The fourth step is Knowledge — and it's explicitly optional. This is where we decide what the team knows and how it learns.
 
-There are three parts to it. First, the initial team skills: skills are curated capability packs from the pool — think COBOL analysis, JCL conversion, and so on for the mainframe-migration domain. Whatever we pick here is placed on the team as a whole, and every member inherits it automatically. Second, the knowledge sources: these are MCP servers the team can query at runtime — a wiki, a vector store, a graph database. These are inherited from the working environment, so they're shown here read-only; to change them you'd edit the environment.
+There are two immediately visible parts and one advanced section. First, the initial team skills: skills are curated capability packs from the pool — think COBOL analysis, JCL conversion, and so on for the mainframe-migration domain. Whatever we pick here is placed on the team as a whole, and every member inherits it automatically. Second, the knowledge sources: these are MCP servers the team can query at runtime — a wiki, a vector store, a graph database. These are inherited from the working environment, so they're shown here read-only; to change them you'd edit the environment.
 
-The third part is the most interesting: how the team learns and shares knowledge. Agents in the Agent Studio don't just execute — they accumulate lessons over time and can share them across the team. Here you set the autonomy level: at the lower levels, learnings are proposed and a human reviews them before they become shared team knowledge; at the highest level, the team curates and promotes its own knowledge automatically, closing the loop without a human in it. These are just sensible defaults every team starts on, and you can change all of them later on the Knowledge page — so for the demo we can simply accept the defaults and continue.
+The learning configuration is collapsed behind an **"Advanced: knowledge learning"** disclosure (closed by default, with the one-liner "Controls how much the team auto-learns from its work — defaults are fine to start"). Expanding it reveals the autonomy level and promotion gates: at the lower levels, learnings are proposed and a human reviews them before they become shared team knowledge; at the highest level, the team curates and promotes its own knowledge automatically, closing the loop without a human in it. These are just sensible defaults every team starts on, and you can change all of them later on the Knowledge page — so for the demo we can simply accept the defaults and continue.
 
 ## Step 5: Review & create (slide 6)
 

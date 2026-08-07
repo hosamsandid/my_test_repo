@@ -306,7 +306,7 @@ function confirmDomains(docIn, { domains, teamId, now } = {}) {
 // ---------------------------------------------------------------------------
 
 // Meta-prompt: propose 5–8 domains covering the team's existing lessons. Pure —
-// the caller (api.js) supplies the model + transport (resolveGenerationTarget +
+// the caller (api.js) supplies the model + transport (resolveAssistTarget +
 // httpPostJson), exactly like buildSkillDraftRequest. The response is parsed by
 // parseBootstrapResponse and ALWAYS operator-confirmed before it becomes the
 // taxonomy — never auto-applied.

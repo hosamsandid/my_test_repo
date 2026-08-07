@@ -58,14 +58,101 @@ SSO with your Accenture account** (`<you>@accenture.com`) *and* access to the
 `acn-projectroots` project. There is deliberately no public URL and no shared
 credential: identity is the perimeter.
 
+Full walkthrough for a fresh **macOS** workstation — steps 1-4 are one-time, then
+"Access the console" below is the everyday path. Skip any step whose check already
+passes.
+
 ```bash
-# 1. Install the gcloud CLI (macOS)
+# 1. Homebrew (skip if `brew --version` already works)
+xcode-select --install || true         # Command Line Tools, needed by Homebrew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Apple Silicon: put brew on PATH for this and future shells
+echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+# 2. Install the gcloud CLI
 brew install --cask gcloud-cli        # older Homebrew: brew install --cask google-cloud-sdk
+exec zsh                              # reload PATH
+gcloud version                        # sanity check
 # no Homebrew? https://cloud.google.com/sdk/docs/install (download + ./google-cloud-sdk/install.sh)
 
-# 2. Log in via SSO (opens a browser -> Accenture sign-in) and pin the project
+# 3. Log in via SSO (opens a browser -> Accenture sign-in) and pin the project
 gcloud auth login
 gcloud config set project acn-projectroots
+gcloud config set compute/zone europe-west3-b
+gcloud config list                    # verify account + project
+
+# 4. Optional: NumPy in gcloud's bundled Python — speeds up the tunnel and silences
+#    the "consider installing NumPy" warning on every start-iap-tunnel
+"$(gcloud info --format='value(basic.python_location)')" -m pip install numpy
+
+# 5. Confirm IAM access + that the VM is up (a permission error here = IAM not granted yet)
+gcloud compute instances describe agent-studio-pilot \
+  --zone=europe-west3-b --project=acn-projectroots --format='value(status)'
+gcloud compute instances start agent-studio-pilot \
+  --zone=europe-west3-b --project=acn-projectroots   # only if not RUNNING
+
+# 6. First SSH — generates ~/.ssh/google_compute_engine (empty passphrase is fine) and
+#    registers your OS Login entry; also prints the console password you need below
+gcloud compute ssh agent-studio-pilot --zone=europe-west3-b --project=acn-projectroots \
+  --tunnel-through-iap --command='sudo grep ^ADMIN_PASSWORD /home/aee/agent-studio/.env'
+```
+
+Full walkthrough for a fresh **Windows 10/11** workstation — run everything in
+**PowerShell** (not Command Prompt). Steps 1-4 are one-time; step 5 onward is the
+everyday path. Skip any step whose check already passes.
+
+```powershell
+# 1. Enable the OpenSSH client (built into Windows 10 1809+ / Windows 11; skip if
+#    `ssh -V` already returns a version)
+#    Run this once in an elevated (Admin) PowerShell:
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+# Verify:
+ssh -V
+
+# 2. Install the gcloud CLI — two options; pick one:
+
+# Option A — winget (recommended; comes pre-installed on Windows 11 and recent Win10)
+winget install --id Google.CloudSDK --exact --silent
+# Option B — direct installer (works everywhere, GUI wizard)
+Invoke-WebRequest -Uri "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe" `
+  -OutFile "$env:TEMP\GoogleCloudSDKInstaller.exe"
+Start-Process -FilePath "$env:TEMP\GoogleCloudSDKInstaller.exe" -Wait
+
+# After either option: open a NEW PowerShell window so the updated PATH takes effect
+gcloud version    # sanity check
+
+# 3. Log in via SSO (opens a browser -> Accenture sign-in) and pin the project
+gcloud auth login
+gcloud config set project acn-projectroots
+gcloud config set compute/zone europe-west3-b
+gcloud config list    # verify account + project
+
+# 4. Confirm IAM access + that the VM is up (a permission error here = IAM not granted yet)
+gcloud compute instances describe agent-studio-pilot `
+  --zone=europe-west3-b --project=acn-projectroots --format="value(status)"
+# Only if not RUNNING:
+gcloud compute instances start agent-studio-pilot `
+  --zone=europe-west3-b --project=acn-projectroots
+
+# 5. First SSH — generates %USERPROFILE%\.ssh\google_compute_engine and registers
+#    your OS Login entry; also prints the console password you need below.
+#    Accept the "do you want to continue?" prompt; leave the passphrase empty.
+gcloud compute ssh agent-studio-pilot --zone=europe-west3-b --project=acn-projectroots `
+  --tunnel-through-iap --command="sudo grep ^ADMIN_PASSWORD /home/aee/agent-studio/.env"
+
+# 6. Open the IAP tunnel (keep this PowerShell window open)
+gcloud compute start-iap-tunnel agent-studio-pilot 14000 `
+  --local-host-port=localhost:14000 --zone=europe-west3-b --project=acn-projectroots
+# Windows Firewall may prompt for network access — allow it.
+# Then open http://localhost:14000 in a browser; user = admin, password from step 5.
+# Ctrl-C closes the tunnel.
+
+# Troubleshoot: check whether the tunnel is listening
+netstat -ano | findstr ":14000"
+# PowerShell alternative:
+Get-NetTCPConnection -LocalPort 14000 -State Listen -ErrorAction SilentlyContinue
+# No output = no tunnel running; re-run step 6.
 ```
 
 Notes:
@@ -93,8 +180,16 @@ gcloud compute start-iap-tunnel agent-studio-pilot 14000 \
 #     --tunnel-through-iap --command='sudo grep ^ADMIN_PASSWORD /home/aee/agent-studio/.env'
 ```
 
+Leave the tunnel running in its own terminal tab (`Ctrl-C` closes it) — the browser talks
+to it for the whole session.
+
 Anyone who should reach the console needs `iap.tunnelInstances.accessViaIAP` on the
 project (or instance) — access is governed by IAM, not by network exposure.
+
+`http://localhost:14000` refusing the connection is almost always a **missing tunnel**,
+not a broken stack — check with `lsof -nP -iTCP:14000 -sTCP:LISTEN` (no output = no
+tunnel) and re-run the `start-iap-tunnel` command above. Only if the tunnel *is* up and
+the page still fails is it worth checking the stack itself (`Operations` below).
 
 > **Port convention:** the hosted console lives on **14000** everywhere (VM publish,
 > firewall, tunnel) — port 4000 stays reserved for local development (`make up`), so

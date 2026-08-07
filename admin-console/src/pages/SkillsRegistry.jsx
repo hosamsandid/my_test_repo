@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import { assistFetch } from '../context/assist-transport.js';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -515,15 +516,18 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   // the latter three fed by one lineage fetch. The fetch is lazy — it only fires
   // once the operator leaves the Content tab, so browsing files stays a single
   // round-trip.
-  const [tab, setTab] = useState('content');
+  // A deep link may open straight on a detail tab (#1143 — drift chips land on
+  // Lineage). `skill.initialTab` is validated against VIEWER_TABS before use.
+  const initialTab = VIEWER_TABS.some(t => t.id === skill.initialTab) ? skill.initialTab : 'content';
+  const [tab, setTab] = useState(initialTab);
   const [lineage, setLineage] = useState(null);
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageError, setLineageError] = useState(null);
 
   useEffect(() => {
     // Reset when the selected skill changes; the fetch effect below refills it
-    // when a lineage tab is active.
-    setTab('content');
+    // when a lineage tab is active. Honours a deep-linked initial tab.
+    setTab(initialTab);
     setLineage(null);
     setLineageError(null);
     setLineageLoading(false);
@@ -856,7 +860,14 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         )}
         {isAgent && (
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            Agent skills are read-only here and can't be moved to the global pool directly. To share one, lift it into a team pool first via the Knowledge page, then promote that team skill to global using Promote to global above — both steps write provenance and skill.json lineage.
+            This skill lives inside a single agent. It can&apos;t be shared directly — copy it to a team first, then promote that team skill to global.{' '}
+            <Link
+              to={skill.teamId ? `/knowledge?team=${encodeURIComponent(skill.teamId)}` : '/knowledge'}
+              style={{ color: 'var(--eb-accent-primary)', fontStyle: 'normal' }}
+            >
+              Open the Knowledge page{skill.teamId ? ' for this team' : ''} →
+            </Link>{' '}
+            to lift it into a team pool, then use Promote to global on the resulting team skill. Both steps write provenance and skill.json lineage.
           </span>
         )}
       </div>
@@ -1104,6 +1115,12 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             style={{ background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', boxShadow: 'var(--eb-shadow-lg)', maxWidth: 900, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--eb-border-default)' }}>
               <strong style={{ fontSize: 'var(--eb-text-sm)' }}>Distill “{skill.name}”</strong>
+              {/* Primer so a first-time operator knows what distillation does (#1146) */}
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginTop: 4 }}>
+                Distilling re-synthesises the whole skill from everything that has accumulated in it — deduping
+                repeats, restructuring, and re-abstracting — so it stays tight as agents keep adding to it.
+                It only rewrites the wording; you review the diff below and apply it yourself.
+              </div>
             </div>
             <div style={{ padding: 16, overflow: 'auto', flex: 1 }}>
               {distill.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Re-synthesising the skill…</div>}
@@ -1201,7 +1218,7 @@ function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
     setDrafting(true);
     setDraftError(null);
     try {
-      const res = await fetch('/api/skills/merge-draft', {
+      const res = await assistFetch('/api/skills/merge-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sources, target: target(), heuristicOnly: !!heuristicOnly }),
@@ -1578,9 +1595,11 @@ export default function SkillsRegistry() {
   }, []);
 
   // Deep link (#774 AC5): `?skill=<name>&tier=<pool|team|agent>&team=<id>`
-  // preselects the tier filter and opens the named skill's viewer. The param is
-  // left on the URL, so a full-page reload of the link restores the same view.
-  // A consumed-ref guards against reopening the panel after the user closes it
+  // preselects the tier filter and opens the named skill's viewer. An optional
+  // `&tab=<content|versions|lineage|usage>` (#1143) opens straight on that detail
+  // tab — the drift chips in SkillPicker use `tab=lineage`. The param is left on
+  // the URL, so a full-page reload of the link restores the same view. A
+  // consumed-ref guards against reopening the panel after the user closes it
   // (the URL still carries the param until the next navigation/reload).
   const [searchParams] = useSearchParams();
   const deepLinkConsumed = useRef(false);
@@ -1591,6 +1610,8 @@ export default function SkillsRegistry() {
     if (!allSkills) return; // wait until the list has loaded to resolve the copy
     const tier = searchParams.get('tier') || 'pool';
     const team = searchParams.get('team') || undefined;
+    const tabParam = searchParams.get('tab');
+    const initialTab = VIEWER_TABS.some(t => t.id === tabParam) ? tabParam : undefined;
     const source = TIER_TO_SOURCE[tier] || 'pool';
     if (TIER_TO_FILTER[tier]) setFilter(TIER_TO_FILTER[tier]);
     // Prefer the real row from the loaded list (carries teamId/agentId), else a
@@ -1598,9 +1619,12 @@ export default function SkillsRegistry() {
     const match = (allSkills || []).find(s =>
       s.name === skillName && s.source === source &&
       (source !== 'team' || !team || s.teamId === team));
-    setSelectedSkill(match || {
-      name: skillName, source,
-      ...(source === 'team' && team ? { teamId: team } : {}),
+    setSelectedSkill({
+      ...(match || {
+        name: skillName, source,
+        ...(source === 'team' && team ? { teamId: team } : {}),
+      }),
+      ...(initialTab ? { initialTab } : {}),
     });
     deepLinkConsumed.current = true;
   }, [allSkills, searchParams]);
@@ -1799,6 +1823,21 @@ export default function SkillsRegistry() {
           <strong>Agent</strong> skills are read-only — lift one into a team pool first, then promote that team skill to global; use{' '}
           <em>Install into agent</em> to push a global skill into a running agent. Click a skill to browse its files.
         </p>
+        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
+          <strong>How skills reach an agent.</strong> Three distinct things sit behind the verbs on this page:{' '}
+          a <strong>grant</strong> is the <em>list of names</em> an agent (or its team) is entitled to;{' '}
+          <strong>seeding / activation</strong> is the moment those files are actually <em>copied</em> into the agent's
+          workspace (it reads them on its next message); and <em>Install into agent</em> is a <strong>one-off push</strong> of
+          a single skill — handy for a quick trial, but a later workspace reset re-seeds only the granted skills, so an
+          install that isn't also granted won't survive. Everything else (<em>Promote</em>, <em>Move</em>, <em>Adopt</em>,{' '}
+          <em>Distill</em>, <em>Merge</em>) just moves a skill between the Global and Team tiers above.
+        </p>
+        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
+          <strong>Skills vs Knowledge vs Memory.</strong> <strong>Memory</strong> is what one agent privately remembers;{' '}
+          <strong>Knowledge</strong> is lessons shared across the team; <strong>Skills</strong> (this page) are the polished,
+          reusable instruction files agents load automatically — often distilled from the best knowledge.{' '}
+          <Link to="/knowledge" style={{ color: 'var(--eb-accent-primary)' }}>See how the knowledge system works →</Link>
+        </p>
       </div>
 
       {/* Import feedback */}
@@ -1887,7 +1926,7 @@ export default function SkillsRegistry() {
         columns={columns}
         data={filteredSkills}
         onRowClick={openSkill}
-        emptyText="No skills found."
+        emptyText="No skills yet. Use “+ New Skill” to create one, “Import skill” to load an existing bundle, or promote lessons from the Knowledge page."
         getRowKey={row => `${row.source}:${row.agentId ?? ''}:${row.teamId ?? ''}:${row.name}`}
       />
 

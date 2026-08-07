@@ -4,7 +4,7 @@ set -euo pipefail
 # Generate .env.e2e at the repo root for the disposable `aee-e2e` stack
 # (#666, docs/e2e-testing-concept.md §5). Fixed admin credentials + isolated
 # ports/project so the e2e stack never collides with the developer's normal
-# `vgh-claw` stack. The LLM proxy vars point at a dead address — the fake
+# `agent-studio` stack. The LLM proxy vars point at a dead address — the fake
 # `claude` shim (AEE_FAKE_CLAUDE=1) is what actually answers, so no real
 # endpoint is ever reached.
 #

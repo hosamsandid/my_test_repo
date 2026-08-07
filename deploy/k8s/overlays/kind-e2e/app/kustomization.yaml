@@ -1,0 +1,8 @@
+# kind e2e overlay — the app stack plus the in-cluster fakes (fake-github,
+# git-remote). The fakes carry no envFrom, so folding them into app/ preserves
+# the Secret-before-app ordering.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/app
+  - ../../../base/e2e

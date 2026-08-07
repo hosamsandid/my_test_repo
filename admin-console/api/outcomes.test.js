@@ -42,16 +42,42 @@ test('validateOutcomes rejects an unknown mode', () => {
   assert.match(v.error, /mode/);
 });
 
-test('validateOutcomes rejects a human:* label as a setLabel target', () => {
-  const v = validateOutcomes({ mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'human:approve' }] }] });
+// #928 AC4 — a setLabel onto a human gate is rejected on the FLAG basis. The name
+// is irrelevant: `approved-for-dispatch` carries no `human:` prefix.
+test('validateOutcomes rejects a FLAGGED human-gate label as a setLabel target', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'approved-for-dispatch' }] }] };
+  const v = validateOutcomes(port, { labels: [{ name: 'approved-for-dispatch', humanGate: true }] });
   assert.equal(v.ok, false);
-  assert.match(v.error, /gate\/brake/);
+  assert.match(v.error, /human-gate/);
 });
 
-test('validateOutcomes rejects a brake label (hold / needs:human)', () => {
+test('validateOutcomes rejects a gate declared by a channel `gate: \'human\'` port', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'design-approved' }] }] };
+  const v = validateOutcomes(port, {
+    agents: [{ id: 'dev', channels: [{ artifact: 'issue', from: 'x', label: 'design-approved', gate: 'human' }] }],
+  });
+  assert.equal(v.ok, false);
+});
+
+// #928 AC8 — the `human:` naming convention is retired: with no flag, the label
+// is a plain agent label and a perfectly legal outcome.
+test('validateOutcomes ACCEPTS an unflagged `human:`-named label (name convention retired)', () => {
+  const v = validateOutcomes({ mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'human:approve' }] }] });
+  assert.equal(v.ok, true);
+});
+
+// #928 AC3 — a brake pauses the loop but IS agent-applied (the reworker setting
+// `human-decision-required`), so it must not be rejected as an outcome.
+test('validateOutcomes ACCEPTS a brake label as a setLabel target', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'human-decision-required' }] }] };
+  const v = validateOutcomes(port, { labels: [{ name: 'human-decision-required', humanGate: false, brake: true }] });
+  assert.equal(v.ok, true);
+});
+
+test('validateOutcomes: the old hardcoded brake names carry no meaning of their own', () => {
   for (const label of ['hold', 'needs:human']) {
     const v = validateOutcomes({ mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label }] }] });
-    assert.equal(v.ok, false, `expected ${label} rejected`);
+    assert.equal(v.ok, true, `expected ${label} accepted without a flag`);
   }
 });
 
@@ -154,6 +180,13 @@ test('slugifyOutcome makes a stable id from a label', () => {
   assert.equal(slugifyOutcome('ready-2'), 'ready-2');
   assert.equal(slugifyOutcome('stage:build'), 'stage-build');
   assert.equal(slugifyOutcome('!!!'), 'outcome');
+  // Leading/trailing separator runs are trimmed; interior dashes are preserved.
+  assert.equal(slugifyOutcome('  ready  '), 'ready');
+  assert.equal(slugifyOutcome('---ready---'), 'ready');
+  assert.equal(slugifyOutcome('a--b'), 'a--b');
+  assert.equal(slugifyOutcome('----'), 'outcome');
+  // A long run of separators must not blow up (js/polynomial-redos regression).
+  assert.equal(slugifyOutcome('-'.repeat(100000) + 'x'), 'x');
 });
 
 // ─── bundle round-trip (AC1) ─────────────────────────────────────────────────
@@ -206,9 +239,21 @@ test('AC1: outcomes round-trip draft → materialise → member config → expor
 test('AC1: an invalid outcomes port fails validateProcessTemplate with the role id', () => {
   const bad = {
     processTemplateVersion: 1, name: 'x', level: 'template',
-    roles: [{ id: 'r', outcomes: { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'human:go' }] }] } }],
+    roles: [{ id: 'r', outcomes: { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel' }] }] } }],
   };
   const v = validateProcessTemplate(bad);
+  assert.equal(v.ok, false);
+  assert.match(v.error, /role r:/);
+});
+
+// #928 AC6 — the bundle's own `labels[]` registry is the gate authority for the
+// outcomes it validates: the same role passes or fails purely on the flag.
+test('AC1/#928: a role outcome setting a bundle-flagged gate label fails validation', () => {
+  const role = { id: 'r', outcomes: { mode: 'anyOf', options: [{ id: 'a', actions: [{ type: 'setLabel', label: 'approved-for-dispatch' }] }] } };
+  const base = { processTemplateVersion: 1, name: 'x', level: 'template', roles: [role] };
+  assert.equal(validateProcessTemplate(base).ok, true, 'no registry → plain agent label');
+  const gated = { ...base, labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }] };
+  const v = validateProcessTemplate(gated);
   assert.equal(v.ok, false);
   assert.match(v.error, /role r:/);
 });
@@ -278,11 +323,51 @@ test('AC2: outcomes openPr projects the github produce flag + node badge (unifie
     'openPr outcome satisfies the producer requirement');
 });
 
-test('gate-violation still fires if a human:* label reaches the emit index (defence in depth)', () => {
+test('gate-violation still fires if a FLAGGED gate label reaches the emit index (defence in depth)', () => {
   // validateOutcomes blocks this at write time, but the graph must still flag it
   // if it somehow lands (the projection routes setLabel labels through n.emits).
-  const g = buildProcessGraph([
-    { id: 'rogue', role: 'agent', triggers: [], emits: ['human:approve'] },
-  ]);
+  const g = buildProcessGraph(
+    [{ id: 'rogue', role: 'agent', triggers: [], emits: ['approved-for-dispatch'] }],
+    { labels: [{ name: 'approved-for-dispatch', humanGate: true, brake: false }] },
+  );
   assert.ok(g.lints.some(l => l.code === 'gate-violation'));
+  // …and the same emit is clean without the flag (#928 AC8).
+  const plain = buildProcessGraph([{ id: 'rogue', role: 'agent', triggers: [], emits: ['approved-for-dispatch'] }]);
+  assert.ok(!plain.lints.some(l => l.code === 'gate-violation'));
+});
+
+// ─── #1004: open-end markers (terminal / external) ───────────────────────────
+
+test('#1004: validateOutcomes accepts and gates the open-end markers', () => {
+  const opt = (extra) => ({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'openPr' }], ...extra }] });
+  assert.equal(validateOutcomes(opt({ terminal: true })).ok, true);
+  assert.equal(validateOutcomes(opt({ external: {} })).ok, true);
+  assert.equal(validateOutcomes(opt({ external: { note: 'CI workflow' } })).ok, true);
+  // Gated shapes.
+  assert.match(validateOutcomes(opt({ terminal: false })).error, /terminal must be true/);
+  assert.match(validateOutcomes(opt({ external: 'yes' })).error, /external must be an object/);
+  assert.match(validateOutcomes(opt({ external: { note: 42 } })).error, /note must be a string/);
+  assert.match(validateOutcomes(opt({ terminal: true, external: {} })).error, /mutually exclusive/);
+});
+
+test('#1004: normalizeOutcomes round-trips the markers and trims the note', () => {
+  const n = normalizeOutcomes({ mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'openPr' }], terminal: true },
+    { id: 'b', actions: [{ type: 'openIssue' }], external: { note: '  platform team  ' } },
+    { id: 'c', actions: [{ type: 'none' }] },
+  ] });
+  assert.equal(n.options[0].terminal, true);
+  assert.deepEqual(n.options[1].external, { note: 'platform team' });
+  assert.ok(!('terminal' in n.options[2]) && !('external' in n.options[2]));
+  // Idempotent — a second normalize changes nothing.
+  assert.deepEqual(normalizeOutcomes(n), n);
+});
+
+test('#1004: substituteOutcomes carries the markers and substitutes the note', () => {
+  const s = substituteOutcomes({ mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'openPr' }], terminal: true },
+    { id: 'b', actions: [{ type: 'openIssue' }], external: { note: 'CI on {{repoFullName}}' } },
+  ] }, (t) => t.replace('{{repoFullName}}', 'org/repo'));
+  assert.equal(s.options[0].terminal, true);
+  assert.deepEqual(s.options[1].external, { note: 'CI on org/repo' });
 });

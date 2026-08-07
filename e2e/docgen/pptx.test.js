@@ -22,33 +22,40 @@ const sampleManifest = JSON.parse(fs.readFileSync(path.join(ARTIFACTS, 'sample',
 
 // --- pure model ---------------------------------------------------------------
 
-test('model: section slide first, then one content slide per narrative/visual step', () => {
+test('model: only visual steps make slides; all narrative folds into their notes', () => {
   const { slides, journeyCount } = buildDeckModel([sample], { sample: sampleManifest });
   assert.equal(journeyCount, 1);
-  // sample.yaml: 1 section + 4 steps, all of which have narrative → 5 slides.
-  assert.equal(slides.length, 5);
-  assert.deepEqual(slides.map((s) => s.type), ['section', 'concept', 'step', 'step', 'concept']);
+  // sample.yaml: intro (prose-only) + landing (screenshot) + no-shot (prose) +
+  // outro (prose). Only `landing` carries a visual, so the deck is: section + the
+  // landing slide — no prose-only content slides.
+  assert.deepEqual(slides.map((s) => s.type), ['section', 'step']);
   assert.equal(slides[0].title, 'Sample Journey');
   // The `landing` step has a captured screenshot in the manifest → image ref.
   const landing = slides.find((s) => s.stepId === 'landing');
   assert.deepEqual(landing.image, { kind: 'screenshot', journeyId: 'sample', file: 'landing.png' });
-  // The `no-shot` step has narrative but no capture → no image, notes only.
-  const noShot = slides.find((s) => s.stepId === 'no-shot');
-  assert.equal(noShot.image, null);
-  assert.match(noShot.notes, /only prose renders here/);
+  // Its notes carry the buffered lead-in intro, its own narrative, and the
+  // trailing no-shot + outro narrative — all four, verbatim.
+  assert.match(landing.notes, /This is the chapter introduction/);
+  assert.match(landing.notes, /Here is the landing page/);
+  assert.match(landing.notes, /only prose renders here/);
+  assert.match(landing.notes, /And that wraps up the sample journey/);
+  // Order preserved: the intro lead-in precedes the landing step's own prose.
+  assert.ok(
+    landing.notes.indexOf('chapter introduction') < landing.notes.indexOf('Here is the landing page'),
+  );
 });
 
-test('model: pure-plumbing steps (no narrative, no visual) produce no slide', () => {
+test('model: a journey with no visual parks its narrative on the section notes, no prose slide', () => {
   const journey = {
     id: 'plumb', title: 'Plumbing', order: 1,
     steps: [
-      { id: 'login', action: { do: 'auth.login' } }, // no narrative, no screenshot
-      { id: 'shown', narrative: 'Visible prose.' },
+      { id: 'login', action: { do: 'auth.login' } }, // no narrative, no screenshot → nothing
+      { id: 'shown', narrative: 'Visible prose.' }, // narrative, no visual → onto section notes
     ],
   };
   const { slides } = buildDeckModel([journey], {});
-  assert.deepEqual(slides.map((s) => s.type), ['section', 'step']);
-  assert.equal(slides[1].stepId, 'shown');
+  assert.deepEqual(slides.map((s) => s.type), ['section']);
+  assert.match(slides[0].notes, /Visible prose\./);
 });
 
 test('model: narrative-only step with a static visual becomes a concept slide with a visual ref', () => {
@@ -84,7 +91,7 @@ test('deck builds from the fixture and passes structural validation', async () =
   const expectedNotes = model.slides.filter((s) => s.notes).map((s) => s.notes);
   const result = await validateDeck(buffer, { expectedSlides: model.slides.length, expectedNotes });
   assert.equal(result.ok, true, `validation errors: ${result.errors.join('; ')}`);
-  assert.equal(result.slideCount, 5);
+  assert.equal(result.slideCount, 2);
   assert.equal(result.errors.length, 0);
 });
 
@@ -100,7 +107,7 @@ test('validation flags a slide-count mismatch', async () => {
   const { buffer } = await buildFixtureDeck();
   const result = await validateDeck(buffer, { expectedSlides: 99 });
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((e) => /slide count 5 does not match expected 99/.test(e)));
+  assert.ok(result.errors.some((e) => /slide count 2 does not match expected 99/.test(e)));
 });
 
 test('validation flags a missing narrative in the notes', async () => {

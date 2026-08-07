@@ -21,7 +21,13 @@ const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 // log line rather than breaking the whole listing).
 function loadProcessTemplate(dir, id) {
   if (!TEMPLATE_ID_RE.test(id)) return null;
-  const p = path.join(dir, id + '.json');
+  // Containment guard: CodeQL does not model TEMPLATE_ID_RE.test() as a
+  // sanitiser, so resolve the target and confirm it stays inside `dir` before
+  // any fs access (the house idiom, cf. draftPath in api.js).
+  const base = path.resolve(dir);
+  const p = path.resolve(base, id + '.json');
+  const rel = path.relative(base, p);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   let raw;
   try {
     if (!fs.existsSync(p)) return null;

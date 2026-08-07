@@ -15,6 +15,11 @@
 // Pure (no IO) so it is unit-testable; the api wires it with the on-disk
 // users/memberships indexes.
 
+// Default Agent-Chat transcript font size in px (#1437). Kept in sync with
+// CHAT_FONT_SIZE_DEFAULT in orchestrator/teams-store.js (the authoritative
+// validator) — the two live in separate images, so the constant is duplicated.
+const CHAT_FONT_SIZE_DEFAULT = 12;
+
 function computeScope({ username, adminUsername, users = [], memberships = [] } = {}) {
   // No identity → see nothing (the auth gate normally guarantees a username;
   // this is a defensive fail-closed default, never reached for the env admin).
@@ -66,6 +71,33 @@ function visibleAgent(scope, agent) {
     return agent.ownerId === scope.userId;
   }
   return true;
+}
+
+// ── Agent → human tenant resolution ─────────────────────────────────────────
+//
+// An agent's `teamId` names its human **Team** — the tenant every ownership,
+// visibility and credential-scoping decision is keyed on. A `team-member` also
+// carries `parentTeamId`, which is the id of its **Agent Team** construct (a
+// `role: "team"` agent). Those are two different namespaces, and reading
+// `parentTeamId` as a tenant only appears to work while an Agent Team happens
+// to share its id with a human Team; otherwise it names a team that does not
+// exist and every team-scoped lookup fails closed on an empty result.
+//
+// Per docs/teams-data-model.md a team-member inherits its parent Agent Team's
+// `teamId`, so resolve the parent and read *its* tenant — one hop, since a team
+// agent never carries a `parentTeamId` of its own. Falls back to the member's
+// own stamp when the parent is missing or unstamped.
+//
+// `loadAgentConfig(id) -> config | null` is injected so this stays pure.
+// Mirrored by resolveAgentTenant in orchestrator/agent-tenant.js (separate
+// images, so the logic is duplicated rather than shared).
+function resolveAgentTenant(cfg, loadAgentConfig) {
+  const parentId = cfg && cfg.parentTeamId;
+  if (parentId && typeof loadAgentConfig === 'function') {
+    const parent = loadAgentConfig(parentId);
+    if (parent && parent.teamId) return parent.teamId;
+  }
+  return (cfg && cfg.teamId) || 'default';
 }
 
 // ── Admin surface (Teams / Users / Memberships) scoping & gating (#584) ──────
@@ -137,6 +169,33 @@ function visibleCredential(scope, cred) {
   return canManageTeam(scope, c.teamId);
 }
 
+// ── Assist model selection — selection (usage) visibility (#1210) ────────────
+//
+// The global assist model selector (Flow Copilot, Generate agent prompt, port
+// suggestions, Knowledge drafting, skill merge, orchestrator syntheses) must
+// bill against a provider the acting user's teams are entitled to *use*. This is
+// deliberately DISTINCT from visibleCredential (the management rule, Team-Admin-
+// oriented): a plain Team Member may run the Flow Copilot billed against their
+// team's provider — exactly as their agents already do via
+// usableEndpointsForTeam (api.js). So selection is membership-based (any role),
+// not gated on canManageTeam.
+//
+//   A user may select provider P iff `scope.all`, OR P is usable by at least one
+//   team the user is a member of: P is team-scoped with P.teamId ∈ teamIds, or
+//   system-scoped with assignedTeamIds ∩ teamIds ≠ ∅.
+//
+// Additional filter: `oauth-token` providers are never selectable — subscription
+// CLI-seat tokens must not be spent on server-side /v1/messages calls (mirrors
+// resolveAssistTarget's env fallback), and they carry no baseUrl.
+function assistSelectableEndpoint(scope, ep) {
+  if (!scope || !ep) return false;
+  if (ep.authType === 'oauth-token') return false;
+  if (scope.all) return true;
+  const c = normalizeCredential(ep);
+  if (c.scope === 'team') return scope.teamIds.has(c.teamId);
+  return c.assignedTeamIds.some(t => scope.teamIds.has(t));
+}
+
 // May the caller edit/delete THIS existing credential? A Team Admin may manage
 // team-scoped credentials of a team they administer, never system-scoped ones
 // (AC5); System Admins may manage all.
@@ -175,6 +234,38 @@ function credentialVisibleToTeam(cred, teamId) {
   return c.teamId === t;
 }
 
+// ── Config-write authorization for agents / environments (#989) ─────────────
+//
+// The #302/#584 model gives list/read endpoints a *visibility* filter
+// (visibleAgent / visibleTeam) and the Teams admin surface a *management* gate
+// (canManageTeam). The core config-write endpoints — agent config, triggers,
+// prompt/model/provider, environment CRUD — were previously either unguarded or
+// gated only on visibility, so a Team Member (or a member of an unrelated team)
+// could mutate them. These predicates apply the same management gate as
+// canManageCredential, keyed on the *resource's* owning team: write authorization
+// requires the team-admin role of the owning team (or full-visibility admin),
+// never mere visibility. All admins keep `all: true` (no single-operator
+// regression).
+
+// May the caller create / edit / delete / re-parent this agent? Team Admin of
+// the agent's owning team, or a full-visibility admin. Callers pass the resolved
+// owning team on `agent.teamId` (agentTeamId = parentTeamId||teamId, single-
+// sourced in the api layer via agentMetaForScope), mirroring canManageCredential.
+function canManageAgent(scope, agent) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return canManageTeam(scope, (agent && agent.teamId) || 'default');
+}
+
+// May the caller create / edit / delete this environment (or its MCP
+// credentials)? Team Admin of the resource's owning team, or a full-visibility
+// admin. A missing teamId collapses to the default team, mirroring visibleTeam.
+function canManageEnvironment(scope, env) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return canManageTeam(scope, (env && env.teamId) || 'default');
+}
+
 // ── Token-usage statistics visibility (#801) ────────────────────────────────
 //
 // The Token Usage statistics view (token/cost figures) is, for now, a
@@ -197,24 +288,51 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
   const scope = computeScope({ username, adminUsername, users, memberships });
   const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername));
   const teams = [...scope.roles.entries()].map(([teamId, role]) => ({ teamId, role }));
+  // Surface the caller's own GitHub handle (#1385) so the session knows who to
+  // assign a parent tracker ticket to. Present only for a known user record;
+  // the env single-admin credential has no user record and so carries none.
+  const self = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
+  const githubHandle = (self && typeof self.githubHandle === 'string') ? self.githubHandle : '';
+  // Per-user Agent-Chat transcript font size (#1437). Read the caller's own
+  // stored preference; anyone without a set value — including the env
+  // single-admin, which has no user record — gets the 12px default.
+  const chatFontSize = (self && Number.isFinite(self.chatFontSize))
+    ? self.chatFontSize
+    : CHAT_FONT_SIZE_DEFAULT;
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
     systemAdmin: scope.all && !envAdmin, // a non-env-admin with full visibility is a System-Admin user
     userId: scope.userId,
+    githubHandle,
+    chatFontSize,
     teams,
   };
+}
+
+// Is this authz descriptor a subject the console actually knows — the env
+// single-admin or a registered user-store record? Basis for the IAP auto-login
+// gate (#1415): only known principals get a silent session; anyone else who
+// merely passed Google IAP falls through to the login form. Fail-closed on
+// missing/partial input.
+function isKnownPrincipal(authz) {
+  return !!(authz && (authz.envAdmin || authz.userId != null));
 }
 
 module.exports = {
   computeScope,
   visibleTeam,
   visibleAgent,
+  resolveAgentTenant,
   canManageTeam,
+  canManageAgent,
+  canManageEnvironment,
   visibleUser,
   describeAuthz,
+  isKnownPrincipal,
   normalizeCredential,
   visibleCredential,
+  assistSelectableEndpoint,
   canManageCredential,
   canCreateCredential,
   canReassignCredential,

@@ -11,6 +11,8 @@ const {
   buildMemoryHint,
   interactionNote,
   workingEnvironmentSection,
+  contextMountSection,
+  contextMountsSection,
   blueprintSection,
   envHasRepository,
   hasSkillGrant,
@@ -124,6 +126,142 @@ test('without knowledgeDigestRef no digest import appears (autonomy 0 / no KB)',
   assert.ok(!md.includes('Team Knowledge (digest)'));
 });
 
+// ---- read-only host context folder (#1283 mount, #1286 prompt block) --------
+
+test('contextMount emits the Read-only Context Folder section next to Workspace', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/SharePointSync/ProjectX',
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Read-only Context Folder'));
+  assert.strictEqual(order.indexOf('Read-only Context Folder'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes('`/context`'));
+  assert.ok(md.includes('/host/SharePointSync/ProjectX'));
+  // The two things an agent gets wrong on its own.
+  assert.match(md, /live view/i);
+  assert.match(md, /cannot write/i);
+});
+
+test('without a contextMount the prompt never mentions /context (byte-identical to before)', () => {
+  const without = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
+  assert.ok(!without.includes('/context'));
+  assert.ok(!without.includes('Read-only Context Folder'));
+  // An empty / whitespace-only value is the same as no mount at all.
+  for (const empty of [null, '', '   ', undefined]) {
+    assert.strictEqual(
+      assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMount: empty }),
+      without,
+    );
+  }
+});
+
+test('contextMountSection is gated on a non-empty host path', () => {
+  assert.strictEqual(contextMountSection(''), '');
+  assert.strictEqual(contextMountSection(null), '');
+  assert.strictEqual(contextMountSection('  '), '');
+  assert.ok(contextMountSection('/host/data').startsWith('## Read-only Context Folder'));
+});
+
+// #1289: a read-write mount must NOT be told the folder is read-only — otherwise
+// an agent following its own prompt declines to write even when the admin enabled it.
+test('contextMountRw emits write-aware wording, never the read-only prohibition', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/SharePointSync/ProjectX', contextMountRw: true,
+  });
+  const order = headings(md);
+  assert.ok(order.includes('Host Context Folder'));
+  assert.ok(!order.includes('Read-only Context Folder'));
+  assert.strictEqual(order.indexOf('Host Context Folder'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes('`/context`'));
+  assert.ok(md.includes('/host/SharePointSync/ProjectX'));
+  assert.match(md, /read-write/i);
+  assert.match(md, /can write/i);
+  // The read-only prohibition must be gone in RW mode.
+  assert.ok(!/cannot write/i.test(md));
+});
+
+test('contextMountSection wording is access-mode aware; read-only default is unchanged', () => {
+  const ro = contextMountSection('/host/data');
+  const rw = contextMountSection('/host/data', true);
+  // Read-only default stays byte-identical whether the flag is omitted or false (AC7).
+  assert.strictEqual(contextMountSection('/host/data', false), ro);
+  assert.ok(ro.startsWith('## Read-only Context Folder'));
+  assert.match(ro, /cannot write/i);
+  assert.ok(rw.startsWith('## Host Context Folder'));
+  assert.match(rw, /can write/i);
+  assert.ok(!/cannot write/i.test(rw));
+});
+
+// AC7: a read-write agent's assembled prompt still matches contextMountSection's
+// RW output exactly — the flag is threaded end to end, not dropped mid-pipeline.
+test('assembleClaudeMd threads contextMountRw through to the section', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMount: '/host/data', contextMountRw: true,
+  });
+  assert.ok(md.includes(contextMountSection('/host/data', true)));
+});
+
+// ---- multiple host folders (#1290) -----------------------------------------
+
+test('contextMountsSection enumerates every folder with its target and mode (AC4)', () => {
+  const s = contextMountsSection([
+    { path: '/host/req', target: '/context/requirements' },
+    { path: '/host/design', target: '/context/design', readWrite: true },
+  ]);
+  assert.ok(s.startsWith('## Context Folders'));
+  assert.ok(s.includes('`/context/requirements`'));
+  assert.ok(s.includes('/host/req'));
+  assert.ok(s.includes('`/context/design`'));
+  assert.ok(s.includes('/host/design'));
+  // The read-only folder is told it cannot write; the read-write one is not.
+  assert.match(s, /`\/context\/requirements`.*read-only.*cannot write/);
+  assert.match(s, /`\/context\/design`.*read-write.*written straight back/);
+});
+
+test('contextMountsSection is empty for an empty / invalid list', () => {
+  assert.strictEqual(contextMountsSection([]), '');
+  assert.strictEqual(contextMountsSection(null), '');
+  assert.strictEqual(contextMountsSection([{ target: '/context/x' }]), ''); // no path → filtered out
+});
+
+test('assembleClaudeMd: multi-folder contextMounts renders the enumerated section', () => {
+  const mounts = [
+    { path: '/host/req', target: '/context/requirements' },
+    { path: '/host/design', target: '/context/design', readWrite: true },
+  ];
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMounts: mounts });
+  const order = md.split('\n').filter(l => l.startsWith('## ')).map(l => l.replace('## ', ''));
+  assert.ok(order.includes('Context Folders'));
+  assert.strictEqual(order.indexOf('Context Folders'), order.indexOf('Workspace') + 1);
+  assert.ok(md.includes(contextMountsSection(mounts)));
+  assert.ok(!md.includes('Read-only Context Folder'));
+});
+
+test('assembleClaudeMd: a single resolved folder at bare /context is byte-identical to the single-folder section (AC9/AC7)', () => {
+  const viaList = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMounts: [{ path: '/host/data', target: '/context', readWrite: false }],
+  });
+  const viaLegacy = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null, contextMount: '/host/data',
+  });
+  assert.strictEqual(viaList, viaLegacy);
+  assert.ok(viaList.includes('## Read-only Context Folder'));
+});
+
+test('assembleClaudeMd: a single folder at a /context/<slug> target uses the enumerated section', () => {
+  const md = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: null,
+    contextMounts: [{ path: '/host/req', target: '/context/requirements' }],
+  });
+  assert.ok(md.includes('## Context Folders'));
+  assert.ok(md.includes('`/context/requirements`'));
+  assert.ok(!md.includes('## Read-only Context Folder'));
+});
+
 // ---- unified Memory System variant (unification Phase 2) --------------------
 
 test('knowledgeDigestRef swaps the Memory System section to the unified variant', () => {
@@ -166,6 +304,26 @@ test('Trigger docs are injected only for autonomous agents', () => {
   const dm = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: false });
   assert.ok(auto.includes('## Trigger management'));
   assert.ok(!dm.includes('## Trigger management'));
+});
+
+test('the injected Trigger-management block documents the loop trigger and its stop contract (#937)', () => {
+  const auto = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: true });
+  // The loop type and its distinguishing "repeat until" framing are present.
+  assert.ok(auto.includes('**Loop (loop):**'));
+  assert.ok(auto.includes('"type": "loop"'));
+  // Stop-contract fields: maxIterations (required), until, maxTokens, verify + outcomes.
+  assert.ok(auto.includes('`maxIterations` is **required**'));
+  assert.ok(auto.includes('until.command'));
+  assert.ok(auto.includes('maxTokens'));
+  assert.ok(/done|exhausted|paused/.test(auto));
+  // Separate-verifier ("don't grade your own work") rule, incl. the flow
+  // hand-off form (verification delegated to the wired downstream QS chain).
+  assert.ok(/Don't grade your own work/i.test(auto));
+  assert.ok(auto.includes('selfGraded'));
+  assert.ok(auto.includes('{"flow": true}'));
+  // A non-autonomous agent never sees any of it (no Trigger section at all).
+  const dm = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous: false });
+  assert.ok(!dm.includes('**Loop (loop):**'));
 });
 
 test('interaction note gains the unattended-run framing only when autonomous', () => {

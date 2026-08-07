@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight,
+  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat, Ticket,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
 import { systemEventSummary, systemEventHasDetail } from './system-event.js';
+import { buildSystemInitView } from './system-init.js';
+import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
 
 /**
  * One row in the SessionLogPanel.
@@ -54,6 +56,8 @@ function iconForType(type) {
     case 'system_init':      return Cpu;
     case 'system_event':     return Settings2;
     case 'trigger.fired':    return Clock;
+    case 'ticket.bound':
+    case 'ticket.unbound':   return Ticket;
     case '_truncated':       return AlertTriangle;
     default:                 return MessageCircle;
   }
@@ -75,8 +79,10 @@ function colorForType(type) {
 export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseLeave }) {
   const [expanded, setExpanded] = useState(false);
   const type = event?.type || 'unknown';
-  const Icon = iconForType(type);
-  const iconColor = colorForType(type);
+  // A loop iteration reads as a loop, not a generic trigger (#1155 AC7).
+  const loopFired = isLoopFired(event);
+  const Icon = loopFired ? Repeat : iconForType(type);
+  const iconColor = loopFired ? 'var(--eb-status-warning)' : colorForType(type);
 
   // Tool-pair short-circuit: SessionLogPanel pre-merges adjacent
   // tool_use+tool_result into a single { kind: 'tool', toolUse, toolResult }
@@ -178,6 +184,10 @@ function hasExpansion(ev) {
     case 'system_event':
       // Expandable only when `raw` carries content beyond the subtype label.
       return systemEventHasDetail(ev);
+    case 'system_init':
+      // Expandable only when #980 provenance was captured (legacy rows have no
+      // extra detail to reveal).
+      return !!(ev.provenance);
     default:
       return false;
   }
@@ -309,6 +319,23 @@ function Body({ event, expanded }) {
         </div>
       );
     case 'trigger.fired':
+      // A loop iteration is visually a loop and carries its number (#1155 AC7),
+      // instead of the bare "Trigger fired: <id>".
+      if (isLoopFired(event)) {
+        return (
+          <div style={baseStyle}>
+            <span style={{ color: 'var(--eb-status-warning)', fontWeight: 'var(--eb-font-semibold)' }}>
+              {loopFiredLabel(event)}
+            </span>
+            {' · '}
+            <code style={{
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+            }}>{event.triggerId || event.id || ''}</code>
+          </div>
+        );
+      }
       return (
         <div style={baseStyle}>
           Trigger fired: <code style={{
@@ -317,18 +344,63 @@ function Body({ event, expanded }) {
           }}>{event.triggerId || event.id || 'unknown'}</code>
         </div>
       );
-    case 'system_init':
+    case 'ticket.bound': {
+      // Parent-ticket binding recorded when a human links this room to a GitHub
+      // issue (#1383, AC5).
+      const label = event.repo && event.number
+        ? `${event.repo} #${event.number}`
+        : (event.number ? `#${event.number}` : 'an issue');
+      return (
+        <div style={baseStyle}>
+          Bound to parent ticket <span style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>{label}</span>
+          {event.title ? <span style={{ color: 'var(--eb-text-muted)' }}> — {event.title}</span> : null}
+        </div>
+      );
+    }
+    case 'ticket.unbound':
+      return <div style={baseStyle}>Parent ticket unbound</div>;
+    case 'system_init': {
+      // #980: model + Model-Provider provenance in one compact opening row;
+      // full detail (provider, auth, endpoint, requested vs effective model,
+      // session id) on expand. Legacy rows (no provenance) render as before.
+      const view = buildSystemInitView(event);
       return (
         <div style={baseStyle}>
           Session init: <code style={{
             fontFamily: 'var(--eb-font-mono)',
             color: 'var(--eb-text-primary)',
-          }}>{event.model || 'unknown'}</code>
-          {event.sessionId && (
-            <span style={{ color: 'var(--eb-text-muted)' }}> ({event.sessionId})</span>
+          }}>{view.model}</code>
+          {view.requestedModel && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> (requested: {view.requestedModel})</span>
+          )}
+          {view.providerText && (
+            <span style={{ color: 'var(--eb-text-secondary)' }}> · {view.providerText}</span>
+          )}
+          {view.sessionId && (
+            <span style={{ color: 'var(--eb-text-muted)' }}> ({view.sessionId})</span>
+          )}
+          {expanded && view.detail && (
+            <div style={{
+              marginTop: 4,
+              paddingLeft: 8,
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              columnGap: 8,
+              rowGap: 1,
+              fontSize: 'var(--eb-text-xs)',
+              fontFamily: 'var(--eb-font-mono)',
+            }}>
+              {view.detail.map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <span style={{ color: 'var(--eb-text-muted)' }}>{k}</span>
+                  <span style={{ color: 'var(--eb-text-secondary)', overflowWrap: 'anywhere' }}>{v}</span>
+                </React.Fragment>
+              ))}
+            </div>
           )}
         </div>
       );
+    }
     case 'error': {
       const msg = event.message || '';
       const display = expanded ? msg : truncate(msg, COMPACT);

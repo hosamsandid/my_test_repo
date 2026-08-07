@@ -1,18 +1,31 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Ticket, ExternalLink, X, Plus, Minus, Type } from 'lucide-react';
+import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
+import { useAuth } from '../../auth/AuthContext';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
+import { useTranscriptionSession } from '../../context/TranscriptionSessionContext.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import { TriggerForm } from './TriggersPanel';
+import { isLaunchedLoop } from './trigger-summary.js';
+import { latestLoopProgress } from './loop-run-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
+import { describeTicket, NO_TICKET_LABEL, parseIssueRefInput } from './ticket-view.js';
+import {
+  MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
+  resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
+} from './chat-font-size.js';
 
-// Default prompt sent when the user clicks "Full Learn". The agent
+// Default prompt sent when the user clicks "Save & Learn". The agent
 // continues in its current Claude session (so it has full conversational
 // context), is asked to consolidate that context into the memory files
 // AND to share durable, team-useful lessons via the knowledge CLI, then
@@ -101,8 +114,8 @@ export default function ChatPanel({
 
   // Active Claude `--resume <sessionId>` pointer for this (agent, room).
   // The pointer file is written by the runner after every successful
-  // invocation and read back here so the UI can show a "Session active"
-  // badge and offer reset controls.
+  // invocation and read back here so the UI can gate the reset/learn
+  // controls on whether a resumable session exists.
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
@@ -112,12 +125,38 @@ export default function ChatPanel({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
 
+  // Chat-launched loops (#1020): a loop is started from the composer, runs as
+  // a launched run visible here, and can be stopped. `activeLoop` is the
+  // running launched-loop trigger (or null); we poll the agent's triggers to
+  // reflect its lifecycle (it self-removes on any terminal outcome).
+  const [loopDialogOpen, setLoopDialogOpen] = useState(false);
+  const [activeLoop, setActiveLoop] = useState(null);
+  // Re-launch pre-fill (#1231): when a finished-loop record's "Start again"
+  // button is pressed, seed the launcher with that loop's settings. null = a
+  // blank launcher (the composer "+" path). A fresh loop is created on submit
+  // (the record's trigger id is never carried), so the original record stays
+  // unchanged.
+  const [relaunchValues, setRelaunchValues] = useState(null);
+  // Live progress of the running loop (#1155): `{ iteration, maxIterations }`
+  // or null (neutral running state), derived from the numbered `trigger.fired`
+  // session-log rows at the same cadence as the trigger poll.
+  const [loopProgress, setLoopProgress] = useState(null);
+  const [loopBusy, setLoopBusy] = useState(false);
+  const [showStopLoopConfirm, setShowStopLoopConfirm] = useState(false);
+  // A chat-turn stop request is in flight (#1427). Distinct from `loopBusy`
+  // (loop lifecycle) so the unified Stop button reflects either abort path.
+  const [stopping, setStopping] = useState(false);
+
   // Per-agent model selection. `modelOptions` is the resolved snapshot from
   // /api/agents/:id/model-options: which endpoint the agent is bound to,
   // what catalog it offers, the env-level default, and the per-agent
   // override. `modelSwitching` blocks rapid double-clicks during the PATCH.
   const [modelOptions, setModelOptions] = useState(null);
   const [modelSwitching, setModelSwitching] = useState(false);
+  // Provider (LLM endpoint) switching lives in the same `modelOptions` snapshot
+  // (`endpoints` = curated set, `endpointOverride`, `canSwitch`). Switching the
+  // provider requires an agent respawn, so it blocks briefly.
+  const [providerSwitching, setProviderSwitching] = useState(false);
   // Context-window fill for the last completed request (#471, cache-tokens
   // fix #490, overcounting fix #509). `contextFill` (from the parent, fed by
   // SessionLogPanel) carries a plausible estimate of the tokens actually held
@@ -142,7 +181,7 @@ export default function ChatPanel({
     if (!contextFill || contextWindowTokens == null) return null;
     return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
   }, [contextFill, contextWindowTokens]);
-  // Wall-clock at the moment the user clicked "Full Learn". The
+  // Wall-clock at the moment the user clicked "Save & Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
   // whose timestamp is at or after this value.
@@ -150,6 +189,47 @@ export default function ChatPanel({
 
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
+
+  // Parent-ticket binding (#1383): the GitHub issue this room is about.
+  const [ticket, setTicket] = useState(null);
+  const [ticketOpen, setTicketOpen] = useState(false);
+  const [ticketBusy, setTicketBusy] = useState(false);
+  const [ticketError, setTicketError] = useState(null);
+
+  // Per-user transcript font size (#1437). Default 12px (was 14px). Seeded from
+  // the user's server-stored preference (authoritative, cross-device) with a
+  // per-username localStorage fallback for the env single-admin (no user
+  // record). Adjusted live by the +/- control in the session toolbar.
+  const { user } = useAuth();
+  const username = user?.username;
+  const hasServerRecord = user != null && user.userId != null;
+  const [fontSize, setFontSize] = useState(() => resolveInitialFontSize({
+    sessionValue: user?.chatFontSize,
+    storedValue: loadStoredFontSize(username),
+    hasServerRecord,
+  }));
+  // Re-seed only when the logged-in identity changes (login / logout / initial
+  // session load) — keyed on the stable username, so an optimistic +/- press is
+  // never clobbered by an unrelated re-render.
+  useEffect(() => {
+    setFontSize(resolveInitialFontSize({
+      sessionValue: user?.chatFontSize,
+      storedValue: loadStoredFontSize(username),
+      hasServerRecord,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
+  const changeFontSize = useCallback((delta) => {
+    const next = stepFontSize(fontSize, delta);
+    if (next === fontSize) return;
+    setFontSize(next);                       // live apply
+    saveStoredFontSize(username, next);       // instant + env-admin fallback store
+    // Best-effort server persistence (follows the user across devices). The env
+    // single-admin has no record → the route returns {persisted:false} and the
+    // localStorage mirror above is the store; a transient failure is non-fatal.
+    apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
+  }, [fontSize, username]);
 
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
@@ -181,6 +261,48 @@ export default function ChatPanel({
     const timer = setInterval(loadGitInfo, 30_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [agent?.id]);
+
+  /* ─── 1c. Parent-ticket binding (#1383) ─────────────────────────── */
+  // Room-scoped: it survives Reset Session (AC4), so it is keyed on the room,
+  // not the Claude session pointer.
+  const refreshTicket = useCallback(() => {
+    if (!agent?.id || !roomId) { setTicket(null); return; }
+    apiCall('GET', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`)
+      .then(d => setTicket(d?.ticket ?? null))
+      .catch(() => { /* leave the last-known binding on a transient error */ });
+  }, [agent?.id, roomId]);
+
+  useEffect(() => { setTicket(null); setTicketOpen(false); refreshTicket(); }, [refreshTicket]);
+
+  const bindTicket = useCallback(async (body) => {
+    if (!agent?.id || !roomId) return;
+    setTicketBusy(true);
+    setTicketError(null);
+    try {
+      const d = await apiCall('PUT', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`, body);
+      setTicket(d?.ticket ?? null);
+      setTicketOpen(false);
+    } catch (e) {
+      setTicketError(e.message);
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [agent?.id, roomId]);
+
+  const unbindTicket = useCallback(async () => {
+    if (!agent?.id || !roomId) return;
+    setTicketBusy(true);
+    setTicketError(null);
+    try {
+      await apiCall('DELETE', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`);
+      setTicket(null);
+      setTicketOpen(false);
+    } catch (e) {
+      setTicketError(e.message);
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [agent?.id, roomId]);
 
   /* ─── 2. Backfill on roomId change ──────────────────────────────── */
   useEffect(() => {
@@ -214,6 +336,7 @@ export default function ChatPanel({
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+            'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -305,6 +428,7 @@ export default function ChatPanel({
       body:     ev.content?.body || '',
       msgtype:  ev.content?.msgtype || 'm.text',
       'io.aee.trigger':  triggerMeta,
+      'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
     };
 
     // A trigger-started run always posts this notice before invoking Claude
@@ -414,6 +538,7 @@ export default function ChatPanel({
             body:     ev.content?.body || '',
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+            'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -563,6 +688,22 @@ export default function ChatPanel({
     return () => { cancelled = true; };
   }, [agent?.id]);
 
+  // On-demand refresh of the resolved model options (#1305). The provider
+  // catalog / team assignment can change elsewhere in the app while this chat
+  // stays open; the switcher calls this when its popover opens so a newly
+  // added / (un)assigned provider appears without a full page reload. Unlike
+  // the agent-change effect above, a transient failure keeps the last good
+  // snapshot rather than blanking the chip.
+  const refreshModelOptions = useCallback(async () => {
+    if (!agent?.id) return;
+    try {
+      const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
+      setModelOptions(data);
+    } catch {
+      /* keep the current snapshot on a transient error */
+    }
+  }, [agent?.id]);
+
   async function handleModelChange(newId) {
     if (!agent?.id || modelSwitching) return;
     setModelSwitching(true);
@@ -577,6 +718,25 @@ export default function ChatPanel({
       setError(`Model switch failed: ${err.message}`);
     } finally {
       setModelSwitching(false);
+    }
+  }
+
+  async function handleProviderChange(newEndpointId) {
+    if (!agent?.id || providerSwitching) return;
+    setProviderSwitching(true);
+    setError(null);
+    try {
+      // Empty string means "back to the environment default" → send null.
+      const payload = { endpointId: newEndpointId ? newEndpointId : null };
+      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, payload);
+      // The provider change may have cleared the model override and swapped the
+      // whole catalog — refetch the full snapshot rather than patching locally.
+      const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
+      setModelOptions(fresh);
+    } catch (err) {
+      setError(`Provider switch failed: ${err.message}`);
+    } finally {
+      setProviderSwitching(false);
     }
   }
 
@@ -608,6 +768,150 @@ export default function ChatPanel({
   }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
 
   /* ─── 5. Send ────────────────────────────────────────────────────── */
+  /* ─── Loop launch (#1020) ────────────────────────────────────────────
+   * A loop is launched from the composer, runs as a launched run visible
+   * here, and self-removes on any terminal outcome. Poll the agent's triggers
+   * so the composer reflects whether a launched loop is currently running —
+   * at most one per agent (the control then offers Stop instead of Start).
+   */
+  const refreshActiveLoop = useCallback(async () => {
+    if (!agent?.id) { setActiveLoop(null); setLoopProgress(null); return; }
+    try {
+      const list = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/triggers`);
+      const running = Array.isArray(list) ? list.find(isLaunchedLoop) : null;
+      setActiveLoop(running || null);
+      // Live progress (#1155 AC5/AC6): read the tail of THIS room's session log
+      // and take the newest numbered loop firing for the running trigger. The
+      // log is persisted per room, so this is correct after a reload and for
+      // whichever agent's loop is running. No numbered firing yet ⇒ null
+      // (neutral running state, never a fabricated count).
+      if (running && roomId) {
+        try {
+          const res = await apiCall('GET',
+            `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}?limit=120`);
+          const evts = Array.isArray(res?.events) ? res.events : [];
+          setLoopProgress(latestLoopProgress(evts, running.id));
+        } catch {
+          /* keep the last known progress on a transient read error */
+        }
+      } else {
+        setLoopProgress(null);
+      }
+    } catch {
+      /* best-effort — a transient error just keeps the last known state */
+    }
+  }, [agent?.id, roomId]);
+
+  useEffect(() => {
+    if (!agent?.id) return undefined;
+    refreshActiveLoop();
+    const timer = setInterval(refreshActiveLoop, 15000);
+    return () => clearInterval(timer);
+  }, [agent?.id, refreshActiveLoop]);
+
+  function handleLoopClick() {
+    if (activeLoop) setShowStopLoopConfirm(true);
+    else { setRelaunchValues(null); setLoopDialogOpen(true); }
+  }
+
+  // "Start again" on a finished-loop record (#1231): open the loop launcher
+  // pre-filled with that loop's config. Does NOT start the loop — the user
+  // confirms/edits in the dialog, exactly like a fresh launch. If a loop is
+  // already running the launcher can't open (the composer control is in Stop
+  // mode), so surface that rather than silently doing nothing.
+  function handleRelaunchLoop(values) {
+    if (activeLoop) {
+      setError('A loop is already running for this agent — stop it before starting another.');
+      return;
+    }
+    setRelaunchValues(values || null);
+    setLoopDialogOpen(true);
+  }
+
+  function closeLoopDialog() {
+    setLoopDialogOpen(false);
+    setRelaunchValues(null);
+  }
+
+  async function handleLaunchLoop(body) {
+    if (!agent?.id) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // A chat-launched loop is a loop trigger tagged `launched: true`; the
+      // runtime runs it once and removes it on completion. Post the room id so
+      // the terminal outcome DM lands in this chat.
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/triggers`, {
+        ...body,
+        launched: true,
+        enabled: true,
+        ...(roomId ? { roomId } : {}),
+      });
+      closeLoopDialog();
+      await refreshActiveLoop();
+    } catch (err) {
+      setError(`Could not start loop: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+    }
+  }
+
+  async function handleStopLoop() {
+    setShowStopLoopConfirm(false);
+    if (!agent?.id || !activeLoop) return;
+    setLoopBusy(true);
+    setError(null);
+    try {
+      // Deleting the trigger cancels the loop's re-arm cycle (the runtime
+      // cancels the runner on the next sync); stopping the session kills the
+      // in-flight iteration immediately. Both best-effort.
+      await apiCall('DELETE', `/api/agents/${encodeURIComponent(agent.id)}/triggers/${encodeURIComponent(activeLoop.id)}`);
+      if (roomId) {
+        try {
+          await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
+        } catch { /* the loop is already stopping — ignore */ }
+      }
+    } catch (err) {
+      setError(`Stop loop failed: ${err.message}`);
+    } finally {
+      setLoopBusy(false);
+      await refreshActiveLoop();
+    }
+  }
+
+  // Unified composer Stop (#1427): abort whatever is running for this agent.
+  // A running loop is the more consequential state (repeated autonomous runs),
+  // so it keeps its confirmation dialog; a single chat turn stops immediately,
+  // matching the instant Stop of VS Code / Cursor / the Claude Code CLI.
+  function handleStop() {
+    if (activeLoop) { setShowStopLoopConfirm(true); return; }
+    handleStopTurn();
+  }
+
+  // Stop the in-flight chat turn by reusing the existing session-stop path
+  // (SIGUSR1 → terminate the Claude process — same endpoint the Sessions tab
+  // uses). Optimistically end the local thinking state and drop a distinct
+  // "Stopped by user" marker into the transcript (AC4); the runtime also posts
+  // its own abort notice, which arrives over SSE.
+  async function handleStopTurn() {
+    if (!agent?.id || !roomId) return;
+    setStopping(true);
+    setError(null);
+    try {
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/session/${encodeURIComponent(roomId)}/stop`);
+      setSending(false);
+      setMessages(prev => [...prev, {
+        event_id: `user-stop-${crypto.randomUUID()}`,
+        type: 'user-stop',
+        ts: Date.now(),
+      }]);
+    } catch (err) {
+      setError(`Stop failed: ${err.message}`);
+    } finally {
+      setStopping(false);
+    }
+  }
+
   async function handleSend(text) {
     if (!roomId) return;
     const body = text.trim();
@@ -713,15 +1017,23 @@ export default function ChatPanel({
   const showThinking =
     !!lastMsg &&
     lastMsg.type !== 'context-reset' &&
+    lastMsg.type !== 'user-stop' && // a user Stop ends the turn — no thinking
     lastMsg.sender !== agent.userId &&
     !lastMsg.isOptimistic && // already covered by sending state below
     !sending;
   const showSendingDots = sending;
+  // The agent is busy on something the unified composer Stop (#1427) can abort:
+  // a chat turn in flight (sending or waiting on the reply) or a running loop.
+  const agentBusy = showSendingDots || showThinking || !!activeLoop;
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+  // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
+  // only needs to kick a session off for this agent and know whether one is
+  // already running (to disable the entry point + quick dictation).
+  const transcription = useTranscriptionSession();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -776,6 +1088,11 @@ export default function ChatPanel({
               refreshKey={sessionUpdatedAt}
               onClick={onOpenKnowledge}
               title="Show what this agent has learned (Knowledge tab)"
+            />
+            <TicketChip
+              ticket={ticket}
+              disabled={!roomId || disabled}
+              onManage={() => { setTicketError(null); setTicketOpen(true); }}
             />
           </div>
           {gitInfo && gitInfo.length > 0 && (
@@ -832,24 +1149,23 @@ export default function ChatPanel({
         color: 'var(--eb-text-muted)',
         minWidth: 0,
       }}>
-        <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
         <button
           type="button"
           onClick={handleFullLearn}
           disabled={!sessionId || learnPending || disabled || maintenance.active}
-          title="Agent summarizes this conversation, saves session state to its memory files and shares durable lessons with the team knowledge base — the session stays open afterwards"
+          title="Save & Learn: the agent summarizes this conversation, persists session state to its memory files and pushes durable lessons to the team knowledge base — a deliberate, consequential action. The session stays open afterwards."
           style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
         >
           {learnPending
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
             : <GraduationCap size={11} />}
-          Full Learn
+          Save &amp; Learn
         </button>
         <button
           type="button"
           onClick={handleResetSession}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Clear the session — the next message starts a new conversation with no memory of this one"
+          title="This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one."
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {resetting
@@ -885,12 +1201,20 @@ export default function ChatPanel({
             Hand-off
           </button>
         )}
+        <ProviderChip
+          options={modelOptions}
+          switching={providerSwitching}
+          disabled={disabled}
+          onChange={handleProviderChange}
+          onOpen={refreshModelOptions}
+        />
         <ModelPicker
           options={modelOptions}
           switching={modelSwitching}
           disabled={disabled}
           onChange={handleModelChange}
         />
+        <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
         {sessionCost !== null && sessionCost.usd > 0 && (
           <span
@@ -955,7 +1279,7 @@ export default function ChatPanel({
           color: 'var(--eb-text-primary)',
           flexShrink: 0,
         }}>
-          This agent is disabled. Enable it in Agent Manager to chat.
+          This agent is disabled. Enable it in <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> to chat.
         </div>
       )}
 
@@ -1025,6 +1349,11 @@ export default function ChatPanel({
           gap: 'var(--eb-space-3)',
           minHeight: 0,
           position: 'relative',
+          // Per-user transcript font size (#1437). Scopes the override to the
+          // message list only — the header/toolbar keep their own sizing. Each
+          // message bubble reads var(--chat-font-size), falling back to the
+          // 14px design token outside the chat view.
+          '--chat-font-size': `${fontSize}px`,
         }}
       >
         {/* Top spinner while backfilling older history on scroll-up. */}
@@ -1096,6 +1425,9 @@ export default function ChatPanel({
           if (msg.type === 'context-reset') {
             return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
           }
+          if (msg.type === 'user-stop') {
+            return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
+          }
           const cid = correlationByEvent.get(msg.event_id) || null;
           const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
           return (
@@ -1108,7 +1440,7 @@ export default function ChatPanel({
                 transition: 'opacity 0.15s',
               }}
             >
-              <Message message={msg} agentUserId={agent.userId} />
+              <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
             </div>
           );
         })}
@@ -1151,9 +1483,20 @@ export default function ChatPanel({
       <MessageInput
         onSend={handleSend}
         disabled={disabled || !roomId || sending || maintenance.active}
+        agentId={agent.id}
         agentDisplayName={agent.displayName || agent.id}
         onUpload={handleUpload}
         uploading={uploading}
+        onLoopClick={handleLoopClick}
+        loopRunning={!!activeLoop}
+        loopBusy={loopBusy}
+        loopTrigger={activeLoop}
+        loopProgress={loopProgress}
+        busy={agentBusy}
+        onStop={handleStop}
+        stopBusy={stopping || loopBusy}
+        onStartMeeting={transcription ? () => transcription.startSession({ agentId: agent.id, agentName: agent.displayName || agent.id }) : undefined}
+        meetingActive={!!transcription?.active}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. */}
@@ -1177,9 +1520,275 @@ export default function ChatPanel({
         agent={agent}
         onClose={() => setShowHandoff(false)}
       />
+
+      {/* Loop launcher (#1020): reuse the shared loop configuration form,
+          pinned to a loop and started in one step ("Start loop"). */}
+      <SidePanel
+        open={loopDialogOpen}
+        onClose={closeLoopDialog}
+        title={relaunchValues ? 'Start loop again' : 'Start a loop'}
+      >
+        {/* Loop-launcher explainer (#1120): a loop is one of the most
+            consequential actions in the UI (repeated autonomous runs, token
+            spend), so state plainly what it does and how it stops before the
+            form. */}
+        <p style={{
+          margin: '0 0 var(--eb-space-4)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          lineHeight: 1.5,
+        }}>
+          A loop re-runs this agent on the instruction below — each run starts
+          fresh — until a goal is reached, working on its own between runs. It
+          stops when the <strong>max iterations</strong> cap is hit, when the{' '}
+          <strong>stop condition</strong> passes, or when you press Stop; if a{' '}
+          <strong>verifier</strong> is set, each run only counts once that check
+          passes.
+        </p>
+        <TriggerForm
+          // Remount on each open so the form re-seeds from the current
+          // pre-fill (fresh launch vs "Start again"): TriggerForm reads
+          // initialValues only in its useState initialiser.
+          key={relaunchValues ? 'relaunch' : 'fresh'}
+          agentId={agent.id}
+          saving={loopBusy}
+          lockType="loop"
+          allowLoopType
+          initialValues={relaunchValues || undefined}
+          submitLabel="Start loop"
+          onSave={handleLaunchLoop}
+          onCancel={closeLoopDialog}
+        />
+      </SidePanel>
+
+      <ConfirmDialog
+        open={showStopLoopConfirm}
+        title="Stop loop"
+        message={`Stop the running loop for this agent${
+          loopProgress?.iteration
+            ? ` (currently on iteration ${loopProgress.iteration}${
+                loopProgress.maxIterations ? ` of ${loopProgress.maxIterations}` : ''})`
+            : ''
+        }? The current iteration is interrupted and no further iterations run.`}
+        variant="danger"
+        confirmLabel="Stop loop"
+        onConfirm={handleStopLoop}
+        onCancel={() => setShowStopLoopConfirm(false)}
+      />
+      {ticketOpen && (
+        <TicketDialog
+          ticket={ticket}
+          agentName={agent.displayName || agent.id}
+          busy={ticketBusy}
+          error={ticketError}
+          onBind={bindTicket}
+          onUnbind={unbindTicket}
+          onClose={() => setTicketOpen(false)}
+        />
+      )}
     </div>
   );
 }
+
+// Compact header chip: the bound parent issue (link + optional "closed") or the
+// "No parent ticket" placeholder, plus a button to open the manage dialog (#1383).
+function TicketChip({ ticket, disabled, onManage }) {
+  const d = describeTicket(ticket);
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, flex: '0 1 auto' }}>
+      <Ticket size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+      {d ? (
+        <a
+          href={d.href}
+          target="_blank"
+          rel="noreferrer"
+          title={`${d.repo} #${d.number}${d.title ? ' — ' + d.title : ''}${d.closed ? ' (closed)' : ''}`}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, minWidth: 0,
+            fontSize: 'var(--eb-text-xs)',
+            color: d.closed ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)',
+            textDecoration: 'none', overflow: 'hidden',
+          }}
+        >
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {d.label}{d.closed ? ' (closed)' : ''}
+          </span>
+          <ExternalLink size={9} style={{ flexShrink: 0 }} />
+        </a>
+      ) : (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>
+          {NO_TICKET_LABEL}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onManage}
+        disabled={disabled}
+        title={d ? 'Manage the parent ticket' : 'Bind a parent GitHub issue to this conversation'}
+        style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', background: 'transparent', cursor: disabled ? 'not-allowed' : 'pointer',
+          color: 'var(--eb-text-muted)', padding: 2, opacity: disabled ? 0.5 : 1, flexShrink: 0,
+        }}
+      >
+        {d ? <ChevronDown size={11} /> : <Plus size={11} />}
+      </button>
+    </div>
+  );
+}
+
+// Modal to bind a parent GitHub issue: "New issue" (create) or "Attach existing"
+// (by number or URL), plus Unbind when a binding already exists (#1383).
+function TicketDialog({ ticket, agentName, busy, error, onBind, onUnbind, onClose }) {
+  const bound = describeTicket(ticket);
+  const [mode, setMode] = useState(bound ? 'attach' : 'create');
+  const [title, setTitle] = useState(agentName ? `${agentName}: ` : '');
+  const [issueBody, setIssueBody] = useState('');
+  const [ref, setRef] = useState('');
+  const [repo, setRepo] = useState('');
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose?.(); }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const refValid = !!parseIssueRefInput(ref);
+  const canSubmit = !busy && (mode === 'create' ? title.trim().length > 0 : refValid);
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const repoTrim = repo.trim();
+    if (mode === 'create') {
+      onBind({
+        mode: 'create',
+        title: title.trim(),
+        ...(issueBody.trim() ? { issueBody: issueBody.trim() } : {}),
+        ...(repoTrim ? { repo: repoTrim } : {}),
+      });
+    } else {
+      onBind({ mode: 'attach', ref: ref.trim(), ...(repoTrim ? { repo: repoTrim } : {}) });
+    }
+  };
+
+  const tabStyle = (active) => ({
+    padding: 'var(--eb-space-2) var(--eb-space-3)',
+    background: active ? 'var(--eb-bg-surface)' : 'transparent',
+    border: '1px solid var(--eb-border-default)',
+    borderBottom: active ? '1px solid var(--eb-bg-surface)' : '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md) var(--eb-radius-md) 0 0',
+    color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+    fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+    fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
+  });
+  const inputStyle = {
+    width: '100%', boxSizing: 'border-box',
+    padding: 'var(--eb-space-2)',
+    background: 'var(--eb-bg-elevated)',
+    border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-md)',
+    color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+  };
+  const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 3, display: 'block' };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Parent ticket" style={ticketOverlayStyle}>
+      <div style={ticketDialogStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)' }}>
+          <Ticket size={16} style={{ color: 'var(--eb-accent-primary)' }} />
+          <h3 style={{ margin: 0, flex: 1, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+            Parent ticket
+          </h3>
+          <button type="button" onClick={onClose} title="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--eb-text-muted)', padding: 2 }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        {bound && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
+            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+          }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Bound to <a href={bound.href} target="_blank" rel="noreferrer" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>{bound.repo} #{bound.number}</a>
+              {bound.title ? ` — ${bound.title}` : ''}{bound.closed ? ' (closed)' : ''}
+            </span>
+            <button type="button" onClick={onUnbind} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>
+              Unbind
+            </button>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 4, marginBottom: -1 }}>
+          <button type="button" onClick={() => setMode('create')} style={tabStyle(mode === 'create')}>+ New issue</button>
+          <button type="button" onClick={() => setMode('attach')} style={tabStyle(mode === 'attach')}>Attach existing</button>
+        </div>
+        <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: '0 var(--eb-radius-md) var(--eb-radius-md) var(--eb-radius-md)', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {mode === 'create' ? (
+            <>
+              <div>
+                <label style={labelStyle}>Issue title</label>
+                <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Short summary of the work" style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Description (optional)</label>
+                <textarea value={issueBody} onChange={e => setIssueBody(e.target.value)} rows={3} placeholder="Optional issue body" style={{ ...inputStyle, resize: 'vertical' }} />
+              </div>
+            </>
+          ) : (
+            <div>
+              <label style={labelStyle}>Issue number or GitHub URL</label>
+              <input autoFocus value={ref} onChange={e => setRef(e.target.value)} placeholder="e.g. 1383 or https://github.com/owner/repo/issues/1383" style={inputStyle} />
+              {ref.trim() && !refValid && (
+                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 3 }}>
+                  Enter a positive issue number or a GitHub issue URL.
+                </div>
+              )}
+            </div>
+          )}
+          <div>
+            <label style={labelStyle}>Repository (owner/name, optional — defaults to the environment&apos;s repo)</label>
+            <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={inputStyle} />
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button type="button" onClick={onClose} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={!canSubmit} style={{ ...ticketPrimaryBtn, ...(!canSubmit ? { opacity: 0.5, cursor: 'not-allowed' } : null) }}>
+            {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : (mode === 'create' ? 'Create & bind' : 'Attach')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ticketOverlayStyle = {
+  position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+};
+const ticketDialogStyle = {
+  background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5, 20px)',
+  maxWidth: 520, width: '92%', boxShadow: 'var(--eb-shadow-xl)',
+};
+const ticketPrimaryBtn = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: 'var(--eb-space-2) var(--eb-space-4)',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+  borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const ticketSecondaryBtn = {
+  padding: 'var(--eb-space-2) var(--eb-space-4)',
+  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+};
 
 function ContextResetSeparator({ ts }) {
   const label = ts
@@ -1211,25 +1820,256 @@ function ContextResetSeparator({ ts }) {
   );
 }
 
-function SessionBadge({ active }) {
+// A distinct "Stopped by user" transcript marker (#1427 AC4): rendered when the
+// operator aborts a running turn from the composer's unified Stop control, so
+// the stop is visibly different from a natural end-of-turn. Danger-toned to
+// mirror the Stop button; injected optimistically on Stop (the runtime also
+// posts its own abort notice over SSE).
+function UserStopSeparator({ ts }) {
+  const label = ts
+    ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
   return (
-    <span style={{
-      display: 'inline-flex',
+    <div style={{
+      display: 'flex',
       alignItems: 'center',
-      gap: 'var(--eb-space-1)',
-      fontSize: 'var(--eb-text-xs)',
-      color: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
-      fontWeight: 'var(--eb-font-medium)',
+      gap: 'var(--eb-space-3)',
+      margin: 'var(--eb-space-2) 0',
+      userSelect: 'none',
     }}>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
       <span style={{
-        width: 7,
-        height: 7,
-        borderRadius: 'var(--eb-radius-full)',
-        background: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
-        display: 'inline-block',
-      }} />
-      {active ? 'Session active' : 'New session'}
-    </span>
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-status-error-text, #dc2626)',
+        fontWeight: 'var(--eb-font-medium)',
+        whiteSpace: 'nowrap',
+        padding: '2px var(--eb-space-2)',
+        border: '1px solid var(--eb-status-error-text, #dc2626)',
+        borderRadius: 'var(--eb-radius-sm)',
+        background: 'var(--eb-status-error-bg, #fef2f2)',
+      }}>
+        ⏹ Stopped by user{label ? ` · ${label}` : ''}
+      </span>
+      <div style={{ flex: 1, height: 1, background: 'var(--eb-status-error-text, #dc2626)' }} />
+    </div>
+  );
+}
+
+// Human label for an auth type. `null` (no endpoint) → the .env fallback.
+function authTypeLabel(authType) {
+  if (!authType) return 'Default (.env)';
+  return authType === 'oauth-token' ? 'Subscription' : 'API key';
+}
+
+// Width of the provider popover. The popover is rendered into document.body
+// via a portal with position: fixed, so it is never clipped by the narrow
+// Chat column's overflow nor trapped beneath a neighbouring panel's stacking
+// context — it stays fully visible and on top at any column width (#1280).
+const PROVIDER_POP_WIDTH = 300;
+
+// Compact, always-visible Model-Provider indicator next to the model picker.
+// Shows which LLM endpoint + auth type the agent actually runs on (transparency)
+// and, on click, a popover with the full binding plus a per-agent provider
+// switcher restricted to the agent team's curated, usable providers.
+function ProviderChip({ options, switching, disabled, onChange, onOpen }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const popRef = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  // Refetch the resolved model options each time the popover opens (#1305), so
+  // a provider added or (un)assigned to this agent's team elsewhere in the app
+  // is reflected without a full page reload. Bounded to the user's open action
+  // — no polling, no per-render fetch. A ref keeps the effect keyed only on
+  // `open` while always calling the latest callback.
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  useEffect(() => {
+    if (open) onOpenRef.current?.();
+  }, [open]);
+
+  // Anchor the fixed popover below the trigger, right-aligned to it, then clamp
+  // to the viewport so it can never overflow off-screen when the chat column is
+  // narrow or the trigger sits near the left edge.
+  const place = useCallback(() => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const maxLeft = window.innerWidth - PROVIDER_POP_WIDTH - 8;
+    const left = Math.max(8, Math.min(r.right - PROVIDER_POP_WIDTH, maxLeft));
+    setPos({ top: r.bottom + 4, left });
+  }, []);
+
+  // Close on outside click / Escape. The popover is portaled out of rootRef, so
+  // a click inside it must NOT count as "outside" — check popRef too.
+  useEffect(() => {
+    if (!open) return undefined;
+    function onDocClick(e) {
+      const inTrigger = rootRef.current && rootRef.current.contains(e.target);
+      const inPop = popRef.current && popRef.current.contains(e.target);
+      if (!inTrigger && !inPop) setOpen(false);
+    }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  // Keep the fixed popover glued to the trigger while it's open, across window
+  // resizes and scrolls (either would otherwise leave it stranded).
+  useEffect(() => {
+    if (!open) { setPos(null); return undefined; }
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [open, place]);
+
+  if (!options) return null;
+
+  const endpoints = options.endpoints || [];
+  const overridden = !!options.endpointOverride;
+  const hasEndpoint = !!options.endpointId;
+  const effectiveModel = options.override || options.defaultModelId || null;
+  // Any-role team members may switch, but only within the curated team set.
+  const canSwitch = !!options.canSwitch && endpoints.length > 0 && !disabled;
+  // The <select> reflects the current binding: the override if set, else the
+  // env endpoint (empty string = "use the environment default").
+  const selectValue = options.endpointOverride || '';
+
+  const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
+  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Default (.env)';
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        title="This agent's Model Provider — click for details & switch"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: '3px 8px',
+          fontSize: 'var(--eb-text-xs)',
+          fontFamily: 'inherit',
+          color: chipColor,
+          background: 'transparent',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          cursor: 'pointer',
+          maxWidth: 240,
+        }}
+      >
+        {switching
+          ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+          : <Zap size={11} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {hasEndpoint ? `${label} · ${authTypeLabel(options.authType)}` : label}
+        </span>
+        {overridden && <span style={{ fontSize: '0.9em' }}>•</span>}
+        <ChevronDown size={11} />
+      </button>
+
+      {open && pos && createPortal(
+        <div
+          ref={popRef}
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            zIndex: 1000,
+            width: PROVIDER_POP_WIDTH,
+            boxSizing: 'border-box',
+            padding: 12,
+            background: 'var(--eb-bg-elevated)',
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            boxShadow: 'var(--eb-shadow-lg)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-primary)',
+            cursor: 'default',
+          }}
+        >
+          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env fallback —')} />
+          <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
+          {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
+          <ProviderInfoRow label="Model" value={effectiveModel || '(provider default)'} mono />
+          {overridden && (
+            <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
+              Override active — environment default:{' '}
+              {options.envEndpointId || '(none)'}
+            </div>
+          )}
+
+          <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
+
+          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Switch provider</div>
+          {canSwitch ? (
+            <select
+              value={selectValue}
+              disabled={switching}
+              onChange={(e) => onChange(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '4px 6px',
+                fontSize: 'var(--eb-text-xs)',
+                fontFamily: 'inherit',
+                color: 'inherit',
+                background: 'var(--eb-bg-surface)',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-sm)',
+                cursor: switching ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <option value="">
+                {options.envEndpointId ? 'Environment default' : '— Environment default (no provider) —'}
+              </option>
+              {endpoints.map(ep => (
+                <option key={ep.id} value={ep.id}>
+                  {ep.name} · {authTypeLabel(ep.authType)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div style={{ color: 'var(--eb-text-muted)' }}>
+              {endpoints.length === 0
+                ? 'No providers are available for this team.'
+                : 'You are not allowed to switch the provider.'}
+            </div>
+          )}
+          {canSwitch && (
+            <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+              Switching briefly restarts the agent container; the chat session
+              is preserved.
+              {switching && ' Restarting…'}
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function ProviderInfoRow({ label, value, mono }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+      <span style={{ color: 'var(--eb-text-muted)', minWidth: 68 }}>{label}</span>
+      <span style={{
+        flex: 1,
+        wordBreak: 'break-all',
+        fontFamily: mono ? 'var(--eb-font-mono, monospace)' : 'inherit',
+        color: 'var(--eb-text-primary)',
+      }}>{value}</span>
+    </div>
   );
 }
 
@@ -1339,5 +2179,74 @@ function sessionBtnStyle(isDisabled) {
     opacity: isDisabled ? 0.6 : 1,
     transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
   };
+}
+
+// Per-user transcript font-size stepper (#1437). A compact −/+ pair with the
+// current size shown between them; each press adjusts the chat font live within
+// [MIN,MAX] px. Stays on the toolbar (which flexWraps) at any layout width.
+function FontSizeControl({ size, onChange }) {
+  const stepBtn = (enabled) => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 20,
+    height: 18,
+    padding: 0,
+    color: enabled ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+    background: 'transparent',
+    border: 'none',
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    opacity: enabled ? 1 : 0.5,
+    fontFamily: 'inherit',
+  });
+  const canDec = canDecrease(size);
+  const canInc = canIncrease(size);
+  return (
+    <div
+      role="group"
+      aria-label="Chat font size"
+      title={`Chat font size: ${size}px (adjustable ${MIN_FONT_SIZE}–${MAX_FONT_SIZE}px)`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 2,
+        padding: '2px 4px',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-sm)',
+        color: 'var(--eb-text-muted)',
+      }}
+    >
+      <Type size={11} style={{ flexShrink: 0 }} />
+      <button
+        type="button"
+        onClick={() => onChange(-1)}
+        disabled={!canDec}
+        aria-label="Decrease chat font size"
+        title="Decrease chat font size"
+        style={stepBtn(canDec)}
+      >
+        <Minus size={12} />
+      </button>
+      <span
+        aria-live="polite"
+        style={{
+          minWidth: 26, textAlign: 'center', fontFamily: 'var(--eb-font-mono)',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+        }}
+      >
+        {size}px
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(1)}
+        disabled={!canInc}
+        aria-label="Increase chat font size"
+        title="Increase chat font size"
+        style={stepBtn(canInc)}
+      >
+        <Plus size={12} />
+      </button>
+    </div>
+  );
 }
 

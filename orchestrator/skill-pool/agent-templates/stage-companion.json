@@ -5,7 +5,6 @@
   "description": "Generic per-stage gatekeeper: reviews the Author's PRs, routes human feedback, brokers escalations, and opens the hand-over issue that carries the stage's human-approved exit. Composable into any stage via the Flow-Weaver.",
   "icon": "shield-check",
   "category": "pattern",
-  "envSuffix": "companion",
   "defaultEnabled": false,
   "patternRole": "companion",
   "stageAffinity": [],

@@ -9,6 +9,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
@@ -20,28 +21,43 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
+const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
-const { computeScope, visibleTeam, visibleAgent, canManageTeam, visibleUser, describeAuthz,
+const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
+        canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
-        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics } = require('./scope');
+        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
+        resolveAgentTenant } = require('./scope');
+const { buildAssistModelOptions } = require('./assist-model-options');
+const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
-const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses } = require('./knowledge-graph');
+const {
+  validateHostMountPath,
+  CONTEXT_MOUNT_TARGET,
+  MAX_CONTEXT_MOUNTS,
+  normalizeContextMountsInput,
+  resolveContextMounts,
+} = require('./context-mount');
+const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
-const { weaveProcess } = require('./flow-weaver');
+const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
+const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
+const hillClimbApplyGuard = require('./hill-climb-apply-guard');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
+const promptHistory = require('./prompt-history');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
@@ -52,6 +68,8 @@ const skillGrantValidate = require('./skill-grant-validate');
 const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
+const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
+const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -128,6 +146,9 @@ fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
 fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
 
 const app = express();
+// Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
+// the real client IP from X-Forwarded-For without throwing a ValidationError.
+app.set('trust proxy', 1);
 app.use(cors());
 // Document-bundle endpoints (process drafts, the unified flow graph, imported
 // BriefingPack flows) carry the full brief.md / prompt bodies inline, which
@@ -209,6 +230,19 @@ const globalApiLimiter = rateLimit({
 
 app.use('/api/', globalApiLimiter);
 
+// SPA fallback limiter — a SEPARATE instance again (the catch-all serves the
+// static index.html from disk, so CodeQL's js/missing-rate-limiting flags its
+// file-system access unless a limiter is attached; the global limiter above is
+// mounted only on /api/ and never sees these routes). Very generous: this is
+// the shell every browser navigation lands on for a single-user admin console.
+const spaLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
 // Audit trail (#305). Mounted before the auth wiring so it observes every
 // mutating /api request — including denied/unauthenticated ones — and reads the
 // acting human from req.user lazily at response-finish time. Best-effort: it can
@@ -222,7 +256,10 @@ app.use('/api', audit.auditMutations);
 // open so the console can load and render its login screen.
 // Inject the authorization descriptor resolver (#584) so the session/login
 // responses carry the caller's admin indicator + per-team roles for the
-// frontend, reusing the same users/memberships indexes as getScope.
+// frontend, reusing the same users/memberships indexes as getScope. The same
+// resolver gates IAP auto-login (#1415): only a registered user-store subject
+// or the env admin gets a silent session; readJsonFile degrading to [] on an
+// unreadable users index means unknown → login form (fail-closed).
 auth.registerAuthRoutes(app, {
   describeAuthz: (subject) => describeAuthz({
     username: subject,
@@ -453,24 +490,42 @@ const MCP_CREDENTIAL_ID_RE = /^[a-z0-9-]+$/;
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 
 // writeJsonAtomic and readJsonFile only ever receive paths under WORKSPACE
-// (or POOL_DIR for skill files). The inline checks below refuse anything
-// else and reject '..' segments. Callers should have already validated
-// their user-supplied id segments via AGENT_ID_RE etc., so this only fires
-// on a programming bug. CodeQL recognises String.prototype.startsWith and
-// String.prototype.includes('..') as path-injection sanitiser barriers
-// when applied in the same function as the sink, so the checks are inlined
-// (not pulled into a helper) to close the cross-function js/path-injection
-// alerts that ~30 caller sites otherwise propagate into the helper body.
+// (or POOL_DIR / CONTROL_DIR for skill/control files). Callers should have
+// already validated their user-supplied id segments via AGENT_ID_RE etc., so
+// the containment below only fires on a programming bug — it is defense in
+// depth. Both funnel the sink-bound path through containPathUnderRoot(), whose
+// path.relative(root, resolved) + reject-'..'/absolute check is the canonical
+// CodeQL js/path-injection barrier on the RETURNED value (the same idiom as
+// safeAgentPath / safeGlobalSkillDir). Multiple roots compose with `||`, so the
+// value the fs sink consumes always flowed through a single-root barrier.
+// NOTE: an inline nested per-root disjunction that guards `resolved` but then
+// feeds the pre-guard `resolved` straight to the sink is NOT CodeQL-legible
+// (the barrier must gate the exact value the sink consumes) — routing through
+// this helper's return value is what clears the alerts.
+
+// Return `resolved` unchanged if it is contained under `root`, else null. The
+// path.relative + reject-'..'/absolute guard on the returned value is the
+// CodeQL-recognised path-injection barrier; callers OR several roots together.
+function containPathUnderRoot(resolved, root) {
+  const base = path.resolve(root);
+  const rel = path.relative(base, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return resolved;
+}
 
 function writeJsonAtomic(filePath, data) {
-  if (typeof filePath !== 'string' ||
-      filePath.includes('..') ||
-      !(filePath.startsWith(WORKSPACE + path.sep) || filePath.startsWith(POOL_DIR + path.sep))) {
+  if (typeof filePath !== 'string') {
+    throw new Error('writeJsonAtomic: refusing non-string path');
+  }
+  const resolved = path.resolve(filePath);
+  const safe = containPathUnderRoot(resolved, WORKSPACE)
+    || containPathUnderRoot(resolved, POOL_DIR);
+  if (safe === null) {
     throw new Error(`writeJsonAtomic: refusing path outside allowed roots: ${filePath}`);
   }
-  const tmp = filePath + '.tmp';
+  const tmp = safe + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, filePath);
+  fs.renameSync(tmp, safe);
 }
 
 function podmanRequest(method, urlPath) {
@@ -491,17 +546,17 @@ function podmanRequest(method, urlPath) {
 
 function readJsonFile(filePath, fallback = null) {
   if (typeof filePath !== 'string') return fallback;
-  // Confine reads: reject traversal and require the path to sit under an
-  // allowed root. The reads in this stack are always built from trusted
-  // constants joined with id segments that the route handlers validate.
-  if (filePath.includes('..')) return fallback;
-  if (!(filePath.startsWith(WORKSPACE + path.sep) ||
-        filePath.startsWith(POOL_DIR + path.sep) ||
-        filePath.startsWith(CONTROL_DIR + path.sep))) {
-    return fallback;
-  }
+  // Confine reads under an allowed root before the value reaches readFileSync.
+  // Same containPathUnderRoot() return-value barrier as writeJsonAtomic; reads
+  // in this stack are always built from trusted constants joined with id
+  // segments the route handlers validate — this is defense in depth.
+  const resolved = path.resolve(filePath);
+  const safe = containPathUnderRoot(resolved, WORKSPACE)
+    || containPathUnderRoot(resolved, POOL_DIR)
+    || containPathUnderRoot(resolved, CONTROL_DIR);
+  if (safe === null) return fallback;
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return JSON.parse(fs.readFileSync(safe, 'utf8'));
   } catch {
     return fallback;
   }
@@ -902,7 +957,14 @@ function loadMcpServer(serverId) {
 }
 
 function saveMcpServer(serverId, data) {
-  const dir = path.join(MCP_SERVERS_DIR, serverId);
+  // Path-injection containment (#207): callers validate serverId with
+  // MCP_SERVER_ID_RE, but CodeQL does not model a regex.test() early-return as
+  // a sanitiser, so re-confine the resolved dir under MCP_SERVERS_DIR here (the
+  // fs sink lives in this helper). Never trips for a regex-valid id.
+  const base = path.resolve(MCP_SERVERS_DIR);
+  const dir = path.resolve(base, serverId);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid MCP server id');
   fs.mkdirSync(dir, { recursive: true });
   writeJsonAtomic(path.join(dir, 'server.json'), data);
 }
@@ -1045,11 +1107,17 @@ function buildComplianceAck(req) {
 // ever called server-side — the raw token never travels to the browser.
 async function claimOauthFlowToken(flowId) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  if (!/^[a-f0-9]+$/.test(String(flowId))) {
+  // Validate and reuse the SAME sanitized value in the request URL. The guard
+  // must test the exact string that flows into fetch() — testing a separate
+  // `String(flowId)` node left the raw `flowId` untrusted on the URL path
+  // (SSRF/path-injection, CWE-918). The anchored hex allow-list forbids any
+  // host- or path-traversal characters; encodeURIComponent is belt-and-braces.
+  const safeFlowId = String(flowId);
+  if (!/^[a-f0-9]+$/.test(safeFlowId)) {
     return { error: 'invalid oauthFlowId' };
   }
   try {
-    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows/${flowId}/claim`, { method: 'POST' });
+    const r = await fetch(`${orchestratorUrl}/internal/llm-auth/flows/${encodeURIComponent(safeFlowId)}/claim`, { method: 'POST' });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { error: body.error || `claim failed (HTTP ${r.status})` };
     if (!body.token) return { error: 'login flow returned no token' };
@@ -1151,11 +1219,32 @@ function httpGetJson(targetUrl, headers = {}, timeoutMs = 8000) {
   });
 }
 
+// Strip trailing '/' characters with a linear scan. A regex trim like
+// `/\/+$/` backtracks O(n²) on a base URL that is a long run of slashes not
+// anchored at the end (CodeQL js/polynomial-redos); a charCode scan is linear
+// and byte-identical in result (47 === '/').
+function trimTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end -= 1;
+  return s.slice(0, end);
+}
+
+// Strip trailing whitespace with a linear scan. A regex trim like `/\s+$/`
+// backtracks O(n²) on a long run of whitespace that is not anchored at the end
+// (CodeQL js/polynomial-redos); scanning from the end is linear. `/\s/.test(ch)`
+// runs on a single character, so it preserves the full `\s` set (incl. Unicode
+// whitespace) without any superlinear matching.
+function trimTrailingWhitespace(s) {
+  let end = s.length;
+  while (end > 0 && /\s/.test(s[end - 1])) end -= 1;
+  return s.slice(0, end);
+}
+
 // Build the URL the LiteLLM proxy exposes its model catalog at. Accepts both
 // `https://host` and `https://host/v1` styles by appending `/v1/models` when
 // the base URL doesn't already end in /v1 or /models.
 function buildModelsUrl(baseUrl) {
-  const trimmed = baseUrl.replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(baseUrl);
   if (/\/(v1\/)?models$/.test(trimmed)) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/models`;
   return `${trimmed}/v1/models`;
@@ -1165,7 +1254,7 @@ function buildModelsUrl(baseUrl) {
 // Appends `/v1/messages` unless the base URL already targets a versioned or
 // messages path.
 function buildMessagesUrl(baseUrl) {
-  const trimmed = baseUrl.replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(baseUrl);
   if (/\/messages$/.test(trimmed)) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
@@ -1492,14 +1581,28 @@ async function reconcileTeamOutcomes(teamId) {
   const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
   const teamTemplate = teamCfg && typeof teamCfg.systemPromptTemplate === 'string'
     ? teamCfg.systemPromptTemplate : '';
+  // Wiring context (#1007): the block now names consumers/reviewers/gates, so
+  // collect the whole team (configs + triggers) once before rendering members.
+  const members = [];
   for (const id of listAgentDirs()) {
-    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
-    const cfg = readJsonFile(cfgPath, null);
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({ id, cfg, displayName: cfg.displayName || id, triggers: Array.isArray(triggers) ? triggers : [] });
+  }
+  for (const { id, cfg } of members) {
+    const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
 
     const hasOwnPrompt = typeof cfg.systemPrompt === 'string';
     const base = hasOwnPrompt ? cfg.systemPrompt : teamTemplate;
-    const nextPrompt = applyDerivedPromptBlocks(base, { github: cfg.github, outcomes: cfg.outcomes });
+    const wiring = outcomesWiringContext(id, {
+      roles: members,
+      humans: (teamCfg && Array.isArray(teamCfg.humans)) ? teamCfg.humans : [],
+      labels: (teamCfg && Array.isArray(teamCfg.labels)) ? teamCfg.labels : [],
+    });
+    const nextPrompt = applyDerivedPromptBlocks(base, {
+      github: cfg.github, outcomes: cfg.outcomes, ...(wiring ? { wiring } : {}),
+    });
 
     // Persist the re-rendered block onto an override member's stored prompt so
     // export (buildProcessTemplate strips it back out) and a later prompt-toggle
@@ -1580,17 +1683,109 @@ function notifyEnvCredentialChange(envId, reason) {
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  // Containment: resolve the agent dir under AGENTS_DIR and reject any id that
+  // escapes it. AGENT_ID_RE alone is not modelled as a path sanitiser, so build
+  // every id-derived path from the resolved `agentDir` behind this barrier.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const agentRel = path.relative(agentsBaseDir, agentDir);
+  if (agentRel.startsWith('..') || path.isAbsolute(agentRel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, github, channels } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+
+  // ── Label registry (#928/#981) ────────────────────────────────────────────
+  // The gate/brake flags live on the TEAM agent (like `stages`) — the live
+  // Flow Editor writes them here. Validate up front so a bad shape can't
+  // half-apply: an array of { name, humanGate?, brake? }, deduped by trimmed
+  // name. Ignored for non-team agents.
+  let normLabels = null;
+  if (labels !== undefined) {
+    if (labels !== null && !Array.isArray(labels)) {
+      return res.status(400).json({ error: 'labels must be an array of { name, humanGate?, brake? }' });
+    }
+    const seenNames = new Set();
+    normLabels = [];
+    for (const l of (labels || [])) {
+      if (!l || typeof l !== 'object' || Array.isArray(l) || typeof l.name !== 'string' || !l.name.trim()) {
+        return res.status(400).json({ error: 'each label needs a non-empty name' });
+      }
+      const name = l.name.trim();
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+      const entry = { name };
+      if (l.humanGate === true) entry.humanGate = true;
+      if (l.brake === true) entry.brake = true;
+      normLabels.push(entry);
+    }
+  }
+
+  // ── Named human roles (#987) ──────────────────────────────────────────────
+  // First-class human flow nodes, persisted on the TEAM agent like `labels` /
+  // `stages` — purely declarative, no runtime side-effect (AC9). Validated via
+  // the same rules the bundle uses so a live edit and an imported draft agree;
+  // normalized to the persisted shape. Ignored for non-team agents.
+  let normHumans = null;
+  if (humans !== undefined) {
+    if (humans !== null && !Array.isArray(humans)) {
+      return res.status(400).json({ error: 'humans must be an array of { id, name, description?, stage?, emits?, consumes? }' });
+    }
+    const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
+    if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
+    normHumans = normalizeHumans(humans || []);
+  }
+
+  // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
+  // Names the provider the orchestrator's autonomous synthesis (curator
+  // auto-promotion, skill distillation) bills against; `''`/`null` clears it
+  // (→ .env fallback). Validated here — up front, so a bad shape can't
+  // half-apply — against the team's USABLE providers (non-oauth), the same set
+  // usableEndpointsForTeam exposes to the console header selector. A stale/
+  // foreign/oauth id is rejected 400 rather than silently ignored.
+  let normAssistEndpointId; // undefined = untouched, null = clear
+  if (assistLlmEndpointId !== undefined) {
+    if (cfg.role !== 'team') {
+      return res.status(400).json({ error: 'assistLlmEndpointId is only settable on a team agent' });
+    }
+    if (assistLlmEndpointId === null || assistLlmEndpointId === '') {
+      normAssistEndpointId = null;
+    } else if (typeof assistLlmEndpointId !== 'string') {
+      return res.status(400).json({ error: 'assistLlmEndpointId must be a string endpoint id (or null to clear)' });
+    } else {
+      const tenant = agentTeamId(cfg);
+      const ep = usableEndpointsForTeam(tenant).find(e => e.id === assistLlmEndpointId);
+      if (!ep) {
+        return res.status(400).json({ error: `assistLlmEndpointId '${assistLlmEndpointId}' is not a provider usable by this team` });
+      }
+      if (ep.authType === 'oauth-token') {
+        return res.status(400).json({ error: 'assistLlmEndpointId cannot be an oauth-token provider (subscription seats are not billable for server-side synthesis)' });
+      }
+      normAssistEndpointId = assistLlmEndpointId;
+    }
+  }
+
+  // Config-write authorization (#989): editing an agent requires management
+  // rights over its owning team — not mere visibility. Re-parenting to another
+  // team additionally requires management rights over the destination team, so a
+  // Team Admin can't move an agent into a team they don't administer.
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (teamId !== undefined && teamId !== (cfg.teamId || 'default')
+      && !canManageAgent(scope, { teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
 
   // Validate the structured OUTCOMES port (#827) up front so a bad shape can't
   // half-apply. `null`/[]/{} clears it (handled at persist below); a non-empty
-  // port must pass validateOutcomes (rejects human:*/brake labels, duplicate
+  // port must pass validateOutcomes (rejects flagged human-gate labels, duplicate
   // option ids, unknown action types).
   if (isAuthoredOutcomes(outcomes)) {
-    const vo = validateOutcomes(outcomes);
+    // Gate-ness is configuration (#928): validate against the owning team's
+    // persisted label registry, not against the label's name.
+    const vo = validateOutcomes(outcomes, { labels: teamLabelRegistry(cfg.parentTeamId) });
     if (!vo.ok) return res.status(400).json({ error: `Invalid outcomes: ${vo.error}` });
   }
 
@@ -1646,6 +1841,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // pushed to all inheriting members in the same call (their AGENT-PROMPT.md
   // and CLAUDE.md are rewritten in place — see updateTeamPrompt).
   if (cfg.role === 'team' && typeof systemPromptTemplate === 'string') {
+    // #990: snapshot the previous template before the orchestrator overwrites it.
+    if (systemPromptTemplate !== (cfg.systemPromptTemplate || '')) {
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPromptTemplate',
+        oldContent: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '',
+        newContent: systemPromptTemplate, req, action: 'edited',
+      });
+    }
     const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
     try {
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/prompt`, {
@@ -1679,11 +1882,20 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       ? skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
       : [];
   }
-  // Agent-level emitted labels (label hand-offs wired from the process editor).
-  // `null` / [] clears the set.
-  if (emits !== undefined) {
-    if (Array.isArray(emits) && emits.length) fresh.emits = emits.filter(e => typeof e === 'string' && e);
-    else delete fresh.emits;
+  // Legacy `emits` input: lift to outcomes on write (#831). Ignored when `outcomes`
+  // is also in the request (outcomes wins). Non-empty emits create a degenerate
+  // anyOf outcomes unless the agent already has authored outcomes (those take
+  // priority). `null`/[] clears only the flat field; empty/clear does not touch
+  // any existing outcomes port.
+  if (emits !== undefined && outcomes === undefined) {
+    const validEmits = Array.isArray(emits) ? emits.filter(e => typeof e === 'string' && e) : [];
+    if (validEmits.length && !isAuthoredOutcomes(fresh.outcomes)) {
+      fresh.outcomes = normalizeOutcomes({
+        mode: 'anyOf',
+        options: validEmits.map(l => ({ id: l, title: l, actions: [{ type: 'setLabel', label: l }] })),
+      });
+    }
+    delete fresh.emits;
   }
 
   // ── Structured OUTCOMES port (#827) ───────────────────────────────────────
@@ -1725,6 +1937,17 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
           ...(hint ? { hint } : {}),
           ...(p ? { path: p } : {}),
           ...(a.description ? { description: a.description } : {}),
+          // Artifact audience (#981): 'human' declares a person consumes this
+          // output (delivery touchpoint) — the only supported value.
+          ...(a.audience === 'human' ? { audience: 'human' } : {}),
+          // Open-end markers (#1004, concept §4.7): terminal XOR external.
+          ...(a.terminal === true ? { terminal: true } : {}),
+          ...(a.terminal !== true && a.external && typeof a.external === 'object' && !Array.isArray(a.external)
+            ? { external: {
+                ...(typeof a.external.note === 'string' && a.external.note.trim()
+                  ? { note: a.external.note.trim() } : {}),
+              } }
+            : {}),
         };
       })
       .filter(a => a.name || a.path);
@@ -1771,6 +1994,37 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       : [];
   }
 
+  // Label registry, team-agent only (#981) — validated into normLabels above.
+  // Mirrors the bundle's `labels[]`; `teamLabelRegistry` reads it for gate/brake
+  // classification on every live graph build. Display/lint-only — no runtime
+  // side-effect. `null`/[] clears the registry.
+  if (labels !== undefined && fresh.role === 'team') {
+    if (normLabels && normLabels.length) fresh.labels = normLabels;
+    else delete fresh.labels;
+  }
+
+  // Named human roles, team-agent only (#987) — validated into normHumans above.
+  // Mirrors the bundle's `humans[]`; `teamHumansRegistry` reads it so the live
+  // graph binds the #981 touchpoints to the named nodes. No trigger side-effect
+  // (AC9), but a reviewer/gate binding feeds the generated Outcomes prompt
+  // block (#1007) — reconciled below.
+  let humansChanged = false;
+  if (humans !== undefined && fresh.role === 'team') {
+    const before = JSON.stringify(fresh.humans || []);
+    if (normHumans && normHumans.length) fresh.humans = normHumans;
+    else delete fresh.humans;
+    humansChanged = JSON.stringify(fresh.humans || []) !== before;
+  }
+
+  // Assist synthesis provider, team-agent only (#1213) — validated into
+  // normAssistEndpointId above. Read by the orchestrator's
+  // resolveAssistBindingForTeam; null/'' clears it (→ .env). No runtime respawn:
+  // it is read fresh on each autonomous synthesis pass.
+  if (normAssistEndpointId !== undefined && fresh.role === 'team') {
+    if (normAssistEndpointId) fresh.assistLlmEndpointId = normAssistEndpointId;
+    else delete fresh.assistLlmEndpointId;
+  }
+
   // ── GitHub artifact ports (#380) ──────────────────────────────────────────
   // Produce flags (opens PRs/issues) drive the node badge/ports + the producer
   // instruction block; consumed channels drive the on:'github' edges and the
@@ -1781,6 +2035,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     const next = {};
     if (g.producesPr) next.producesPr = true;
     if (g.producesIssue) next.producesIssue = true;
+    // Artifact audience (#981): 'human' declares that a person (review/merge)
+    // consumes the artifact — the only supported value; anything else is
+    // dropped (= unspecified). Meaningless without the produce flag.
+    if (next.producesPr && g.prAudience === 'human') next.prAudience = 'human';
+    if (next.producesIssue && g.issueAudience === 'human') next.issueAudience = 'human';
     if (Object.keys(next).length) fresh.github = next; else delete fresh.github;
     githubChanged = true;
   }
@@ -1793,6 +2052,16 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         artifact: c.artifact, from: c.from,
         ...(typeof c.label === 'string' && c.label.trim() ? { label: c.label.trim() } : {}),
         ...(c.gate === 'human' ? { gate: 'human' } : {}),
+        // Claim opt-out (#958) — must survive the live port write, otherwise
+        // reconcileTeamGithubChannels re-stamps the claim the author just turned
+        // off. Only the non-default is persisted.
+        ...(c.autoClaim === false ? { autoClaim: false } : {}),
+        // Internal-channel transport (#1194) — must survive the live port write so
+        // reconcileTeamGithubChannels re-derives an internal (poller-excluded)
+        // listener. Only meaningful on a labelled, non-human channel; anything else
+        // stays poller-delivered, so a stray `transport` on those is dropped here.
+        ...(c.transport === 'internal' && typeof c.label === 'string' && c.label.trim() && c.gate !== 'human'
+          ? { transport: 'internal' } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -1882,6 +2151,18 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // parent team's systemPromptTemplate), mirror it into the agent's volume, and
   // wake the agent so the next session reads it.
   if (promptOverrideChanged) {
+    // #990: version the member's authored OVERRIDE (the field the human edits).
+    // Setting an override → 'edited'; switching back to inherit (systemPrompt
+    // cleared) → 'inherited' with empty content. cfg still holds the pre-edit
+    // override here (fresh was written above; cfg was read before that).
+    const prevOverride = (typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
+    const nextOverride = (typeof fresh.systemPrompt === 'string') ? fresh.systemPrompt : '';
+    if (prevOverride !== nextOverride) {
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPrompt', oldContent: prevOverride, newContent: nextOverride, req,
+        action: typeof fresh.systemPrompt === 'string' ? 'edited' : 'inherited',
+      });
+    }
     let resolvedPrompt = '';
     if (typeof fresh.systemPrompt === 'string') {
       resolvedPrompt = fresh.systemPrompt;
@@ -1891,7 +2172,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         resolvedPrompt = teamCfg.systemPromptTemplate;
       }
     }
-    const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
+    const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
     try {
       const tmp = promptPath + '.tmp';
       fs.writeFileSync(tmp, resolvedPrompt, 'utf8');
@@ -1923,6 +2204,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // github-flag-only change keeps the produce block's established lazy refresh.
   if (outcomesChanged && fresh.parentTeamId) {
     await reconcileTeamOutcomes(fresh.parentTeamId);
+  }
+  // A humans-registry change on the TEAM agent (reviewer/gate bindings) feeds
+  // the members' generated Outcomes blocks (#1007) — re-render them.
+  if (humansChanged && fresh.role === 'team') {
+    await reconcileTeamOutcomes(id);
   }
   // Wake a running agent so it re-pulls config promptly under volume isolation
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
@@ -2115,6 +2401,131 @@ app.get('/api/agents/:id/handover/git-status', heavyLimiter, async (req, res) =>
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+/* ─── Sync repositories into existing agents (#1342) ─────────────────────────
+   The Working Environment form lets you add repositories at any time, but repos
+   are only cloned into an agent's workspace at creation. These endpoints clone
+   the MISSING repos into existing agents (idempotent — already-cloned repos are
+   left untouched) and stream one NDJSON line per repo per agent so the operator
+   sees progress. Per-agent (Agent detail) + per-environment fan-out. */
+
+// Open an NDJSON-over-chunked response for streaming per-line progress (the
+// POST /api/teams/stream mould — see that handler for the flushHeaders /
+// setNoDelay / res.on('close') rationale). Returns { emit, end, isAborted }.
+function openNdjsonStream(res) {
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  if (typeof res.socket?.setNoDelay === 'function') res.socket.setNoDelay(true);
+  let aborted = false;
+  res.on('close', () => { if (!res.writableEnded) aborted = true; });
+  return {
+    emit(ev) { if (aborted) return; try { res.write(JSON.stringify(ev) + '\n'); } catch { /* socket gone */ } },
+    end() { if (!aborted && !res.writableEnded) res.end(); },
+    isAborted: () => aborted,
+  };
+}
+
+const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+
+// Sync one agent by calling the orchestrator's per-agent endpoint and emitting
+// agent-scoped progress lines. Never throws — an orchestrator/transport error
+// becomes an 'agent-error' line so a per-environment fan-out isn't aborted by a
+// single bad agent. Returns { summary } for the caller to accumulate totals.
+async function syncOneAgentToStream(agentId, displayName, emit) {
+  emit({ type: 'agent', agentId, displayName: displayName || agentId });
+  let data;
+  try {
+    const resp = await fetch(
+      `${ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/sync-repositories`,
+      { method: 'POST' },
+    );
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const error = (data && data.error) || `HTTP ${resp.status}`;
+      emit({ type: 'agent-error', agentId, error });
+      return { summary: { ...EMPTY_SYNC_SUMMARY } };
+    }
+  } catch (err) {
+    emit({ type: 'agent-error', agentId, error: `Orchestrator unreachable: ${err.message}` });
+    return { summary: { ...EMPTY_SYNC_SUMMARY } };
+  }
+  if (data.noWorkspace) {
+    emit({ type: 'agent-skip', agentId, reason: 'no-workspace' });
+    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY } };
+  }
+  const repos = Array.isArray(data.repos) ? data.repos : [];
+  for (const r of repos) {
+    emit({
+      type: 'repo', agentId, name: r.name, url: r.url, status: r.status,
+      reason: r.reason || null, error: r.error || null, fromCache: !!r.fromCache,
+    });
+  }
+  const summary = data.summary || summarizeSyncRepos(repos);
+  emit({ type: 'agent-done', agentId, summary });
+  return { summary };
+}
+
+// Local fold, in case the orchestrator omits `summary` (defensive).
+function summarizeSyncRepos(repos) {
+  const list = Array.isArray(repos) ? repos : [];
+  return {
+    total: list.length,
+    cloned: list.filter((r) => r.status === 'cloned').length,
+    skipped: list.filter((r) => r.status === 'skipped').length,
+    failed: list.filter((r) => r.status === 'failed').length,
+  };
+}
+
+// Per-agent: clone the environment's missing repos into this one agent.
+app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const stream = openNdjsonStream(res);
+  try {
+    stream.emit({ type: 'plan', agentCount: 1 });
+    const { summary } = await syncOneAgentToStream(id, id, stream.emit);
+    stream.emit({ type: 'complete', agentCount: 1, totals: summary });
+  } catch (err) {
+    stream.emit({ type: 'error', status: 500, error: err.message });
+  } finally {
+    stream.end();
+  }
+});
+
+// Per-environment: fan the same sync out to every agent bound to the env.
+app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => {
+  const envId = normalizeEnvId(req.params.id);
+  const env = loadEnvironment(envId);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  const agents = agentsUsingEnvironment(envId, scope);
+  const repoCount = (Array.isArray(env.repositories) ? env.repositories : []).length;
+
+  const stream = openNdjsonStream(res);
+  const totals = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+  try {
+    stream.emit({
+      type: 'plan', envId, agentCount: agents.length, repoCount,
+      agents: agents.map((a) => ({ id: a.id, displayName: a.displayName })),
+    });
+    for (const a of agents) {
+      if (stream.isAborted()) break;
+      const { summary } = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
+      totals.total += summary.total || 0;
+      totals.cloned += summary.cloned || 0;
+      totals.skipped += summary.skipped || 0;
+      totals.failed += summary.failed || 0;
+    }
+    stream.emit({ type: 'complete', agentCount: agents.length, totals });
+  } catch (err) {
+    stream.emit({ type: 'error', status: 500, error: err.message });
+  } finally {
+    stream.end();
   }
 });
 
@@ -2426,6 +2837,12 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   if (!fs.existsSync(teamDir)) {
     return res.status(404).json({ error: 'Team not found' });
   }
+  // Config-write authorization (#989): adding a member requires management
+  // rights over the parent team agent's owning team.
+  const teamCfg = readJsonFile(path.join(teamDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(teamCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   // Body is optional. When present it carries the override / config fields
   // the orchestrator's addTeamMember now accepts: { id, displayName,
   // systemPromptOverride, skillsOverride, sessionPolicy, triggers }.
@@ -2454,6 +2871,37 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       memberDisplayName,
       vars: { ...resolved.vars, agentId: memberId },
     });
+  } else if (typeof inBody.processTemplateId === 'string' && inBody.processTemplateId) {
+    // Add-role-from-a-PROCESS-template (#1375): surface a loop-closing role a
+    // team is missing (e.g. merger/reworker) and add it in one click. Unlike the
+    // agent-template branch above, the role comes from a whole-process bundle
+    // (orchestrator/skill-pool/process-templates/), so we mirror the Team-Setup
+    // wizard's per-role materialisation for a SINGLE role — reusing the exact
+    // same pure builders so the added member is byte-identical to one created at
+    // team-setup time: templateToCustomRoles → labelSuffix stamp → buildMemberFromTemplate.
+    const bundle = loadProcessTemplate(PROCESS_TEMPLATES_DIR, inBody.processTemplateId);
+    if (!bundle) return res.status(400).json({ error: `Process template '${inBody.processTemplateId}' not found` });
+    const roleId = typeof inBody.roleId === 'string' ? inBody.roleId : '';
+    const role = (bundle.roles || []).find(r => r.id === roleId);
+    if (!role) return res.status(400).json({ error: `Role '${roleId}' not found in process template '${inBody.processTemplateId}'` });
+    const memberId = typeof inBody.id === 'string' && inBody.id ? inBody.id : `${teamId}-${role.id}`;
+    if (!AGENT_ID_RE.test(memberId)) return res.status(400).json({ error: 'Invalid member id' });
+    const memberDisplayName = typeof inBody.displayName === 'string' && inBody.displayName.trim()
+      ? inBody.displayName.trim() : (role.displayName || role.id);
+    const resolved = resolveTeamMemberVars(teamId, inBody);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    // One role → its member-shaped "custom role", then apply the team's own
+    // labelSuffix (#902) so the new role's labels line up with the rest of the
+    // team, exactly as the wizard stamps the whole bundle before materialising.
+    let customRole = templateToCustomRoles({ roles: [role] })[0];
+    const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix : '';
+    if (suffix) customRole = applyLabelSuffix([customRole], [], suffix).members[0];
+    outBody = buildMemberFromTemplate(customRole, {
+      teamId,
+      memberId,
+      memberDisplayName,
+      vars: { ...resolved.vars, agentId: memberId },
+    });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -2474,6 +2922,11 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath, teamId } = req.body;
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
+  }
+  // Config-write authorization (#989): creating an agent requires management
+  // rights over the destination team (default when unspecified).
+  if (!canManageAgent(getScope(req), { teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
   // Teams may be created without a default prompt — members can carry their
   // own per-role prompts, and the orchestrator stores an empty template.
@@ -2504,8 +2957,22 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
 app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check: AGENT_ID_RE already excludes traversal segments,
+  // but CodeQL doesn't always recognise the regex as a sanitiser when the
+  // value travels through a destructure first. Re-check with path.relative.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): deleting an agent requires management
+  // rights over its owning team.
+  const delCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(delCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, {
@@ -2540,7 +3007,17 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(newId)) {
     return res.status(400).json({ error: `Invalid agent id '${newId}' (allowed: letters, digits, _ - .)` });
   }
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) {
+  // Containment check for the SOURCE id — AGENT_ID_RE excludes traversal
+  // segments, but CodeQL's path-injection query doesn't follow the regex
+  // through the destructure; path.resolve + path.relative is the in-flow
+  // sanitiser it recognises. Build every id-derived path from the contained dir.
+  const cloneAgentsBaseDir = path.resolve(AGENTS_DIR);
+  const srcAgentDir = path.resolve(cloneAgentsBaseDir, id);
+  const srcRel = path.relative(cloneAgentsBaseDir, srcAgentDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel) || !srcRel) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  if (!fs.existsSync(srcAgentDir)) {
     return res.status(404).json({ error: 'Agent not found' });
   }
   if (parentTeamId != null && !AGENT_ID_RE.test(parentTeamId)) {
@@ -2560,6 +3037,20 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
       code: 'id-conflict',
       agentId: newId,
     });
+  }
+  // Config-write authorization (#989): cloning creates an agent — require
+  // management rights over the source agent's owning team, and (when grafting
+  // the clone into a team) over the destination team too.
+  const cloneScope = getScope(req);
+  const srcCfg = readJsonFile(path.join(srcAgentDir, 'config.json'), null);
+  if (!canManageAgent(cloneScope, agentMetaForScope(srcCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (parentTeamId != null) {
+    const destCfg = readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null);
+    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { teamId: parentTeamId }))) {
+      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    }
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -2582,25 +3073,79 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
 // startsWith(rootPrefix) as a path-injection sanitiser when applied in the
 // same function as the sink. Allowed roots are WORKSPACE (agent files) and
 // /tmp (scratch dirs from fs.mkdtempSync). Refuses anything else.
-function copyDirRecursive(src, dst) {
+// Asynchronous by design: an agent workspace is routinely hundreds of MB over
+// tens of thousands of files, and a synchronous copy would block the
+// single-threaded API for its whole duration.
+async function copyDirRecursiveAsync(src, dst) {
   if (typeof src !== 'string' || src.includes('..') ||
       !(src.startsWith(WORKSPACE + path.sep) || src.startsWith('/tmp' + path.sep))) {
-    throw new Error(`copyDirRecursive: refusing src outside allowed roots: ${src}`);
+    throw new Error(`copyDirRecursiveAsync: refusing src outside allowed roots: ${src}`);
   }
   if (typeof dst !== 'string' || dst.includes('..') ||
       !(dst.startsWith(WORKSPACE + path.sep) || dst.startsWith('/tmp' + path.sep))) {
-    throw new Error(`copyDirRecursive: refusing dst outside allowed roots: ${dst}`);
+    throw new Error(`copyDirRecursiveAsync: refusing dst outside allowed roots: ${dst}`);
   }
-  fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+  await fs.promises.mkdir(dst, { recursive: true });
+  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name);
     const d = path.join(dst, entry.name);
     if (entry.isSymbolicLink()) continue; // skip symlinks for safety
     if (entry.isDirectory()) {
-      copyDirRecursive(s, d);
+      await copyDirRecursiveAsync(s, d);
     } else {
-      fs.copyFileSync(s, d);
+      await fs.promises.copyFile(s, d);
     }
+  }
+}
+
+// Mirrors a directory tree as a farm of hard links: same shape, same file
+// contents (same inodes), but no data copied and no second copy of the bytes on
+// disk. The export needs a tree it can hand to `zip` under a chosen top-level
+// name; it does not need the bytes duplicated, and duplicating them costs ~10 s
+// and ~545 MB on a real agent workspace.
+//
+// Same inline containment gate and the same skip-symlinks rule as
+// copyDirRecursiveAsync — see there. `skipTop` names top-level entries to leave
+// out (the export drops sessions/).
+//
+// Falls back to a copy per file when linking is refused — a hard link cannot
+// cross a filesystem boundary (EXDEV) and some backing stores reject it
+// outright — so the result is correct wherever the volumes happen to sit.
+const LINK_BATCH = 32;
+async function linkDirRecursiveAsync(src, dst, skipTop = new Set()) {
+  if (typeof src !== 'string' || src.includes('..') ||
+      !(src.startsWith(WORKSPACE + path.sep) || src.startsWith('/tmp' + path.sep))) {
+    throw new Error(`linkDirRecursiveAsync: refusing src outside allowed roots: ${src}`);
+  }
+  if (typeof dst !== 'string' || dst.includes('..') ||
+      !(dst.startsWith(WORKSPACE + path.sep) || dst.startsWith('/tmp' + path.sep))) {
+    throw new Error(`linkDirRecursiveAsync: refusing dst outside allowed roots: ${dst}`);
+  }
+  await fs.promises.mkdir(dst, { recursive: true });
+  const files = [];
+  for (const entry of await fs.promises.readdir(src, { withFileTypes: true })) {
+    if (skipTop.has(entry.name)) continue;
+    if (entry.isSymbolicLink()) continue; // skip symlinks for safety
+    if (entry.isDirectory()) {
+      await linkDirRecursiveAsync(path.join(src, entry.name), path.join(dst, entry.name));
+    } else if (entry.isFile()) {
+      files.push(entry.name);
+    }
+    // sockets/fifos/devices: nothing an export should carry
+  }
+  // Linking a file is a metadata operation; issued one await at a time it
+  // leaves the fs thread pool idle. Batching is ~5× on the workspace volume
+  // (5k files: 229 ms → 44 ms) and matters more still on the copy fallback.
+  for (let i = 0; i < files.length; i += LINK_BATCH) {
+    await Promise.all(files.slice(i, i + LINK_BATCH).map(async (name) => {
+      const s = path.join(src, name);
+      const d = path.join(dst, name);
+      try {
+        await fs.promises.link(s, d);
+      } catch {
+        await fs.promises.copyFile(s, d);
+      }
+    }));
   }
 }
 
@@ -2643,25 +3188,32 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
     }
   } catch { /* Podman unavailable — proceed without image info */ }
 
-  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'aee-export-'));
-  // zipDir is a sibling scratch dir (so `zip -r` doesn't try to archive its
-  // own output). Neither tmpDir nor zipDir carries any user-controlled path
-  // segment, which keeps the filesystem sinks below clear of req-derived data.
-  const zipDir = fs.mkdtempSync(path.join('/tmp', 'aee-zip-'));
-  const zipPath = path.join(zipDir, 'export.zip');
+  // The archive is streamed straight to the client and never materialises on
+  // disk, so all that is staged is the shape `zip` walks: a link farm under the
+  // top-level name the importer expects (`workspace/`) plus the manifest. The
+  // staging root sits on the workspace volume — a hard link cannot cross a
+  // filesystem boundary, and the point of the farm is not copying the bytes.
+  // No path segment below carries request-derived data (the id is contained
+  // above, the rest is a UUID), which keeps the filesystem sinks clear.
+  const stagingDir = path.join(WORKSPACE, '.export-staging', crypto.randomUUID());
+  let cleanedUp = false;
+  const cleanupStaging = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    // Only the links go — the agent's own files are untouched by rmSync here.
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ }
+  };
   try {
-    // Copy workspace excluding sessions/ (conversation history, logs).
-    // copyDirRecursive carries an inline path-containment check; using it
+    // Excludes sessions/ (conversation history, container logs).
+    // linkDirRecursiveAsync carries an inline path-containment check; using it
     // for both files and directories keeps every fs sink behind that gate.
-    const workspaceDir = path.join(tmpDir, 'workspace');
-    copyDirRecursive(agentDirPath, workspaceDir);
-    try { fs.rmSync(path.join(workspaceDir, 'sessions'), { recursive: true, force: true }); } catch { /* noop */ }
+    await linkDirRecursiveAsync(agentDirPath, path.join(stagingDir, 'workspace'), new Set(['sessions']));
 
     // Agent-specific env vars (sensitive Matrix creds are excluded)
     const envVars = { AGENT_ID: id };
     if (cfg.modelOverride) envVars.AGENT_DEFAULT_MODEL = cfg.modelOverride;
 
-    fs.writeFileSync(path.join(tmpDir, 'manifest.json'), JSON.stringify({
+    await fs.promises.writeFile(path.join(stagingDir, 'manifest.json'), JSON.stringify({
       version: '1',
       exportedAt: new Date().toISOString(),
       agentId: id,
@@ -2669,26 +3221,47 @@ app.get('/api/agents/:id/export', heavyLimiter, async (req, res) => {
       envVars,
     }, null, 2));
 
-    const zipResult = spawnSync('zip', ['-r', zipPath, '.'], { cwd: tmpDir });
-    if (zipResult.status !== 0) {
-      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
-    }
+    // `-` as the archive name makes zip write to stdout; -q keeps the per-file
+    // listing out of it (see archive.js).
+    const { child, done } = streamArchiveTool('zip', ['-r', '-q', '-', '.'], { cwd: stagingDir });
 
-    const stat = fs.statSync(zipPath);
     res.setHeader('Content-Disposition', `attachment; filename="agent-${id}-export.zip"`);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Length', stat.size);
-    const stream = fs.createReadStream(zipPath);
-    stream.on('close', () => {
-      try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
+    // No Content-Length: the size isn't known until the archive is finished,
+    // and waiting for that is exactly what this route no longer does.
+
+    // `end: false` keeps the decision to terminate the response here rather
+    // than with the pipe: a response ended by zip's stdout closing would look
+    // complete to the client even when zip died mid-archive.
+    child.stdout.pipe(res, { end: false });
+
+    // Client cancelled the download — stop archiving instead of building the
+    // rest of a ZIP nobody is reading.
+    let clientGone = false;
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
+      child.kill('SIGKILL');
     });
-    stream.pipe(res);
+
+    const zipResult = await done;
+    cleanupStaging();
+    if (clientGone) {
+      console.log(`[API] Export of ${id} cancelled by the client`);
+    } else if (zipResult.code === 0) {
+      res.end();
+    } else {
+      console.error(`[API] Export failed for ${id}: ${describeArchiveFailure('zip', zipResult)}`);
+      // Headers are long gone, so there is no status left to send: destroy the
+      // response so the client sees a truncated download rather than a
+      // silently corrupt ZIP.
+      res.destroy();
+    }
   } catch (err) {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
-    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    cleanupStaging();
     console.error(`[API] Export failed for ${id}: ${err.message}`);
-    res.status(500).json({ error: `Export failed: ${err.message}` });
+    if (res.headersSent) res.destroy();
+    else res.status(500).json({ error: `Export failed: ${err.message}` });
   }
 });
 
@@ -2716,8 +3289,11 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     fs.writeFileSync(zipPath, req.file.buffer);
     fs.mkdirSync(extractDir);
 
-    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
-    if (unzipResult.status !== 0) {
+    // -q: no per-file listing (see runArchiveTool) — an agent export routinely
+    // holds tens of thousands of members.
+    const unzipResult = await runArchiveTool('unzip', ['-q', '-o', zipPath, '-d', extractDir]);
+    if (unzipResult.code !== 0) {
+      console.error(`[API] Import: ${describeArchiveFailure('unzip', unzipResult)}`);
       return res.status(400).json({ error: 'Could not extract ZIP — ensure the file is a valid agent export' });
     }
 
@@ -2765,6 +3341,20 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const parentTeamId = typeof req.body.parentTeamId === 'string' && req.body.parentTeamId.trim()
       ? req.body.parentTeamId.trim() : null;
 
+    // Config-write authorization (#989): importing creates an agent. When
+    // grafting into a team, require management rights over that team; a
+    // standalone import (arbitrary bundle, untrusted teamId) requires management
+    // of the default team — non-default Team Admins should graft via parentTeamId.
+    {
+      const importScope = getScope(req);
+      const destMeta = parentTeamId != null
+        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { teamId: parentTeamId })
+        : { teamId: 'default' };
+      if (!canManageAgent(importScope, destMeta)) {
+        return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+      }
+    }
+
     // Containment check — path.resolve + path.relative is the in-flow
     // sanitiser pattern CodeQL recognises for js/path-injection.
     const agentsBaseDir = path.resolve(AGENTS_DIR);
@@ -2796,7 +3386,7 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     const stagingRoot = path.join(WORKSPACE, '.import-staging');
     fs.mkdirSync(stagingRoot, { recursive: true });
     stagingDir = path.join(stagingRoot, crypto.randomUUID());
-    copyDirRecursive(workspaceDir, stagingDir);
+    await copyDirRecursiveAsync(workspaceDir, stagingDir);
 
     const orchResp = await fetch(`${ORCH_URL()}/internal/agents/import`, {
       method: 'POST',
@@ -2831,11 +3421,70 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
 
 /* ─── Agent Prompt ──────────────────────────────────────────────────── */
 
+// #990 (docs/prompt-version-history-concept.md): record the pre-edit authored
+// prompt as a retained version before a write overwrites it. Best-effort — a
+// stamping failure never breaks the primary prompt write. `field` is
+// 'systemPromptTemplate' for a team, else 'systemPrompt'. `by` comes from the
+// acting human (skillActor), so history is attributed to the person.
+function captureAuthoredPromptEdit(id, { field, oldContent, newContent, req, action = 'edited', note }) {
+  try {
+    // Containment: every caller AGENT_ID_RE-validates `id`, which already
+    // excludes traversal, but CodeQL doesn't model the regex as a sanitiser once
+    // the value travels through a call — re-check with path.relative before fs.
+    const agentsBaseDir = path.resolve(AGENTS_DIR);
+    const agentDir = path.resolve(agentsBaseDir, id);
+    const rel = path.relative(agentsBaseDir, agentDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    const existing = promptHistory.readPromptHistory(agentDir);
+    const next = promptHistory.stampPromptHistory(existing, {
+      field,
+      oldContent: oldContent == null ? '' : String(oldContent),
+      newContent: newContent == null ? '' : String(newContent),
+      by: skillActor(req),
+      action,
+      note,
+    });
+    promptHistory.writePromptHistory(agentDir, next);
+    return next;
+  } catch (err) {
+    console.warn(`[API] prompt-history capture failed for ${id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The authored-prompt field an agent versions, and its current authored content
+// (the string the human edits), resolved from config + AGENT-PROMPT.md. A team
+// versions its `systemPromptTemplate`; everyone else versions `systemPrompt`
+// (materialized in AGENT-PROMPT.md). Returns { field, content }.
+function resolveAuthoredPrompt(id, cfg) {
+  if (cfg && cfg.role === 'team') {
+    return { field: 'systemPromptTemplate', content: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '' };
+  }
+  // Prefer the materialized AGENT-PROMPT.md (the byte-exact authored text); fall
+  // back to config.systemPrompt when the file isn't there yet.
+  const fallback = (cfg && typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
+  // Containment re-check (see captureAuthoredPromptEdit) — `id` is AGENT_ID_RE-
+  // validated upstream; confirm the resolved dir stays under AGENTS_DIR for CodeQL.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  let content = fallback;
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    try { content = fs.readFileSync(path.join(agentDir, 'AGENT-PROMPT.md'), 'utf8'); }
+    catch { content = fallback; }
+  }
+  return { field: 'systemPrompt', content };
+}
+
 app.get('/api/agents/:id/prompt', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const promptPath = path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md');
-  if (!fs.existsSync(path.join(AGENTS_DIR, id))) return res.status(404).json({ error: 'Agent not found' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
   let content = '';
   try { content = fs.readFileSync(promptPath, 'utf8'); } catch { /* file may not exist yet */ }
   res.json({ content });
@@ -2844,11 +3493,27 @@ app.get('/api/agents/:id/prompt', (req, res) => {
 app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): a prompt edit is a management action, not
+  // a visibility one — require team-admin rights over the agent's owning team.
+  const promptCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  if (!canManageAgent(getScope(req), agentMetaForScope(promptCfg || {}))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const { content } = req.body;
   if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
   const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+  // #990: snapshot the previous authored prompt before we overwrite it. (Rollback
+  // has its own route that stamps action:'reverted'; a direct edit here is 'edited'.)
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const prev = resolveAuthoredPrompt(id, cfg);
+  captureAuthoredPromptEdit(id, {
+    field: 'systemPrompt', oldContent: prev.content, newContent: content, req, action: 'edited',
+  });
   const tmp = promptPath + '.tmp';
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, promptPath);
@@ -2860,29 +3525,225 @@ app.put('/api/agents/:id/prompt', apiLimiter, (req, res) => {
   res.json({ ok: true });
 });
 
+/* ─── Agent Prompt version history (#990) ────────────────────────────── */
+
+// GET the bounded version history (content-free summary + preview snippets).
+app.get('/api/agents/:id/prompt-history', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  const existing = promptHistory.readPromptHistory(agentDir);
+  if (!existing) {
+    // No history yet — report the field the agent versions so the UI can render
+    // an empty state without a second request.
+    const { field } = resolveAuthoredPrompt(id, cfg);
+    return res.json({ v: promptHistory.HISTORY_V, field, currentVersion: 0, history: [] });
+  }
+  res.json(promptHistory.summarize(existing));
+});
+
+// GET the full stored content of one version (for diff / preview before revert).
+app.get('/api/agents/:id/prompt-history/:version', (req, res) => {
+  const { id, version } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  const existing = promptHistory.readPromptHistory(agentDir);
+  const entry = promptHistory.findVersion(existing, version);
+  if (!entry) return res.status(404).json({ error: `Version ${version} not retained` });
+  res.json(entry);
+});
+
+// POST rollback to an earlier version. The target content is re-applied through
+// the SAME write path a normal edit uses (so preview stays byte-identical to what
+// is seeded); capture then records a new head with action:'reverted'. Never
+// destructive — a rollback is itself a new version.
+app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (req, res) => {
+  const { id, version } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfgPath = path.join(agentDir, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const existing = promptHistory.readPromptHistory(agentDir);
+  const target = promptHistory.findVersion(existing, version);
+  if (!target) return res.status(404).json({ error: `Version ${version} not retained` });
+  const summary = promptHistory.summarize(existing);
+  const note = `from v${summary.currentVersion} to v${target.version}`;
+  const targetContent = typeof target.content === 'string' ? target.content : '';
+
+  try {
+    if (cfg.role === 'team') {
+      // Route through the orchestrator so the reverted template is pushed to all
+      // inheriting members (same path as updateTeamPrompt).
+      captureAuthoredPromptEdit(id, {
+        field: 'systemPromptTemplate',
+        oldContent: typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '',
+        newContent: targetContent, req, action: 'reverted', note,
+      });
+      const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPromptTemplate: targetContent }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return res.status(resp.status).json(data);
+    } else if (cfg.role === 'team-member') {
+      // A member revert re-establishes an override (or switches back to inherit
+      // when the target version was an inherit-clear, i.e. empty content).
+      const fresh = readJsonFile(cfgPath, cfg);
+      const prev = resolveAuthoredPrompt(id, cfg);
+      captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
+      let resolvedPrompt = targetContent;
+      if (targetContent.length === 0) {
+        delete fresh.systemPrompt; // inherit
+        const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
+        resolvedPrompt = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
+      } else {
+        fresh.systemPrompt = targetContent;
+      }
+      writeJsonAtomic(cfgPath, fresh);
+      const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, resolvedPrompt, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+    } else {
+      // Standalone agent (or any other role) — raw AGENT-PROMPT.md rewrite.
+      const prev = resolveAuthoredPrompt(id, cfg);
+      captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
+      const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
+      const tmp = promptPath + '.tmp';
+      fs.writeFileSync(tmp, targetContent, 'utf8');
+      fs.renameSync(tmp, promptPath);
+      notifyAgentReseed(id, ['AGENT-PROMPT.md']);
+    }
+  } catch (err) {
+    return res.status(502).json({ error: `Revert failed: ${err.message}` });
+  }
+
+  const updated = promptHistory.summarize(promptHistory.readPromptHistory(agentDir));
+  res.json({ ok: true, revertedTo: target.version, currentVersion: updated.currentVersion, history: updated.history });
+});
+
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
 
-// Resolve everything the chat UI needs to render the model picker for an
-// agent: the endpoint+catalog reachable through its working environment, the
-// environment-level default, and the agent-level override (if any).
+// The human Team an agent belongs to — the tenant for ownership, visibility,
+// management and credential scoping. A team-member inherits it from its parent
+// Agent Team; `parentTeamId` is an Agent-Team id and is never itself a tenant
+// (see resolveAgentTenant in scope.js).
+function agentTeamId(cfg) {
+  return resolveAgentTenant(cfg, (id) => (
+    AGENT_ID_RE.test(id) ? readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null) : null
+  ));
+}
+
+// The minimal agent shape visibleAgent() needs (team + private-ownership).
+function agentMetaForScope(cfg) {
+  return { teamId: agentTeamId(cfg), visibility: cfg && cfg.visibility, ownerId: cfg && cfg.ownerId };
+}
+
+// Config-write authorization guard (#989). Derives the agent's owning team from
+// its on-disk config and 403s the response when the caller lacks team-admin
+// management rights over it. Returns true when it has already sent a denial (the
+// route should `return` immediately), false when the caller may proceed. Accepts
+// either the agent directory or an already-loaded config object.
+function denyUnlessCanManageAgent(req, res, agentDirOrCfg) {
+  const cfg = typeof agentDirOrCfg === 'string'
+    ? readJsonFile(path.join(agentDirOrCfg, 'config.json'), null)
+    : agentDirOrCfg;
+  if (!canManageAgent(getScope(req), agentMetaForScope(cfg || {}))) {
+    res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    return true;
+  }
+  return false;
+}
+
+// The Model Providers a given team is entitled to use — team-owned endpoints
+// plus system-scoped endpoints assigned to that team. This is the ONLY set an
+// agent may be switched to (no cross-team leakage), and — unlike
+// visibleCredential — it is role-independent, so a plain Team Member sees the
+// same curated set a Team Admin does (#302 credential listing stays closed to
+// members; this is a narrower, agent-scoped surface).
+function usableEndpointsForTeam(teamId) {
+  return listLlmEndpoints().filter(ep => credentialVisibleToTeam(ep, teamId));
+}
+
+// The non-secret projection of an endpoint sent to the chat UI (never a token).
+function publicEndpointView(ep) {
+  if (!ep) return null;
+  return {
+    id: ep.id,
+    name: ep.name || ep.id,
+    authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
+    baseUrl: ep.baseUrl || '',
+    defaultModelId: ep.defaultModelId || null,
+    models: ep.models || [],
+  };
+}
+
+// The effective endpoint id an agent runs on: a per-agent provider override
+// wins over the environment's binding (mirrors resolveLlmBindingForAgent in the
+// orchestrator).
+function effectiveEndpointId(cfg, env) {
+  return (cfg && cfg.llmEndpointOverride) || (env && env.llmEndpointId) || null;
+}
+
+// Resolve everything the chat UI needs to render the model + provider picker for
+// an agent: the effective endpoint+catalog (override wins over the env binding),
+// the environment-level default, the agent-level model override, and the curated
+// set of providers this agent's team may switch to.
 app.get('/api/agents/:id/model-options', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Fail closed for team-foreign callers — a 404 avoids leaking existence.
+  const scope = getScope(req);
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(404).json({ error: 'Agent not found' });
+  }
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-  const endpoint = env?.llmEndpointId
-    ? listLlmEndpoints().find(e => e.id === env.llmEndpointId)
+  const effEndpointId = effectiveEndpointId(cfg, env);
+  const endpoint = effEndpointId
+    ? listLlmEndpoints().find(e => e.id === effEndpointId)
     : null;
+  const teamId = agentTeamId(cfg);
   res.json({
-    endpointId:    endpoint?.id || null,
-    endpointName:  endpoint?.name || null,
+    endpointId:     endpoint?.id || null,
+    endpointName:   endpoint?.name || null,
+    authType:       endpoint ? (endpoint.authType === 'oauth-token' ? 'oauth-token' : 'api-key') : null,
+    baseUrl:        endpoint?.baseUrl || null,
+    // The provider is bound at the env level unless the agent carries an override.
+    endpointOverride: cfg.llmEndpointOverride || null,
+    envEndpointId:  env?.llmEndpointId || null,
     // env-level pin wins; otherwise show whatever the registry default is so
     // the picker label matches what the agent will actually use.
     defaultModelId: env?.defaultModelId || endpoint?.defaultModelId || null,
-    override:      cfg.modelOverride || null,
-    models:        endpoint?.models || [],
+    override:       cfg.modelOverride || null,
+    models:         endpoint?.models || [],
+    // Curated set of providers this agent's team may switch to (never tokens).
+    endpoints:      usableEndpointsForTeam(teamId).map(publicEndpointView),
+    // #1213: the team agent's assist-synthesis provider (curator promotion /
+    // distillation bill against it). Team-agent-only; null on other roles.
+    assistLlmEndpointId: cfg.role === 'team' ? (cfg.assistLlmEndpointId || null) : null,
+    // Whether THIS caller may actually change the model/provider — a management
+    // action (#989), so the picker is read-only for a plain Team Member.
+    canSwitch:      canManageAgent(scope, agentMetaForScope(cfg)),
+    teamId,
   });
 });
 
@@ -2892,6 +3753,13 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): changing the model is a management
+  // action — require team-admin rights over the agent's owning team, not mere
+  // visibility (a plain Team Member may see the agent but not reconfigure it).
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const { modelId } = req.body || {};
 
   // null / "" / undefined → clear override (fall back to env default)
@@ -2907,15 +3775,17 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
     return res.status(400).json({ error: 'modelId must be a string or null' });
   }
 
-  // Validate against the environment's endpoint catalog so an agent can't be
-  // pinned to a model the proxy doesn't actually serve.
+  // Validate against the EFFECTIVE endpoint's catalog (a per-agent provider
+  // override wins over the env binding) so an agent can't be pinned to a model
+  // the active provider doesn't actually serve.
   const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-  if (!env?.llmEndpointId) {
-    return res.status(400).json({ error: 'Environment has no LLM endpoint bound — set one before overriding the model' });
+  const effEndpointId = effectiveEndpointId(cfg, env);
+  if (!effEndpointId) {
+    return res.status(400).json({ error: 'No LLM endpoint bound — set a provider before overriding the model' });
   }
-  const endpoint = listLlmEndpoints().find(e => e.id === env.llmEndpointId);
+  const endpoint = listLlmEndpoints().find(e => e.id === effEndpointId);
   if (!endpoint) {
-    return res.status(400).json({ error: `LLM endpoint '${env.llmEndpointId}' not found` });
+    return res.status(400).json({ error: `LLM endpoint '${effEndpointId}' not found` });
   }
   if (!(endpoint.models || []).some(m => m.id === modelId)) {
     return res.status(400).json({ error: `Model '${modelId}' is not in endpoint '${endpoint.id}' catalog` });
@@ -2926,13 +3796,410 @@ app.patch('/api/agents/:id/model', apiLimiter, (req, res) => {
   res.json({ override: modelId });
 });
 
+// Switch the Model Provider (LLM endpoint) for a single agent. Unlike the model
+// override (read live by the runtime), the provider is injected at container
+// spawn time, so a change requires a one-agent respawn — done best-effort after
+// the config write. Permission model (see docs/multi-user-concept.md):
+//   • the caller must have team-admin management rights over the agent's owning
+//     team (#989) — not mere visibility — 403 else
+//   • the target endpoint must be in the agent team's curated, usable set
+//     (credentialVisibleToTeam) — never a provider the team isn't entitled to,
+//     not even for a System Admin — 403 else
+app.patch('/api/agents/:id/provider', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const { endpointId } = req.body || {};
+  const teamId = agentTeamId(cfg);
+
+  // null / "" / undefined → clear the override (back to the env default).
+  if (endpointId === null || endpointId === undefined || endpointId === '') {
+    if ('llmEndpointOverride' in cfg) {
+      delete cfg.llmEndpointOverride;
+      // A model pin that only made sense on the overridden provider is dropped;
+      // the env provider re-validates its own default anyway.
+      pruneIncompatibleModelOverride(cfg, effectiveEndpointId(cfg, cfg.environmentId ? loadEnvironment(cfg.environmentId) : null));
+      writeJsonAtomic(cfgPath, cfg);
+    }
+    const respawned = await respawnAgentBestEffort(id, 'provider-override-cleared');
+    return res.json({ endpointOverride: null, respawned });
+  }
+
+  if (typeof endpointId !== 'string') {
+    return res.status(400).json({ error: 'endpointId must be a string or null' });
+  }
+  const target = usableEndpointsForTeam(teamId).find(ep => ep.id === endpointId);
+  if (!target) {
+    return res.status(403).json({
+      error: `Model provider '${endpointId}' is not available for team '${teamId}'`,
+      code: 'forbidden',
+    });
+  }
+
+  cfg.llmEndpointOverride = endpointId;
+  // Drop a stale model pin the new provider doesn't serve, so the agent falls
+  // back to the new provider's default instead of failing at invocation.
+  pruneIncompatibleModelOverride(cfg, endpointId);
+  writeJsonAtomic(cfgPath, cfg);
+  const respawned = await respawnAgentBestEffort(id, 'provider-override-changed');
+  res.json({ endpointOverride: endpointId, respawned });
+});
+
+// Clear cfg.modelOverride when it isn't in the (resolved) endpoint's catalog.
+function pruneIncompatibleModelOverride(cfg, endpointId) {
+  if (!cfg.modelOverride) return;
+  const ep = endpointId ? listLlmEndpoints().find(e => e.id === endpointId) : null;
+  if (!ep || !(ep.models || []).some(m => m.id === cfg.modelOverride)) {
+    delete cfg.modelOverride;
+  }
+}
+
+// Ask the orchestrator to recreate the agent's running container so a new
+// spawn-time binding takes effect. Best-effort: a stopped orchestrator or a
+// disabled/stub agent simply yields respawned:false, never an API error.
+async function respawnAgentBestEffort(id, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/respawn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) return false;
+    const body = await r.json().catch(() => ({}));
+    return Boolean(body && body.respawned);
+  } catch (err) {
+    console.error(`[api] respawn ${id} failed: ${err.message}`);
+    return false;
+  }
+}
+
+// Ask the orchestrator to rebuild an agent's CLAUDE.md after a config change
+// the prompt is gated on (#1286: the `/context` section appears iff a mount is
+// set). Best-effort — the config write has already succeeded either way.
+async function rebuildAgentPromptBestEffort(id, reason) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-rebuild`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) return false;
+    const body = await r.json().catch(() => ({}));
+    return Boolean(body && body.rebuilt);
+  } catch (err) {
+    console.error(`[api] prompt rebuild ${id} failed: ${err.message}`);
+    return false;
+  }
+}
+
+/* ─── Read-only host-folder context mount (#1283) ───────────────────────── */
+
+// The mount is a LOCAL/self-hosted-only feature: a host bind-mount has no
+// meaning behind IAP/GKE (hard-off, first check). On the podman runtime it is
+// always offered; on Kubernetes it renders as a hostPath volume — "host" means
+// the node — so it takes the explicit AEE_K8S_CONTEXT_HOSTPATH=1 opt-in
+// (#1319, kind/local single-node clusters only; hosted GKE never sets it).
+// The provisioning side (orchestrator CONTEXT_MOUNT_RUNTIME_OK) mirrors this
+// guard.
+function isLocalContextMountEnv() {
+  if (process.env.IAP_AUDIENCE) return false;
+  const rt = String(process.env.AEE_CONTAINER_RUNTIME || 'podman').toLowerCase();
+  return (rt !== 'kubernetes' && rt !== 'k8s') || process.env.AEE_K8S_CONTEXT_HOSTPATH === '1';
+}
+
+// Shape an agent config's resolved context folders for the API (#1290). One
+// entry per mounted folder — legacy single folder and multi-folder alike —
+// carrying the browse `key` (its in-container target, which the workspace
+// browser uses to key each read-only root). Empty for an agent with no mount.
+function shapeContextMounts(cfg) {
+  return resolveContextMounts(cfg || {}).map((m) => ({
+    name: m.name,
+    hostPath: m.path,
+    slug: m.slug,
+    target: m.target,
+    key: m.target,
+    readWrite: m.readWrite === true,
+  }));
+}
+
+// Whether the read-only host-folder context mount is offered in this
+// environment, plus the fixed in-container target. The UI reads this to disable
+// the control (with an explanation) on the hosted stack (AC8).
+app.get('/api/context-mount/capability', (req, res) => {
+  res.json({ supported: isLocalContextMountEnv(), mountPath: CONTEXT_MOUNT_TARGET });
+});
+
+// Set / clear the agent's read-only host-folder context mount. Like the provider
+// override, the mount is baked at container spawn time, so a change requires a
+// one-agent respawn — done best-effort after the config write (AC6). Guards:
+//   • local/self-hosted only — 400 behind IAP, and on k8s without the
+//     AEE_K8S_CONTEXT_HOSTPATH opt-in (AC8, #1319)
+//   • the caller must have management rights over the agent's owning team (#989)
+//   • the host path must pass basic server-side validation (AC7)
+// A `team` agent hosts no container, so a mount there is meaningless → 400.
+app.patch('/api/agents/:id/context-mount', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  if (!isLocalContextMountEnv()) {
+    return res.status(400).json({
+      error: 'Host-folder context mounts are only available in the local / self-hosted environment',
+      code: 'context-mount-unsupported',
+    });
+  }
+  const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  const scope = getScope(req);
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+  if (cfg.role === 'team') {
+    return res.status(400).json({ error: 'A team agent hosts no container; set the context mount on its members instead' });
+  }
+
+  // Multi-folder path (#1290): a `mounts` array supersedes the single-path body.
+  // Each entry is validated + given a stable slug by the pure normalizer; the
+  // whole legacy single-folder shape is dropped so the two never coexist on disk.
+  if (req.body && Array.isArray(req.body.mounts)) {
+    const norm = normalizeContextMountsInput(req.body.mounts);
+    if (!norm.ok) return res.status(400).json({ error: norm.error, code: 'invalid-host-path' });
+    let changed = false;
+    if (norm.mounts.length === 0) {
+      // Empty array → clear every folder (back to no external context).
+      if ('contextMounts' in cfg || 'contextMount' in cfg || 'contextMountRw' in cfg) {
+        delete cfg.contextMounts;
+        delete cfg.contextMount;
+        delete cfg.contextMountRw;
+        changed = true;
+      }
+    } else {
+      cfg.contextMounts = norm.mounts;
+      // Never keep the legacy single-folder keys alongside the array.
+      delete cfg.contextMount;
+      delete cfg.contextMountRw;
+      changed = true;
+    }
+    if (changed) writeJsonAtomic(cfgPath, cfg);
+    // Rebuild the prompt before the respawn so the new container starts with the
+    // enumerated Context Folders section already in its CLAUDE.md (or without it
+    // when cleared) — the agent is never told about a folder it cannot read.
+    const reason = norm.mounts.length ? 'context-mount-changed' : 'context-mount-cleared';
+    if (changed) await rebuildAgentPromptBestEffort(id, reason);
+    const respawned = changed ? await respawnAgentBestEffort(id, reason) : false;
+    return res.json({ mounts: shapeContextMounts(cfg), mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  }
+
+  const hostPath = req.body ? req.body.path : undefined;
+  // Read-write opt-in (#1289): strictly boolean-true enables it; anything else
+  // (absent / false / non-boolean) stays read-only, the safe default.
+  const readWrite = !!(req.body && req.body.readWrite === true);
+  // null / '' / undefined → clear the mount (back to no external context).
+  if (hostPath === null || hostPath === undefined || hostPath === '') {
+    let changed = false;
+    if ('contextMount' in cfg || 'contextMountRw' in cfg || 'contextMounts' in cfg) {
+      delete cfg.contextMount;
+      delete cfg.contextMountRw;
+      delete cfg.contextMounts;
+      writeJsonAtomic(cfgPath, cfg);
+      changed = true;
+    }
+    // Drop the `/context` section from the prompt before the container loses
+    // the mount, so the agent is never told about a folder it cannot read.
+    if (changed) await rebuildAgentPromptBestEffort(id, 'context-mount-cleared');
+    const respawned = changed ? await respawnAgentBestEffort(id, 'context-mount-cleared') : false;
+    return res.json({ contextMount: null, readWrite: false, mounts: [], mountPath: CONTEXT_MOUNT_TARGET, respawned });
+  }
+
+  if (typeof hostPath !== 'string') {
+    return res.status(400).json({ error: 'path must be a string host directory (or null to clear)' });
+  }
+  const v = validateHostMountPath(hostPath);
+  if (!v.ok) return res.status(400).json({ error: v.error, code: 'invalid-host-path' });
+
+  cfg.contextMount = v.path;
+  // Persist the access-mode flag only when read-write is on: a read-only mount
+  // carries no `contextMountRw` key, so its config (and the container spec built
+  // from it) stays byte-identical to a pre-#1289 agent (AC7).
+  if (readWrite) cfg.contextMountRw = true;
+  else delete cfg.contextMountRw;
+  // A single-path write is the legacy shape → never leave a multi-folder array
+  // behind (switching from many folders back to one clears the rest).
+  delete cfg.contextMounts;
+  writeJsonAtomic(cfgPath, cfg);
+  // Tell the agent the folder exists (#1286) — a mount nobody documented is a
+  // mount nobody uses. Rebuilt before the respawn so the new container starts
+  // with the section already in its CLAUDE.md.
+  await rebuildAgentPromptBestEffort(id, 'context-mount-changed');
+  const respawned = await respawnAgentBestEffort(id, 'context-mount-changed');
+  res.json({ contextMount: v.path, readWrite, mounts: shapeContextMounts(cfg), mountPath: CONTEXT_MOUNT_TARGET, respawned });
+});
+
+/* ─── Browsing the context mount (#1286) ─────────────────────────────────
+ * The mounted host folder is visible only inside the agent's container, so
+ * these routes are pure proxies onto the orchestrator's read-only browse
+ * endpoints — this container never touches the container engine for agent
+ * data, and there is deliberately no write counterpart to any of them.
+ */
+
+// One-shot call onto an orchestrator context-browse endpoint. Returns the
+// parsed body plus its status so each route can pass the orchestrator's honest
+// error (agent not running, path refused, folder unmounted) straight through.
+async function fetchContextBrowse(agentId, kind, relPath) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const url = `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/context/${kind}`
+            + `?path=${encodeURIComponent(relPath || '')}`;
+  const r = await fetch(url);
+  const body = await r.json().catch(() => ({}));
+  return { status: r.status, body };
+}
+
+// Whether this agent has a context folder at all — drives the virtual root in
+// the workspace browser. Read straight from config; no container involved, so
+// it answers the same for a stopped agent.
+app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  // Resolved through the canonical containment helper (realpath +
+  // path.relative), so the config read cannot leave the agents tree even if the
+  // id pattern ever loosens — the same barrier the workspace routes use.
+  const cfgPath = safeAgentPath(agentId, 'config.json');
+  if (!cfgPath) return res.status(404).json({ error: 'Agent not found' });
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // #1290: one entry per mounted folder (legacy single folder and multi-folder
+  // alike). `mounts` drives one read-only root per folder in the workspace
+  // browser; the top-level `hostPath`/`readWrite` mirror the first folder for
+  // backward compatibility with any older caller.
+  const mounts = shapeContextMounts(cfg);
+  const first = mounts[0] || null;
+  res.json({
+    enabled: mounts.length > 0,
+    mounts,
+    hostPath: first ? first.hostPath : null,
+    readWrite: !!(first && first.readWrite),
+    mountPath: CONTEXT_MOUNT_TARGET,
+    supported: isLocalContextMountEnv(),
+  });
+});
+
+// Directory listing inside the mounted folder.
+app.get('/api/agents/:agentId/context/tree', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    const { status, body } = await fetchContextBrowse(agentId, 'tree', relPath);
+    res.status(status).json(body);
+  } catch (err) {
+    console.error(`[api] context tree ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+});
+
+// File content for the viewer. The orchestrator returns capped base64; the
+// binary / raster-image detection and the response shape are the SAME as the
+// workspace `/file` route, so the viewer needs no special case.
+app.get('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'file', relPath));
+  } catch (err) {
+    console.error(`[api] context file ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const probe = buf.slice(0, Math.min(buf.length, 8192));
+  const isBinary = probe.includes(0);
+  const imageType = isBinary ? detectRasterImageType(buf) : null;
+  res.json({
+    path: body.path || '',
+    size: typeof body.size === 'number' ? body.size : buf.length,
+    truncated: !!body.truncated,
+    binary: isBinary,
+    imageType,
+    content: isBinary ? null : buf.toString('utf8'),
+    mtime: typeof body.mtime === 'number' ? body.mtime : 0,
+    readOnly: true,
+  });
+});
+
+// Inline image bytes — same contract as the workspace `/image` route (supported
+// raster formats only, detected by magic bytes, never by extension).
+app.get('/api/agents/:agentId/context/image', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context image ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const contentType = imageContentType(detectRasterImageType(buf));
+  if (!contentType) return res.status(415).json({ error: 'unsupported image type' });
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', buf.length);
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(buf);
+});
+
+// Raw download. Capped by the orchestrator (the bytes travel base64 through an
+// exec pipe, not a file stream) — a file over the cap arrives truncated, so it
+// is refused outright rather than silently corrupted.
+app.get('/api/agents/:agentId/context/download', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  let status; let body;
+  try {
+    ({ status, body } = await fetchContextBrowse(agentId, 'download', relPath));
+  } catch (err) {
+    console.error(`[api] context download ${agentId} failed: ${err.message}`);
+    return res.status(502).json({ error: 'Reading the context folder failed' });
+  }
+  if (status >= 300) return res.status(status).json(body);
+  if (body.truncated) {
+    return res.status(413).json({
+      error: 'File is too large to download through the context folder',
+      code: 'too-large',
+    });
+  }
+  const buf = Buffer.from(String(body.content || ''), 'base64');
+  const filename = path.basename(String(body.path || 'download'));
+  const encoded = encodeURIComponent(filename).replace(/'/g, '%27');
+  res.setHeader('Content-Disposition', `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Length', buf.length);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.end(buf);
+});
+
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/triggers', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
-  if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Resolve the agent root through safeAgentPath so its path.relative
+  // return-value barrier clears the CodeQL js/path-injection sink; null when
+  // the dir is absent, byte-equivalent to the previous existsSync 404.
+  const agentDir = safeAgentPath(id, '');
+  if (!agentDir) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json(Array.isArray(triggers) ? triggers : []);
 });
@@ -2977,11 +4244,37 @@ async function putTriggers(agentId, triggers) {
 app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check: AGENT_ID_RE already excludes traversal segments, but
+  // CodeQL doesn't recognise the regex as a sanitiser once the value is
+  // destructured. Re-anchor under AGENTS_DIR with path.relative.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const newTrigger = { id: `t${Date.now()}`, ...req.body };
+  // Raw-layer guard (#1006, concept §4.8): one event per github-event trigger
+  // + claim shape — enforced server-side so no surface (engine dialog, panel,
+  // direct API) can persist a non-conformant listener unchallenged again.
+  const te = rawTriggerError(newTrigger);
+  if (te) return res.status(400).json({ error: te });
+  // Internal-channel transport (#1174): a mistyped value would silently leave
+  // the listener poller-delivered while the producer runs `aee-emit` — checked
+  // here (route-level), mirroring validateProcessTemplate's bundle check.
+  const tpe = triggerTransportError(newTrigger);
+  if (tpe) return res.status(400).json({ error: tpe });
+  // At most one active chat-launched loop per agent (#1020 AC8). A launched
+  // loop is a one-off run; a second launch while one runs would race two
+  // runners, so reject it — the composer reflects the running state and
+  // offers Stop instead of Start.
+  if (launchedLoopConflict(triggers, newTrigger)) {
+    return res.status(409).json({ error: 'A loop is already running for this agent. Stop it before starting another.' });
+  }
   if (newTrigger.type === 'github-event' || newTrigger.type === 'jira-event') {
     const now = new Date().toISOString();
     if (!newTrigger.createdAt) newTrigger.createdAt = now;
@@ -2993,14 +4286,25 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
+  // A new listener is a CONSUMER write (#1007): sibling producers' generated
+  // Outcomes blocks name their consumers, so re-render the team. Best-effort.
+  await reconcileTeamOutcomesForAgent(id);
   res.status(201).json(newTrigger);
 });
 
 app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check (see POST handler): re-anchor under AGENTS_DIR so CodeQL
+  // sees the traversal barrier even after the id is destructured.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
   const triggers = Array.isArray(cur) ? cur : [];
   const idx = triggers.findIndex(t => t.id === triggerId);
@@ -3012,6 +4316,14 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // re-persists it (a persisted-but-ignored value can't create a phantom edge).
   delete merged.emits;
   delete merged.emitsDerived;
+  // Raw-layer guard (#1006, §4.8): reject a multi-event github-event trigger /
+  // invalid claim — except a pre-existing multi-event trigger passing through
+  // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
+  const te = rawTriggerError(merged, prev);
+  if (te) return res.status(400).json({ error: te });
+  // Internal-channel transport (#1174) — same route-level check as POST.
+  const tpe = triggerTransportError(merged);
+  if (tpe) return res.status(400).json({ error: tpe });
   if (merged.type === 'github-event' || merged.type === 'jira-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -3029,24 +4341,98 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
+  // Consumer write (#1007) — see the POST handler.
+  await reconcileTeamOutcomesForAgent(id);
   res.json(triggers[idx]);
 });
+
+// The trigger-delete choke-point, factored so both the DELETE route and the
+// hill-climb applier (#1225) run the exact same write + reconcile. Returns the
+// removed trigger object (or null if it wasn't present) so a caller can retain
+// it (the applier keeps the deleted trigger JSON as its undo payload). Throws on
+// a write failure.
+async function deleteAgentTrigger(id, triggerId) {
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
+  const removed = triggers.find(t => t && t.id === triggerId) || null;
+  const filtered = triggers.filter(t => t.id !== triggerId);
+  await putTriggers(id, filtered);
+  // Consumer write (#1007) — a trigger write changes who consumes its siblings'
+  // labels, so re-render the team's Outcomes blocks.
+  await reconcileTeamOutcomesForAgent(id);
+  return removed;
+}
+
+// The trigger-restore choke-point, factored so the hill-climb rollback (#1226)
+// re-creates a retained trigger through the exact same write + reconcile as a
+// normal add. Re-inserts the trigger JSON verbatim (keeping its original id so a
+// rolled-back trigger-hygiene card restores the exact object that was deleted).
+// Idempotent: if a trigger with that id already exists it is left untouched.
+// Throws on a write failure. Returns the restored trigger (or the existing one).
+async function restoreAgentTrigger(id, trigger) {
+  if (!trigger || typeof trigger !== 'object' || !trigger.id) {
+    throw new Error('no retained trigger to restore');
+  }
+  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+  const triggers = Array.isArray(cur) ? cur : [];
+  const existing = triggers.find(t => t && t.id === trigger.id);
+  if (existing) return existing;
+  triggers.push(trigger);
+  await putTriggers(id, triggers);
+  // A restored listener is a CONSUMER write (#1007) — re-render the team's
+  // generated Outcomes blocks.
+  await reconcileTeamOutcomesForAgent(id);
+  return trigger;
+}
 
 app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   const { id, triggerId } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const agentDir = path.join(AGENTS_DIR, id);
+  // Containment check (see POST handler): re-anchor under AGENTS_DIR so CodeQL
+  // sees the traversal barrier even after the id is destructured.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid agent id' });
   if (!fs.existsSync(agentDir)) return res.status(404).json({ error: 'Agent not found' });
-  const cur = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-  const triggers = Array.isArray(cur) ? cur : [];
-  const filtered = triggers.filter(t => t.id !== triggerId);
+  // Config-write authorization (#989): triggers are agent config — gate on
+  // team-admin management rights, not visibility.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
   try {
-    await putTriggers(id, filtered);
+    await deleteAgentTrigger(id, triggerId);
   } catch (err) {
     return res.status(502).json({ error: `Could not save triggers: ${err.message}` });
   }
   res.status(204).end();
 });
+
+// Internal-channel transport (#1174): value + shape hygiene for a trigger write.
+// The failure mode of a bad value is silent (the listener stays in the poller
+// plan and `aee-emit` wakes nobody), so it is rejected, not tolerated. Kept
+// route-level — the bundle-side twin lives in validateProcessTemplate.
+function triggerTransportError(t) {
+  if (t.transport === undefined) return null;
+  if (t.transport !== 'internal' && t.transport !== 'github') {
+    return "transport must be 'internal' or 'github'";
+  }
+  if (t.transport === 'internal'
+      && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
+    return "transport 'internal' requires a github-event label listener (labelFilter)";
+  }
+  return null;
+}
+
+// A trigger write on a team member changes WHO CONSUMES its siblings' labels —
+// re-render the team's generated Outcomes blocks (#1007). Best-effort: a
+// reconcile failure never breaks the originating trigger request.
+async function reconcileTeamOutcomesForAgent(agentId) {
+  try {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+    if (cfg && cfg.parentTeamId) await reconcileTeamOutcomes(cfg.parentTeamId);
+  } catch (err) {
+    console.error(`[API] outcomes reconcile after trigger write on ${agentId} failed: ${err.message}`);
+  }
+}
 
 function readAgentSystemPrompt(id) {
   try {
@@ -3086,6 +4472,29 @@ function liftAgentEmits(cfgEmits, triggers) {
 
 function truthyParam(v) { return v === '1' || v === 'true' || v === ''; }
 
+// The authoritative gate/brake label registry of a LIVE team (#928). Persisted on
+// the team agent at materialisation, exactly like `stages` — the live graph has no
+// bundle to read `labels[]` from, and gate-ness is no longer inferable from the
+// label's name. Unknown team / no registry → [] (every label is a plain agent
+// label; channel `gate: 'human'` ports still classify on their own).
+function teamLabelRegistry(teamId) {
+  if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
+  const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
+  return Array.isArray(cfg.labels)
+    ? cfg.labels.filter(l => l && typeof l.name === 'string' && l.name.trim())
+    : [];
+}
+
+// The named human roles of a LIVE team (#987). Persisted on the team agent like
+// `labels`/`stages`; the live graph builders bind the #981 gate/brake/delivery
+// touchpoints to these named nodes. Unknown team / no registry → [] (every
+// touchpoint keeps the generic `@human` actor).
+function teamHumansRegistry(teamId) {
+  if (!teamId || !AGENT_ID_RE.test(teamId)) return [];
+  const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), {});
+  return Array.isArray(cfg.humans) ? cfg.humans : [];
+}
+
 app.get('/api/process/graph', (req, res) => {
   const templatesParam = req.query.templates;
 
@@ -3103,6 +4512,7 @@ app.get('/api/process/graph', (req, res) => {
       const triggers = (t.triggers || []).map(tr => ({
         id: tr.id, type: tr.type, events: tr.events, labelFilter: tr.labelFilter,
         cron: tr.cron, at: tr.at, enabled: tr.enabled, channel: tr.channel,
+        claim: tr.claim, // #958 — else the preview graph lints every listener as unclaimed
       }));
       agents.push({
         id: t.id, role: 'template', displayName: t.displayName || t.id,
@@ -3139,7 +4549,8 @@ app.get('/api/process/graph', (req, res) => {
       github: cfg.github || null, channels: Array.isArray(cfg.channels) ? cfg.channels : [],
     });
   }
-  res.json({ level: 'live', team, ...buildProcessGraph(agents) });
+  const teamHumans = teamHumansRegistry(team);
+  res.json({ level: 'live', team, humans: teamHumans, ...buildProcessGraph(agents, { labels: teamLabelRegistry(team), humans: teamHumans }) });
 });
 
 // Build a graph from an imported bundle (no persistence) so the canvas can
@@ -3163,7 +4574,13 @@ app.post('/api/process/graph', (req, res) => {
     github: r.github || null, channels: Array.isArray(r.channels) ? r.channels : [],
     triggers: (r.triggers || []).map(t => ({ ...t, emits: Array.isArray(t.emits) ? t.emits : [] })),
   }));
-  res.json({ level: 'template', team: null, imported: true, name: bundle.name, ...buildProcessGraph(agents) });
+  res.json({
+    level: 'template', team: null, imported: true, name: bundle.name,
+    // The bundle's own registries are the authority: labels for gate/brake
+    // classification (#928), humans for the named-role bindings (#987).
+    humans: Array.isArray(bundle.humans) ? bundle.humans : [],
+    ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
+  });
 });
 
 /* ─── Knowledge Flow (Shared Agent Learning, Phase 2) ───────────────────────
@@ -3307,6 +4724,7 @@ function knowledgeTeamByAgent() {
 
 const KNOWLEDGE_ARCHIVED_DIR = path.join(WORKSPACE, 'knowledge-archived');
 const KNOWLEDGE_REVIEW_DIR = path.join(WORKSPACE, 'knowledge-review');
+const KNOWLEDGE_VALIDITY_DIR = path.join(WORKSPACE, 'knowledge-validity');
 
 function readArchivedIdsFor(teamId) {
   const arr = readJsonFile(path.join(KNOWLEDGE_ARCHIVED_DIR, `${path.basename(teamId)}.json`), []);
@@ -3315,6 +4733,22 @@ function readArchivedIdsFor(teamId) {
 
 function readReviewDecisionsFor(teamId) {
   const obj = readJsonFile(path.join(KNOWLEDGE_REVIEW_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
+// #916: per-team validity sidecar { <id>: { validTo?, supersededBy? } } — the
+// orchestrator is the writer; read here so the overlay holds even when the
+// canonical clone's re-projection lags.
+function readValidityFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_VALIDITY_DIR, `${path.basename(teamId)}.json`), {});
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
+// #917: per-team auto-load trigger sidecar { <id>: loadTriggers[] } — same
+// orchestrator-writes/console-reads posture.
+const KNOWLEDGE_TRIGGERS_DIR = path.join(WORKSPACE, 'knowledge-triggers');
+function readTriggersFor(teamId) {
+  const obj = readJsonFile(path.join(KNOWLEDGE_TRIGGERS_DIR, `${path.basename(teamId)}.json`), {});
   return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
 }
 
@@ -3366,6 +4800,23 @@ function gatherTeamEntries(teamId) {
   }
   const reviewOn = knowledgeReviewOn(teamKnowledgeEnv(teamId)); // #570: per-team config
   entries = overlayStatuses(entries, { archivedIds: archived, decisions, reviewOn });
+  // #916: validity is a field overlay (never a status) — same legacy-'default'
+  // merge as the archive store so pre-re-homing decisions still hold.
+  const validity = { ...readValidityFor(teamId) };
+  if (teamId !== 'default') {
+    for (const [k, v] of Object.entries(readValidityFor('default'))) {
+      if (!(k in validity)) validity[k] = v;
+    }
+  }
+  entries = overlayValidity(entries, validity);
+  // #917: auto-load triggers — same authoritative field overlay + legacy merge.
+  const triggers = { ...readTriggersFor(teamId) };
+  if (teamId !== 'default') {
+    for (const [k, v] of Object.entries(readTriggersFor('default'))) {
+      if (!(k in triggers)) triggers[k] = v;
+    }
+  }
+  entries = overlayLoadTriggers(entries, triggers);
   return { entries, warnings };
 }
 
@@ -3481,6 +4932,7 @@ app.get('/api/knowledge/graph', async (req, res) => {
   await augmentDigestInclusion(graph, teamIds);
   await augmentSkillRoles(graph, teamIds);
   augmentDisplaySummary(graph, entries);
+  await augmentRetrievalStats(graph, teamIds);
   res.json(graph);
 });
 
@@ -3526,6 +4978,46 @@ async function augmentDigestInclusion(graph, teamIds) {
   if (included.size === 0) return;
   for (const node of graph.nodes) {
     if (node.kind === 'item' && included.has(String(node.id).slice(5))) node.inDigest = true;
+  }
+}
+
+// Overlay the read-side retrieval truth (#915) on every item node: when was the
+// entry last returned by a `knowledge search`/`list` (strong signal) or inlined
+// into a digest build (weak signal), and how often. Sourced from the
+// orchestrator's per-team aggregate — never the live feed. Best-effort: an
+// unreachable orchestrator just means no "last used" info (nodes stay unmarked,
+// which the UI renders as "never used" only when the stats fetch succeeded).
+async function augmentRetrievalStats(graph, teamIds) {
+  if (!graph || !Array.isArray(graph.nodes)) return;
+  const byId = new Map();
+  let anyStats = false;
+  await Promise.all((teamIds || []).map(async (teamId) => {
+    try {
+      const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      anyStats = true;
+      const entries = data && data.entries && typeof data.entries === 'object' ? data.entries : {};
+      for (const [id, row] of Object.entries(entries)) byId.set(id, row);
+    } catch { /* best effort */ }
+  }));
+  if (!anyStats) return;
+  graph.retrievalStats = true; // the UI may distinguish "no data yet" from "endpoint down"
+  for (const node of graph.nodes) {
+    if (node.kind !== 'item') continue;
+    const row = byId.get(String(node.id).slice(5));
+    if (!row) continue;
+    let last = '';
+    for (const k of ['lastSearchAt', 'lastDigestAt', 'lastScopedAt']) {
+      const v = typeof row[k] === 'string' ? row[k] : '';
+      if (v > last) last = v;
+    }
+    if (last) node.lastUsedAt = last;
+    const hits = (Number.isInteger(row.searchHits) ? row.searchHits : 0)
+      + (Number.isInteger(row.digestCount) ? row.digestCount : 0)
+      + (Number.isInteger(row.scopedCount) ? row.scopedCount : 0);
+    if (hits > 0) node.usageCount = hits;
+    if (Number.isInteger(row.searchHits) && row.searchHits > 0) node.searchHits = row.searchHits;
   }
 }
 
@@ -3720,6 +5212,23 @@ app.get('/api/knowledge/summary', async (req, res) => {
   res.json(summarizeKnowledge({ scope: parsed.scope, entries, now: Date.now() }));
 });
 
+// Read-side retrieval aggregate (#915): per-entry "last used" truth + the
+// `since` baseline. Proxies the orchestrator's per-team aggregate store.
+app.get('/api/knowledge/retrieval-stats', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/retrieval-stats`);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: (out && out.error) || 'retrieval-stats failed' });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.get('/api/knowledge/item/:id', (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
@@ -3768,6 +5277,58 @@ app.post('/api/knowledge/item/:id/archive', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'archive failed' });
     res.json({ ok: true, id, archived });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set / clear a KB entry's validity window (#916 bitemporal validity). Proxies
+// to the orchestrator (sidecar writer + canonical re-projection). Setting
+// validTo expires the entry everywhere active on that date; null/'' clears it
+// (idempotent round trip). supersededBy records semantic replacement and never
+// by itself hides the entry.
+app.post('/api/knowledge/item/:id/validity', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/validity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        teamId, id,
+        validTo: typeof req.body?.validTo === 'string' ? req.body.validTo : null,
+        supersededBy: typeof req.body?.supersededBy === 'string' ? req.body.supersededBy : null,
+      }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'validity update failed' });
+    res.json({ ok: true, id, validTo: out.validTo ?? null, supersededBy: out.supersededBy ?? null });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set / clear a KB entry's auto-load triggers (#917 scoped knowledge). Proxies
+// to the orchestrator (sidecar writer + canonical re-projection). An empty
+// list clears. Operator-only in v1 — agents don't author triggers.
+app.post('/api/knowledge/item/:id/triggers', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const { id } = req.params;
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  if (!/^[0-9a-f]{12}$/.test(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/triggers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, id, loadTriggers: Array.isArray(req.body?.loadTriggers) ? req.body.loadTriggers : [] }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(r.status === 400 ? 400 : 502).json({ error: (out && out.error) || 'triggers update failed' });
+    res.json({ ok: true, id, loadTriggers: out.loadTriggers || [] });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -3979,7 +5540,8 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   const heuristic = knowledgeSuggestions.buildHeuristicSkillDraft(cand);
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -3991,7 +5553,13 @@ app.post('/api/knowledge/promotion-suggestions/:id/draft', heavyLimiter, async (
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+  // #921: the LLM is instructed to open with frontmatter, but the round-trip
+  // contract (promoted ≡ imported) must hold even when it disobeys — inject any
+  // missing key from the heuristic draft's derived values (no-op when complete).
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 // Resolve an operator-selected set of KB entry ids into an ad-hoc candidate
@@ -4028,7 +5596,8 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic', entryIds: cand.entryIds });
   if (req.body?.heuristicOnly) return fallback();
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -4040,7 +5609,11 @@ app.post('/api/knowledge/draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: heuristic.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds });
+  // #921: same disobedient-model guard as the suggestion draft above.
+  const withFm = knowledgeSuggestions.ensureSkillFrontmatter(skillMd, {
+    name: heuristic.name, description: heuristic.description,
+  });
+  res.json({ draft: { name: heuristic.name, skillMd: withFm, llmDrafted: true }, source: 'llm', model: target.model, entryIds: cand.entryIds, meta: assistMeta(target) });
 });
 
 // Generate-and-store human-readable summaries (#635, AC3) for a team's KB entries
@@ -4070,7 +5643,10 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   const batch = missing.slice(0, MAX_PER_REQUEST);
   if (batch.length === 0) return res.json({ generated: 0, persisted: 0, remaining: 0, source: 'none' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  // Resolve the assist target ONCE per request (not per entry) — the whole
+  // batch bills against the one selected provider.
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   // No LLM target: persist nothing (heuristic is display-only). Report the count
   // so the caller knows these render via the read-time fallback (AC4).
   if (target.error) return res.json({ generated: 0, persisted: 0, remaining, source: 'heuristic', reason: target.error });
@@ -4095,7 +5671,7 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
   }
 
   const ids = Object.keys(summaries);
-  if (ids.length === 0) return res.json({ generated: 0, persisted: 0, remaining, source: 'llm', failures });
+  if (ids.length === 0) return res.json({ generated: 0, persisted: 0, remaining, source: 'llm', failures, meta: assistMeta(target) });
 
   try {
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/summaries`, {
@@ -4104,7 +5680,7 @@ app.post('/api/knowledge/summaries/backfill', heavyLimiter, async (req, res) => 
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'summary persist failed' });
-    res.json({ generated: ids.length, persisted: out.persisted || ids.length, remaining, source: 'llm', model: target.model, failures });
+    res.json({ generated: ids.length, persisted: out.persisted || ids.length, remaining, source: 'llm', model: target.model, failures, meta: assistMeta(target) });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -4141,7 +5717,8 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   });
   if (req.body?.heuristicOnly) return fallback();
 
-  const gen = resolveGenerationTarget(req.body?.llmEndpointId);
+  const gen = resolveAssistTarget(req);
+  if (gen.selectionError) return sendAssistSelectionError(res, gen);
   if (gen.error) return fallback();
   const url = buildMessagesUrl(gen.baseUrl);
   const headers = {
@@ -4153,7 +5730,7 @@ app.post('/api/knowledge/extend-draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { skillMd, llmDrafted: true }, source: 'llm', model: gen.model, entryIds: cand.entryIds });
+  res.json({ draft: { skillMd, llmDrafted: true }, source: 'llm', model: gen.model, entryIds: cand.entryIds, meta: assistMeta(gen) });
 });
 
 app.post('/api/knowledge/promotion-suggestions/:id/dismiss', apiLimiter, async (req, res) => {
@@ -4234,7 +5811,7 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
 
     // E5: reject an empty / identical (no-op) submit.
-    if (v.skillMd.replace(/\s+$/, '') === target.existingSkillMd.replace(/\s+$/, '')) {
+    if (trimTrailingWhitespace(v.skillMd) === trimTrailingWhitespace(target.existingSkillMd)) {
       return res.status(400).json({ error: 'no changes: submitted content is identical to the existing skill' });
     }
 
@@ -4332,10 +5909,8 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     dstDir = safeTeamSkillDir(teamId, v.name);
     if (!dstDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
   } else {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    dstDir = path.resolve(poolSkillsBaseDir, v.name);
-    const rel = path.relative(poolSkillsBaseDir, dstDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'Invalid skill name' });
+    dstDir = safeGlobalSkillDir(v.name);
+    if (!dstDir) return res.status(400).json({ error: 'Invalid skill name' });
   }
   const dstExists = fs.existsSync(path.join(dstDir, 'SKILL.md'));
   const wp = skillTransfer.planSkillWrite({ onCollision: req.body.overwrite ? 'overwrite' : 'reject', exists: dstExists });
@@ -4394,7 +5969,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     cleanup = await cleanupPromotedSource(teamId, v.entryIds, { name: v.name, tier: v.to });
   }
 
-  res.status(201).json({ name: v.name, tier: v.to, teamId, provenance: prov, ...(cleanup ? { cleanup } : {}) });
+  res.status(201).json({
+    name: v.name, tier: v.to, teamId, provenance: prov,
+    ...(cleanup ? { cleanup } : {}),
+    // #921: non-blocking — the skill was written; the caller may surface that it
+    // lacks the import-grade frontmatter header.
+    ...(Array.isArray(v.warnings) && v.warnings.length ? { warnings: v.warnings } : {}),
+  });
 });
 
 // List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill
@@ -4404,7 +5985,15 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'invalid agent id' });
-  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  // Containment guard: AGENT_ID_RE excludes traversal segments, but CodeQL does
+  // not recognise the regex as a sanitiser once `id` travels through a
+  // destructure, so re-verify with path.relative before any fs access and build
+  // every downstream path from the contained dir (house idiom, cf. ~L2578).
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const agentRel = path.relative(agentsBaseDir, agentDir);
+  if (agentRel.startsWith('..') || path.isAbsolute(agentRel)) return res.status(400).json({ error: 'invalid agent id' });
+  const cfg = readJsonFile(path.join(agentDir, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
   // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
   const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
@@ -4417,13 +6006,23 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
     : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
     : null;
-  const parentCfg = parentId ? readJsonFile(path.join(AGENTS_DIR, parentId, 'config.json'), null) : null;
+  // parentId originates from the agent's own config rather than the request,
+  // but contain it the same way before reading so no unvalidated value ever
+  // reaches fs (keeps CodeQL's taint tracker satisfied here too).
+  let parentCfg = null;
+  if (parentId) {
+    const parentDir = path.resolve(agentsBaseDir, String(parentId));
+    const parentRel = path.relative(agentsBaseDir, parentDir);
+    if (!parentRel.startsWith('..') && !path.isAbsolute(parentRel)) {
+      parentCfg = readJsonFile(path.join(parentDir, 'config.json'), null);
+    }
+  }
   const granted = new Set(
     Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
     : Array.isArray(cfg.skills) ? cfg.skills
     : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
     : []);
-  const skillsDir = path.join(AGENTS_DIR, id, 'skills');
+  const skillsDir = path.join(agentDir, 'skills');
   const skills = [];
   try {
     for (const name of fs.readdirSync(skillsDir)) {
@@ -4671,7 +6270,48 @@ app.get('/api/knowledge/gates', (req, res) => {
     store: knowledgeStoreView(env),
     repositories: teamRepositories(env),
     githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
+    decayHorizonDays: knowledgeSuggestions.resolveDecayHorizonDays(env), // #919
   });
+});
+
+// Set the per-team decay horizon (#919): after how many unused days the nightly
+// sweep PROPOSES retiring a lesson (0 = off). Proxies the orchestrator's
+// knowledge-config writer — the same per-team override file as autonomy/gates.
+app.put('/api/knowledge/decay', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const days = Number(req.body?.decayHorizonDays);
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!Number.isInteger(days) || days < 0) return res.status(400).json({ error: 'decayHorizonDays must be a non-negative integer (0 = off)' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, config: { decayHorizonDays: days } }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'decay config update failed' });
+    res.json({ ok: true, decayHorizonDays: days });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Curation health (#919): the 30-day counters + silent-convergence status the
+// nightly pass persists. `status:"unknown"` until the first pass has run.
+app.get('/api/knowledge/curation-health', async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.query.team === 'string' ? req.query.team : '';
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'team is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/knowledge/curation-health`);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: (out && out.error) || 'curation-health failed' });
+    res.json(out);
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
 });
 
 // Flip one promotion transition between "auto" and "review" (the operator's one
@@ -4731,14 +6371,32 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
   if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
   if (!DOMAIN_OPS.has(op)) return res.status(400).json({ error: 'invalid op' });
+  // #1214: `bootstrap` is the only op that runs an LLM synthesis in the orchestrator,
+  // so it must bill against the caller's header-selected assist provider (same 403/400
+  // semantics as the nine console assist routes). We forward IDS ONLY over the internal
+  // hop — the orchestrator reads the token locally from `_keys/`, so it never travels
+  // the wire. Deterministic ops (add/rename/merge/…) skip enforcement entirely.
+  let assistTarget = null;
+  if (op === 'bootstrap') {
+    assistTarget = resolveAssistTarget(req);
+    if (assistTarget.selectionError) return sendAssistSelectionError(res, assistTarget);
+    if (assistTarget.error) return res.status(400).json({ error: assistTarget.error });
+  }
   try {
+    const forward = { ...req.body, teamId, op };
+    if (assistTarget && assistTarget.endpointId) {
+      forward.assistEndpointId = assistTarget.endpointId; // env fallback (endpointId=null) → orchestrator uses .env
+      forward.model = assistTarget.model;
+    }
     const r = await fetch(`${ORCH_URL()}/internal/knowledge/domains`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...req.body, teamId, op }),
+      body: JSON.stringify(forward),
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
-    res.json({ ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback });
+    const payload = { ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback };
+    if (assistTarget) payload.meta = assistMeta(assistTarget); // "which key paid for this" (#1211 §4.5)
+    res.json(payload);
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -4968,10 +6626,8 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
     srcDir = safeTeamSkillDir(v.sourceTeamId, v.name);
     if (!srcDir) return res.status(400).json({ error: 'invalid source team or skill name' });
   } else {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    srcDir = path.resolve(poolSkillsBaseDir, v.name);
-    const rel = path.relative(poolSkillsBaseDir, srcDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return res.status(400).json({ error: 'invalid skill name' });
+    srcDir = safeGlobalSkillDir(v.name);
+    if (!srcDir) return res.status(400).json({ error: 'invalid skill name' });
   }
   const srcSkill = path.join(srcDir, 'SKILL.md');
   if (!fs.existsSync(srcSkill)) return res.status(404).json({ error: `skill '${v.name}' not found in the ${v.from} source` });
@@ -5079,7 +6735,396 @@ app.get('/api/flows/graph', async (req, res) => {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), {});
     if (Array.isArray(teamCfg.stages)) stages = teamCfg.stages.filter(s => typeof s === 'string');
   }
-  res.json({ unifiedFlowVersion: 1, source: 'live', team, stages, ...buildUnifiedGraph(nodes) });
+  const teamHumans = teamHumansRegistry(team);
+  res.json({
+    unifiedFlowVersion: 1, source: 'live', team, stages, humans: teamHumans,
+    ...buildUnifiedGraph(nodes, undefined, { labels: teamLabelRegistry(team), humans: teamHumans }),
+  });
+});
+
+// GET /api/teams/:teamId/flow-anomalies — observe-only stall detection (#959).
+// Team-scoped proxy to the orchestrator's deterministic detector; the anomaly
+// panel in the Flows view renders the result. Read-only, no repair.
+app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-anomalies`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
+// snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
+// the Improvements panel (#1223) renders the metric tiles from this.
+app.get('/api/teams/:teamId/hill-climb/metrics', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/metrics`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/run — manual pass (#1222 metrics + #1224
+// analyst). Same code path as the daily scheduled pass; a run while one is
+// already in flight returns 409 pass-running. Team-scoped + audited.
+//
+// The orchestrator pass computes the metrics snapshot AND folds the deterministic
+// heuristic improvement cards into the store (the honest fallback), returning a
+// secret-free `digest`. When the team's autonomy dial is ≥ 1 and a Model Provider
+// resolves for this caller, we then run the server-side one-shot analyst
+// (`resolveAssistTarget` — skips oauth-token providers, same discipline as
+// port-suggestion) over that digest and hand any validated cards back to the
+// orchestrator's merge endpoint, which re-validates + merges them under the
+// budget rules. If no provider resolves or the LLM fails, the heuristic cards
+// still stand — the pass is never blocked on the analyst. Cards are proposals only.
+app.post('/api/teams/:teamId/hill-climb/run', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/run`, {
+      method: 'POST',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200 || data.maintenance || !data.digest || (data.autonomy != null && data.autonomy < 1)) {
+      return res.status(resp.status).json(data);
+    }
+    // Server-side analyst step (#1224). A selection error (403/400) surfaces so
+    // the picker can nudge; a soft/misconfigured target quietly keeps heuristics.
+    const target = resolveAssistTarget(req);
+    if (target.selectionError) return res.status(resp.status).json({ ...data, analyst: 'skipped' });
+    if (target.error) return res.status(resp.status).json({ ...data, analyst: 'no-provider' });
+    let analyst = 'no-cards';
+    try {
+      const url = buildMessagesUrl(target.baseUrl);
+      const headers = {
+        'anthropic-version': '2023-06-01',
+        ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+      };
+      const payload = { model: target.model, ...buildHillClimbAnalystRequest(data.digest) };
+      const result = await httpPostJson(url, headers, payload);
+      if (!result.error && result.status >= 200 && result.status < 300) {
+        const cards = parseHillClimbCards(extractMessageText(result.body));
+        if (cards.length) {
+          const mergeResp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/merge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cards }),
+          });
+          const merged = await mergeResp.json().catch(() => ({}));
+          if (mergeResp.status === 200) {
+            return res.status(200).json({ ...data, cards: merged.cards, analystMerge: merged.merge, analyst: 'llm', meta: assistMeta(target) });
+          }
+        }
+      }
+    } catch { /* analyst failure → heuristic cards already stand */ }
+    return res.status(resp.status).json({ ...data, analyst });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/hill-climb/cards — the persisted improvement cards
+// (#1224). Team-scoped read-only proxy; the Improvements panel (#1223) renders
+// the open cards + closed ledger from this.
+app.get('/api/teams/:teamId/hill-climb/cards', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/dismiss — dismiss a card
+// (#1224) so it is not re-raised. Team-scoped + audited. Card-state only — no
+// apply path runs in this ticket.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/dismiss', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/dismiss`, {
+      method: 'POST',
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/apply — the gated applier
+// (#1225, concept §3.3). Runs a card's declared apply path through an existing
+// audited console choke-point *as the acting human* (this endpoint is itself a
+// mutating /api call, so `audit.auditMutations` records it under req.user; for a
+// prompt change the choke-point also stamps `.aee/prompt-history.json`), then
+// asks the orchestrator to record the applied card (timestamp + config-version
+// reference + baseline snapshot + undo payload) for #1226 to measure.
+//
+// Gates, all server-side so a direct API call can't bypass them: autonomy 2
+// required (0/1 deny); only an open card applies; only executable classes apply
+// (trigger-hygiene is wired first — DELETE /api/agents/:id/triggers/:tid); the
+// trigger guard rejects intrinsic/derived/human-gate triggers; and a card whose
+// target trigger changed since detection is refused with 409 stale-card.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/apply', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+
+  // 1) Pull the card + the team's autonomy from the store (the orchestrator is
+  //    the authority on both).
+  let cards; let autonomy;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) return res.status(resp.status).json(data);
+    cards = Array.isArray(data.cards) ? data.cards : [];
+    autonomy = data.autonomy;
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const card = cards.find(c => c && c.id === cardId);
+  if (!card) return res.status(404).json({ error: 'card not found' });
+  // Autonomy 0/1 deny apply (not merely hide it).
+  if (!(autonomy >= 2)) {
+    return res.status(403).json({ error: 'autonomy-locked', code: 'autonomy-locked', autonomy });
+  }
+  if (card.status !== 'open') {
+    return res.status(409).json({ error: 'card-not-open', code: 'card-not-open', status: card.status });
+  }
+  if (!hillClimbApplyGuard.isExecutableClass(card.class)) {
+    return res.status(422).json({
+      error: 'card-not-applicable', code: 'card-not-applicable', class: card.class,
+      message: `apply for '${card.class}' cards is not wired yet — only trigger-hygiene applies in this release`,
+    });
+  }
+
+  // 2) trigger-hygiene apply path: DELETE /api/agents/:id/triggers/:tid.
+  const ref = hillClimbApplyGuard.parseTriggerRef(card);
+  if (!ref || !AGENT_ID_RE.test(ref.agentId)) {
+    return res.status(422).json({ error: 'card does not name a valid trigger', code: 'card-not-applicable' });
+  }
+  const agentDir = path.join(AGENTS_DIR, ref.agentId);
+  const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+  // The card's target must still be a live member of this team (else re-detect).
+  if (!agentCfg || (agentCfg.parentTeamId !== teamId && ref.agentId !== teamId)) {
+    return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: `agent '${ref.agentId}' is not a live member of this team — re-detect first` });
+  }
+  // Config-write authorization (#989): deleting a trigger is a management action.
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return;
+
+  const triggers = readJsonFile(controlOrAgentPath(ref.agentId, 'triggers.json'), []);
+  const liveTrigger = (Array.isArray(triggers) ? triggers : []).find(t => t && t.id === ref.triggerId) || null;
+  // Staleness: the target trigger must still exist (AC 409 stale-card).
+  const staleReason = hillClimbApplyGuard.staleTriggerReason(card, liveTrigger);
+  if (staleReason) {
+    return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: staleReason });
+  }
+  // Guard: never delete an intrinsic/derived/human-gate trigger (AC).
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  const guardReason = hillClimbApplyGuard.triggerApplyGuardError(liveTrigger, {
+    humanGateLabels: hillClimbApplyGuard.humanGateLabelSet(teamCfg),
+  });
+  if (guardReason) {
+    return res.status(403).json({ error: 'protected-trigger', code: 'protected-trigger', reason: guardReason });
+  }
+
+  // 3) Execute the mutation through the shared choke-point (audited under
+  //    req.user via the mounted auditMutations middleware).
+  let deletedTrigger;
+  try {
+    deletedTrigger = await deleteAgentTrigger(ref.agentId, ref.triggerId);
+  } catch (err) {
+    return res.status(502).json({ error: `Could not delete trigger: ${err.message}` });
+  }
+
+  // 4) Record the applied card (undo payload = the deleted trigger JSON).
+  const appliedBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  const undo = { kind: 'restore-trigger', agentId: ref.agentId, trigger: deletedTrigger };
+  const configVersionRef = { kind: 'trigger-delete', agentId: ref.agentId, triggerId: ref.triggerId, at: new Date().toISOString() };
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appliedBy, undo, configVersionRef }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) {
+      // The mutation succeeded but the card couldn't be marked — surface it
+      // honestly so the operator knows the trigger is already gone.
+      return res.status(502).json({ error: 'applied-not-recorded', code: 'applied-not-recorded', applied: true, deletedTrigger, recordStatus: resp.status, recordError: data.error });
+    }
+    return res.status(200).json({ teamId, applied: true, card: data.card, deletedTrigger });
+  } catch (err) {
+    return res.status(502).json({ error: 'applied-not-recorded', code: 'applied-not-recorded', applied: true, deletedTrigger, recordError: err.message });
+  }
+});
+
+// POST /api/teams/:teamId/hill-climb/cards/:cardId/rollback — the rollback
+// applier (#1226, concept §6). A regressed card carries a rollback plan; this
+// runs its undo path through the SAME existing audited console choke-point as
+// the apply (so `audit.auditMutations` records the reversal under req.user),
+// then asks the orchestrator to mark the card rolled-back with a fresh cooldown.
+// A rollback is always a human click — never auto-reverted (§6).
+//
+// Gates mirror the apply route, all server-side: autonomy 2 required (0/1 deny);
+// only a `regressed` card rolls back; only executable plan kinds run
+// (restore-trigger is wired first — re-creates the retained trigger JSON through
+// the trigger choke-point). Non-wired kinds (prompt-revert / restore-port /
+// restore-value) are refused rather than half-reverted, exactly as apply refuses
+// their apply paths.
+app.post('/api/teams/:teamId/hill-climb/cards/:cardId/rollback', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const cardId = req.params.cardId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+
+  // 1) Pull the card + autonomy from the store (the orchestrator is authority).
+  let cards; let autonomy;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) return res.status(resp.status).json(data);
+    cards = Array.isArray(data.cards) ? data.cards : [];
+    autonomy = data.autonomy;
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const card = cards.find(c => c && c.id === cardId);
+  if (!card) return res.status(404).json({ error: 'card not found' });
+  if (!(autonomy >= 2)) {
+    return res.status(403).json({ error: 'autonomy-locked', code: 'autonomy-locked', autonomy });
+  }
+  if (card.status !== 'regressed') {
+    return res.status(409).json({ error: 'card-not-regressed', code: 'card-not-regressed', status: card.status });
+  }
+  const plan = card.rollback && card.rollback.plan ? card.rollback.plan : null;
+  if (!plan || !plan.kind) {
+    return res.status(422).json({ error: 'no-rollback-plan', code: 'no-rollback-plan' });
+  }
+
+  // 2) Execute the rollback plan. Only restore-trigger is wired in this release
+  //    (mirrors the applier's executable-class discipline).
+  let undoResult = null;
+  if (plan.kind === 'restore-trigger') {
+    if (!plan.agentId || !AGENT_ID_RE.test(plan.agentId) || !plan.trigger || !plan.trigger.id) {
+      return res.status(422).json({ error: 'rollback-plan-incomplete', code: 'rollback-plan-incomplete' });
+    }
+    const agentDir = path.join(AGENTS_DIR, plan.agentId);
+    const agentCfg = readJsonFile(path.join(agentDir, 'config.json'), null);
+    if (!agentCfg || (agentCfg.parentTeamId !== teamId && plan.agentId !== teamId)) {
+      return res.status(409).json({ error: 'stale-card', code: 'stale-card', reason: `agent '${plan.agentId}' is not a live member of this team` });
+    }
+    // Config-write authorization (#989): re-creating a trigger is a management action.
+    if (denyUnlessCanManageAgent(req, res, agentDir)) return;
+    try {
+      const restored = await restoreAgentTrigger(plan.agentId, plan.trigger);
+      undoResult = { kind: 'restore-trigger', agentId: plan.agentId, triggerId: restored.id };
+    } catch (err) {
+      return res.status(502).json({ error: `Could not restore trigger: ${err.message}` });
+    }
+  } else {
+    return res.status(422).json({
+      error: 'rollback-not-applicable', code: 'rollback-not-applicable', kind: plan.kind,
+      message: `rollback for '${plan.kind}' is not wired yet — only restore-trigger rolls back in this release`,
+    });
+  }
+
+  // 3) Record the rolled-back card (fresh cooldown so the object re-enters
+  //    detection only after a full window).
+  const rolledBackBy = (req.user && (req.user.sub || req.user.username)) || 'operator';
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/hill-climb/cards/${encodeURIComponent(cardId)}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolledBackBy, undoResult }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status !== 200) {
+      return res.status(502).json({ error: 'rolled-back-not-recorded', code: 'rolled-back-not-recorded', rolledBack: true, undoResult, recordStatus: resp.status, recordError: data.error });
+    }
+    return res.status(200).json({ teamId, rolledBack: true, card: data.card, undoResult });
+  } catch (err) {
+    return res.status(502).json({ error: 'rolled-back-not-recorded', code: 'rolled-back-not-recorded', rolledBack: true, undoResult, recordError: err.message });
+  }
+});
+
+// GET /api/teams/:teamId/members — running/busy/trigger state for every
+// member, feeding the team-wide disable/enable preview dialog.
+app.get('/api/teams/:teamId/members', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/members`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/disable — bulk-disable every enabled member.
+// Body: { mode: 'drain' | 'abort' }, required.
+app.post('/api/teams/:teamId/disable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const mode = req.body?.mode;
+  if (mode !== 'drain' && mode !== 'abort') return res.status(400).json({ error: "mode must be 'drain' or 'abort'" });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/disable`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/enable — bulk-enable every member the earlier
+// disable tagged disabledByTeam.
+app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/enable`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
 });
 
 /* Derive a unified graph from a draft/imported bundle (#367) — the editable
@@ -5093,11 +7138,15 @@ app.post('/api/flows/graph', (req, res) => {
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
   const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
   const flow = processTemplateToUnified(bundle);
+  const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
   res.json({
     unifiedFlowVersion: flow.unifiedFlowVersion, source: 'draft', imported: true, name: bundle.name,
     // Ordered stage names drive the layered layout on the client (#stage-order).
     stages: Array.isArray(bundle.stages) ? bundle.stages.filter(s => typeof s === 'string') : [],
-    ...buildUnifiedGraph(flow.nodes, flow.edges),
+    // The bundle's own registries drive gate/brake classification (#928) and the
+    // named human-role bindings (#987).
+    humans: bundleHumans,
+    ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
 
@@ -5113,10 +7162,14 @@ app.get('/api/process/template', (req, res) => {
   if (team && !AGENT_ID_RE.test(team)) return res.status(400).json({ error: 'Invalid team id' });
   let teamName = team;
   let teamStages = [];
+  let teamHillClimb = null;
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
     if (Array.isArray(teamCfg?.stages)) teamStages = teamCfg.stages.filter(s => typeof s === 'string');
+    // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
+    // (in buildProcessTemplate) drops applied-card/snapshot state so only config travels.
+    teamHillClimb = teamCfg?.hillClimb || null;
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -5141,51 +7194,125 @@ app.get('/api/process/template', (req, res) => {
       ...(authoredOutcomes ? { outcomes: cfg.outcomes } : (emits.length ? { emits } : {})),
       ...(typeof cfg.stage === 'string' && cfg.stage ? { stage: cfg.stage } : {}),
     });
-    graphAgents.push({ id, role, triggers: tlist, emits, outcomes: cfg.outcomes || null });
+    // `channels` rides along so a channel's `gate: 'human'` classifies its routing
+    // label as a gate in the exported registry too (#928).
+    graphAgents.push({
+      id, role, triggers: tlist, emits, outcomes: cfg.outcomes || null,
+      channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+    });
   }
-  const g = buildProcessGraph(graphAgents);
+  // The team's persisted registry is the gate/brake authority (#928); the graph
+  // echoes it back in `labels[]` so the exported bundle round-trips its flags.
+  const g = buildProcessGraph(graphAgents, { labels: teamLabelRegistry(team) });
   res.json(buildProcessTemplate({
     name: teamName || 'process', level: 'live', teamId: team || undefined,
     roles: roleEntries, gates: g.gates, labels: g.labels, stages: teamStages,
+    // Named human roles (#987) round-trip with the bundle so an exported team
+    // re-materialises its human boxes and Edit-as-draft carries them.
+    humans: teamHumansRegistry(team),
+    // Hill-climb collector config (#1222) rides along on the team agent.
+    hillClimb: teamHillClimb,
   }));
 });
 
-/* ─── Flow-Weaver (#421) ────────────────────────────────────────────────
- * Deterministic wiring engine: ordered stages + selected roles → a complete,
- * gap-free process-template bundle (pure builder in flow-weaver.js). Roles are
- * referenced by catalog template id ({ templateId }) or supplied inline
- * ({ inline: true, ... } — #423). Returns { bundle, notes } where notes lists
- * every applied gap rule so the wizard can explain the compensation. */
-app.post('/api/process/weave', (req, res) => {
+/* ─── Flow Copilot (#1068/#1070, spec #1047) ────────────────────────────
+ * Natural-language flow generation/revision. Stateless: the client resends the
+ * conversation + current bundle each turn; generate → sanitize → STRICT
+ * validate → lint → repair (≤ 2 iterations) lives in flow-copilot.js. This
+ * route only resolves the model (same posture as /api/agent-prompt/generate —
+ * no heuristic fallback exists at whole-flow scope, so no provider is a hard
+ * 400) and owns the LLM transport. Mutating POST → audited automatically.
+ *
+ * A turn can take 20–60s (up to 3 LLM calls), so the response is NDJSON
+ * progress lines (#1070) in the /api/teams/stream mould: request-shape and
+ * provider errors stay plain 400 JSON (headers not sent yet); once generation
+ * starts, `{type:'phase', …}` events stream as the loop advances, terminated
+ * by `{type:'result', …Phase-1 payload}` or `{type:'error', status, error}`. */
+app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   const body = req.body || {};
-  const stagesIn = Array.isArray(body.stages) ? body.stages : null;
-  if (!stagesIn) return res.status(400).json({ error: 'stages must be an array' });
-  const stages = [];
-  for (const s of stagesIn) {
-    const roles = [];
-    for (const r of (s && Array.isArray(s.roles) ? s.roles : [])) {
-      if (r && typeof r.templateId === 'string') {
-        const t = loadAgentTemplate(r.templateId);
-        if (!t) return res.status(400).json({ error: `Unknown role template: ${r.templateId}` });
-        roles.push(t);
-      } else if (r && r.inline === true) {
-        roles.push(r);
-      } else {
-        return res.status(400).json({ error: 'each role needs { templateId } or { inline: true, ... }' });
-      }
+  const messages = Array.isArray(body.messages) ? body.messages : null;
+  if (!messages || !messages.length) return res.status(400).json({ error: 'messages must be a non-empty array' });
+  for (const m of messages) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string') {
+      return res.status(400).json({ error: "each message needs role 'user'|'assistant' and string content" });
     }
-    stages.push({ name: s && s.name, prefix: s && s.prefix, roles });
   }
+  if (body.bundle !== undefined && (body.bundle === null || typeof body.bundle !== 'object' || Array.isArray(body.bundle))) {
+    return res.status(400).json({ error: 'bundle must be an object' });
+  }
+
+  // Server-side size guard (#1404): measure the full system prompt before
+  // starting the NDJSON stream so we can return a plain 400. This fires when
+  // the serialised bundle JSON + format doc + conventions addendum would exceed
+  // the threshold, which causes a 504 timeout from the upstream LLM proxy.
+  if (body.bundle !== undefined) {
+    const formatDoc = readFormatDoc();
+    const addendum = readPromptAddendum();
+    const size = measureCopilotSystemPrompt({ formatDoc, addendum, bundle: body.bundle });
+    if (size > SYSTEM_PROMPT_CHAR_LIMIT) {
+      return res.status(400).json({
+        error: 'bundle-too-large',
+        message: `The bundle is too large for the Flow Copilot to process (${size.toLocaleString()} chars; limit ${SYSTEM_PROMPT_CHAR_LIMIT.toLocaleString()}). Make small, targeted requests — describe one role at a time rather than pasting the full bundle JSON.`,
+      });
+    }
+  }
+
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
+  if (target.error) return res.status(400).json({ error: target.error });
+
+  const url = buildMessagesUrl(target.baseUrl);
+  const headers = {
+    'anthropic-version': '2023-06-01',
+    ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+  };
+  // Whole-bundle generations are big (16k max_tokens) — a generous transport
+  // timeout, unlike the short one-shot suggestion calls.
+  const callLlm = async (payload) => {
+    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000);
+    if (result.error || result.status < 200 || result.status >= 300) {
+      const detail = result.error
+        || (result.body && (result.body.error?.message || result.body.error || result.body.message))
+        || `HTTP ${result.status}`;
+      throw new Error(`LLM request failed: ${detail}`);
+    }
+    return extractMessageText(result.body);
+  };
+
+  // NDJSON stream plumbing — see POST /api/teams/stream for the rationale of
+  // flushHeaders/setNoDelay and of watching res (not req) for disconnect.
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  if (typeof res.socket?.setNoDelay === 'function') {
+    res.socket.setNoDelay(true);
+  }
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) aborted = true;
+  });
+  function emit(ev) {
+    if (aborted) return;
+    try {
+      res.write(JSON.stringify(ev) + '\n');
+    } catch { /* socket gone */ }
+  }
+
+  // Provenance first (§4.5): the NDJSON stream announces which provider + model
+  // is paying for this turn before any generation begins.
+  emit({ type: 'assist', ...assistMeta(target).assist });
+
   try {
-    const { bundle, notes } = weaveProcess({
-      name: typeof body.name === 'string' && body.name.trim() ? body.name : 'Woven process',
-      stages,
-      options: body.options,
-    });
-    res.json({ bundle, notes });
+    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
+    emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    // Transport failure with no bundle to fall back to, or no parseable reply
+    // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
+    // returns ok:false for that.
+    emit({ type: 'error', status: 502, error: err.message });
   }
+  if (!aborted) res.end();
 });
 
 /* ─── Process-template registry (#419) ──────────────────────────────────
@@ -5294,6 +7421,11 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // Copilot chat history (#1071) — storage metadata like id/createdAt, never
+  // part of the portable bundle. Normalized on write: whitelisted fields only,
+  // capped length; anything malformed is dropped rather than persisted.
+  const copilot = sanitizeCopilotHistory(body.copilot);
+  if (copilot) draft.copilot = copilot; else delete draft.copilot;
   // Write the new-id entry first, then remove the old one, so a crash mid-rename
   // leaves the old record rather than losing the draft. No orphan/duplicate
   // remains once both steps complete (AC7).
@@ -5492,6 +7624,20 @@ function stampSkillCopy(dstDir, opts) {
 // Returns { ok: true } or { error } (the content write failed — the caller 500s;
 // stamping is best-effort and never surfaced as an error).
 function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, stamp }) {
+  // #515 (js/path-injection): destDir is composed by callers from a user-supplied
+  // skill name. Every skill write lands under the team-tier root (/workspace/teams)
+  // or the global skill pool (/pool/skills), so re-assert containment *here* — the
+  // CodeQL-legible path.relative barrier co-located with the fs sinks, since the
+  // callers' guards live in a different function and don't reach the sink. A bare
+  // SKILL_NAME_RE regex is not recognised as a traversal barrier; this is. Callers
+  // keep their own guards — this is the last line of defence right at the write.
+  const resolvedDest = path.resolve(destDir);
+  const relFromTeams = path.relative(path.resolve(WORKSPACE, 'teams'), resolvedDest);
+  const relFromPool = path.relative(path.resolve(POOL_DIR, 'skills'), resolvedDest);
+  const underTeams = !!relFromTeams && !relFromTeams.startsWith('..') && !path.isAbsolute(relFromTeams);
+  const underPool = !!relFromPool && !relFromPool.startsWith('..') && !path.isAbsolute(relFromPool);
+  if (!underTeams && !underPool) return { error: 'skill destination escapes the skills root' };
+  destDir = resolvedDest;
   try {
     if (overwrite) fs.rmSync(destDir, { recursive: true, force: true });
     if (copyFrom) {
@@ -5543,6 +7689,38 @@ function safeTeamSkillDir(teamId, name) {
   return dir;
 }
 
+// Global-pool skill dir with the CodeQL-legible containment guard — the twin of
+// safeTeamSkillDir for the global tier. A raw path.join(POOL_DIR,'skills',name)
+// with only a SKILL_NAME_RE guard is functionally safe but is NOT recognised by
+// CodeQL js/path-injection as a traversal barrier; the path.relative idiom is.
+// Returns null on an invalid or escaping name.
+function safeGlobalSkillDir(name) {
+  if (!SKILL_NAME_RE.test(name || '')) return null;
+  const base = path.resolve(POOL_DIR, 'skills');
+  const dir = path.resolve(base, name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
+// Agent-tier skill dir with the CodeQL-legible containment guard — the agent
+// twin of safeTeamSkillDir/safeGlobalSkillDir for a per-agent skill copy under
+// /workspace/agents/<agentId>/skills. A raw path.join(AGENTS_DIR, agentId,
+// 'skills', name) with only AGENT_ID_RE + SKILL_NAME_RE guards is functionally
+// safe but is NOT recognised by CodeQL js/path-injection as a traversal
+// barrier; the path.relative idiom on the returned value is. Contains BOTH the
+// agent id (dir) and the skill name (leaf). Returns null on an invalid or
+// escaping id/name. Unlike safeAgentPath it does not realpath, so it resolves a
+// not-yet-existing skill dir (callers check existence and 404 themselves).
+function safeAgentSkillDir(agentId, name) {
+  if (!AGENT_ID_RE.test(agentId || '') || !SKILL_NAME_RE.test(name || '')) return null;
+  const base = path.resolve(AGENTS_DIR);
+  const dir = path.resolve(base, agentId, 'skills', name);
+  const rel = path.relative(base, dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return dir;
+}
+
 // List team skills, optionally filtered to one team. Each is tagged with its
 // owning teamId so the UI (and a future membership filter, #302) can scope it.
 function listTeamSkills(filterTeamId) {
@@ -5589,10 +7767,8 @@ function resolveExtendTarget(teamId, tier, name) {
     dir = safeTeamSkillDir(teamId, name);
     if (!dir) return { error: 'Invalid team id or skill name' };
   } else if (tier === 'global') {
-    const poolSkillsBaseDir = path.resolve(POOL_DIR, 'skills');
-    dir = path.resolve(poolSkillsBaseDir, name);
-    const rel = path.relative(poolSkillsBaseDir, dir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return { error: 'Invalid skill name' };
+    dir = safeGlobalSkillDir(name);
+    if (!dir) return { error: 'Invalid skill name' };
   } else {
     return { error: 'invalid tier' };
   }
@@ -5652,8 +7828,8 @@ function gatherSkillCopies(name, scope) {
   const copies = [];
   if (!SKILL_NAME_RE.test(String(name || ''))) return copies;
 
-  const globalDir = path.join(POOL_DIR, 'skills', name);
-  if (fs.existsSync(path.join(globalDir, 'SKILL.md'))) {
+  const globalDir = safeGlobalSkillDir(name);
+  if (globalDir && fs.existsSync(path.join(globalDir, 'SKILL.md'))) {
     let origin = null;
     try { const man = skillManifest.readManifest(globalDir); origin = man && man.origin; } catch { /* none */ }
     const d = skillDriftSummary(globalDir, origin);
@@ -5673,7 +7849,10 @@ function gatherSkillCopies(name, scope) {
   for (const agentId of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
     if (!visibleAgent(scope, cfg)) continue;
-    const dir = path.join(AGENTS_DIR, agentId, 'skills', name);
+    const agentSkillsBase = path.resolve(AGENTS_DIR, agentId, 'skills');
+    const dir = path.resolve(agentSkillsBase, name);
+    const drel = path.relative(agentSkillsBase, dir);
+    if (drel.startsWith('..') || path.isAbsolute(drel)) continue;
     if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
     lazyStampAgentSkill(dir, agentId);
     const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
@@ -5740,7 +7919,9 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
-            skills.push({ name, source: 'agent', agentId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            // Carry the owning team so the UI can deep-link the "share it" path
+            // into the (team-scoped) Knowledge page for this agent (#1144).
+            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });
@@ -5797,15 +7978,17 @@ app.get('/api/skills/:name/lineage', (req, res) => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
     if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Skill not found' });
     viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
-    viewedDir = path.join(AGENTS_DIR, path.basename(qAgentId), 'skills', name);
+    viewedDir = safeAgentSkillDir(qAgentId, name);
+    if (!viewedDir) return res.status(400).json({ error: 'Invalid agent id or skill name' });
   } else if (source === 'team') {
     viewedDir = safeTeamSkillDir(qTeamId, name);
     if (!viewedDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
     if (!visibleTeam(scope, qTeamId)) return res.status(404).json({ error: 'Skill not found' });
     viewed = { tier: 'team', teamId: qTeamId };
   } else {
+    viewedDir = safeGlobalSkillDir(name);
+    if (!viewedDir) return res.status(400).json({ error: 'Invalid skill name' });
     viewed = { tier: 'global' };
-    viewedDir = path.join(POOL_DIR, 'skills', name);
   }
   if (!fs.existsSync(path.join(viewedDir, 'SKILL.md'))) return res.status(404).json({ error: 'Skill not found' });
 
@@ -5849,7 +8032,11 @@ function safeSkillFilePath(rootDir, relFile) {
   const target = path.resolve(realRoot, normalized);
   let realTarget;
   try { realTarget = fs.realpathSync(target); } catch { return null; }
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  // Canonical path.relative containment idiom — recognised as a CodeQL
+  // js/path-injection barrier on the returned value; behaviour-equivalent to
+  // the previous `startsWith(realRoot + sep)` check.
+  const rel = path.relative(realRoot, realTarget);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   return realTarget;
 }
 
@@ -5959,7 +8146,7 @@ app.put('/api/skills/:name/file', (req, res) => {
 // Stream a ZIP archive of an entire skill directory (pool or agent source).
 // The archive contains a single top-level folder named after the skill, so it
 // round-trips cleanly through POST /api/skills/import.
-app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
+app.get('/api/skills/:name/export', heavyLimiter, async (req, res) => {
   const { name } = req.params;
   const { source, agentId, teamId } = req.query;
   const root = skillRootDir(source, name, agentId, teamId);
@@ -5968,13 +8155,16 @@ app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
 
   const parentDir = path.dirname(root);
   const dirName = path.basename(root);
-  // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
-  const zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
-  const zipPath = path.join(zipDir, 'skill.zip');
+  // Scratch dir is created inside the try: this handler is async, so a throw
+  // outside it would surface as an unhandled rejection instead of a 500.
+  let zipDir = null;
   try {
-    const zipResult = spawnSync('zip', ['-r', zipPath, dirName], { cwd: parentDir });
-    if (zipResult.status !== 0) {
-      throw new Error(`zip exited ${zipResult.status}: ${(zipResult.stderr || '').toString().trim()}`);
+    // Scratch zip lives in /tmp so `zip -r` doesn't try to archive its own output.
+    zipDir = fs.mkdtempSync(path.join('/tmp', 'skill-zip-'));
+    const zipPath = path.join(zipDir, 'skill.zip');
+    const zipResult = await runArchiveTool('zip', ['-r', '-q', zipPath, dirName], { cwd: parentDir });
+    if (zipResult.code !== 0) {
+      throw new Error(describeArchiveFailure('zip', zipResult));
     }
     const stat = fs.statSync(zipPath);
     res.setHeader('Content-Disposition', `attachment; filename="skill-${name}.zip"`);
@@ -5984,7 +8174,7 @@ app.get('/api/skills/:name/export', heavyLimiter, (req, res) => {
     stream.on('close', () => { try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ } });
     stream.pipe(res);
   } catch (err) {
-    try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ }
+    if (zipDir) { try { fs.rmSync(zipDir, { recursive: true, force: true }); } catch { /* noop */ } }
     console.error(`[API] Skill export failed for ${name}: ${err.message}`);
     res.status(500).json({ error: `Export failed: ${err.message}` });
   }
@@ -6004,7 +8194,7 @@ const _skillImportUpload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
-app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), (req, res) => {
+app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file provided (field name: file)' });
 
   const tmpDir = fs.mkdtempSync(path.join('/tmp', 'skill-import-'));
@@ -6016,8 +8206,9 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
 
     // A .skill file is just a ZIP under the hood, so unzip handles both .zip and
     // .skill uploads — extraction is content-based and ignores the file extension.
-    const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractDir]);
-    if (unzipResult.status !== 0) {
+    const unzipResult = await runArchiveTool('unzip', ['-q', '-o', zipPath, '-d', extractDir]);
+    if (unzipResult.code !== 0) {
+      console.error(`[API] Skill import: ${describeArchiveFailure('unzip', unzipResult)}`);
       return res.status(400).json({ error: 'Could not extract archive — ensure the file is a valid .zip or .skill skill archive' });
     }
 
@@ -7014,7 +9205,8 @@ app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
   const fallback = () => res.json({ draft: heuristic, source: 'heuristic' });
   if (req.body?.heuristicOnly) return fallback();
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
   const url = buildMessagesUrl(target.baseUrl);
   const headers = {
@@ -7026,7 +9218,7 @@ app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const skillMd = extractMessageText(result.body);
   if (!skillMd) return fallback();
-  res.json({ draft: { name: plan.target.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model });
+  res.json({ draft: { name: plan.target.name, skillMd, llmDrafted: true }, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 // POST /api/skills/merge — commit the merge: write the target from the operator's
@@ -7222,6 +9414,21 @@ app.get('/api/llm-endpoints', (req, res) => {
   // this same endpoint.
   const scope = getScope(req);
   res.json(listLlmEndpoints().filter(ep => visibleCredential(scope, ep)).map(maskLlmEndpoint));
+});
+
+// Selection options for the global assist model selector (#1210). Distinct from
+// GET /api/llm-endpoints (the management list, visibleCredential-filtered): this
+// is filtered by assistSelectableEndpoint — membership-based, any role, so a
+// plain Team Member sees the providers their team may bill AI helpers against —
+// and masked to just what the picker needs (never a token, never a baseUrl).
+// `envFallbackActive` flags the bootstrap case (no providers registered anywhere
+// + ANTHROPIC_BASE_URL set), where the selector shows a read-only ".env" chip.
+// Session-gated by the /api auth mount.
+app.get('/api/assist/model-options', (req, res) => {
+  const scope = getScope(req);
+  res.json(buildAssistModelOptions(scope, listLlmEndpoints(), {
+    envBaseUrl: process.env.ANTHROPIC_BASE_URL || '',
+  }));
 });
 
 // Read-only view of the ANTHROPIC_* variables from `.env`, surfaced as a
@@ -7518,6 +9725,53 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// Returns enabled, materialized agents whose effective LLM endpoint is :id.
+// Used by the UI to prompt a respawn after credential rotation. Discovery
+// logic lives in respawn-agents.js (pure, unit-tested) — this route only
+// does I/O (loading configs) and wires the result into a JSON response.
+app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  res.json({ agents });
+});
+
+// Respawn all enabled agents bound to :id so they pick up the rotated credential
+// without requiring a manual disable→enable cycle. Discovery + the bounded
+// worker-pool both live in respawn-agents.js (pure, unit-tested); this route
+// does I/O and decides the default concurrency policy.
+app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const ep = listLlmEndpoints().find(e => e.id === req.params.id);
+  if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+  const agents = discoverBoundAgents(agentConfigs, ep.id, {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+  });
+  // Bounded concurrency: an unbounded Promise.all here would fan out one
+  // stop+recreate container-lifecycle call per agent simultaneously, which
+  // can overwhelm the orchestrator's libpod socket and the host's container
+  // runtime on a large squad (observed directly while load-testing this
+  // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
+  // for their hardware; the default is conservative for a local Podman host.
+  const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
+  const { respawned, skipped } = await respawnWithConcurrency(
+    agents.map(a => a.id),
+    requestedConcurrency,
+    id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
+  );
+  res.json({ respawned, skipped });
+});
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always
@@ -7687,35 +9941,74 @@ app.delete('/api/llm-auth/flows/:id', apiLimiter, (req, res) => {
  * from .env. This is a stateless, one-shot completion — nothing is persisted.
  */
 
-// Resolve which endpoint + model + token to use for a one-shot generation call.
-// Prefers a caller-named endpoint, else the first registered one, else the
-// .env fallback. Within an endpoint, prefer a Sonnet-class model (good quality
-// at low latency for this short task), then its configured default, then the
-// first model. Returns { baseUrl, token, model } or { error }.
-function resolveGenerationTarget(preferredEndpointId) {
-  // Subscription-OAuth providers are excluded here: their token authenticates
-  // the Claude *CLI* under the subscriber's seat, not arbitrary server-side
-  // /v1/messages calls — routing one-shot generation through it would be both
-  // unreliable and outside the subscription's permitted use.
-  const endpoints = listLlmEndpoints().filter(e => normalizeAuthType(e.authType) !== 'oauth-token');
-  const ep = (preferredEndpointId && endpoints.find(e => e.id === preferredEndpointId))
-    || endpoints[0]
-    || null;
-  if (ep) {
-    const models = Array.isArray(ep.models) ? ep.models : [];
-    const sonnet = models.find(m => m.kind === 'sonnet');
-    const model = sonnet?.id || pickEndpointDefaultModel(ep);
-    if (!ep.baseUrl) return { error: `LLM endpoint '${ep.id}' has no base URL` };
-    if (!model) return { error: `LLM endpoint '${ep.id}' has no models configured` };
-    return { baseUrl: ep.baseUrl, token: readLlmEndpointToken(ep.authTokenId), model };
-  }
-  // No registered endpoint — fall back to the raw ANTHROPIC_* env vars.
+// The raw ANTHROPIC_* fallback — used only in the bootstrap case (no Model
+// Provider registered platform-wide). Kept identical to the pre-#1211 behaviour
+// so a freshly-installed stack with just a `.env` proxy keeps working with zero
+// configuration. Subscription-OAuth is not involved here (bootstrap installs
+// have no providers at all).
+function envFallbackTarget() {
   const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').trim();
   if (!baseUrl) {
     return { error: 'No LLM endpoint configured. Add one on the Model Providers page or set ANTHROPIC_BASE_URL.' };
   }
   const model = (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-6').trim();
-  return { baseUrl, token: (process.env.ANTHROPIC_AUTH_TOKEN || '').trim(), model };
+  return { baseUrl, token: (process.env.ANTHROPIC_AUTH_TOKEN || '').trim(), model, endpointId: null, endpointName: '.env' };
+}
+
+// Resolve the Model Provider + model an assist call must bill against (#1211,
+// concept §4.5). This is the server-side authority: the client's selection
+// (X-Assist-Model header, or legacy body.llmEndpointId) is validated against
+// the caller's team visibility (assistSelectableEndpoint) and never trusted to
+// pick a provider its teams may not use. The pure decision lives in
+// assist-target.js; here we add the impure bits (scope, registry, token read,
+// .env material) and stamp req.assistMeta for the audit trail.
+//
+// Returns one of:
+//   { selectionError: { status, code, error } } — a 403 (not permitted) or 400
+//       (unselected while providers exist). Callers MUST surface it and never
+//       mask it behind a heuristic fallback (that would re-open the billing bug).
+//   { error }                — a resolved-but-misconfigured provider, or the
+//       bootstrap .env fallback with no base URL. Same shape resolveGeneration-
+//       Target used, so existing routes treat it exactly as before.
+//   { baseUrl, token, model, endpointId, endpointName } — ready to call.
+function resolveAssistTarget(req, { requireSelection = true } = {}) {
+  const scope = getScope(req);
+  const decision = resolveAssistSelection({
+    scope,
+    endpoints: listLlmEndpoints(),
+    selection: parseAssistSelection(req),
+    requireSelection,
+  });
+  if (decision.selectionError) return decision;
+  if (decision.error) return { error: decision.error };
+  if (decision.env) {
+    const env = envFallbackTarget();
+    if (!env.error) req.assistMeta = { endpointId: env.endpointId, model: env.model };
+    return env;
+  }
+  const target = {
+    baseUrl: decision.baseUrl,
+    token: readLlmEndpointToken(decision.endpoint.authTokenId),
+    model: decision.model,
+    endpointId: decision.endpointId,
+    endpointName: decision.endpointName,
+  };
+  req.assistMeta = { endpointId: target.endpointId, model: target.model };
+  return target;
+}
+
+// Provenance block echoed on every assist response (#1211 §4.5) — "which key
+// paid for this". endpointId is null for the .env bootstrap fallback.
+function assistMeta(target) {
+  return { assist: { endpointId: target.endpointId ?? null, model: target.model } };
+}
+
+// Send a resolveAssistTarget selection error (403/400) as JSON. Returns true so
+// route bodies can `if (target.selectionError) return sendAssistSelectionError(res, target);`.
+function sendAssistSelectionError(res, target) {
+  const e = target.selectionError;
+  res.status(e.status).json({ error: e.error, code: e.code });
+  return true;
 }
 
 // Meta-prompt: instruct the LLM to author a reusable agent/system prompt for a
@@ -7760,7 +10053,8 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   const notes    = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
   if (!roleName) return res.status(400).json({ error: 'roleName is required' });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return res.status(400).json({ error: target.error });
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -7779,7 +10073,7 @@ app.post('/api/agent-prompt/generate', heavyLimiter, async (req, res) => {
   }
   const prompt = extractMessageText(result.body);
   if (!prompt) return res.status(502).json({ error: 'LLM returned an empty prompt' });
-  res.json({ prompt, model: target.model });
+  res.json({ prompt, model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── Port suggestion for custom composer roles (#423) ──────────────────
@@ -7799,7 +10093,8 @@ app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
     source: 'heuristic',
   });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -7812,7 +10107,7 @@ app.post('/api/agent-ports/suggest', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const suggestion = parsePortSuggestion(extractMessageText(result.body));
   if (!suggestion) return fallback();
-  res.json({ suggestion, source: 'llm', model: target.model });
+  res.json({ suggestion, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── Outcome suggestion for the Routing tab (#828) ─────────────────────
@@ -7831,7 +10126,8 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
     source: 'heuristic',
   });
 
-  const target = resolveGenerationTarget(req.body?.llmEndpointId);
+  const target = resolveAssistTarget(req);
+  if (target.selectionError) return sendAssistSelectionError(res, target);
   if (target.error) return fallback();
 
   const url = buildMessagesUrl(target.baseUrl);
@@ -7844,7 +10140,7 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
   const suggestion = parseOutcomeSuggestion(extractMessageText(result.body));
   if (!suggestion) return fallback();
-  res.json({ suggestion, source: 'llm', model: target.model });
+  res.json({ suggestion, source: 'llm', model: target.model, meta: assistMeta(target) });
 });
 
 /* ─── MCP server registry ───────────────────────────────────────────── */
@@ -7992,7 +10288,13 @@ app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
   const usedBy = mcpServerInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP server is used by environment '${usedBy}'. Detach it first.` });
-  try { fs.rmSync(path.join(MCP_SERVERS_DIR, id), { recursive: true, force: true }); } catch { /* ignore */ }
+  // Path-injection containment (#208): re-confine the resolved server dir under
+  // MCP_SERVERS_DIR — MCP_SERVER_ID_RE alone is not CodeQL-legible for the sink.
+  const mcpServersBaseDir = path.resolve(MCP_SERVERS_DIR);
+  const serverDir = path.resolve(mcpServersBaseDir, id);
+  const relServerDir = path.relative(mcpServersBaseDir, serverDir);
+  if (relServerDir.startsWith('..') || path.isAbsolute(relServerDir)) return res.status(400).json({ error: 'Invalid server id' });
+  try { fs.rmSync(serverDir, { recursive: true, force: true }); } catch { /* ignore */ }
   res.status(204).end();
 });
 
@@ -8011,6 +10313,11 @@ app.post('/api/mcp-credentials', apiLimiter, (req, res) => {
   let ownerTeamId;
   try { ownerTeamId = resolveOwnerTeamId(teamId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  // Config-write authorization (#989): creating an MCP credential requires
+  // team-admin management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   if (serverId !== undefined && serverId !== null && !MCP_SERVER_ID_RE.test(serverId)) {
     return res.status(400).json({ error: 'Invalid serverId' });
   }
@@ -8057,10 +10364,22 @@ app.delete('/api/mcp-credentials/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_CREDENTIAL_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid credential id' });
   const creds = listMcpCredentials();
-  if (!creds.some(c => c.id === id)) return res.status(404).json({ error: 'MCP credential not found' });
+  const cred = creds.find(c => c.id === id);
+  if (!cred) return res.status(404).json({ error: 'MCP credential not found' });
+  // Config-write authorization (#989): deleting an MCP credential requires
+  // team-admin management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: cred.teamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = mcpCredentialInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP credential is used by environment '${usedBy}'. Detach it first.` });
-  try { fs.unlinkSync(path.join(MCP_CREDENTIALS_KEYS_DIR, id)); } catch { /* ignore */ }
+  // Path-injection containment (#211): re-confine the resolved key file under
+  // MCP_CREDENTIALS_KEYS_DIR — MCP_CREDENTIAL_ID_RE alone is not CodeQL-legible.
+  const mcpCredsBaseDir = path.resolve(MCP_CREDENTIALS_KEYS_DIR);
+  const credFile = path.resolve(mcpCredsBaseDir, id);
+  const relCredFile = path.relative(mcpCredsBaseDir, credFile);
+  if (relCredFile.startsWith('..') || path.isAbsolute(relCredFile)) return res.status(400).json({ error: 'Invalid credential id' });
+  try { fs.unlinkSync(credFile); } catch { /* ignore */ }
   saveMcpCredentialsIndex(creds.filter(c => c.id !== id));
   res.status(204).end();
 });
@@ -8351,6 +10670,35 @@ app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`);
 });
 
+// Self-service per-user preferences (#1437). A logged-in user updates their OWN
+// profile settings (currently just the Agent-Chat transcript font size) without
+// System-Admin rights. The write is pinned to the caller's OWN resolved userId
+// (never an id from the request), so — unlike the admin CRUD above — it can
+// touch no other user's record. The env single-admin has no user record
+// (scope.userId === null): accept the value so the client's optimistic apply +
+// per-user localStorage fallback still work, but report it as not persisted
+// server-side. teamsStore.updateUser is the authoritative validator (range /
+// integer check → 400).
+app.put('/api/me/preferences', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const patch = {};
+  if (req.body && req.body.chatFontSize !== undefined) {
+    patch.chatFontSize = req.body.chatFontSize;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: 'No supported preference in request body', code: 'no_preference' });
+  }
+  if (scope.userId == null) {
+    return res.json({ persisted: false });
+  }
+  return callAdmin('PUT', `users/${encodeURIComponent(scope.userId)}`, patch)
+    .then(({ status, data }) => {
+      if (status >= 400) return res.status(status).json(data);
+      res.json({ persisted: true, user: data });
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+});
+
 // Memberships — list filtered to the caller's teams (AC2); mutations require
 // team-admin of the target team (AC3).
 app.get('/api/admin/memberships', (req, res) => {
@@ -8431,6 +10779,12 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   try { ownerTeamId = resolveOwnerTeamId(teamId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
+  // Config-write authorization (#989): creating an environment requires team-admin
+  // management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
   let normalizedRepos;
   try {
     normalizedRepos = normalizeRepositoriesInput(repositories, repository);
@@ -8484,7 +10838,15 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  // Config-write authorization (#989): editing an environment requires team-admin
+  // management rights over its owning team; re-parenting also over the target.
+  const envScope = getScope(req);
+  if (!canManageEnvironment(envScope, env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const prevGithubTokenId = env.githubTokenId || null;
+  const prevLlmEndpointId = env.llmEndpointId || null;
+  const prevDefaultModelId = env.defaultModelId || null;
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
@@ -8498,8 +10860,15 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   }
 
   if (teamId !== undefined) {
-    try { env.teamId = resolveOwnerTeamId(teamId); }
+    let nextTeamId;
+    try { nextTeamId = resolveOwnerTeamId(teamId); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    // Re-parenting to another team requires management rights over the target.
+    if (nextTeamId !== (env.teamId || 'default')
+        && !canManageEnvironment(envScope, { teamId: nextTeamId })) {
+      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    }
+    env.teamId = nextTeamId;
   }
 
   // Only re-validate the LLM binding if either field was explicitly sent.
@@ -8540,10 +10909,16 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
-  // If the GitHub PAT the env points at changed, respawn its running agents so
-  // the new token is re-injected into their containers (baked in at spawn time).
+  // Spawn-time bindings (GitHub PAT, LLM provider/model) are baked into each
+  // agent container at start, so a change only takes effect on respawn. Respawn
+  // the env's running agents whenever any of them changed — otherwise a provider
+  // switch at the environment level would silently not apply until a manual
+  // disable→enable. (A per-agent override is handled by PATCH /agents/:id/provider.)
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
+          || (env.defaultModelId || null) !== prevDefaultModelId) {
+    notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
   }
   res.json(env);
 });
@@ -8551,6 +10926,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
+  // Config-write authorization (#989): deleting an environment requires team-admin
+  // management rights over its owning team.
+  if (!canManageEnvironment(getScope(req), env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = environmentInUse(env.id);
   if (usedBy) {
     return res.status(409).json({ error: `Environment is used by agent '${usedBy}'. Delete the agent first.` });
@@ -8913,14 +11293,14 @@ app.get('/api/agent-templates', (_req, res) => {
       icon: t.icon,
       category: t.category,
       sessionPolicy: t.sessionPolicy,
-      envSuffix: t.envSuffix,
       // Which tier this effective template comes from (#587): 'default'
       // (seeded, read-only), 'user' (UI-created) or 'override' (UI edit of a
       // seeded default — can be reset to default).
       origin,
       defaultEnabled: t.defaultEnabled !== false,
-      // Catalog v2 (#420): the normalised composition surface for the wizard's
-      // stage picker + the Flow-Weaver (patternRole / stageAffinity / ports).
+      // Catalog v2 (#420): the normalised composition surface (patternRole /
+      // stageAffinity / ports) consumed by the wiring-suggestion feature
+      // (port-suggestion.js) and the Flow Editor.
       ...normalizeTemplatePorts(t),
       triggerSummary: (t.triggers || []).map(tr => ({
         id: tr.id,
@@ -9113,6 +11493,51 @@ function planMembers(teamId, normalizedRoles, loadTemplate) {
   return planned;
 }
 
+// Suggest a random label suffix for the team-setup wizard (#902).
+app.get('/api/teams/suggest-suffix', (req, res) => {
+  res.json({ suffix: generateSuffix() });
+});
+
+// Deterministic label color derived from the suffix string: hash to an HSL hue,
+// convert to a readable pastel-ish hex color. Two teams with different suffixes
+// get visually distinct label colors in the GitHub UI.
+function suffixLabelColor(suffix) {
+  let h = 0;
+  for (let i = 0; i < suffix.length; i++) h = (h * 31 + suffix.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  // Fixed saturation + lightness for a consistent pastel palette.
+  const s = 65, l = 60;
+  const a = s * Math.min(l, 100 - l) / 100;
+  const f = n => {
+    const k = (n + hue / 30) % 12;
+    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * c / 100).toString(16).padStart(2, '0');
+  };
+  return `${f(0)}${f(8)}${f(4)}`;
+}
+
+// Best-effort label provisioning call to the orchestrator after materialisation.
+// Creates missing GitHub labels for the stamped token set. Failures are warnings.
+async function provisionGithubLabels(orchestratorUrl, envId, tokenSet, suffix) {
+  if (!suffix || !tokenSet || !tokenSet.size) return [];
+  try {
+    const color = suffixLabelColor(suffix);
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/environments/${encodeURIComponent(envId)}/github-labels`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels: [...tokenSet], color }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (data.warnings?.length) return data.warnings;
+    return [];
+  } catch (err) {
+    return [`Label provisioning: ${err.message}`];
+  }
+}
+
 app.post('/api/teams', heavyLimiter, async (req, res) => {
   const body = req.body || {};
   const { teamId, teamName, mcpServers } = body;
@@ -9185,6 +11610,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     return res.status(400).json({
       error: `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`,
     });
+  }
+  // Label suffix (#902): optional short base36 tag applied once to all label
+  // tokens at materialisation so parallel teams/stacks on one repo don't
+  // cross-trigger. Empty/absent = standard shared label vocabulary.
+  const labelSuffix = (typeof body.labelSuffix === 'string' && body.labelSuffix.trim())
+    ? body.labelSuffix.trim()
+    : '';
+  {
+    const sv = validateSuffix(labelSuffix);
+    if (!sv.ok) return res.status(400).json({ error: sv.error });
   }
 
   // ── 1. Validate input ─────────────────────────────────────────────
@@ -9290,6 +11725,35 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const bundleStages = Array.isArray(body.processTemplate?.stages)
     ? body.processTemplate.stages.filter(s => typeof s === 'string')
     : [];
+  // Authoritative gate/brake label registry (#928) — normalized to the persisted
+  // shape so the live graph reads booleans back, never a stray truthy value.
+  let bundleLabels = Array.isArray(body.processTemplate?.labels)
+    ? body.processTemplate.labels
+      .filter(l => l && typeof l.name === 'string' && l.name.trim())
+      .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
+    : [];
+  // Named human roles (#987) — normalized to the persisted shape and stored on
+  // the team agent (like `stages`/`labels`) so the live graph binds the #981
+  // touchpoints to the named nodes. Never materialise into an agent.
+  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
+
+  // Label-suffix stamping (#902): one-shot rename applied to the member array
+  // + bundle label registry before any agent is created. No-op when labelSuffix
+  // is empty (byte-identical output). Warnings surface un-stamped prompt mentions.
+  let suffixWarnings = [];
+  let suffixTokenSet = null;
+  if (labelSuffix) {
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    customRolesRaw = stamped.members;
+    bundleLabels = stamped.bundleLabels;
+    suffixWarnings = stamped.warnings;
+    suffixTokenSet = stamped.tokenSet;
+  }
+
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -9333,33 +11797,92 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   }
 
   const envExists = !!loadEnvironment(envId);
+  // Containment check — teamAgentId (= teamId) and each memberId are
+  // TEAM_ID_RE/AGENT_ID_RE-validated, but CodeQL's js/path-injection query
+  // doesn't recognise the regex as a barrier; path.resolve + path.relative is
+  // the in-flow sanitiser it does recognise. Build every id-derived fs path
+  // from the contained dir.
+  const teamsAgentsRoot = path.resolve(AGENTS_DIR);
+  const teamAgentDir = path.resolve(teamsAgentsRoot, teamAgentId);
+  const teamAgentRel = path.relative(teamsAgentsRoot, teamAgentDir);
+  if (teamAgentRel.startsWith('..') || path.isAbsolute(teamAgentRel)) {
+    return res.status(400).json({ error: 'Invalid teamId path' });
+  }
   // Inspect the existing agent (if any) so we can distinguish "an actual
   // team blocks this id" from "some unrelated agent (orchestrator,
   // bp-instance, plain agent) blocks this id". The first case is a real
   // collision the user can resolve via extend; the second is an id
   // conflict and `mode: extend` would be a lie.
-  const existingTeamCfg = fs.existsSync(path.join(AGENTS_DIR, teamAgentId))
-    ? readJsonFile(path.join(AGENTS_DIR, teamAgentId, 'config.json'), null)
+  const existingTeamCfg = fs.existsSync(teamAgentDir)
+    ? readJsonFile(path.join(teamAgentDir, 'config.json'), null)
     : null;
   const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
   const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
-  const existingMembers = planned
-    .filter(p => fs.existsSync(path.join(AGENTS_DIR, p.memberId)))
-    .map(p => p.memberId);
+  // Read each planned member's config so residue classification is symmetric
+  // with `teamExists` — a bare directory must never outrank a readable config
+  // (#1525). Containment via path.resolve + path.relative is the CodeQL barrier.
+  const memberEntries = planned.map(p => {
+    const memberDir = path.resolve(teamsAgentsRoot, p.memberId);
+    const memberRel = path.relative(teamsAgentsRoot, memberDir);
+    if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
+      return { memberId: p.memberId, exists: false, config: null };
+    }
+    const exists = fs.existsSync(memberDir);
+    return {
+      memberId: p.memberId,
+      exists,
+      config: exists ? readJsonFile(path.join(memberDir, 'config.json'), null) : null,
+    };
+  });
+  const residue = classifyMemberResidue(memberEntries, teamId);
+  const { existingMembers } = residue;
 
-  if (teamIdTakenByOther) {
+  // One shared decision with the streaming handler (#1525) — a config-less /
+  // provisioning-stub leftover is an adoptable orphan, not a collision.
+  const decision = decideTeamCreate({ mode, teamExists, teamIdTakenByOther, residue });
+  if (decision.type === 'conflict-team') {
     return res.status(409).json({
       error: `Cannot use teamId '${teamId}': an agent with this id already exists ` +
         `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
         `the existing agent first.`,
     });
   }
+  if (decision.type === 'conflict-members') {
+    const list = decision.members.map(m => `${m.memberId} (role '${m.role}')`).join(', ');
+    return res.status(409).json({
+      error: `Cannot create team '${teamId}': the id(s) ${list} already belong to ` +
+        `unrelated agent(s). Pick a different teamId or delete the existing agent(s) first.`,
+    });
+  }
+  if (decision.type === 'extend-missing-team') {
+    return res.status(409).json({
+      error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
+    });
+  }
+  if (decision.type === 'collision') {
+    // Real collision = an actual team or member exists. An env-only orphan and
+    // a config-less agent-dir orphan are both adopted (recovered) below.
+    return res.status(409).json({
+      error: 'Resources for this team already exist',
+      existing: {
+        env: envExists ? envId : null,
+        team: teamExists ? teamAgentId : null,
+        members: decision.existingMembers,
+      },
+      suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+    });
+  }
 
+  // decision.type === 'proceed' — leftover orphan dirs to clean before create.
+  const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
-    if (!teamExists) {
-      return res.status(409).json({
-        error: `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`,
+    // Enforce suffix consistency: added roles must use the stored suffix.
+    const storedSuffix = existingTeamCfg.labelSuffix || '';
+    if (labelSuffix !== storedSuffix) {
+      return res.status(400).json({
+        error: `labelSuffix mismatch: team '${teamId}' was created with suffix '${storedSuffix || '(none)'}'; ` +
+          `extending it with '${labelSuffix || '(none)'}' would create mismatched labels.`,
       });
     }
     toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
@@ -9373,22 +11896,6 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       });
     }
   } else {
-    // Real collision = team or members exist. An env-only orphan is a
-    // recoverable left-over from a prior aborted run (or an out-of-band
-    // delete that didn't reap the env); silently reuse/overwrite it
-    // instead of stranding the caller — same recovery the streaming
-    // endpoint applies, kept in parity here.
-    if (teamExists || existingMembers.length) {
-      return res.status(409).json({
-        error: 'Resources for this team already exist',
-        existing: {
-          env: envExists ? envId : null,
-          team: teamExists ? teamAgentId : null,
-          members: existingMembers,
-        },
-        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
-      });
-    }
     toCreate = planned;
   }
   // Never overwrite a deliberately reused environment — only adopt an orphan
@@ -9422,21 +11929,32 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const created = { env: null, team: null, members: [], dms: [] };
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
+  // A rollback that could not delete something must be loud (#1525 AC3):
+  // record the failed cleanup (with the leftover id) into `rollbackWarnings`
+  // so the caller learns about residue instead of being told all was well.
+  const rollbackWarnings = [];
+  const rollbackDelete = async (id, kind) => {
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        const detail = data.error || `HTTP ${resp.status}`;
+        console.error(`[Team] Rollback: failed to delete ${kind} ${id}: ${detail}`);
+        rollbackWarnings.push({ id, kind, error: detail });
+      }
+    } catch (err) {
+      console.error(`[Team] Rollback: failed to delete ${kind} ${id}: ${err.message}`);
+      rollbackWarnings.push({ id, kind, error: err.message });
+    }
+  };
+
   const rollback = async (reason) => {
     console.warn(`[Team] Rolling back ${teamId}: ${reason}`);
     for (const memberId of [...created.members].reverse()) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team] Rollback: failed to delete member ${memberId}: ${err.message}`);
-      }
+      await rollbackDelete(memberId, 'member');
     }
     if (created.team) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team] Rollback: failed to delete team ${created.team}: ${err.message}`);
-      }
+      await rollbackDelete(created.team, 'team');
     }
     if (created.env) {
       try {
@@ -9454,6 +11972,18 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   };
 
   try {
+    // Phase 0 — adopt orphans. Config-less / provisioning-stub leftover dirs
+    // from a prior aborted create are deleted through the audited agent-delete
+    // choke-point so a same-id retry starts clean (#1525). Not tracked in the
+    // rollback set — they were garbage before this request.
+    for (const orphanId of orphansToClean) {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(orphanId)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(`Cleanup of leftover '${orphanId}': ${data.error || `HTTP ${resp.status}`}`);
+      }
+    }
+
     // Phase A — single shared environment: pure infrastructure (repo, SSH
     // key, PAT, MCP). Skills are team-owned and live on the team agent below.
     if (!envExists || adoptOrphanEnv) {
@@ -9492,6 +12022,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           skills: initialSkills,
           // Ordered stage names for the process graph's layered layout (#stage-order).
           ...(bundleStages.length ? { stages: bundleStages } : {}),
+          // Named human roles (#987) — held on the team agent like stages/labels.
+          ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
+          // Authoritative gate/brake label registry (#928): the live graph has no
+          // bundle to read it from and gate-ness is no longer inferable from the
+          // label's name, so the team agent holds it — same pattern as `stages`.
+          ...(bundleLabels.length ? { labels: bundleLabels } : {}),
+          // Label suffix (#902): stored so extend-mode adds roles with the same
+          // suffix and Flow-Editor dialogs can pre-fill new label inputs.
+          ...(labelSuffix ? { labelSuffix } : {}),
         }),
       });
       if (!resp.ok) {
@@ -9583,10 +12124,24 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
       dms: created.dms,
+      ...(suffixWarnings.length ? { warnings: suffixWarnings } : {}),
     });
+
+    // Phase E — label provisioning (best-effort, after response sent).
+    // Create the stamped labels in the target repo so `gh issue edit --add-label`
+    // doesn't fail on a label that doesn't exist yet. Failures are logged only.
+    provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix)
+      .then(provWarn => {
+        if (provWarn.length) console.warn(`[Team] Label provisioning warnings for ${teamId}:`, provWarn);
+      })
+      .catch(err => console.warn(`[Team] Label provisioning error for ${teamId}: ${err.message}`));
   } catch (err) {
     await rollback(err.message);
-    res.status(500).json({ error: `Team creation failed: ${err.message}` });
+    res.status(500).json({
+      error: `Team creation failed: ${err.message}`,
+      // A partial rollback is worse when silent (#1525 AC3): name the leftovers.
+      ...(rollbackWarnings.length ? { rollbackWarnings } : {}),
+    });
   }
 });
 
@@ -9662,6 +12217,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const dispatchLabel = (typeof body.dispatchLabel === 'string' && body.dispatchLabel.trim())
     ? body.dispatchLabel.trim()
     : 'dispatch';
+  // Label suffix (#902) — see the non-streaming handler above.
+  const labelSuffix = (typeof body.labelSuffix === 'string' && body.labelSuffix.trim())
+    ? body.labelSuffix.trim()
+    : '';
 
   // ── 1. Validate input ─────────────────────────────────────────────
   if (!READY_LABEL_RE.test(readyLabel)) {
@@ -9684,6 +12243,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const maxParallel = body.maxParallel ?? 1;
   if (maxParallel < MAX_PARALLEL_MIN || maxParallel > MAX_PARALLEL_MAX) {
     return fail(400, `maxParallel must be an integer in [${MAX_PARALLEL_MIN}, ${MAX_PARALLEL_MAX}]`);
+  }
+  {
+    const sv = validateSuffix(labelSuffix);
+    if (!sv.ok) return fail(400, sv.error);
   }
   if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) {
     return fail(400, 'teamId must be a lowercase slug, 1–40 chars, [a-z0-9-]');
@@ -9764,6 +12327,33 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const bundleStages = Array.isArray(body.processTemplate?.stages)
     ? body.processTemplate.stages.filter(s => typeof s === 'string')
     : [];
+  // Authoritative gate/brake label registry (#928) — normalized to the persisted
+  // shape so the live graph reads booleans back, never a stray truthy value.
+  let bundleLabels = Array.isArray(body.processTemplate?.labels)
+    ? body.processTemplate.labels
+      .filter(l => l && typeof l.name === 'string' && l.name.trim())
+      .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake }))
+    : [];
+  // Named human roles (#987) — normalized to the persisted shape and stored on
+  // the team agent (like `stages`/`labels`) so the live graph binds the #981
+  // touchpoints to the named nodes. Never materialise into an agent.
+  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Hill-climb collector config (#1222) — normalized to the known config keys and
+  // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
+  // its collector config. null when the bundle never configured it.
+  const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
+
+  // Label-suffix stamping (#902) — see the non-streaming handler.
+  let suffixWarnings = [];
+  let suffixTokenSet = null;
+  if (labelSuffix) {
+    const stamped = applyLabelSuffix(customRolesRaw, bundleLabels, labelSuffix);
+    customRolesRaw = stamped.members;
+    bundleLabels = stamped.bundleLabels;
+    suffixWarnings = stamped.warnings;
+    suffixTokenSet = stamped.tokenSet;
+  }
+
   const customMap = new Map(customRolesRaw.map(r => [r.id, r]));
   const resolveTemplate = (id) => customMap.get(id) || loadAgentTemplate(id);
 
@@ -9803,7 +12393,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // surface the real conflict).
   const agentsRoot = path.resolve(AGENTS_DIR);
   const teamAgentPath = path.resolve(agentsRoot, teamAgentId);
-  if (!(teamAgentPath === agentsRoot || teamAgentPath.startsWith(agentsRoot + path.sep))) {
+  const teamAgentRel = path.relative(agentsRoot, teamAgentPath);
+  if (teamAgentRel.startsWith('..') || path.isAbsolute(teamAgentRel)) {
     return fail(400, 'Invalid teamId path');
   }
   const existingTeamCfg = fs.existsSync(teamAgentPath)
@@ -9811,30 +12402,72 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     : null;
   const teamExists = !!existingTeamCfg && existingTeamCfg.role === 'team';
   const teamIdTakenByOther = !!existingTeamCfg && existingTeamCfg.role !== 'team';
-  const existingMembers = planned
-    .filter((p) => {
-      const memberPath = path.resolve(agentsRoot, p.memberId);
-      const inAgentsDir =
-        memberPath === agentsRoot || memberPath.startsWith(agentsRoot + path.sep);
-      if (!inAgentsDir) {
-        fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
-        return false;
-      }
-      return fs.existsSync(memberPath);
-    })
-    .map(p => p.memberId);
+  // Read each planned member's config so residue classification is symmetric
+  // with `teamExists` — a bare directory must never outrank a readable config
+  // (#1525). The path.resolve + path.relative containment is the CodeQL-
+  // recognised js/path-injection barrier for the id-derived config read.
+  const memberEntries = [];
+  for (const p of planned) {
+    const memberPath = path.resolve(agentsRoot, p.memberId);
+    const memberRel = path.relative(agentsRoot, memberPath);
+    if (memberRel.startsWith('..') || path.isAbsolute(memberRel)) {
+      return fail(400, `Computed memberId '${p.memberId}' resolves outside AGENTS_DIR`);
+    }
+    const exists = fs.existsSync(memberPath);
+    memberEntries.push({
+      memberId: p.memberId,
+      exists,
+      config: exists ? readJsonFile(path.join(memberPath, 'config.json'), null) : null,
+    });
+  }
+  const residue = classifyMemberResidue(memberEntries, teamId);
+  const { existingMembers } = residue;
 
-  if (teamIdTakenByOther) {
+  // One shared decision (with the non-streaming handler) — a config-less /
+  // provisioning-stub leftover is an adoptable orphan, not a collision, so a
+  // partial rollback can never deadlock a same-id retry into extend mode.
+  const decision = decideTeamCreate({ mode, teamExists, teamIdTakenByOther, residue });
+  if (decision.type === 'conflict-team') {
     return fail(409,
       `Cannot use teamId '${teamId}': an agent with this id already exists ` +
       `with role '${existingTeamCfg.role}'. Pick a different teamId or delete ` +
       `the existing agent first.`);
   }
+  if (decision.type === 'conflict-members') {
+    const list = decision.members.map(m => `${m.memberId} (role '${m.role}')`).join(', ');
+    return fail(409,
+      `Cannot create team '${teamId}': the id(s) ${list} already belong to ` +
+      `unrelated agent(s). Pick a different teamId or delete the existing agent(s) first.`);
+  }
+  if (decision.type === 'extend-missing-team') {
+    return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
+  }
+  if (decision.type === 'collision') {
+    // Real collision = a genuine team or member exists. An ENV-ONLY orphan is
+    // a different beast (adopted below); a config-less agent-dir orphan is now
+    // adopted too, so this only fires for an actual working team.
+    emit({
+      type: 'collision',
+      existing: {
+        env: envExists ? envId : null,
+        team: teamExists ? teamAgentId : null,
+        members: decision.existingMembers,
+      },
+      suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
+    });
+    return res.end();
+  }
 
+  // decision.type === 'proceed' — leftover orphan dirs to clean before create.
+  const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
-    if (!teamExists) {
-      return fail(409, `Cannot extend: team '${teamId}' does not exist yet. Use mode: "create" first.`);
+    // Enforce suffix consistency on extend — mirror the non-streaming handler.
+    const storedSuffix = existingTeamCfg.labelSuffix || '';
+    if (labelSuffix !== storedSuffix) {
+      return fail(400,
+        `labelSuffix mismatch: team '${teamId}' was created with suffix '${storedSuffix || '(none)'}'; ` +
+        `extending it with '${labelSuffix || '(none)'}' would create mismatched labels.`);
     }
     toCreate = planned.filter(p => !existingMembers.includes(p.memberId));
     if (toCreate.length === 0) {
@@ -9850,26 +12483,6 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       return res.end();
     }
   } else {
-    // Real collision = team or members already exist (the user actually
-    // has a working team to deal with). An ENV-ONLY orphan is a different
-    // beast: it's left over from a prior aborted create / out-of-band
-    // delete and there's no UI path to clean it up. Blocking mode:create
-    // on it strands the user (the original wizard freeze report). Recover
-    // by reusing/overwriting it instead — the user's freshly submitted
-    // settings win, and we adopt the env so rollback removes it cleanly
-    // if the rest of the create fails.
-    if (teamExists || existingMembers.length) {
-      emit({
-        type: 'collision',
-        existing: {
-          env: envExists ? envId : null,
-          team: teamExists ? teamAgentId : null,
-          members: existingMembers,
-        },
-        suggestion: 'Pass `mode: "extend"` to add only the missing roles.',
-      });
-      return res.end();
-    }
     toCreate = planned;
   }
 
@@ -9900,6 +12513,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // step as `pending` — gives the user the full progress shape, not a
   // tickertape that only reveals work as it happens.
   const plan = [];
+  if (orphansToClean.length) {
+    plan.push({ id: 'cleanup', label: `Clean up ${orphansToClean.length} leftover agent director${orphansToClean.length === 1 ? 'y' : 'ies'}` });
+  }
   if (!envExists || adoptOrphanEnv) {
     plan.push({
       id: 'env',
@@ -9920,25 +12536,52 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const created = { env: null, team: null, members: [], dms: [] };
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
+  // A rollback that could not delete something must be LOUD (#1525 AC3): a
+  // silent partial rollback is what leaves the invisible residue in the first
+  // place. Surface a failed cleanup as a warning event naming the leftover id
+  // (and log it) instead of reporting success.
+  const rollbackDelete = async (id, kind) => {
+    const warn = (detail) => {
+      console.error(`[Team:stream] Rollback: failed to delete ${kind} ${id}: ${detail}`);
+      emit({
+        type: 'warning',
+        message: `Rollback could not remove ${kind} '${id}' (${detail}) — a leftover ` +
+          `directory may remain under /workspace/agents/. A same-id retry will clean it up automatically.`,
+      });
+    };
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        warn(data.error || `HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      warn(err.message);
+    }
+  };
+
   const rollback = async (reason) => {
     console.warn(`[Team:stream] Rolling back ${teamId}: ${reason}`);
     for (const memberId of [...created.members].reverse()) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team:stream] Rollback: failed to delete member ${memberId}: ${err.message}`);
-      }
+      await rollbackDelete(memberId, 'member');
     }
     if (created.team) {
-      try {
-        await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(created.team)}`, { method: 'DELETE' });
-      } catch (err) {
-        console.error(`[Team:stream] Rollback: failed to delete team ${created.team}: ${err.message}`);
-      }
+      await rollbackDelete(created.team, 'team');
     }
     if (created.env) {
       try {
-        fs.rmSync(path.join(ENVIRONMENTS_DIR, created.env), { recursive: true, force: true });
+        // created.env is envId (TEAM_ID_RE / normalizeEnvId), but CodeQL's
+        // js/path-injection query doesn't recognise those as barriers; contain
+        // it under ENVIRONMENTS_DIR with the path.resolve + path.relative
+        // idiom (mirrors the non-streaming handler's rollback) before rmSync.
+        const environmentsRoot = path.resolve(ENVIRONMENTS_DIR);
+        const envPath = path.resolve(environmentsRoot, String(created.env));
+        const rel = path.relative(environmentsRoot, envPath);
+        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+          fs.rmSync(envPath, { recursive: true, force: true });
+        } else {
+          console.error(`[Team:stream] Rollback: refused to delete env outside root: ${created.env}`);
+        }
       } catch (err) {
         console.error(`[Team:stream] Rollback: failed to delete env ${created.env}: ${err.message}`);
       }
@@ -9946,6 +12589,23 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   };
 
   try {
+    // Phase 0 — adopt orphans. Config-less / provisioning-stub leftover dirs
+    // (a prior aborted create) are deleted through the same audited choke-point
+    // as any agent delete, so a same-id `create` retry starts from a clean
+    // slate instead of colliding with dead residue (#1525). Not tracked in the
+    // rollback set: they were garbage before this request touched them.
+    if (orphansToClean.length) {
+      emit({ type: 'step', id: 'cleanup', status: 'running' });
+      for (const orphanId of orphansToClean) {
+        const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(orphanId)}`, { method: 'DELETE' });
+        if (!resp.ok && resp.status !== 404) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(`Cleanup of leftover '${orphanId}': ${data.error || `HTTP ${resp.status}`}`);
+        }
+      }
+      emit({ type: 'step', id: 'cleanup', status: 'done' });
+    }
+
     if (!envExists || adoptOrphanEnv) {
       emit({ type: 'step', id: 'env', status: 'running' });
       const env = {
@@ -9982,6 +12642,15 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           skills: initialSkills,
           // Ordered stage names for the process graph's layered layout.
           ...(bundleStages.length ? { stages: bundleStages } : {}),
+          // Named human roles (#987) — held on the team agent like stages/labels.
+          ...(bundleHumans.length ? { humans: bundleHumans } : {}),
+          // Hill-climb collector config (#1222) — held on the team agent like stages.
+          ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
+          // Authoritative gate/brake label registry (#928) — see the sibling
+          // materialise path; the live graph reads it back off the team agent.
+          ...(bundleLabels.length ? { labels: bundleLabels } : {}),
+          // Label suffix (#902) — see the non-streaming handler.
+          ...(labelSuffix ? { labelSuffix } : {}),
         }),
       });
       if (!resp.ok) {
@@ -10070,6 +12739,19 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       emit({ type: 'step', id: 'dms', status: 'done' });
     }
 
+    // Emit any suffix coverage warnings as separate warning events before
+    // the complete event so the wizard can render them in the result step.
+    for (const w of suffixWarnings) {
+      emit({ type: 'warning', message: w });
+    }
+    // Phase E — label provisioning (best-effort, before complete event).
+    // Emit provisioning warnings as individual warning events so the wizard
+    // result step can surface them inline.
+    const provWarn = await provisionGithubLabels(orchestratorUrl, envId, suffixTokenSet, labelSuffix);
+    for (const w of provWarn) {
+      emit({ type: 'warning', message: w });
+    }
+
     emit({
       type: 'complete',
       result: {
@@ -10081,6 +12763,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),
         dms: created.dms,
+        ...(suffixWarnings.length ? { warnings: [...suffixWarnings, ...provWarn] } : (provWarn.length ? { warnings: provWarn } : {})),
       },
     });
     res.end();
@@ -10610,9 +13293,10 @@ app.post('/api/github/probe', heavyLimiter, async (req, res) => {
   if (!listGithubTokens().some(t => t.id === githubTokenId)) {
     return res.json({ ok: false, error: `GitHub token '${githubTokenId}' not found` });
   }
+  const safeTokenId = path.basename(githubTokenId);
   let token;
   try {
-    token = fs.readFileSync(path.join(GH_TOKENS_DIR, githubTokenId), 'utf8').trim();
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, safeTokenId), 'utf8').trim();
   } catch (err) {
     return res.json({ ok: false, error: `Cannot read token: ${err.message}` });
   }
@@ -10621,7 +13305,7 @@ app.post('/api/github/probe', heavyLimiter, async (req, res) => {
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const apiBase = `${githubApiBase()}/repos/${encodeURIComponent(parsed.org)}/${encodeURIComponent(parsed.repo)}`;
@@ -10692,7 +13376,7 @@ app.get('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (re
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const url = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
@@ -10735,7 +13419,7 @@ app.post('/api/repos/coordinator-workflow', coordinatorWorkflowLimiter, async (r
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'e-vgh-claw-wizard',
+    'User-Agent': 'agent-studio-wizard',
     'X-GitHub-Api-Version': '2022-11-28',
   };
   const contentsUrl = `${githubApiBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.github/workflows/coordinator.yml`;
@@ -11150,15 +13834,38 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 // 5. Redact (delete) all m.room.message events in a room
 //
 // Paginates backward through the full timeline, collecting every m.room.message
-// event_id, then issues a Matrix redaction (PUT .../redact/...) for each one.
-// The admin token is used throughout. Events the homeserver rejects (e.g.
-// already redacted) are silently skipped so the call is idempotent.
+// event, then issues a Matrix redaction (PUT .../redact/...) for each one.
+//
+// Token routing per sender: the DM room is CREATED BY THE AGENT (see
+// ensureAgentDmRoom), and on current homeserver room versions the creator
+// holds implicit top power while the PL content is empty — so the admin token
+// can only redact the admin's own messages (m.room.power_levels `redact`
+// defaults to 50, users_default to 0). Redacting the agent's messages with the
+// admin token silently 403'd, and "Clear History" came back after the next
+// backfill. Events sent by the agent are therefore redacted with the agent's
+// own token (from its config.json, same source ensureAgentDmRoom uses).
+// Already-redacted events (empty content) are skipped so the call stays
+// idempotent.
+function findAgentTokenByDmRoom(roomId) {
+  try {
+    for (const agentId of fs.readdirSync(AGENTS_DIR)) {
+      const dm = readJsonFile(path.join(AGENTS_DIR, agentId, 'dm-room.json'), null);
+      if (dm?.roomId !== roomId) continue;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+      return cfg?.token ? { token: cfg.token, userId: cfg.userId || `@${agentId}:local` } : null;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
 app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
+  const agent = findAgentTokenByDmRoom(roomId);
 
-  // Collect all m.room.message event_ids by paginating dir=b until exhausted.
-  const eventIds = [];
+  // Collect all unredacted m.room.message events (id + sender) by paginating
+  // dir=b until exhausted.
+  const events = [];
   let from = undefined;
   try {
     while (true) {
@@ -11172,7 +13879,9 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
       }
       const chunk = Array.isArray(resp.data?.chunk) ? resp.data.chunk : [];
       for (const ev of chunk) {
-        if (ev.type === 'm.room.message' && ev.event_id) eventIds.push(ev.event_id);
+        if (ev.type !== 'm.room.message' || !ev.event_id) continue;
+        if (!ev.content || Object.keys(ev.content).length === 0) continue; // already redacted
+        events.push({ eventId: ev.event_id, sender: ev.sender });
       }
       const next = resp.data?.end;
       if (!next || chunk.length === 0) break;
@@ -11182,23 +13891,31 @@ app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) =>
     return res.status(502).json({ error: `Chat service unreachable: ${err.message}` });
   }
 
-  // Redact each event. Failures per event are non-fatal (may already be redacted).
+  // Redact each event with the token that has the right to do so: the sender's
+  // own token where we hold it (the agent's), the admin token otherwise.
   let redacted = 0;
-  let skipped  = 0;
-  for (const eventId of eventIds) {
+  let failed = 0;
+  for (const { eventId, sender } of events) {
+    const token = agent && sender === agent.userId ? agent.token : matrix.ADMIN_TOKEN;
     const txnId = crypto.randomUUID();
     try {
-      const r = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      const r = await matrix.matrixFetch(token,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(txnId)}`,
         { method: 'PUT', body: { reason: 'Chat history cleared by admin' } });
       if (r.status < 400) redacted++;
-      else skipped++;
+      else failed++;
     } catch {
-      skipped++;
+      failed++;
     }
   }
 
-  res.json({ redacted, skipped, total: eventIds.length });
+  // Surface partial failure instead of a silent 200 — the UI clears its view
+  // optimistically, so a quiet failure looks like success until the next
+  // backfill resurrects the history.
+  if (failed > 0) {
+    return res.status(502).json({ error: `Failed to redact ${failed} of ${events.length} message(s)`, redacted, failed, total: events.length });
+  }
+  res.json({ redacted, skipped: 0, failed: 0, total: events.length });
 });
 
 // 6. SSE stream — long-poll /sync filtered to this room
@@ -11322,10 +14039,39 @@ app.get('/api/matrix/rooms/:roomId/stream', async (req, res) => {
 // at v12 by default, so the suffix must be optional here.
 const ROOM_ID_RE = /^![a-zA-Z0-9_-]+(?::[a-zA-Z0-9.-]+)?$/;
 
-// Session-file paths are built inline at every call site (rather than via a
-// helper) so the sanitisation gate (AGENT_ID_RE / ROOM_ID_RE tests at the
-// route entry) and the path.join sit in the same function — that's the
-// shape CodeQL's js/path-injection rule recognises as a barrier.
+// Session-file paths derive from two route params (agentId, roomId). Both pass
+// an anchored regex at the route entry (AGENT_ID_RE / ROOM_ID_RE — neither admits
+// a path separator or `..`), but CodeQL's js/path-injection rule does not model a
+// regex test as a traversal barrier, so every downstream fs sink stayed flagged.
+// Resolve every session path through this one helper: its path.relative
+// containment check IS the CodeQL-legible barrier, and its return value is safe to
+// hand to any fs call. Returns null on an escaping / malformed pair (the guard
+// never trips for a regex-valid agentId + roomId — behaviour is unchanged).
+function safeSessionPath(agentId, roomId, suffix) {
+  const base = path.resolve(AGENTS_DIR);
+  const full = path.resolve(base, agentId, 'sessions', roomId + suffix);
+  const rel = path.relative(base, full);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return full;
+}
+
+// Append one JSONL event to a room's session log (#1383, AC5). Best-effort:
+// a failure here never blocks the caller's response. The log is otherwise
+// agent-written, but appends are O_APPEND-atomic and readers already tolerate a
+// malformed line, so an out-of-band admin event is safe. On the default shared
+// volume this is exactly the file the history reader reads; the write is routed
+// through safeSessionPath so the fs sink stays behind the CodeQL barrier.
+function appendSessionEvent(agentId, roomId, event) {
+  const fp = safeSessionPath(agentId, roomId, '.jsonl');
+  if (!fp) return;
+  try {
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    const ev = { ts: new Date().toISOString(), ...event };
+    fs.appendFileSync(fp, JSON.stringify(ev) + '\n');
+  } catch (err) {
+    console.warn(`[API] session-event append failed for ${agentId}/${roomId}: ${err.message}`);
+  }
+}
 
 /* ─── Session pointer (Claude --resume id) ─────────────────────────── */
 
@@ -11340,7 +14086,8 @@ app.get('/api/agents/:agentId/session/:roomId/current', (req, res) => {
     return res.status(400).json({ error: 'invalid id' });
   }
   const ptr = controlOrAgentPath(agentId, 'sessions', roomId + '.current.json'); // pushed copy preferred (#185)
-  const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
+  const flagPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!flagPath) return res.status(400).json({ error: 'invalid id' });
 
   let sessionId = null, updatedAt = null;
   if (fs.existsSync(ptr)) {
@@ -11380,10 +14127,12 @@ app.delete('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (re
   if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
     return res.status(400).json({ error: 'invalid id' });
   }
+  const currentPath = safeSessionPath(agentId, roomId, '.current.json');
+  const flagPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!currentPath || !flagPath) return res.status(400).json({ error: 'invalid id' });
   try {
     // Local pool copy (works on the shared volume; a no-op on an isolated one).
-    fs.rmSync(path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.current.json'), { force: true });
-    const flagPath = path.join(AGENTS_DIR, agentId, 'sessions', roomId + '.reset.json');
+    fs.rmSync(currentPath, { force: true });
     fs.mkdirSync(path.dirname(flagPath), { recursive: true });
     writeJsonAtomic(flagPath, { resetAt: new Date().toISOString() });
   } catch (err) {
@@ -11481,14 +14230,16 @@ app.post('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req,
   // volume this write is directly visible to the agent; on an isolated volume
   // the orchestrator call below queues the same work for the agent to apply.
   const updatedAt = new Date().toISOString();
+  const currentPath = safeSessionPath(agentId, roomId, '.current.json');
+  const resetPath = safeSessionPath(agentId, roomId, '.reset.json');
+  if (!currentPath || !resetPath) return res.status(400).json({ error: 'invalid id' });
   try {
-    const sessionsDir = path.join(AGENTS_DIR, agentId, 'sessions');
-    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
     writeJsonAtomic(
-      path.join(sessionsDir, roomId + '.current.json'),
+      currentPath,
       { sessionId, updatedAt, resumeRequested: true },
     );
-    fs.rmSync(path.join(sessionsDir, roomId + '.reset.json'), { force: true });
+    fs.rmSync(resetPath, { force: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -11508,6 +14259,121 @@ app.post('/api/agents/:agentId/session/:roomId/current', apiLimiter, async (req,
   }
 
   res.json({ ok: true, sessionId, updatedAt });
+});
+
+/* ─── Parent-ticket binding (#1383) ────────────────────────────────────── */
+
+// Read the parent GitHub issue bound to this agent+room, or null when unbound.
+// Room-scoped (AC4: persists across Reset Session — a separate file from
+// `.current.json`/`.reset.json`). Prefers a pushed control-plane copy (#185).
+app.get('/api/agents/:agentId/session/:roomId/ticket', (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const fp = controlOrAgentPath(agentId, 'sessions', roomId + '.ticket.json');
+  let ticket = null;
+  if (fs.existsSync(fp)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (j && typeof j === 'object' && Number.isInteger(j.number) && j.number >= 1) ticket = j;
+    } catch { /* corrupt binding → treat as unbound */ }
+  }
+  res.json({ ticket });
+});
+
+// Bind a parent issue to this agent+room. Body: `{ mode: 'create', title,
+// repo?, issueBody? }` (AC2) or `{ mode: 'attach', ref, repo? }` where `ref`
+// is an issue number or GitHub issue URL (AC3). The orchestrator does the
+// GitHub round-trip with the env PAT and materialises `ticket.json` at the
+// workspace root (AC8); we then persist the room-scoped copy and append a
+// `ticket.bound` session-log event (AC5).
+app.put('/api/agents/:agentId/session/:roomId/ticket', apiLimiter, async (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const ticketPath = safeSessionPath(agentId, roomId, '.ticket.json');
+  if (!ticketPath) return res.status(400).json({ error: 'invalid id' });
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const mode = body.mode === 'create' ? 'create' : 'attach';
+  if (mode === 'create') {
+    if (typeof body.title !== 'string' || !body.title.trim()) {
+      return res.status(400).json({ error: 'title is required to create an issue' });
+    }
+  } else if (typeof body.ref !== 'string' || !body.ref.trim()) {
+    return res.status(400).json({ error: 'an issue number or GitHub issue URL is required' });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let ticket;
+  try {
+    const r = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/ticket`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data || data.ok === false || !data.ticket) {
+      return res.status(r.status && r.status >= 400 ? r.status : 502)
+        .json({ error: (data && data.error) || 'could not bind the ticket' });
+    }
+    ticket = data.ticket;
+  } catch (err) {
+    return res.status(502).json({ error: 'orchestrator unreachable: ' + err.message });
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(ticketPath), { recursive: true });
+    writeJsonAtomic(ticketPath, ticket);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  appendSessionEvent(agentId, roomId, {
+    type: 'ticket.bound',
+    repo: ticket.repo,
+    number: ticket.number,
+    url: ticket.url || '',
+    title: ticket.title || '',
+  });
+  res.json({ ok: true, ticket });
+});
+
+// Remove the parent-ticket binding (AC7): delete the room-scoped copy, ask the
+// orchestrator to drop the workspace `ticket.json`, and append a `ticket.unbound`
+// session-log event.
+app.delete('/api/agents/:agentId/session/:roomId/ticket', apiLimiter, async (req, res) => {
+  const { agentId, roomId } = req.params;
+  if (!AGENT_ID_RE.test(agentId) || !ROOM_ID_RE.test(roomId)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const ticketPath = safeSessionPath(agentId, roomId, '.ticket.json');
+  if (!ticketPath) return res.status(400).json({ error: 'invalid id' });
+
+  let hadBinding = false;
+  try {
+    hadBinding = fs.existsSync(ticketPath);
+    fs.rmSync(ticketPath, { force: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/ticket`,
+      { method: 'DELETE' },
+    );
+  } catch (err) {
+    console.warn(`[API] ticket delete call failed for ${agentId}: ${err.message}`);
+  }
+
+  if (hadBinding) appendSessionEvent(agentId, roomId, { type: 'ticket.unbound' });
+  res.json({ ok: true });
 });
 
 // Send a stop-session signal to the orchestrator, which forwards it via IPC
@@ -11652,7 +14518,12 @@ function safeAgentPath(agentId, relPath) {
     if (err.code === 'ENOENT') return null;
     return null;
   }
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  // Final containment guard, expressed as the canonical path.relative idiom so
+  // it is recognised as a CodeQL js/path-injection barrier on the returned
+  // value (an outward-pointing symlink yields a rel that escapes the root).
+  // Behaviour-equivalent to the previous `startsWith(realRoot + sep)` check.
+  const rel = path.relative(realRoot, realTarget);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
   return realTarget;
 }
 
@@ -11795,9 +14666,13 @@ app.get('/api/agents/:agentId/workspace/dirs', apiLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
-  const root = path.join(AGENTS_DIR, agentId);
-  // Verify agent exists
-  if (!fs.existsSync(root)) return res.status(404).json({ error: 'Agent not found' });
+  // Resolve the agent root through the shared safeAgentPath resolver (same as
+  // the sibling workspace/tree + workspace/file handlers): it realpaths the
+  // root, returns null when the agent dir is absent (→ 404), and its final
+  // path.relative containment check is a CodeQL js/path-injection barrier on
+  // the returned value, so `root` is no longer a tainted path expression.
+  const root = safeAgentPath(agentId, '');
+  if (!root) return res.status(404).json({ error: 'Agent not found' });
   try {
     const qs = new URLSearchParams({ root, path: relPath }).toString();
     const upstream = await fetch(`${BP_EXPLORER_URL}/api/workspace/tree?${qs}`);
@@ -12693,6 +15568,96 @@ app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdPa
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
+/* ─── Read-write context mount: write proxies ───────────────────────────
+ * The host-folder mount lives only inside the agent container, so — exactly
+ * like the read-only browse proxies above — these forward to the orchestrator,
+ * which performs the mutation there. `path` here is the path RELATIVE to the
+ * mount root (the browser strips the leading `/context` before calling). The
+ * orchestrator enforces the per-mount readWrite gate and containment; a
+ * read-only mount is refused (403) both there and by the kernel.               */
+const CONTEXT_ORCH_URL = () => process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+// Delete a file or directory inside a read-write context folder.
+app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  try {
+    const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/file`
+              + `?path=${encodeURIComponent(relPath)}`;
+    const r = await fetch(url, { method: 'DELETE' });
+    const body = await r.json().catch(() => ({}));
+    res.status(r.status).json(body);
+  } catch (err) {
+    console.error(`[api] context delete ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Modifying the context folder failed' });
+  }
+});
+
+// Move (rename/relocate) an entry within ONE read-write context folder. Body:
+//   { from: "<rel path>", toDir: "<rel dir path>" } — both relative to the mount.
+app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const from = typeof req.body?.from === 'string' ? req.body.from : '';
+  const toDir = typeof req.body?.toDir === 'string' ? req.body.toDir : '';
+  try {
+    const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/move`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, toDir }),
+    });
+    const body = await r.json().catch(() => ({}));
+    res.status(r.status).json(body);
+  } catch (err) {
+    console.error(`[api] context move ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Modifying the context folder failed' });
+  }
+});
+
+// Upload one or more files into a read-write context folder. The multipart body
+// is parsed here (same multer config + 50 MB cap as the workspace upload); each
+// file is then streamed to the orchestrator as a raw octet-stream (no base64
+// inflation) which packages it into the container via the archive endpoint.
+app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, uploadFiles, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relDir = typeof req.body.path === 'string' ? req.body.path : '';
+  const rawRelPaths = req.body.relativePaths;
+  const relPaths = Array.isArray(rawRelPaths) ? rawRelPaths : (rawRelPaths != null ? [rawRelPaths] : []);
+  if (!Array.isArray(req.files) || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+  const uploaded = [];
+  const errors = [];
+  for (let i = 0; i < req.files.length; i++) {
+    const file = req.files[i];
+    const name = (typeof relPaths[i] === 'string' && relPaths[i]) ? relPaths[i] : file.originalname;
+    try {
+      const url = `${CONTEXT_ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/context/upload`
+                + `?path=${encodeURIComponent(relDir)}&name=${encodeURIComponent(name)}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': file.buffer.length },
+        body: file.buffer,
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        errors.push({ name, error: body?.error || `HTTP ${r.status}` });
+        continue;
+      }
+      for (const u of (body.uploaded || [])) uploaded.push(u);
+    } catch (err) {
+      errors.push({ name, error: err.message });
+    }
+  }
+  if (uploaded.length === 0 && errors.length > 0) {
+    return res.status(502).json({ error: 'All uploads failed', details: errors });
+  }
+  res.json({ uploaded, ...(errors.length ? { errors } : {}) });
+});
+
 // Return a filename that doesn't yet exist in `dir`, appending " (n)" before
 // the extension on collision so a second upload of `report.pdf` becomes
 // `report (2).pdf` rather than clobbering the first. The " ()" chars are within
@@ -12720,9 +15685,22 @@ app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, 
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
+  // #418/#419/#420 (js/path-injection): a bare AGENT_ID_RE match is not a
+  // CodeQL-recognised traversal barrier, so agentId still taints everything
+  // derived from the workspace root — targetDir (mkdirSync), the uniqueFileName
+  // existsSync probes, and destPath (writeFileSync). Contain it under AGENTS_DIR
+  // with the path.relative idiom so the resolved root is clean at every fs sink.
+  // The guard never trips for a regex-valid id (AGENT_ID_RE forbids '/' and '..').
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, agentId);
+  const relAgentDir = path.relative(agentsBaseDir, agentDir);
+  if (relAgentDir.startsWith('..') || path.isAbsolute(relAgentDir)) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+
   let agentRoot;
   try {
-    agentRoot = fs.realpathSync(path.join(AGENTS_DIR, agentId));
+    agentRoot = fs.realpathSync(agentDir);
   } catch {
     return res.status(404).json({ error: 'Agent workspace not found' });
   }
@@ -13058,7 +16036,7 @@ app.all('/api/bp-explorer/*', async (req, res) => {
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 
-app.get('*', (req, res) => {
+app.get('*', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
@@ -13100,7 +16078,26 @@ function backfillSkillManifests() {
   if (stamped > 0) console.log(`[Admin] Skill manifest backfill stamped ${stamped} skill(s)`);
 }
 
+// A crash mid-export leaves its link farm behind, and hard links keep the
+// linked file contents alive even after the agent rewrites or deletes them —
+// a leaked farm pins real disk, not just inodes. Nothing reads the staging
+// root between requests, so anything found at startup is a leftover.
+function sweepExportStaging() {
+  const stagingRoot = path.join(WORKSPACE, '.export-staging');
+  let swept = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(stagingRoot); } catch { return; }
+  for (const entry of entries) {
+    try {
+      fs.rmSync(path.join(stagingRoot, entry), { recursive: true, force: true });
+      swept++;
+    } catch { /* noop */ }
+  }
+  if (swept > 0) console.log(`[Admin] Swept ${swept} leftover export staging dir(s)`);
+}
+
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
+  try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
 });

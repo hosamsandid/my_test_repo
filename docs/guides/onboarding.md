@@ -212,7 +212,16 @@ Open `.env` and fill in the required values:
 | `ANTHROPIC_AUTH_TOKEN` | Your LiteLLM auth token — ask a project admin |
 | `ANTHROPIC_BASE_URL` | LiteLLM proxy URL — ask a project admin |
 | `ADMIN_USER` | Your desired Matrix admin username (e.g. `admin`) |
+| `ADMIN_PASS` | Password for that Matrix admin user. Not in `.env.example` — **add the line yourself**, otherwise `setup.sh` prompts interactively (unreliable in Git Bash on Windows) |
 | `PODMAN_HOST_SOCKET` | Path to your Podman socket — see below |
+
+> **Two host-side prerequisites that are easy to miss:** `jq` must be installed
+> (`setup.sh` aborts without it), and `~/.gitconfig` must exist (`bp-explorer` bind-mounts
+> it read-only and will not start otherwise):
+> ```bash
+> git config --global user.name "Your Name"
+> git config --global user.email "you@example.com"
+> ```
 
 > **Discover your Podman socket path:**
 > ```bash
@@ -229,7 +238,22 @@ podman compose up -d conduwuit
 ./orchestrator/setup.sh
 ```
 
-The script prints a `MATRIX_ACCESS_TOKEN` and `CONDUWUIT_ADMIN_ROOM`. Copy both values into your `.env`.
+The script prints a `MATRIX_ACCESS_TOKEN` and a `CONDUWUIT_ADMIN_ROOM` — and **writes both
+into your `.env` for you**. You do not need to copy them by hand; it confirms with
+`.env updated: …`.
+
+### Seed the shared pool (first time only — required)
+
+```bash
+make seed-pool
+```
+
+This copies skills, baseline memory, agent role templates, process templates and the
+reference MCP servers into the pool volume.
+
+> **`make up` does not seed for you.** Skip this step and the Team-Setup wizard opens with
+> an empty process and role catalog. A `WARNING` about the engineering skill is expected
+> unless you installed the ACE plugin — everything else seeds normally.
 
 ### Start the full stack
 
@@ -238,12 +262,6 @@ make up
 ```
 
 This builds the per-agent container image (`as-agent:latest`) and starts all services (Conduwuit, Orchestrator, Admin Console, bp-explorer). After a successful start you will see a container status table.
-
-> **Seed agent templates (first time only):**
-> After the first `make up`, seed the shared skill pool so the Team Setup wizard has agent role templates available:
-> ```bash
-> make seed-pool
-> ```
 
 ## 6. First Steps — Get Oriented
 
@@ -268,7 +286,7 @@ make up
 Or in one command:
 
 ```bash
-make update   # git pull + down + up
+make update   # git pull --ff-only + down + up
 ```
 
 ### Useful commands
@@ -280,10 +298,10 @@ make update   # git pull + down + up
 | `make restart` | down + up |
 | `make build` | Rebuild orchestrator + admin-console images only |
 | `make agent-image` | Rebuild the per-agent container image (`as-agent:latest`) |
-| `make update` | `git pull` + down + up in one step |
-| `make ps` | Show container status |
-| `make logs` | Follow logs of all stack containers |
-| `make seed-pool` | Seed skills, templates, and memory into the shared pool volume |
+| `make update` | `git pull --ff-only` + down + up in one step. Fails (rather than merging) if you have local commits or a dirty tree |
+| `make ps` | Show container status for `conduwuit`, `orchestrator`, `admin-console` |
+| `make logs` | Follow logs of those three. **`bp-explorer` is not included** — use `podman logs -f <project>-bp-explorer` for it |
+| `make seed-pool` | Seed skills, memory, agent role templates, process templates and reference MCP servers into the shared pool volume |
 
 ### VS Code extension (optional)
 

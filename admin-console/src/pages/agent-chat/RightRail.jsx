@@ -1,20 +1,26 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightClose, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain, Target } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
+import OutcomesPanel from './OutcomesPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
+import { fitTabCount } from './rail-layout';
 import { apiCall } from '../../hooks/useApi';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 const SESSION_POLL_MS = 3_000;
-// Width reserved (px) for the overflow "⋯" toggle when it is shown. Used only
-// as a layout budget in the fit computation; the button sizes itself.
-const OVERFLOW_BTN_WIDTH = 40;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
+// The whole rail toggles with Cmd+Shift+L on macOS / Ctrl+Shift+L elsewhere
+// (handler in AgentChat.jsx). Detect the platform once so the visible hint and
+// the chevron tooltips name the modifier the user's keyboard actually has.
+const IS_MAC = typeof navigator !== 'undefined'
+  && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
+const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
+
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -24,6 +30,9 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  *     shows that session's log + an in-tab Stop (merged Log+Sessions, #543)
  *   - "Workspace" — read-only file tree of /workspace/agents/<id>/
  *   - "Triggers"  — the agent's triggers.json
+ *   - "Outcomes"  — read-only view of the agent's outcome options (#963); the
+ *     outputs counterpart of Triggers, so it sits next to it. Team members only
+ *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
  *   - "Prompt"    — read-only preview of the composed system prompt
  *   - "Knowledge" — the agent's knowledge base
  *
@@ -35,12 +44,25 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'prompt', 'knowledge'];
  * always render icon + label, and whichever ones no longer fit spill into an
  * overflow "⋯" menu. This adapts to any rail width and any number of tabs
  * (rather than a single hard-coded icons-only breakpoint).
+ *
+ * Collapsing follows the left navigation sidebar's pattern (#905): the owner
+ * animates the rail's width down to `--eb-sidebar-collapsed` and passes
+ * `collapsed`, at which point the rail renders a slim icon-only strip — an
+ * inline expand chevron plus the tab icons, each of which re-expands straight
+ * to its tab. The component stays mounted across a collapse, so the active tab
+ * survives the cycle; the tab bodies do not render while collapsed, so a
+ * hidden rail costs no polling. Because it stays mounted, the tab-strip
+ * measurement has to be re-run per collapse/expand rather than relying on a
+ * remount — see the `collapsed` dependency below (#924).
  */
 export default function RightRail({
-  agentId, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onCostUpdate, onContextUpdate,
+  agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
-  onResumeSession, sessionSelectRequest = null,
+  onResumeSession, sessionSelectRequest = null, collapsed = false,
 }) {
+  // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
+  // standalone agent (#963 AC1).
+  const showOutcomes = !!agentTeamId;
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
@@ -57,6 +79,17 @@ export default function RightRail({
   useEffect(() => {
     if (openTabRequest && TAB_KEYS.includes(openTabRequest.tab)) setTab(openTabRequest.tab);
   }, [openTabRequest]);
+
+  // The persisted tab outlives the agent selection, so switching from a team
+  // member to a standalone agent can leave 'outcomes' active with no such tab
+  // rendered — fall back to the default rather than showing an empty body.
+  // Gated on `agentId`: until a selection resolves, `agentTeamId` is null for
+  // "not loaded yet" as much as for "not in a team", and reacting to that would
+  // throw away a persisted Outcomes tab on every page load.
+  useEffect(() => {
+    if (!agentId) return;
+    if (!showOutcomes && tab === 'outcomes') setTab('sessions');
+  }, [agentId, showOutcomes, tab]);
 
   // Lightweight poll of just the session COUNT — so the "Sessions" tab
   // can show a badge regardless of which tab is currently visible. The
@@ -81,57 +114,57 @@ export default function RightRail({
     };
   }, [agentId]);
 
+  // `Icon` is the component (not a rendered element) because the tab strip and
+  // the collapsed icon rail render it at different sizes — 13 inline next to a
+  // label, 20 standalone to match the left nav's icon-only items.
   const tabs = useMemo(() => [
-    { key: 'sessions', icon: <Activity size={13} />, label: 'Sessions', badge: sessionCount > 0 ? sessionCount : null },
-    { key: 'workspace', icon: <FolderTree size={13} />, label: 'Workspace' },
-    { key: 'triggers', icon: <CalendarClock size={13} />, label: 'Triggers' },
-    { key: 'prompt', icon: <FileText size={13} />, label: 'Prompt' },
-    { key: 'knowledge', icon: <Brain size={13} />, label: 'Knowledge' },
-  ], [sessionCount]);
+    { key: 'sessions', Icon: Activity, label: 'Sessions', hint: 'Live and past runs — each session\'s log, cost and context usage', badge: sessionCount > 0 ? sessionCount : null },
+    { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
+    { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
+    ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
+    { key: 'prompt', Icon: FileText, label: 'Prompt', hint: 'Read-only preview of the composed system prompt' },
+    { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
+  ], [sessionCount, showOutcomes]);
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
-  // natural width, then greedily fit as many as the strip allows. Whatever
-  // doesn't fit spills into the overflow menu. Re-measured on resize and
-  // whenever a tab's width can change (e.g. the Sessions badge appears).
+  // natural width, then fit as many as the strip allows (`fitTabCount`).
+  // Whatever doesn't fit spills into the overflow menu. Re-measured on resize
+  // and whenever a tab's width can change (e.g. the Sessions badge appears).
   const stripRef = useRef(null);
   const measureRef = useRef(null);
   const closeRef = useRef(null);
   const [visibleCount, setVisibleCount] = useState(tabs.length);
 
+  // `collapsed` MUST stay in this dependency list. The rail no longer unmounts
+  // when it is hidden (#905) — it early-returns the collapsed strip instead, so
+  // the measured nodes come and go while the component (and therefore this
+  // effect) lives on. Without `collapsed` here the effect would bail out once
+  // on a rail that loads collapsed (`agentChat.logOpen` is persisted) and never
+  // run again, leaving `visibleCount` stale: every tab renders, the strip clips
+  // them, and no overflow toggle appears because nothing spilled (#924). It
+  // also has to re-observe on expand — the strip is a *new* DOM node each time.
   useLayoutEffect(() => {
     const strip = stripRef.current;
     const measure = measureRef.current;
-    if (!strip || !measure || typeof ResizeObserver === 'undefined') return undefined;
+    if (collapsed || !strip || !measure || typeof ResizeObserver === 'undefined') return undefined;
 
     const recompute = () => {
-      const stripWidth = strip.clientWidth;
-      const closeWidth = closeRef.current ? closeRef.current.offsetWidth : 0;
-      const widths = Array.from(measure.children).map((el) => el.getBoundingClientRect().width);
-      const total = widths.reduce((a, b) => a + b, 0);
-
-      // Everything fits alongside the close button → no overflow menu.
-      if (total <= stripWidth - closeWidth) {
-        setVisibleCount(tabs.length);
-        return;
-      }
-      // Otherwise reserve room for the "⋯" toggle and fit greedily.
-      const budget = stripWidth - closeWidth - OVERFLOW_BTN_WIDTH;
-      let used = 0;
-      let count = 0;
-      for (const w of widths) {
-        if (used + w > budget) break;
-        used += w;
-        count += 1;
-      }
-      setVisibleCount(Math.max(1, count)); // always keep at least one real tab
+      setVisibleCount(fitTabCount({
+        stripWidth: strip.clientWidth,
+        closeWidth: closeRef.current ? closeRef.current.offsetWidth : 0,
+        tabWidths: Array.from(measure.children).map((el) => el.getBoundingClientRect().width),
+      }));
     };
 
     recompute();
+    // Also carries the expand animation: the strip is still at the collapsed
+    // width when this runs, and the observer converges as the width transition
+    // advances.
     const ro = new ResizeObserver(recompute);
     ro.observe(strip);
     return () => ro.disconnect();
-  }, [tabs]);
+  }, [tabs, collapsed]);
 
   const visibleTabs = tabs.slice(0, visibleCount);
   const overflowTabs = tabs.slice(visibleCount);
@@ -175,6 +208,19 @@ export default function RightRail({
   }, [menuOpen]);
   // Close the menu if everything fits again after a resize.
   useEffect(() => { if (overflowTabs.length === 0) setMenuOpen(false); }, [overflowTabs.length]);
+  // An overflow dropdown must not outlive a collapse.
+  useEffect(() => { if (collapsed) setMenuOpen(false); }, [collapsed]);
+
+  if (collapsed) {
+    return (
+      <CollapsedRail
+        tabs={tabs}
+        activeTab={tab}
+        onExpandTo={(key) => { setTab(key); if (onOpen) onOpen(); }}
+        onExpand={onOpen}
+      />
+    );
+  }
 
   return (
     <div style={{
@@ -198,8 +244,9 @@ export default function RightRail({
         {visibleTabs.map((t) => (
           <TabButton
             key={t.key}
-            icon={t.icon}
+            Icon={t.Icon}
             label={t.label}
+            hint={t.hint}
             badge={t.badge ?? null}
             active={tab === t.key}
             onClick={() => setTab(t.key)}
@@ -253,8 +300,9 @@ export default function RightRail({
                 {overflowTabs.map((t) => (
                   <MenuItem
                     key={t.key}
-                    icon={t.icon}
+                    Icon={t.Icon}
                     label={t.label}
+                    hint={t.hint}
                     badge={t.badge ?? null}
                     active={tab === t.key}
                     onClick={() => { setTab(t.key); setMenuOpen(false); }}
@@ -270,8 +318,8 @@ export default function RightRail({
         <button
           ref={closeRef}
           onClick={onClose}
-          title="Hide panel (Cmd+Shift+L)"
-          aria-label="Hide panel"
+          title={`Collapse panel (${TOGGLE_SHORTCUT})`}
+          aria-label="Collapse panel"
           style={{
             background: 'none',
             border: 'none',
@@ -284,7 +332,9 @@ export default function RightRail({
           onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
           onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
         >
-          <PanelRightClose size={16} />
+          {/* Mirror of the left nav's collapse chevron: the rail sits on the
+              right, so "toward the edge" points right. */}
+          <ChevronRight size={16} />
         </button>
 
         {/* Hidden measurement row: full-width copy of all tabs so we can learn
@@ -299,7 +349,7 @@ export default function RightRail({
           whiteSpace: 'nowrap',
         }}>
           {tabs.map((t) => (
-            <TabButton key={t.key} icon={t.icon} label={t.label} badge={t.badge ?? null} active={false} onClick={() => {}} />
+            <TabButton key={t.key} Icon={t.Icon} label={t.label} badge={t.badge ?? null} active={false} onClick={() => {}} />
           ))}
         </div>
       </div>
@@ -327,6 +377,11 @@ export default function RightRail({
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
         </div>
+        {showOutcomes && (
+          <div style={{ display: tab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
+          </div>
+        )}
         <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <PromptPreviewPanel agentId={agentId} embedded />
         </div>
@@ -334,15 +389,140 @@ export default function RightRail({
           <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>
       </div>
+
+      {/* Always-visible caption so the toggle shortcut is discoverable without
+          having to hover the collapse chevron (#1118). */}
+      <div style={{
+        flexShrink: 0,
+        padding: 'var(--eb-space-1) var(--eb-space-3)',
+        borderTop: '1px solid var(--eb-border-default)',
+        background: 'var(--eb-bg-surface)',
+        fontSize: 'var(--eb-text-xs)',
+        color: 'var(--eb-text-muted)',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+        Press <kbd style={{
+          fontFamily: 'var(--eb-font-mono, monospace)',
+          fontSize: 'var(--eb-text-xs)',
+          padding: '0 4px',
+          border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-sm)',
+          background: 'var(--eb-bg-app)',
+        }}>{TOGGLE_SHORTCUT}</kbd> to show or hide this panel
+      </div>
     </div>
   );
 }
 
-function TabButton({ icon, label, active, onClick, badge = null }) {
+/**
+ * The collapsed rail — the right-hand mirror of the left navigation sidebar's
+ * icon-only rail (`Shell.jsx`): an inline expand chevron at the top, then the
+ * tab icons stacked vertically, each with a native tooltip and centred in the
+ * strip. The active tab is marked with the accent bar on the *content* side
+ * (borderRight here vs. borderLeft in the left nav), and clicking any icon
+ * expands the rail straight to that tab.
+ */
+function CollapsedRail({ tabs, activeTab, onExpandTo, onExpand }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      minWidth: 0,
+      overflow: 'hidden',
+      background: 'var(--eb-bg-surface)',
+      borderLeft: '1px solid var(--eb-border-default)',
+    }}>
+      {/* Expand chevron — same slot the tab strip's collapse button occupies. */}
+      <div style={{
+        height: 'var(--eb-header-height)',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderBottom: '1px solid var(--eb-border-default)',
+      }}>
+        <button
+          type="button"
+          onClick={onExpand}
+          title={`Expand panel (${TOGGLE_SHORTCUT})`}
+          aria-label="Expand panel"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--eb-text-secondary)',
+            cursor: 'pointer',
+            padding: 'var(--eb-space-1)',
+            display: 'flex',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+        >
+          {/* Mirror of the left nav's expand chevron: points toward the content. */}
+          <ChevronLeft size={16} />
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2) 0' }}>
+        {tabs.map(({ key, Icon, label, hint, badge }) => {
+          const active = activeTab === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onExpandTo(key)}
+              title={hint ? `${label} — ${hint}` : label}
+              aria-label={label}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '100%',
+                padding: 'var(--eb-space-2) 0',
+                background: active ? 'var(--eb-bg-selected)' : 'transparent',
+                border: 'none',
+                borderRight: active ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+                color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'background var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+              onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+            >
+              {/* Counts don't fit the icon rail, so a badge becomes a dot — the
+                  same treatment the left nav gives its collapsed chat badge. */}
+              <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                <Icon size={20} />
+                {badge !== null && badge !== undefined && (
+                  <span style={{
+                    position: 'absolute',
+                    top: -2,
+                    right: -2,
+                    width: 7,
+                    height: 7,
+                    borderRadius: 'var(--eb-radius-full)',
+                    background: 'var(--eb-accent-primary)',
+                    border: '1.5px solid var(--eb-bg-surface)',
+                  }} />
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({ Icon, label, hint, active, onClick, badge = null }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={hint || label}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -362,19 +542,20 @@ function TabButton({ icon, label, active, onClick, badge = null }) {
       onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
       onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
     >
-      {icon}
+      <Icon size={13} />
       {label}
       {badge !== null && badge !== undefined && <Badge value={badge} />}
     </button>
   );
 }
 
-function MenuItem({ icon, label, active, onClick, badge = null }) {
+function MenuItem({ Icon, label, hint, active, onClick, badge = null }) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={onClick}
+      title={hint || label}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -395,7 +576,7 @@ function MenuItem({ icon, label, active, onClick, badge = null }) {
       onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
       onMouseLeave={e => { e.currentTarget.style.background = active ? 'var(--eb-bg-hover)' : 'none'; }}
     >
-      {icon}
+      <Icon size={13} />
       <span style={{ flex: 1 }}>{label}</span>
       {badge !== null && badge !== undefined && <Badge value={badge} />}
     </button>

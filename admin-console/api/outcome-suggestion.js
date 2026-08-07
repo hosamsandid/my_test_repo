@@ -41,16 +41,17 @@ function scoreShape(text) {
 }
 
 // Pull backtick-quoted label-ish tokens out of the prompt (e.g. "apply the
-// `ready-to-merge` label"). Kebab/colon label tokens only, capped, forbidden
-// gate/brake labels dropped — pure documentation harvesting, never evaluated.
-function harvestLabels(text) {
+// `ready-to-merge` label"). Kebab/colon label tokens only, capped, human-gate
+// labels dropped — pure documentation harvesting, never evaluated. Gate-ness
+// comes from the optional `sources` registry (#928), never from the token's name.
+function harvestLabels(text, sources) {
   const out = [];
   const seen = new Set();
   const re = /`([a-z0-9][a-z0-9:_-]*)`/gi;
   let m;
   while ((m = re.exec(String(text || ''))) !== null) {
     const l = m[1].trim();
-    if (!l || seen.has(l) || forbiddenOutcomeLabel(l)) continue;
+    if (!l || seen.has(l) || forbiddenOutcomeLabel(l, sources)) continue;
     seen.add(l);
     out.push(l);
     if (out.length >= 6) break;
@@ -69,12 +70,15 @@ function option(id, title, when, label) {
 
 /**
  * Deterministic offline suggestion from a role's name + prompt.
+ * @param {object} arg - { roleName, prompt, labels? } — `labels` is the optional
+ *   gate/brake registry (#928) whose `humanGate` entries are never suggested.
  * @returns {{ mode, options }} a valid, normalized outcomes port.
  */
-function heuristicOutcomeSuggestion({ roleName, prompt }) {
+function heuristicOutcomeSuggestion({ roleName, prompt, labels }) {
   const text = `${roleName || ''}\n${prompt || ''}`;
   const shape = scoreShape(text);
-  const harvested = harvestLabels(prompt).filter(l => !forbiddenOutcomeLabel(l));
+  const sources = { labels };
+  const harvested = harvestLabels(prompt, sources).filter(l => !forbiddenOutcomeLabel(l, sources));
 
   let port;
   if (shape === 'reviewer') {
@@ -114,7 +118,12 @@ function heuristicOutcomeSuggestion({ roleName, prompt }) {
 
 // Meta-prompt for the LLM path — asks for a single JSON object shaped like the
 // `outcomes` port. Deliberately schematic: the model decides mode + options.
-function buildOutcomeSuggestionRequest(roleName, prompt) {
+function buildOutcomeSuggestionRequest(roleName, prompt, labels) {
+  // Human-gate labels come from the flag registry (#928), not a name convention,
+  // so the model is told the concrete forbidden names when we know them.
+  const gateNames = (Array.isArray(labels) ? labels : [])
+    .filter(l => l && l.humanGate && typeof l.name === 'string' && l.name.trim())
+    .map(l => l.name.trim());
   const promptBlock = prompt
     ? `The role's current system prompt (routing intent lives in here as prose):\n"""\n${String(prompt).slice(0, 4000)}\n"""`
     : 'The role has no system prompt yet — infer sensible outcomes from the name alone.';
@@ -134,7 +143,9 @@ function buildOutcomeSuggestionRequest(roleName, prompt) {
     '',
     'For each outcome give: a short stable "id" (kebab-case), a "title", a human-readable "when" condition, and "actions".',
     'Each action is one of: {"type":"setLabel","label":"<github-label>"}, {"type":"openPr"}, {"type":"openIssue"}, or {"type":"none"} (a terminal outcome with no signal).',
-    'NEVER use a label starting with "human:" or the brakes "hold"/"needs:human" — those are human gates, not agent outcomes.',
+    gateNames.length
+      ? `NEVER use these labels — they are human approval gates only a person applies: ${gateNames.map(n => `"${n}"`).join(', ')}.`
+      : 'NEVER use a label that a human applies as an approval gate — an outcome is a signal the AGENT sets.',
     '',
     'Answer with ONLY a JSON object (no fences, no prose):',
     '{"mode":"exactlyOne|anyOf","options":[{"id":"...","title":"...","when":"...","actions":[{"type":"setLabel","label":"..."}]}]}',
@@ -145,7 +156,7 @@ function buildOutcomeSuggestionRequest(roleName, prompt) {
 // Parse + validate the LLM answer into a normalized outcomes port. Returns null
 // (caller falls back to the heuristic) on any parse/shape/validation failure,
 // including a forbidden gate/brake label — the data-model validator is the gate.
-function parseOutcomeSuggestion(text) {
+function parseOutcomeSuggestion(text, sources) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -174,7 +185,7 @@ function parseOutcomeSuggestion(text) {
     };
   }).filter(Boolean);
   const port = { mode, options };
-  const v = validateOutcomes(port);
+  const v = validateOutcomes(port, sources);
   if (!v.ok) return null;
   return normalizeOutcomes(port);
 }

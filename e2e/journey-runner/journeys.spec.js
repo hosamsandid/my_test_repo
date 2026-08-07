@@ -21,10 +21,24 @@ const { validateStepNames } = require('./schema');
 // validateStepNames then rejects any action/assert naming a step the library
 // doesn't export — a clear, early failure rather than a mid-run surprise (AC3).
 const registry = buildRegistry();
-const journeys = loadJourneysDir();
-for (const journey of journeys) {
+const allJourneys = loadJourneysDir();
+for (const journey of allJourneys) {
   validateStepNames(journey, registry.names(), { source: `${journey.id}.yaml` });
 }
+
+// Lane filter (#1319). A journey runs when any of its `lanes` is active;
+// E2E_LANE is a comma-separated list, default `ci` — so `make e2e` (compose)
+// behaves exactly as before, while `make e2e-kind` passes `ci,kind` to also
+// pick up kind-only journeys (e.g. context-mount, whose fixture shells into
+// the kind node). A journey with no lanes runs everywhere.
+const activeLanes = String(process.env.E2E_LANE || 'ci')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const journeys = allJourneys.filter((j) => {
+  const lanes = Array.isArray(j.lanes) ? j.lanes : [];
+  const active = lanes.length === 0 || lanes.some((l) => activeLanes.includes(l));
+  if (!active) console.log(`[journeys] skipping ${j.id} (lanes: ${lanes.join(',')}; active: ${activeLanes.join(',')})`);
+  return active;
+});
 
 // Video capture (#712, docs/journey-spec-concept.md §3.3 item 1). Only the
 // `journey-video` project records video (E2E_VIDEO=1 — playwright.config.js), so

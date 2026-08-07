@@ -12,6 +12,11 @@ import { upsertChannel, removeChannelFrom } from './channel-ops';
 import {
   stagesAfterAdd, stagesAfterRename, stagesAfterRemove, stagesAfterReorder, membersToCascade,
 } from './stage-list-ops';
+import { labelsAfterSet } from './label-registry-ops';
+import {
+  humansAfterUpsert, humansAfterRemove,
+  humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
+} from './humans-registry-ops';
 
 // Read the current data-flow port block off a live agent's config as a plain
 // {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
@@ -48,6 +53,27 @@ async function resolveAgentRepo(roleId) {
 }
 // An artifact port's match key: its logical name when set, else its path (#382).
 const artKey = (a) => (typeof a === 'string' ? a : (a && (a.name || a.path))) || '';
+// Set/clear an artifact's human audience (#981); string-shaped legacy ports are
+// lifted to objects so the flag has somewhere to live.
+const setAudienceOn = (a, audience) => {
+  const base = typeof a === 'string' ? { path: a } : { ...a };
+  if (audience === 'human') base.audience = 'human'; else delete base.audience;
+  return base;
+};
+// Set/clear an artifact output's open-end marker (#1004): `marker` is
+// `{terminal: true}`, `{external: {note?}}` or null. Terminal XOR external.
+const setMarkerOn = (a, marker) => {
+  const base = typeof a === 'string' ? { path: a } : { ...a };
+  delete base.terminal; delete base.external;
+  if (marker && marker.terminal === true) base.terminal = true;
+  else if (marker && marker.external && typeof marker.external === 'object') {
+    base.external = {
+      ...(typeof marker.external.note === 'string' && marker.external.note.trim()
+        ? { note: marker.external.note.trim() } : {}),
+    };
+  }
+  return base;
+};
 async function liveDataFlow(roleId) {
   const a = await apiCall('GET', `/api/agents/${roleId}`);
   const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};
@@ -98,14 +124,7 @@ export const liveOps = {
   // change the agent id (that is immutable once materialized). Shape-compatible
   // with makeDraftOps.renameRole so the shared inspector never branches on mode.
   renameRole: (roleId, displayName) => apiCall('PUT', `/api/agents/${roleId}`, { displayName }),
-  // Agent-level emitted labels (label hand-offs) — independent of any trigger.
-  getRoleEmits: async (roleId) => {
-    const a = await apiCall('GET', `/api/agents/${roleId}`);
-    return Array.isArray(a?.emits) ? a.emits : [];
-  },
-  setRoleEmits: (roleId, emits) => apiCall('PUT', `/api/agents/${roleId}`, { emits }),
-
-  // Structured OUTCOMES port (#827) — the successor to `emits`. Shape-compatible
+  // Structured OUTCOMES port (#827) — the successor to flat `emits`. Shape-compatible
   // with makeDraftOps.getRoleOutcomes/setRoleOutcomes so the phase-3 UI never
   // branches on mode. Writing a non-empty port CLEARS `emits` server-side
   // (PUT /api/agents/:id), so the two never coexist.
@@ -153,6 +172,25 @@ export const liveOps = {
     df[k] = df[k].filter(a => artKey(a) !== key);
     await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
   },
+  // Artifact audience (#981): declare that a PERSON consumes this output —
+  // clears the unconsumed-output lint and draws the delivery edge to @human.
+  setArtifactAudience: async (roleId, { name, path, audience }) => {
+    const key = String(name || path || '').trim();
+    if (!key) return;
+    const df = await liveDataFlow(roleId);
+    df.outputs = df.outputs.map(a => (artKey(a) === key
+      ? setAudienceOn(a, audience) : a));
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
+  // Open-end marker on an output artifact (#1004): `marker` is
+  // `{terminal: true}`, `{external: {note?}}` or null (unmark).
+  setArtifactMarker: async (roleId, { name, path, marker }) => {
+    const key = String(name || path || '').trim();
+    if (!key) return;
+    const df = await liveDataFlow(roleId);
+    df.outputs = df.outputs.map(a => (artKey(a) === key ? setMarkerOn(a, marker) : a));
+    await apiCall('PUT', `/api/agents/${roleId}`, { dataFlow: df });
+  },
   // Parent-child hierarchy (#377) — child gets parentMemberId; cleared with falsy.
   setParent: (roleId, parentId) =>
     apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
@@ -194,20 +232,80 @@ export const liveOps = {
     await apiCall('PUT', `/api/agents/${teamId}`, { stages: stagesAfterReorder(cur, names) });
   },
 
-  // ── GitHub artifact ports (#380): produce flags + consumed channels ──
-  // Produce flags drive the node badge/ports + the producer prompt block.
+  // ── label registry (#981): gate/brake flags, TEAM-agent only ──
+  // Same binding pattern as the stage ops: teamId first, ProcessCanvas wraps.
+  listLabels: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.labels) ? a.labels.slice() : [];
+  },
+  setLabelFlags: async (teamId, name, flags) => {
+    const cur = await liveOps.listLabels(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { labels: labelsAfterSet(cur, name, flags) });
+  },
+
+  // ── named human roles (#987): first-class human flow nodes, TEAM-agent only ──
+  // Same binding pattern as stages/labels: teamId first, ProcessCanvas wraps.
+  // Purely declarative — the PUT touches only the team config's `humans[]`, no
+  // trigger/reconcile side-effect (AC9).
+  listHumans: async (teamId) => {
+    const a = await apiCall('GET', `/api/agents/${teamId}`);
+    return Array.isArray(a?.humans) ? a.humans.slice() : [];
+  },
+  upsertHuman: async (teamId, human) => {
+    const cur = await liveOps.listHumans(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, human) });
+  },
+  removeHuman: async (teamId, id) => {
+    const cur = await liveOps.listHumans(teamId);
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterRemove(cur, id) });
+  },
+  // Wiring helpers (#987): read the human off the team registry, mutate its
+  // consumes/emits, PUT the whole registry back. `humanId` is the ROLE id (the
+  // registry lives on the team agent = teamId), not an agent config of its own.
+  getHuman: async (teamId, id) => {
+    const cur = await liveOps.listHumans(teamId);
+    return cur.find(h => h && h.id === id) || null;
+  },
+  wireHumanConsume: async (teamId, id, entry) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id) || { id, name: id };
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterConsumeAdd(human, entry)) });
+  },
+  unwireHumanConsume: async (teamId, id, entry) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id);
+    if (!human) return;
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterConsumeRemove(human, entry)) });
+  },
+  addHumanEmit: async (teamId, id, label) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id) || { id, name: id };
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitAdd(human, label)) });
+  },
+  removeHumanEmit: async (teamId, id, label) => {
+    const cur = await liveOps.listHumans(teamId);
+    const human = cur.find(h => h && h.id === id);
+    if (!human) return;
+    await apiCall('PUT', `/api/agents/${teamId}`, { humans: humansAfterUpsert(cur, humanAfterEmitRemove(human, label)) });
+  },
+
+  // ── GitHub artifact ports (#380): consumed channels ──
+  // `github.produces*` became a pure projection of openPr/openIssue outcome
+  // actions (#1003) — no UI write path exists any more; the badge, tiles and
+  // prompt blocks read the server-side projection (`outcomesToGithub`).
   getRoleGithub: async (roleId) => {
     const a = await apiCall('GET', `/api/agents/${roleId}`);
     return (a && a.github) || {};
   },
-  setGithubProduces: (roleId, { pr, issue }) =>
-    apiCall('PUT', `/api/agents/${roleId}`, { github: { producesPr: !!pr, producesIssue: !!issue } }),
   // Channels live on the *consumer*; the backend re-derives the github-event
   // triggers from them (reconcileTeamGithubChannels). Upsert keyed on (artifact, from).
-  addChannel: async (roleId, { artifact, from, label, gate }) => {
+  addChannel: async (roleId, { artifact, from, label, gate, wakePrompt, autoClaim, transport }) => {
     if (!from || from === roleId) return;
     const a = await apiCall('GET', `/api/agents/${roleId}`);
-    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate });
+    // `autoClaim` (#958) + `transport` (#1194) ride along so the claim opt-out and
+    // the internal-delivery choice survive the live port write — otherwise the
+    // reconciler re-stamps the claim / re-derives a poller-delivered listener.
+    const channels = upsertChannel(Array.isArray(a?.channels) ? a.channels : [], { artifact, from, label, gate, wakePrompt, autoClaim, transport });
     await apiCall('PUT', `/api/agents/${roleId}`, { channels });
   },
   updateChannel: async (roleId, spec) => liveOps.addChannel(roleId, spec),
@@ -295,6 +393,9 @@ function templateToDraftRole(t, { id, displayName }) {
       enabled: tr.enabled !== false,
       ...(tr.events ? { events: tr.events } : {}),
       ...(tr.labelFilter ? { labelFilter: tr.labelFilter } : {}),
+      // Claim (#958) — carried so edit-as-draft round-trips it instead of
+      // dropping it and re-deriving a possibly-opted-out claim on re-materialise.
+      ...(tr.claim ? { claim: tr.claim } : {}),
       ...(tr.cron ? { cron: tr.cron } : {}),
       ...(tr.at ? { at: tr.at } : {}),
       ...(Array.isArray(tr.emits) ? { emits: tr.emits } : {}),
@@ -376,21 +477,10 @@ export function makeDraftOps(getBundle, persist) {
       if (r) r.triggers = (r.triggers || []).filter(x => x.id !== tid);
       await persist(b);
     },
-    // Trigger-level `emits` was removed (#783) — label hand-offs live on the
-    // role level (setRoleEmits below), so there is no per-trigger setEmits.
-    // Agent-level emitted labels (label hand-offs) — on the role, no trigger.
-    getRoleEmits: async (roleId) => {
-      const r = role(getBundle(), roleId);
-      return Array.isArray(r?.emits) ? r.emits.slice() : [];
-    },
-    setRoleEmits: async (roleId, emits) => {
-      const b = clone(getBundle());
-      const r = role(b, roleId);
-      if (r) { if (Array.isArray(emits) && emits.length) r.emits = emits; else delete r.emits; }
-      await persist(b);
-    },
+    // Trigger-level `emits` was removed (#783) — label hand-offs now live
+    // in the structured OUTCOMES port (#831).
 
-    // Structured OUTCOMES port (#827) — parallel to setRoleEmits above; the same
+    // Structured OUTCOMES port (#827) — the same
     // surface as liveOps so the shared inspector never branches on mode. A
     // non-empty port supersedes `emits` (mirrors the PUT clear-emits rule).
     getRoleOutcomes: async (roleId) => {
@@ -520,6 +610,56 @@ export function makeDraftOps(getBundle, persist) {
       b.stages = (names || []).filter(n => existing.has(n));
       await persist(b);
     },
+    // ── label registry (#981): gate/brake flags on the bundle ──
+    listLabels: () => (getBundle().labels || []).slice(),
+    setLabelFlags: async (name, flags) => {
+      const b = clone(getBundle());
+      const next = labelsAfterSet(b.labels, name, flags);
+      if (next.length) b.labels = next; else delete b.labels;
+      await persist(b);
+    },
+    // ── named human roles (#987): first-class human flow nodes on the bundle ──
+    listHumans: () => (getBundle().humans || []).slice(),
+    upsertHuman: async (human) => {
+      const b = clone(getBundle());
+      const next = humansAfterUpsert(b.humans, human);
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    removeHuman: async (id) => {
+      const b = clone(getBundle());
+      const next = humansAfterRemove(b.humans, id);
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    getHuman: (id) => ((getBundle().humans || []).find(h => h && h.id === id) || null),
+    wireHumanConsume: async (id, entry) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id) || { id, name: id };
+      b.humans = humansAfterUpsert(b.humans, humanAfterConsumeAdd(human, entry));
+      await persist(b);
+    },
+    unwireHumanConsume: async (id, entry) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id);
+      if (!human) return;
+      const next = humansAfterUpsert(b.humans, humanAfterConsumeRemove(human, entry));
+      if (next.length) b.humans = next; else delete b.humans;
+      await persist(b);
+    },
+    addHumanEmit: async (id, label) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id) || { id, name: id };
+      b.humans = humansAfterUpsert(b.humans, humanAfterEmitAdd(human, label));
+      await persist(b);
+    },
+    removeHumanEmit: async (id, label) => {
+      const b = clone(getBundle());
+      const human = (b.humans || []).find(h => h && h.id === id);
+      if (!human) return;
+      b.humans = humansAfterUpsert(b.humans, humanAfterEmitRemove(human, label));
+      await persist(b);
+    },
     // Parent-child hierarchy (#378). setParent(child, parent) makes `parent` the
     // grouping node of `child`; clear with a falsy parentId. Self-parenting and
     // direct cycles (parent already a descendant) are rejected.
@@ -601,22 +741,33 @@ export function makeDraftOps(getBundle, persist) {
       }
       await persist(b);
     },
+    // Artifact audience (#981) — see liveOps.setArtifactAudience.
+    setArtifactAudience: async (roleId, { name, path, audience }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      const key = String(name || path || '').trim();
+      if (r && key) {
+        r.outputs = (r.outputs || []).map(a => (artKey(a) === key
+          ? setAudienceOn(a, audience) : a));
+      }
+      await persist(b);
+    },
+    // Open-end marker on an output (#1004) — see liveOps.setArtifactMarker.
+    setArtifactMarker: async (roleId, { name, path, marker }) => {
+      const b = clone(getBundle());
+      const r = role(b, roleId);
+      const key = String(name || path || '').trim();
+      if (r && key) {
+        r.outputs = (r.outputs || []).map(a => (artKey(a) === key ? setMarkerOn(a, marker) : a));
+      }
+      await persist(b);
+    },
 
-    // ── GitHub artifact ports (#380): produce flags + consumed channels ──
+    // ── GitHub artifact ports (#380): consumed channels ──
+    // `github.produces*` is a projection of outcome actions (#1003) — no write op.
     getRoleGithub: async (roleId) => {
       const r = role(getBundle(), roleId);
       return (r && r.github) || {};
-    },
-    setGithubProduces: async (roleId, { pr, issue }) => {
-      const b = clone(getBundle());
-      const r = role(b, roleId);
-      if (r) {
-        const g = {};
-        if (pr) g.producesPr = true;
-        if (issue) g.producesIssue = true;
-        if (Object.keys(g).length) r.github = g; else delete r.github;
-      }
-      await persist(b);
     },
     addChannel: async (roleId, spec) => {
       const b = clone(getBundle());
@@ -632,10 +783,13 @@ export function makeDraftOps(getBundle, persist) {
     removeChannel: async (roleId, { artifact, from, label }) => {
       const b = clone(getBundle());
       const r = role(b, roleId);
-      if (r) {
-        r.channels = removeChannelFrom(r.channels, { artifact, from, label });
-        if (!r.channels.length) delete r.channels;
-      }
+      // Symmetric with addChannel (#1036): a channel lives on a role. If the
+      // target isn't a role (e.g. a human delivery mis-routed here), surface a
+      // clear error instead of persisting unchanged — a removal must never be a
+      // silent no-op that reports success while the edge stays on the canvas.
+      if (!r) throw new Error(`role ${roleId} not found`);
+      r.channels = removeChannelFrom(r.channels, { artifact, from, label });
+      if (!r.channels.length) delete r.channels;
       await persist(b);
     },
   };

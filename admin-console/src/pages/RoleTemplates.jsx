@@ -6,7 +6,9 @@ import SidePanel from '../components/SidePanel';
 // Keys the structured form owns directly; everything else on a template
 // (triggers, ports, patternRole, stageAffinity, github, skills, …) is edited
 // in the Advanced JSON area so the full definition stays editable (AC-2).
-const FORM_SCALAR_KEYS = ['id', 'displayName', 'description', 'icon', 'category', 'sessionPolicy', 'envSuffix'];
+// icon and envSuffix are intentionally excluded: icon is display-only (derived
+// from the built-in definition, not user-editable); envSuffix is dead code.
+const FORM_SCALAR_KEYS = ['id', 'displayName', 'description', 'category', 'sessionPolicy'];
 const PROMPT_KEYS = ['prompt', 'promptTemplate'];
 
 const btn = (variant, disabled) => ({
@@ -175,28 +177,25 @@ function Editor({ initial, origin, onSaved, onClose }) {
       <Field label="Description">
         <input style={inputStyle} value={form.description || ''} onChange={e => setField('description', e.target.value)} />
       </Field>
-      <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
-        <div style={{ flex: 1 }}>
-          <Field label="Icon"><input style={inputStyle} value={form.icon || ''} onChange={e => setField('icon', e.target.value)} placeholder="e.g. code" /></Field>
+      <Field label="Role type">
+        <select style={inputStyle} value={form.category || ''} onChange={e => setField('category', e.target.value)}>
+          <option value="">(unset)</option>
+          <option value="chat">chat — always-on companion; responds to direct messages</option>
+          <option value="reactive">reactive — event-driven; wakes on GitHub events or label triggers</option>
+          <option value="pattern">pattern — scaffold role; excluded from the Team Setup "extra" slot</option>
+        </select>
+      </Field>
+      <Field label="Invocation mode">
+        <select style={inputStyle} value={form.sessionPolicy || ''} onChange={e => setField('sessionPolicy', e.target.value)}>
+          <option value="">(default: persistent)</option>
+          <option value="persistent">persistent — triggered runs resume the last conversation</option>
+          <option value="per-invocation">per-invocation — each triggered run starts fresh (no --resume)</option>
+        </select>
+        <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+          <strong>per-invocation</strong> agents are marked autonomous: they receive trigger-management documentation in their system prompt and the entrypoint invokes Claude fresh on every trigger.
+          <strong> persistent</strong> agents resume their last session on each trigger.
         </div>
-        <div style={{ flex: 1 }}>
-          <Field label="Category"><input style={inputStyle} value={form.category || ''} onChange={e => setField('category', e.target.value)} placeholder="e.g. reactive" /></Field>
-        </div>
-      </div>
-      <div style={{ display: 'flex', gap: 'var(--eb-space-3)' }}>
-        <div style={{ flex: 1 }}>
-          <Field label="Session policy">
-            <select style={inputStyle} value={form.sessionPolicy || ''} onChange={e => setField('sessionPolicy', e.target.value)}>
-              <option value="">(default: persistent)</option>
-              <option value="persistent">persistent</option>
-              <option value="per-invocation">per-invocation</option>
-            </select>
-          </Field>
-        </div>
-        <div style={{ flex: 1 }}>
-          <Field label="Env suffix"><input style={inputStyle} value={form.envSuffix || ''} onChange={e => setField('envSuffix', e.target.value)} placeholder="e.g. dev" /></Field>
-        </div>
-      </div>
+      </Field>
 
       <Field label="Prompt">
         <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
@@ -334,7 +333,7 @@ export default function RoleTemplates() {
               </tr>
             ))}
             {templates.length === 0 && (
-              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No agent templates.</td></tr>
+              <tr><td style={{ ...cell, color: 'var(--eb-text-muted)' }} colSpan={6}>No agent templates yet. Use “New template” above to define a reusable role that agents can be created from.</td></tr>
             )}
           </tbody>
         </table>

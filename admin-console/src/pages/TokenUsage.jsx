@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -277,10 +277,10 @@ function StatisticsTab({ team }) {
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
-        <StatCard label="Total tokens" value={formatInt(totals.total)} />
-        <StatCard label="Invocations" value={formatInt(totals.invocations)} />
+        <StatCard label="Total tokens" value={formatInt(totals.total)} help={STAT_TILE_HELP.total} />
+        <StatCard label="Invocations" value={formatInt(totals.invocations)} help={STAT_TILE_HELP.invocations} />
         {TOKEN_CLASSES.map((c) => (
-          <StatCard key={c.key} label={c.label} value={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} />
+          <StatCard key={c.key} label={c.label} value={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} help={STAT_TILE_HELP[c.key]} />
         ))}
       </div>
 
@@ -377,7 +377,12 @@ function WorkItemDetail({ item, since, team, navigate }) {
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
         <thead><tr style={{ color: 'var(--eb-text-secondary)', textAlign: 'left' }}>
           <th style={{ padding: 4 }}>When</th><th style={{ padding: 4 }}>Agent</th>
-          <th style={{ padding: 4 }}>Tier</th><th style={{ padding: 4, textAlign: 'right' }}>Tokens</th><th style={{ padding: 4 }} />
+          <th style={{ padding: 4 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              Tier
+              <InfoTip title="Tier" text={TIER_SIGNAL_HELP} size={12} />
+            </span>
+          </th><th style={{ padding: 4, textAlign: 'right' }}>Tokens</th><th style={{ padding: 4 }} />
         </tr></thead>
         <tbody>
           {(data.runs || []).map((r, i) => (
@@ -448,7 +453,14 @@ function WorkItemsTab({ team }) {
     { key: 'input', label: 'Input', align: 'right', render: (v) => formatInt(v) },
     { key: 'output', label: 'Output', align: 'right', render: (v) => formatInt(v) },
     { key: 'total', label: 'Total', align: 'right', render: (v) => formatInt(v) },
-    { key: 'tiers', label: 'Signals' },
+    { key: 'tiers', label: (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        Signals
+        <span onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+          <InfoTip title="Signals" text={TIER_SIGNAL_HELP} size={12} />
+        </span>
+      </span>
+    ) },
   ];
 
   return (
@@ -536,6 +548,10 @@ export default function TokenUsage() {
             {t.label}
           </div>
         ))}
+      </div>
+
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        {COST_NOTE}
       </div>
 
       {tab === 'statistics' ? <StatisticsTab team={team} /> : <WorkItemsTab team={team} />}

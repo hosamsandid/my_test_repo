@@ -1,0 +1,7 @@
+# Base "e2e" — the in-cluster fakes (fake-github, git-remote) the journey
+# suite needs (#1319). Composed only by overlays/kind-e2e; never deployed to a
+# hosted environment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 80-e2e-fakes.yaml

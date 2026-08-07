@@ -11,6 +11,7 @@ const bpEventRouter = require("./bp-event-router");
 const { findEnclosingGitRepo } = require("./git-workspace");
 const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
@@ -19,6 +20,8 @@ const {
   knowledgeConvergenceConfig,
   resolvePromotionGates,
   knowledgeCurationConfig,
+  resolveDecayHorizonDays,
+  normalizeLoadTriggers,
   mergeTeamKnowledgeConfig,
   buildDefaultManifest,
   kindFilePath,
@@ -29,8 +32,15 @@ const {
   KINDS: KNOWLEDGE_KINDS,
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
+const flowEmit = require("./flow-emit");
+const githubEventLog = require("./github-event-log");
+const hillClimbMetrics = require("./hill-climb-metrics");
+const hillClimbSweep = require("./hill-climb-sweep");
+const hillClimbCards = require("./hill-climb-cards");
+const hillClimbApply = require("./hill-climb-apply");
+const hillClimbVerdict = require("./hill-climb-verdict");
 const knowledgeFeed = require("./knowledge-feed");
-const { buildKnowledgeDigest, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
+const { buildKnowledgeDigest, foldVisibleEntries, DIGEST_FILENAME: KNOWLEDGE_DIGEST_FILENAME } = require("./knowledge-digest");
 const memoryMigration = require("./memory-migration");
 const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
@@ -39,16 +49,54 @@ const knowledgeRouting = require("./knowledge-routing");
 const knowledgeDistillation = require("./knowledge-distillation");
 const knowledgeConsolidation = require("./knowledge-consolidation");
 const knowledgeCleanup = require("./knowledge-cleanup");
+const knowledgeRetrieval = require("./knowledge-retrieval");
+const knowledgeDecay = require("./knowledge-decay");
+const knowledgeEmbeddings = require("./knowledge-embeddings");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
-const { assembleClaudeMd, buildMemoryHint } = require("./prompt-assembly");
+const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
+const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
+const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
+// Browsing the read-only host-folder context mount (#1286): the pure path /
+// program / parsing rules, plus the one-shot exec that runs them where the
+// folder actually exists — inside the agent's own container.
+const {
+  CONTEXT_FILE_MAX_BYTES,
+  CONTEXT_DOWNLOAD_MAX_BYTES,
+  BROWSE_TIMEOUT_MS,
+  normalizeContextRel,
+  buildListArgv,
+  buildReadArgv,
+  parseBrowseOutput,
+  statusForBrowseCode,
+  sortContextItems,
+} = require("./context-browse");
+// Resolve an agent config to the ordered list of host folders to mount (#1290,
+// generalising #1283's single folder) — handles both the multi-folder field and
+// the legacy single-folder fields.
+const { resolveContextMounts, CONTEXT_MOUNT_TARGET } = require("./context-mount");
+const {
+  buildDeleteArgv,
+  buildMoveArgv,
+  buildPrepareUploadArgv,
+  statusForWriteCode,
+  sanitizeUploadName,
+  CONTEXT_UPLOAD_MAX_BYTES,
+  WRITE_TIMEOUT_MS,
+} = require("./context-write");
+const { buildTar } = require("./tar-single");
+// In-container exec seam (context browse/write): libpod exec on podman,
+// pods/exec on kubernetes — selected the same way as container-runtime.
+const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
-const { buildEnsureUserCommands } = require("./matrix-admin-commands");
+const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
+const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
+const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
@@ -60,7 +108,51 @@ const { workItemDetail } = require("./work-items");
 const prTokenComment = require("./pr-token-comment");
 const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
+const ticketStore = require("./ticket-store");
 const pendingQueue = require("./pending-queue");
+const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
+const flowAnomalySweep = require("./flow-anomaly-sweep");
+
+// ── Read-write context mount helpers (writing into a mounted host folder) ──
+// A caller path is RELATIVE to /context. For a single legacy folder the mount
+// target is exactly /context, so everything belongs to it; for a multi-folder
+// set each target is /context/<slug>, so the rel's first segment names the
+// folder. Returns the matching resolved mount (carrying `readWrite`) or null —
+// the route refuses a write that resolves to no mount or to a read-only one.
+function resolveContextMountForRel(mounts, rel) {
+  if (!Array.isArray(mounts) || mounts.length === 0) return null;
+  const clean = String(rel == null ? '' : rel).replace(/^\/+/, '');
+  for (const m of mounts) {
+    if (!m || typeof m.target !== 'string') continue;
+    if (m.target === CONTEXT_MOUNT_TARGET) return m; // legacy single folder
+    const slug = m.target.slice(CONTEXT_MOUNT_TARGET.length + 1); // strip "/context/"
+    if (!slug) continue;
+    if (clean === slug || clean.startsWith(slug + '/')) return m;
+  }
+  return null;
+}
+
+// Run one context WRITE_PROGRAM exec and parse it. Resolves { ok:true, result }
+// or { ok:false, status, error, code } — never throws for an expected failure,
+// mirroring the browse path so the route stays free of exit-code archaeology.
+async function runContextWriteExec(id, argv) {
+  let out;
+  try {
+    out = await execInAgentContainer(id, argv, { timeoutMs: WRITE_TIMEOUT_MS, maxBytes: 256 * 1024 });
+  } catch (err) {
+    const code = err && err.code ? err.code : 'exec-failed';
+    const status = code === 'no-container' ? 409 : code === 'timeout' ? 504 : 502;
+    const error = code === 'no-container'
+      ? 'The agent is not running, so its context folder cannot be modified'
+      : `Modifying the context folder failed (${code})`;
+    return { ok: false, status, error, code };
+  }
+  const parsed = parseBrowseOutput(out.stdout);
+  if (!parsed.ok) {
+    return { ok: false, status: statusForWriteCode(parsed.code), error: parsed.error, code: parsed.code };
+  }
+  return { ok: true, result: parsed.result };
+}
 
 // ============================================================
 // Config
@@ -74,7 +166,7 @@ const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765"
 // to THIS stack when multiple instances share one Podman store. Configured via
 // AEE_INSTANCE_ID in .env, defaulting to COMPOSE_PROJECT_NAME. MUST resolve to
 // the same value as spawn-container.js's INSTANCE_ID (identical precedence).
-const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const INSTANCE_LABEL_KEY = 'aee.instance';
 
 const AGENTS_DIR = "/workspace/agents";
@@ -116,6 +208,19 @@ const KNOWLEDGE_ARCHIVED_DIR = "/workspace/knowledge-archived";
 // Per-team operator review decisions (supervised-review mode). One JSON map per
 // team { <canonicalId>: "approved"|"rejected" }; an absent id is "pending".
 const KNOWLEDGE_REVIEW_DIR = "/workspace/knowledge-review";
+// Per-team bitemporal-validity sidecar (#916). One JSON map per team
+// { <canonicalId>: { validTo?, supersededBy? } }, overlaid as FIELDS onto the
+// canonical entry at re-projection (status untouched — readers derive "expired").
+const KNOWLEDGE_VALIDITY_DIR = "/workspace/knowledge-validity";
+// Per-team read-side retrieval aggregate (#915): one compact JSON per team, one
+// row per entry (never an unbounded log, never a line in events.jsonl).
+const KNOWLEDGE_RETRIEVAL_DIR = "/workspace/knowledge-retrieval";
+// Per-team auto-load trigger sidecar (#917): { <canonicalId>: loadTriggers[] },
+// overlaid as a FIELD onto the canonical entry at re-projection (like validity).
+const KNOWLEDGE_TRIGGERS_DIR = "/workspace/knowledge-triggers";
+// Per-team embedding-vector cache (#918): derived artifacts, OUTSIDE the git KB
+// (recomputable at will), computed only by the nightly backstop pass.
+const KNOWLEDGE_VECTORS_DIR = "/workspace/knowledge-vectors";
 const TEMPLATE_WORKSPACE = "/template-workspace";
 // Agent id grammar — mirrors AGENT_ID_RE in admin-console/api/api.js. Used to
 // validate ids that arrive from outside (e.g. on import).
@@ -142,29 +247,29 @@ const { resolveSkillSourceDir } = makeSkillSourceResolver({
   defaultTeamId: DEFAULT_TEAM_ID,
 });
 
-// Resolve the LLM binding for an environment:
+// Resolve the LLM binding for an explicit endpoint id + model pin:
 //  - reads /workspace/llm-endpoints/index.json
-//  - looks up env.llmEndpointId
+//  - looks up the endpoint by id
 //  - reads the auth token from _keys/<authTokenId>
-// Returns { baseUrl, token, defaultModelId } or null if the env has no
-// binding or the endpoint is missing — in that case the caller falls back to
-// the global ANTHROPIC_* env vars from `.env`.
+// Returns { authType, baseUrl, token, defaultModelId } or null if no endpoint
+// id was given or the endpoint is missing — in that case the caller falls back
+// to the global ANTHROPIC_* env vars from `.env`.
 //
-// Model resolution order: env.defaultModelId (explicit pin) → endpoint
-// registry default → null (lets the Claude CLI pick from .env). The endpoint
-// fallback exists so legacy envs that never picked a model still inherit the
+// Model resolution order: modelPin (explicit env/agent pin) → endpoint registry
+// default → null (lets the Claude CLI pick from .env). The endpoint fallback
+// exists so legacy envs that never picked a model still inherit the
 // operator-configured default once one is set in the Model Registry.
-function loadLlmBindingForEnv(env) {
-  if (!env?.llmEndpointId) return null;
+function resolveLlmBinding(endpointId, modelPin, { context } = {}) {
+  if (!endpointId) return null;
   let list;
   try {
     list = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8"));
   } catch {
     return null;
   }
-  const ep = Array.isArray(list) ? list.find(e => e.id === env.llmEndpointId) : null;
+  const ep = Array.isArray(list) ? list.find(e => e.id === endpointId) : null;
   if (!ep) {
-    console.error(`[Orchestrator] LLM endpoint '${env.llmEndpointId}' (env=${env.id}) not found — falling back to .env`);
+    console.error(`[Orchestrator] LLM endpoint '${endpointId}'${context ? ` (${context})` : ""} not found — falling back to .env`);
     return null;
   }
   let token = "";
@@ -176,15 +281,111 @@ function loadLlmBindingForEnv(env) {
     }
   }
   return {
+    endpointId: ep.id,
+    name: ep.name || ep.id,
     authType: ep.authType === "oauth-token" ? "oauth-token" : "api-key",
     baseUrl: ep.baseUrl || "",
     token,
-    defaultModelId: env.defaultModelId || ep.defaultModelId || null,
+    defaultModelId: modelPin || ep.defaultModelId || null,
   };
 }
 
+// Resolve the effective LLM binding for an agent: a per-agent provider override
+// (`cfg.llmEndpointOverride`) wins over the environment's `llmEndpointId`. The
+// model pin still comes from the environment (`env.defaultModelId`); the agent's
+// own `modelOverride` is applied later in startAgentProcess.
+function resolveLlmBindingForAgent(cfg, env) {
+  const endpointId = cfg?.llmEndpointOverride || env?.llmEndpointId || null;
+  if (!endpointId) return null;
+  const ctx = cfg?.llmEndpointOverride
+    ? `agent=${cfg.id} override`
+    : `env=${env?.id}`;
+  return resolveLlmBinding(endpointId, env?.defaultModelId, { context: ctx });
+}
+
+// #1213: resolve the assist-synthesis binding for a team's autonomous synthesis
+// (curator auto-promotion, skill distillation). The team agent's optional
+// `assistLlmEndpointId` names the provider these session-less calls must bill
+// against; it is validated against the team's usable providers (non-oauth) the
+// same way `assistSelectableEndpoint` gates the console-side header selection.
+// Returns `{ baseUrl, token, model }` when set + usable, else null → the caller
+// falls back to the `.env` proxy exactly as before (unset, deleted id, oauth
+// seat, foreign team, or unreadable token all fail SOFT with a logged warning).
+// The token is read locally from `_keys/` and never leaves this process.
+function resolveAssistBindingForTeam(teamId) {
+  if (!teamId) return null;
+  let cfg = null;
+  try { cfg = loadAgentConfig(teamId); } catch { cfg = null; }
+  const endpointId = cfg && typeof cfg.assistLlmEndpointId === "string" ? cfg.assistLlmEndpointId.trim() : "";
+  if (!endpointId) return null; // unset → .env as today (no warning: the common case)
+  // Endpoints are scoped to the human tenant that owns the agents, mirroring
+  // spawn-binding + admin-console usableEndpointsForTeam. `parentTeamId` names
+  // the Agent Team, not the tenant — resolve the parent's `teamId` instead.
+  const tenant = resolveAgentTenant(cfg, (id) => {
+    try { return loadAgentConfig(id); } catch { return null; }
+  });
+  let index = null;
+  try { index = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8")); } catch { index = null; }
+  const pick = assistBinding.pickAssistEndpoint(index, endpointId, tenant);
+  if (!pick.ep) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} not usable (${pick.reason}) — falling back to .env`);
+    return null;
+  }
+  // Reuse resolveLlmBinding for the impure token read + model default; it never
+  // filters, so the usability decision above stays the single gate.
+  const bound = resolveLlmBinding(endpointId, null, { context: `assist team=${teamId}` });
+  if (!bound || bound.authType === "oauth-token" || !bound.baseUrl || !bound.token) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} unresolved (base/token/oauth) — falling back to .env`);
+    return null;
+  }
+  const model = bound.defaultModelId
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
+    || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || process.env.ANTHROPIC_MODEL;
+  if (!model) {
+    console.warn(`[Orchestrator] assist endpoint '${endpointId}' for team ${teamId} has no model — falling back to .env`);
+    return null;
+  }
+  return { baseUrl: bound.baseUrl, token: bound.token, model };
+}
+
+// #1214: resolve a synthesis binding from an assist selection (endpointId + model)
+// that the admin-console already validated against the caller's teams (the
+// `X-Assist-Model` header, `resolveAssistTarget`). Only the IDS travel the internal
+// HTTP hop — the token is read locally from `_keys/` here and never leaves this
+// process. Returns `{ baseUrl, token, model }` when usable, else null → the caller
+// falls back to the `.env` proxy (unset selection, deleted id, oauth seat, or an
+// unreadable token all fail SOFT). The console already gated team visibility, so
+// this only re-checks resolvability, mirroring resolveAssistBindingForTeam's tail.
+function resolveAssistBindingFromSelection(endpointId, modelId) {
+  if (!endpointId) return null; // no selection forwarded → .env as today
+  const bound = resolveLlmBinding(endpointId, modelId || null, { context: "assist domain-bootstrap" });
+  if (!bound || bound.authType === "oauth-token" || !bound.baseUrl || !bound.token) return null;
+  const model = bound.defaultModelId // resolveLlmBinding returns modelPin (the user's model) || endpoint default
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
+    || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || process.env.ANTHROPIC_MODEL;
+  if (!model) return null;
+  return { baseUrl: bound.baseUrl, token: bound.token, model };
+}
+
 const { execFile, execFileSync } = require("child_process");
-const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./spawn-container");
+const execFileP = require("util").promisify(execFile);
+// Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
+// Host-folder context mounts (#1283) are a LOCAL/self-hosted-only feature. On
+// the podman runtime they are always available; on Kubernetes they are an
+// EXPLICIT opt-in (#1319, AEE_K8S_CONTEXT_HOSTPATH=1): the mount renders as a
+// hostPath volume, so "host" means the node — right on a single-node kind dev
+// cluster, wrong on hosted multi-node GKE, which never sets the flag. The API
+// layer mirrors this gate (isLocalContextMountEnv); this is the
+// provisioning-side backstop.
+const AEE_RUNTIME = String(process.env.AEE_CONTAINER_RUNTIME || "podman").toLowerCase();
+const CONTEXT_MOUNT_RUNTIME_OK =
+  (AEE_RUNTIME !== "kubernetes" && AEE_RUNTIME !== "k8s") ||
+  process.env.AEE_K8S_CONTEXT_HOSTPATH === "1";
+const { buildLlmProvenanceEnv } = require("./llm-provenance");
+const assistBinding = require("./assist-binding");
 const { reconcileSessionAppend } = require("./session-cursor");
 const {
   rotationConfig,
@@ -199,6 +400,9 @@ function randomHex(bytes) {
   return crypto.randomBytes(bytes).toString("hex");
 }
 const agentProcesses = new Map(); // id → ChildProcess
+// #933: rendezvous for agent-form loop verifiers — a requester loop polls here
+// for the verdict the target verifier agent posts back.
+const loopVerifyStore = createVerdictStore();
 
 // Subscription-OAuth login flows (`claude setup-token` under a PTY) — driven
 // by the Model Providers page in the admin console. See llm-auth-flow.js.
@@ -232,7 +436,7 @@ function startAgentProcess(config) {
   // the inherited ANTHROPIC_* values from `.env` in place — that keeps
   // pre-registry environments and the bp-explorer integration working.
   const env = environmentId ? loadEnvironment(environmentId) : null;
-  const llm = loadLlmBindingForEnv(env);
+  const llm = resolveLlmBindingForAgent(config, env);
   if (llm) {
     if (llm.authType === "oauth-token") {
       // Subscription auth (Claude Max / Enterprise seat): the Claude CLI reads
@@ -250,15 +454,26 @@ function startAgentProcess(config) {
       if (llm.token)   childEnv.ANTHROPIC_AUTH_TOKEN = llm.token;
     }
     if (llm.defaultModelId) childEnv.AGENT_DEFAULT_MODEL = llm.defaultModelId;
-    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${env.llmEndpointId} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
-  } else if (env?.llmEndpointId) {
-    console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing for env=${env.id}, using .env fallback`);
+    const via = config.llmEndpointOverride ? ' (agent override)' : '';
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint=${llm.endpointId}${via} (${llm.authType}), model=${llm.defaultModelId || '(endpoint default)'}`);
+  } else if (config.llmEndpointOverride || env?.llmEndpointId) {
+    console.log(`[Orchestrator] Agent ${id} → LLM endpoint binding missing (override=${config.llmEndpointOverride || '-'}, env=${env?.id || '-'}), using .env fallback`);
   }
 
   // Per-agent override (set via the chat UI) wins over the environment's
   // default model. Fresh-read on each spawn so an admin can edit config.json
   // and restart to apply.
   if (config.modelOverride) childEnv.AGENT_DEFAULT_MODEL = config.modelOverride;
+
+  // Non-secret Model-Provider provenance (#980): the human-readable attributes
+  // of how this run is executed (provider name, auth type, sanitized base URL,
+  // requested model) so the agent runtime can stamp them onto the immutable
+  // `system_init` session-log row. Supersedes the bare AEE_LLM_PROVIDER_ID the
+  // usage records still read (buildLlmProvenanceEnv re-sets it when bound). The
+  // requested model mirrors the AGENT_DEFAULT_MODEL precedence above
+  // (modelOverride wins over the binding default). NEVER carries a token.
+  const endpointConfigured = !!(config.llmEndpointOverride || env?.llmEndpointId);
+  Object.assign(childEnv, buildLlmProvenanceEnv(llm, config, { endpointConfigured }));
 
   // If the agent's environment has a GitHub token attached, expose it as
   // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.
@@ -326,7 +541,17 @@ function startAgentProcess(config) {
     }
   }
 
-  const child = spawnContainer({ id, env: childEnv });
+  // Host-folder context mount(s) (#1283, multiple folders #1290). Applied on
+  // the podman runtime, and on Kubernetes behind the AEE_K8S_CONTEXT_HOSTPATH
+  // opt-in (#1319); both runtimes re-validate each path fail-closed at the
+  // point of use (buildContextMountSpecs / buildContextHostPathVolumes), so a
+  // stale/invalid value produces no mount. Each
+  // folder is read-only by default and read-write only when its per-folder
+  // opt-in is set (#1289). resolveContextMounts returns [] when there is no
+  // mount at all, so the no-mount spawn path is byte-identical to before (AC9).
+  const contextMounts = CONTEXT_MOUNT_RUNTIME_OK ? resolveContextMounts(config) : [];
+
+  const child = spawnContainer({ id, env: childEnv, contextMounts });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -340,7 +565,15 @@ function startAgentProcess(config) {
   );
   child.on('exit', (code) => {
     console.log(`[Orchestrator] Agent ${id} exited (code ${code})`);
-    agentProcesses.delete(id);
+    // Only clear the map entry if it still points at THIS child. A respawn
+    // calls stopAgentProcess() (kill + delete) then immediately sets a new
+    // child for the same id; the OLD child's exit event can fire after that
+    // point (container teardown is async), and would otherwise delete the
+    // NEW child's entry — making a genuinely running agent look stopped to
+    // every subsequent respawn call (agentProcesses.has(id) → false).
+    if (agentProcesses.get(id) === child) {
+      agentProcesses.delete(id);
+    }
   });
 
   agentProcesses.set(id, child);
@@ -464,6 +697,13 @@ function controlOrPoolPath(id, ...segs) {
 function isSafePathSeg(s) {
   return typeof s === 'string' && s.length > 0 && s.length <= 256 &&
     !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
+}
+
+// Client-safe error text: only ever the `message` property read (a CodeQL
+// js/stack-trace-exposure barrier), never a stringification of the exception
+// object itself, which is treated as carrying the stack trace.
+function errorMessage(err) {
+  return (err && err.message) ? String(err.message) : 'error';
 }
 
 // Apply the session-log retention policy (#673) to a room's archives in `dir`.
@@ -680,6 +920,7 @@ function backfillResourceOwnership() {
 
   // Agents
   if (fs.existsSync(AGENTS_DIR)) {
+    const configs = {};
     for (const id of listAgentIds()) {
       const cfg = loadAgentConfig(id);
       if (cfg && cfg.teamId === undefined) {
@@ -687,6 +928,18 @@ function backfillResourceOwnership() {
         saveAgentConfig(id, cfg);
         stamped++;
       }
+      if (cfg) configs[id] = cfg;
+    }
+    // A team-member's tenant is its parent Agent Team's `teamId` (see
+    // agent-tenant.js). Members created before that was enforced can carry a
+    // stale stamp; realign them so the on-disk value matches what every scoping
+    // decision already resolves. Idempotent — a synced member is skipped.
+    for (const { id, from, to } of planTenantBackfill(configs)) {
+      const cfg = configs[id];
+      cfg.teamId = to;
+      saveAgentConfig(id, cfg);
+      console.log(`[Orchestrator] Realigned team-member ${id} tenant ${from || "(unset)"} → ${to}`);
+      stamped++;
     }
   }
 
@@ -794,18 +1047,21 @@ function resolveOwnerTeamId(teamId) {
 // sessionPolicy=per-invocation, which is the signal we rely on there.
 function agentIsAutonomous(id, role) {
   if (role === "orchestrator" || role === "bp-instance") return true;
+  let sessionPolicy;
   try {
-    const cfg = loadAgentConfig(id);
-    if (cfg?.sessionPolicy === "per-invocation") return true;
+    sessionPolicy = loadAgentConfig(id)?.sessionPolicy;
   } catch { /* no config yet */ }
+  let triggers = [];
   try {
     const p = controlOrPoolPath(id, "triggers.json");
     if (fs.existsSync(p)) {
       const arr = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (Array.isArray(arr) && arr.length > 0) return true;
+      if (Array.isArray(arr)) triggers = arr;
     }
   } catch { /* unparsable / missing triggers */ }
-  return false;
+  // Pure predicate (agent-autonomy.js) so the trigger-write autonomy-flip
+  // rebuild (#962) shares one testable definition of "autonomous".
+  return isAutonomousState({ role, sessionPolicy, triggers });
 }
 
 // Unified-memory / digest gate (Memory/Knowledge unification, Phases 1+2):
@@ -841,11 +1097,79 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // Seeding runs before every saveAgentPrompt call in all paths, so the
   // on-disk checkout the gate reads is the live truth here.
   const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
+  // #1286: an agent with host-folder mount(s) (#1283, multiple #1290) is told
+  // each folder exists. Resolved from the same config the spawn path mounts
+  // from, so the prompt can never claim a folder the container doesn't have —
+  // each entry carries its in-container target and read/write mode (#1289).
+  const contextMounts = resolveContextMounts(cfg || {});
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
+}
+
+// #962: adding or removing a trigger can flip agentIsAutonomous(), which gates
+// the Trigger-management docs + unattended-run framing in the agent's CLAUDE.md.
+// Only saveAgentPrompt rebuilds CLAUDE.md and it isn't called on a trigger
+// write, so an agent that gained autonomy via the Flow Editor would never see
+// the trigger docs (and one that lost it would keep them). Called from the
+// trigger PUT chokepoint with the pre-write autonomy state; rebuilds CLAUDE.md
+// and mirrors it into an isolated agent's volume — but ONLY when the state
+// actually flipped, so a no-op edit (e.g. adding a 2nd trigger) never churns
+// (AC4). Reconstructs prompt/env/blueprintId exactly like the skill-sync
+// rebuild + prompt-preview. Best-effort: a rebuild failure never fails the
+// (already-persisted) trigger write.
+async function reconcileAgentAutonomyPrompt(id, wasAutonomous) {
+  try {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) return false;
+    const nowAutonomous = agentIsAutonomous(id, cfg.role);
+    if (!autonomyChanged(wasAutonomous, nowAutonomous)) return false;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+    const prompt = fs.existsSync(promptPath)
+      ? fs.readFileSync(promptPath, "utf8")
+      : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+    saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    // Mirror the rebuilt CLAUDE.md into a dedicated volume (no-op unless
+    // isolated + running). CLAUDE.md is re-read by the CLI on every invocation,
+    // so the new prompt takes effect on the agent's next run — no respawn, same
+    // as the skill-sync path (AC3).
+    await reseedAgent(id, ["CLAUDE.md"]);
+    console.log(`[Orchestrator] Rebuilt CLAUDE.md for ${id} (autonomy ${nowAutonomous ? "gained" : "lost"} via trigger change)`);
+    return true;
+  } catch (err) {
+    console.warn(`[Orchestrator] autonomy reconcile ${id}: ${err.message}`);
+    return false;
+  }
+}
+
+// #1286: unconditional CLAUDE.md rebuild for an agent whose config changed in a
+// way the prompt is gated on but no prompt write covers — today the read-only
+// context mount (setting or clearing it must add/remove the `/context` section).
+// Sibling of reconcileAgentAutonomyPrompt, minus the flip check: the caller only
+// invokes it when the gating input actually changed. Best-effort — a rebuild
+// failure never fails the already-persisted config write.
+async function rebuildAgentPrompt(id, reason) {
+  try {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) return false;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const promptPath = path.join(agentDir(id), AGENT_PROMPT_FILENAME);
+    const prompt = fs.existsSync(promptPath)
+      ? fs.readFileSync(promptPath, "utf8")
+      : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+    saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    // CLAUDE.md is re-read on every invocation, so this lands on the agent's
+    // next run; the mirror keeps an isolated volume in step.
+    await reseedAgent(id, ["CLAUDE.md"]);
+    console.log(`[Orchestrator] Rebuilt CLAUDE.md for ${id} (${reason || "config change"})`);
+    return true;
+  } catch (err) {
+    console.warn(`[Orchestrator] prompt rebuild ${id}: ${err.message}`);
+    return false;
+  }
 }
 
 // ============================================================
@@ -862,6 +1186,599 @@ function loadEnvironment(envId) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// ============================================================
+// Flow-anomaly sweep (#959, concept §4.1/§4.3)
+// ============================================================
+// Best-effort GitHub + run-state gather feeding the pure detector. All I/O is
+// wrapped so a single failed fetch/read degrades to a partial result rather than
+// a 500 — this is an observe-only surface, never a gate.
+
+// A minimal GitHub GET returning parsed JSON, mirroring the poller's `_fetchJson`
+// but path-based so it honours GITHUB_API_BASE (the E2E fake-github seam, #710).
+function _flowGithubGetJson(apiPath, token) {
+  const { resolveGithubApiTarget } = require("./github-api-base");
+  const api = resolveGithubApiTarget();
+  return new Promise((resolve, reject) => {
+    const req = api.transport.request(
+      {
+        hostname: api.hostname,
+        port: api.port,
+        path: `${api.basePath}${apiPath}`,
+        method: "GET",
+        headers: {
+          "User-Agent": "agent-studio-poller",
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout: 15_000,
+      },
+      (resp) => {
+        let body = "";
+        resp.on("data", (c) => (body += c));
+        resp.on("end", () => {
+          if (resp.statusCode !== 200) {
+            return reject(new Error(`GitHub ${apiPath} → HTTP ${resp.statusCode}`));
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (err) {
+            reject(new Error(`GitHub ${apiPath} → bad JSON: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error(`GitHub ${apiPath} → timeout`)));
+    req.end();
+  });
+}
+
+function _flowLiftEmits(cfgEmits, triggers) {
+  const base = Array.isArray(cfgEmits) ? cfgEmits.filter((e) => typeof e === "string" && e) : [];
+  const lifted = [];
+  for (const t of Array.isArray(triggers) ? triggers : []) {
+    if (t && Array.isArray(t.emits)) for (const e of t.emits) if (typeof e === "string" && e) lifted.push(e);
+  }
+  return lifted.length ? [...new Set([...base, ...lifted])] : base;
+}
+
+// Gather the team's flow model + a GitHub/run-state snapshot, then classify.
+// Returns `{ teamId, generatedAt, thresholds, repos, model, anomalies }`.
+async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const thresholds = flowAnomalySweep.resolveThresholds(teamCfg.anomalyThresholds);
+
+  // 1) Members (+ their triggers) of this team.
+  const members = [];
+  const envIds = new Set();
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch {
+      /* no triggers yet */
+    }
+    members.push({
+      id,
+      displayName: cfg.displayName || id,
+      emits: _flowLiftEmits(cfg.emits, triggers),
+      github: cfg.github || null,
+      // Open-end markers (#1004): a terminal/external outcome makes a silent
+      // run legitimate — the detector drops the output-missing expectation.
+      outcomes: cfg.outcomes || null,
+      triggers,
+    });
+    if (cfg.environmentId) envIds.add(cfg.environmentId);
+  }
+
+  const model = buildFlowModel(members, { labels });
+
+  // Which labels the detector cares about — bound the (expensive) timeline
+  // fetches to objects that actually carry one.
+  const interesting = new Set([
+    ...model.wakeEdges.map((w) => w.label),
+    ...model.wakeEdges.map((w) => w.claimLabel),
+    ...model.claimEdges.map((c) => c.claimLabel),
+    ...model.gateLabels,
+  ]);
+
+  // 2) Resolve one token per repo across the team's environments.
+  const repoToken = new Map();
+  const allowNonGithubHost = String(process.env.AEE_ALLOW_NON_GITHUB_REPO_HOST || "") === "1";
+  for (const envId of envIds) {
+    const env = loadEnvironment(envId);
+    if (!env || !env.githubTokenId) continue;
+    let token = null;
+    try {
+      token = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), "utf8").trim();
+    } catch {
+      continue;
+    }
+    if (!token) continue;
+    for (const r of Array.isArray(env.repositories) ? env.repositories : []) {
+      const full = ghParseRepoFullName(r && r.url, { allowNonGithubHost });
+      if (full && !repoToken.has(full)) repoToken.set(full, token);
+    }
+  }
+
+  // 3) Sweep GitHub for open issues/PRs, enriching interesting objects.
+  const objects = [];
+  const errors = [];
+  for (const [repo, token] of repoToken) {
+    const [owner, name] = repo.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    let issues = [];
+    let openPrs = [];
+    try {
+      issues = await _flowGithubGetJson(`${seg}/issues?state=open&per_page=100`, token);
+    } catch (err) {
+      errors.push(`${repo}: ${err.message}`);
+      continue;
+    }
+    try {
+      openPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    } catch {
+      openPrs = [];
+    }
+    for (const it of Array.isArray(issues) ? issues : []) {
+      const names = (Array.isArray(it.labels) ? it.labels : []).map((l) =>
+        typeof l === "string" ? l : l && l.name,
+      );
+      let timeline = null;
+      if (names.some((n) => interesting.has(n))) {
+        try {
+          timeline = await _flowGithubGetJson(`${seg}/issues/${it.number}/timeline`, token);
+        } catch {
+          timeline = null; // fall back to updated/created time
+        }
+      }
+      const linked =
+        flowAnomalySweep.objectKind(it) === "issue"
+          ? flowAnomalySweep.prsForIssue(openPrs, it.number)
+          : [];
+      objects.push(flowAnomalySweep.issueToDetectorObject(it, { timeline, linkedPrNumbers: linked }));
+    }
+  }
+
+  // 4) Per-consumer run state (running-sessions registry + session logs).
+  const sessions = {};
+  for (const id of Object.keys(model.consumers)) {
+    const active = new Set();
+    let running = false;
+    try {
+      const reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
+      if (Array.isArray(reg)) {
+        running = reg.length > 0;
+        for (const s of reg) if (s && s.correlationId) active.add(s.correlationId);
+      }
+    } catch {
+      /* no active sessions */
+    }
+    const events = [];
+    try {
+      const dir = agentStatePath(id, "sessions");
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const raw = fs.readFileSync(path.join(dir, f), "utf8");
+        for (const line of raw.split("\n")) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            events.push(JSON.parse(t));
+          } catch {
+            /* skip malformed line */
+          }
+        }
+      }
+    } catch {
+      /* no session logs */
+    }
+    sessions[id] = { running, runs: flowAnomalySweep.runsFromSessionEvents(events, active) };
+  }
+
+  const { anomalies } = detectFlowAnomalies({ model, github: { objects }, sessions, thresholds, now });
+  return {
+    teamId,
+    generatedAt: new Date(now).toISOString(),
+    thresholds,
+    repos: [...repoToken.keys()],
+    swept: objects.length,
+    errors,
+    model,
+    anomalies,
+  };
+}
+
+// ============================================================
+// Hill-climbing loop Phase 1 (#1222): per-team run-metrics collector.
+// Concept `docs/hill-climbing-agent-concept.md` §3.1/§4/§7. The deterministic
+// side lives in the pure `hill-climb-metrics.js` + `hill-climb-sweep.js`
+// (golden-fixture tested); this function is the I/O adapter that reads the log
+// surfaces off disk and feeds them in. It performs NO GitHub calls — every
+// signal is log-driven (session JSONL, usage spool, anomaly-history, the
+// event-transparency log, audit / prompt-history) — so a scheduled pass and a
+// manual pass produce identical snapshots for identical inputs.
+// ============================================================
+const HILL_CLIMB_TEAMS_DIR = process.env.HILL_CLIMB_TEAMS_DIR || "/workspace/teams";
+// Per-team single-flight lock shared by the scheduled pass and the manual
+// endpoint (a manual POST while a pass runs → 409 pass-running).
+const _hillClimbInFlight = new Set();
+
+// Read + JSON-parse a JSONL file into an array of rows; [] on any failure.
+function _readJsonlRows(file) {
+  try {
+    const raw = fs.readFileSync(file, "utf8");
+    const out = [];
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { out.push(JSON.parse(t)); } catch { /* skip malformed line */ }
+    }
+    return out;
+  } catch { return []; }
+}
+
+// All of one agent's session events across the live file + rotated archives.
+function _readAgentSessionEvents(id) {
+  const events = [];
+  try {
+    const dir = agentStatePath(id, "sessions");
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      for (const ev of _readJsonlRows(path.join(dir, f))) events.push(ev);
+    }
+  } catch { /* no session logs */ }
+  return events;
+}
+
+// Audit entries within the window (config-version boundary fallback when an
+// agent has no prompt-history). Newest-only read to bound the scan.
+function _readAuditEntriesSince(sinceMs) {
+  const dir = process.env.AUDIT_DIR || "/workspace/audit";
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue;
+      for (const e of _readJsonlRows(path.join(dir, f))) {
+        const t = e && e.ts ? Date.parse(e.ts) : NaN;
+        if (Number.isFinite(t) && (sinceMs == null || t >= sinceMs)) out.push(e);
+      }
+    }
+  } catch { /* no audit */ }
+  return out;
+}
+
+async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const hc = teamCfg.hillClimb && typeof teamCfg.hillClimb === "object" ? teamCfg.hillClimb : {};
+  const windowDays = Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7;
+  const minRunsPerWindow = Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0
+    ? hc.minRunsPerWindow : 20;
+  const excludeAgents = Array.isArray(hc.excludeAgents)
+    ? hc.excludeAgents.filter((s) => typeof s === "string") : [];
+  const fromMs = now - windowDays * 24 * 60 * 60 * 1000;
+
+  const auditEntries = _readAuditEntriesSince(fromMs);
+
+  // 1) Members of this team + their triggers/ports (dead-config + rework inputs).
+  const members = [];
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { continue; }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch { /* no triggers yet */ }
+    members.push({ id, emits: cfg.emits, outcomes: cfg.outcomes, triggers });
+  }
+  const reworkTriggers = hillClimbSweep.reworkTriggerIds(members);
+
+  // 2) Per-member: session runs + token cost + config-version boundaries.
+  const runs = [];
+  const configBoundaries = {};
+  for (const m of members) {
+    const events = _readAgentSessionEvents(m.id);
+    const usageByCorr = hillClimbSweep.usageByCorrelation(_readJsonlRows(agentStatePath(m.id, "usage-spool.jsonl")));
+    const active = new Set();
+    try {
+      const reg = JSON.parse(fs.readFileSync(agentStatePath(m.id, "running-sessions.json"), "utf8"));
+      if (Array.isArray(reg)) for (const s of reg) if (s && s.correlationId) active.add(s.correlationId);
+    } catch { /* no active sessions */ }
+    for (const r of hillClimbSweep.runsFromSessionEvents(events, {
+      agentId: m.id, usageByCorr, reworkTriggerIds: reworkTriggers, activeCorrelationIds: active,
+    })) runs.push(r);
+    let promptHistory = null;
+    try {
+      promptHistory = JSON.parse(fs.readFileSync(agentStatePath(m.id, ".aee", "prompt-history.json"), "utf8"));
+    } catch { /* no prompt-history — audit fallback */ }
+    configBoundaries[m.id] = hillClimbSweep.configBoundariesForAgent(promptHistory, auditEntries, m.id);
+  }
+
+  // 3) Anomaly recurrence — read #1221's per-team history file by PATH (so this
+  //    feature doesn't hard-depend on that module being present); [] if absent.
+  let anomalyHistory = [];
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (seg) anomalyHistory = _readJsonlRows(path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "anomaly-history.jsonl"));
+
+  // 4) Waste signals from the (global) event-transparency log, scoped to team.
+  const teamAgentIds = new Set(members.map((m) => m.id));
+  const eventLogEntries = [];
+  try {
+    const dir = githubEventLog.EVENT_LOG_DIR;
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^github-events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue;
+      for (const e of _readJsonlRows(path.join(dir, f))) eventLogEntries.push(e);
+    }
+  } catch { /* no event log */ }
+  const waste = hillClimbSweep.wasteSignalsFromEventLog(eventLogEntries, fromMs, now, teamAgentIds);
+
+  const snapshot = hillClimbMetrics.computeHillClimbMetrics({
+    runs,
+    anomalyHistory,
+    configBoundaries,
+    triggerDefs: hillClimbSweep.triggerDefsFromMembers(members),
+    emitLabels: hillClimbSweep.emitLabelsFromMembers(members),
+    consumedLabels: hillClimbSweep.consumedLabelsFromMembers(members),
+    throttleDrops: waste.throttleDrops,
+    digestFolds: waste.digestFolds,
+  }, { now, windowDays, minRunsPerWindow, excludeAgents });
+
+  return { teamId, generatedAt: new Date(now).toISOString(), ...snapshot };
+}
+
+// Day-keyed snapshot path (same-day re-run overwrites). Traversal-guarded via
+// safeTeamSegment — the same guard the KB clone + anomaly-history file use.
+function hillClimbSnapshotPath(teamId, dateStr) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "metrics", `${dateStr}.json`);
+}
+function persistHillClimbSnapshot(teamId, snapshot, now = Date.now()) {
+  const p = hillClimbSnapshotPath(teamId, new Date(now).toISOString().slice(0, 10));
+  if (!p) return null;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(snapshot, null, 2));
+    return p;
+  } catch { return null; }
+}
+function readLatestHillClimbSnapshot(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  const dir = path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "metrics");
+  try {
+    const files = fs.readdirSync(dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort();
+    if (!files.length) return null;
+    return JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), "utf8"));
+  } catch { return null; }
+}
+
+// ── improvement-card store (hill-climbing loop Phase 2, #1224) ───────────────
+//
+// Persist the team's improvement cards next to its metrics snapshots at
+// /workspace/teams/<teamId>/hill-climb/cards.json. Traversal-guarded via
+// safeTeamSegment (same guard as the snapshot/anomaly-history files). The store
+// is the single JSON array of cards across their whole lifecycle (open → applied
+// → validated/… ); config never travels here (it rides the team-agent bundle).
+function hillClimbCardsPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "cards.json");
+}
+function readHillClimbCards(teamId) {
+  const p = hillClimbCardsPath(teamId);
+  if (!p) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    return Array.isArray(raw) ? raw : (Array.isArray(raw.cards) ? raw.cards : []);
+  } catch { return []; }
+}
+function writeHillClimbCards(teamId, cards) {
+  const p = hillClimbCardsPath(teamId);
+  if (!p) return null;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(Array.isArray(cards) ? cards : [], null, 2));
+    return p;
+  } catch { return null; }
+}
+
+// The per-team card budget/window config, read off the team agent's hillClimb
+// blob (round-tripped like stages/labels). autonomy 0 = collector only (no cards).
+function hillClimbCardConfig(teamId) {
+  const cfg = loadAgentConfig(teamId) || {};
+  const hc = cfg.hillClimb && typeof cfg.hillClimb === "object" ? cfg.hillClimb : {};
+  const autonomy = [0, 1, 2, 3].includes(hc.autonomy) ? hc.autonomy : 2;
+  const maxCardsPerPass = Number.isFinite(hc.maxCardsPerPass) && hc.maxCardsPerPass >= 0
+    ? hc.maxCardsPerPass : hillClimbCards.DEFAULT_MAX_CARDS_PER_PASS;
+  const windowDays = Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7;
+  return { autonomy, maxCardsPerPass, windowDays };
+}
+
+// Fold this pass's incoming cards (heuristic and/or analyst) into the persisted
+// store under the budget/dedup/cooldown rules, re-validating every incoming card
+// through the schema (invalid ones are dropped — the store is the authority even
+// for analyst output). Persists and returns the merge summary. Never throws.
+function mergeAndPersistHillClimbCards(teamId, incoming, { now = Date.now(), source = "heuristic" } = {}) {
+  const { maxCardsPerPass, windowDays } = hillClimbCardConfig(teamId);
+  const existing = readHillClimbCards(teamId);
+  const passId = `pass-${new Date(now).toISOString()}`;
+  const valid = [];
+  let rejected = 0;
+  for (const raw of Array.isArray(incoming) ? incoming : []) {
+    // Heuristic cards arrive already-normalized; analyst cards are raw JSON.
+    const card = raw && raw.status && raw.id
+      ? raw
+      : (() => { const n = hillClimbCards.normalizeCard(raw, { teamId, now, source, passId }); return n.ok ? n.card : null; })();
+    if (!card) { rejected += 1; continue; }
+    if (!hillClimbCards.validateCard(card).ok) { rejected += 1; continue; }
+    valid.push(card);
+  }
+  const merged = hillClimbCards.mergeCards(existing, valid, { maxCardsPerPass, windowDays, now, passId });
+  const savedPath = writeHillClimbCards(teamId, merged.cards);
+  return { ...merged, rejected, path: savedPath, cards: merged.cards };
+}
+
+// Dismiss a card (human action): flip its status to 'dismissed' so it is not
+// re-raised. Returns the updated card or null when unknown. Proposals-only —
+// dismiss changes card state, never any agent config.
+function dismissHillClimbCard(teamId, cardId, { now = Date.now() } = {}) {
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return null;
+  card.status = "dismissed";
+  card.updatedAt = new Date(now).toISOString();
+  writeHillClimbCards(teamId, cards);
+  return card;
+}
+
+// Record an APPLIED card (hill-climbing loop Phase 2b, #1225). The console runs
+// the actual mutation through the existing audited choke-point (as the acting
+// human); this endpoint only stamps the outcome onto the card so #1226 can
+// measure it across the config boundary. Gated: autonomy < 2 refuses (apply is
+// a level-2 action even via a direct call), and only an OPEN card can be applied
+// (an already-applied/dismissed card is left untouched). The applied patch
+// carries the apply timestamp, the config-version reference, the baseline
+// metrics snapshot, the undo payload the console gathered before mutating, and a
+// one-window cooldown (so a re-detected finding can't bump the applied card and
+// contaminate its own measurement). Returns { ok, code?, card? }.
+function applyHillClimbCard(teamId, cardId, { now = Date.now(), appliedBy = null, undo = null, configVersionRef = null } = {}) {
+  const { autonomy, windowDays } = hillClimbCardConfig(teamId);
+  if (!hillClimbApply.canApplyAtAutonomy(autonomy)) {
+    return { ok: false, code: "autonomy-locked", autonomy };
+  }
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return { ok: false, code: "card-not-found" };
+  if (card.status !== "open") return { ok: false, code: "card-not-open", status: card.status };
+  const snapshot = readLatestHillClimbSnapshot(teamId);
+  const patch = hillClimbApply.buildAppliedPatch(card, { now, appliedBy, snapshot, undo, configVersionRef, windowDays });
+  Object.assign(card, patch);
+  writeHillClimbCards(teamId, cards);
+  return { ok: true, card };
+}
+
+// The verdict step (hill-climbing loop Phase 3, #1226). For every `applied`
+// card whose full measurement window has elapsed AFTER the config boundary it
+// created, compare the declared target metric before/after and transition the
+// card: improved → validated, regressed → a rollback card, neutral → neutral
+// (finalised only after two windows), thin sample → insufficient-data (deferred,
+// never guessed). Pure logic in `hill-climb-verdict.js`; this reads/writes the
+// store. Runs every pass, independent of autonomy (measurement is honest
+// bookkeeping — it never mutates any agent config). Returns the verdict summary.
+function runVerdictStep(teamId, snapshot, { now = Date.now() } = {}) {
+  const { minRunsPerWindow, windowDays } = (() => {
+    const cfg = loadAgentConfig(teamId) || {};
+    const hc = cfg.hillClimb && typeof cfg.hillClimb === "object" ? cfg.hillClimb : {};
+    return {
+      minRunsPerWindow: Number.isFinite(hc.minRunsPerWindow) && hc.minRunsPerWindow >= 0 ? hc.minRunsPerWindow : 20,
+      windowDays: Number.isFinite(hc.windowDays) && hc.windowDays > 0 ? hc.windowDays : 7,
+    };
+  })();
+  const cards = readHillClimbCards(teamId);
+  if (!cards.some((c) => c && c.status === "applied")) return { transitioned: 0, verdicts: [] };
+  const out = hillClimbVerdict.applyVerdicts(cards, snapshot, { now, minRunsPerWindow, windowDays });
+  if (out.transitioned > 0) writeHillClimbCards(teamId, out.cards);
+  return { transitioned: out.transitioned, verdicts: out.verdicts };
+}
+
+// Record a ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
+// already executed the card's rollback plan through the same audited choke-point
+// as the apply (§3.3) — this only stamps the outcome so the object re-enters
+// detection after a fresh window (the cooldown the merge honours). Gated like
+// apply: autonomy < 2 refuses, and only a `regressed` card (one carrying a
+// rollback offer) can be rolled back. A rollback is always a human click, never
+// auto-reverted. Returns { ok, code?, card? }.
+function rollbackHillClimbCard(teamId, cardId, { now = Date.now(), rolledBackBy = null, undoResult = null } = {}) {
+  const { autonomy, windowDays } = hillClimbCardConfig(teamId);
+  if (!hillClimbApply.canApplyAtAutonomy(autonomy)) {
+    return { ok: false, code: "autonomy-locked", autonomy };
+  }
+  const cards = readHillClimbCards(teamId);
+  const card = cards.find((c) => c && c.id === cardId);
+  if (!card) return { ok: false, code: "card-not-found" };
+  if (card.status !== "regressed") return { ok: false, code: "card-not-regressed", status: card.status };
+  const nowIso = new Date(now).toISOString();
+  const days = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 7;
+  card.status = "rolled-back";
+  card.rolledBackAt = nowIso;
+  card.rolledBackBy = rolledBackBy ? String(rolledBackBy) : null;
+  card.updatedAt = nowIso;
+  // A fresh window before the same finding may be raised again (AC: a rolled-back
+  // object re-enters detection only after a fresh window).
+  card.cooldownUntil = new Date(now + days * 24 * 60 * 60 * 1000).toISOString();
+  if (undoResult != null) card.undoResult = undoResult;
+  writeHillClimbCards(teamId, cards);
+  return { ok: true, card };
+}
+
+// Run one hill-climb pass for a team behind the per-team single-flight lock —
+// the SAME code path for the scheduled timer and the manual POST endpoint (AC:
+// manual and scheduled passes produce identical snapshots for identical inputs).
+// A manual run started while a pass is already in flight is refused so the
+// endpoint can answer 409 pass-running. Also folds the deterministic heuristic
+// findings into the card store (concept §3.2 honest fallback — cards ship on
+// every pass, provider or not) and returns the secret-free analyst digest so the
+// console can run the LLM analyst step over it (#1224). Cards are proposals only.
+// Returns { ok:true, snapshot, path, cards, digest, merge } or { ok:false, reason }.
+async function runHillClimbPass(teamId, { now = Date.now() } = {}) {
+  if (_hillClimbInFlight.has(teamId)) return { ok: false, reason: "pass-running" };
+  _hillClimbInFlight.add(teamId);
+  try {
+    const snapshot = await computeTeamHillClimbMetrics(teamId, { now });
+    const savedPath = persistHillClimbSnapshot(teamId, snapshot, now);
+    const { autonomy } = hillClimbCardConfig(teamId);
+    // Verdict step (#1226): measure already-applied changes across the config
+    // boundary BEFORE folding this pass's new findings, so a regressed card is
+    // flipped to a rollback card and its object is not re-raised as a duplicate.
+    const verdict = runVerdictStep(teamId, snapshot, { now });
+    let merge = null;
+    let digest = null;
+    if (autonomy >= 1) {
+      // Deterministic findings → cards (the honest fallback shipped every pass).
+      const anomalyHistory = _readTeamAnomalyHistory(teamId);
+      const findings = hillClimbCards.heuristicFindings(snapshot, { now, anomalyHistory });
+      merge = mergeAndPersistHillClimbCards(teamId, findings, { now, source: "heuristic" });
+      // Secret-free digest for the console's server-side analyst (concept §3.2).
+      digest = hillClimbCards.buildAnalystDigest(snapshot, { findings });
+    }
+    return {
+      ok: true,
+      snapshot,
+      path: savedPath,
+      cards: merge ? merge.cards : [],
+      merge: merge ? { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected } : null,
+      verdict: { transitioned: verdict.transitioned, verdicts: verdict.verdicts },
+      digest,
+      autonomy,
+    };
+  } finally {
+    _hillClimbInFlight.delete(teamId);
+  }
+}
+
+// Read the team's raw #1221 anomaly-history rows (for object-keyed recurrence
+// cards). Best-effort; [] when absent. Traversal-guarded like the metrics files.
+function _readTeamAnomalyHistory(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return [];
+  return _readJsonlRows(path.join(HILL_CLIMB_TEAMS_DIR, seg, "hill-climb", "anomaly-history.jsonl"));
 }
 
 // Enrich a token-usage record (#654) with the authoritative control-plane
@@ -888,7 +1805,8 @@ function enrichUsageRecord(agentId, record) {
   }
   if (out.provider == null) {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    out.provider = env?.llmEndpointId || null;
+    // A per-agent provider override wins over the environment binding.
+    out.provider = cfg.llmEndpointOverride || env?.llmEndpointId || null;
   }
   return out;
 }
@@ -1051,6 +1969,11 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
     knowledgeDigestRef: opts.knowledgeDigestRef || null,
+    // Resolved list of host-folder mounts (#1283 single, #1290 multiple), when
+    // the agent has any — gates + populates the Context Folder section (#1286),
+    // enumerating each folder with its in-container path and access mode (#1289).
+    // Empty → the section is absent (byte-identical to a no-mount agent).
+    contextMounts: Array.isArray(opts.contextMounts) ? opts.contextMounts : [],
   });
 }
 
@@ -1678,7 +2601,12 @@ function saveTriggers(id, triggers) {
 
 function deleteAgentFiles(id) {
   const dir = agentDir(id);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+  // `force: true` matches the sibling cleanups below: without it, an
+  // rmSync that fails mid-walk (e.g. an NFS/Filestore `.nfsXXXX` silly-rename
+  // left by a live pod → ENOTEMPTY) throws AFTER unlinking config.json,
+  // leaving exactly the invisible config-less residue that dead-locked
+  // same-id team retries (#1525 B2).
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   // Control-plane state pushed by the agent (#185): /control/agents/<id>/
   // status.json + sessions/<roomId>.jsonl + the session-pointer mirror. This
   // is UNCONDITIONAL — push (AEE_PUSH_STATE) defaults ON, so the control dir
@@ -1723,6 +2651,8 @@ function purgeTeamKnowledge(teamId) {
     suggestionsDir: KNOWLEDGE_SUGGESTIONS_DIR,
     archivedDir: KNOWLEDGE_ARCHIVED_DIR,
     reviewDir: KNOWLEDGE_REVIEW_DIR,
+    retrievalDir: KNOWLEDGE_RETRIEVAL_DIR,
+    vectorsDir: KNOWLEDGE_VECTORS_DIR,
     eventsFile: KNOWLEDGE_EVENTS_FILE,
   });
   if (!plan) return; // unsafe id → remove nothing
@@ -1785,6 +2715,34 @@ function listAgentIds() {
   );
 }
 
+// All team-member configs belonging to teamId — shared by
+// listTeamMembersWithState/disableTeam/enableTeam so the membership
+// filter (role + parentTeamId) lives in exactly one place.
+function teamMemberConfigs(teamId) {
+  return listAgentIds()
+    .map((id) => loadAgentConfig(id))
+    .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+}
+
+// Busy/active-trigger snapshot for an agent — shared by disableAgent's own
+// busy-warning path and the team-members preview listing, so both report
+// identical state for the same agent.
+function agentBusyState(id) {
+  let statusJson = null;
+  try {
+    statusJson = JSON.parse(
+      fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
+    );
+  } catch { /* no status file = idle */ }
+
+  let triggers = null;
+  try {
+    triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
+  } catch { /* no triggers file */ }
+
+  return deriveBusyState(statusJson, triggers);
+}
+
 // ============================================================
 // Matrix helpers (admin operations only — no routing identity)
 // ============================================================
@@ -1804,6 +2762,19 @@ async function ensureMatrixUser(adminClient, username, password) {
   // sets the password and reactivates a previously deactivated account on the
   // Continuwuity build we run (issue #715) — see matrix-admin-commands.js.
   for (const { body, delayMs } of buildEnsureUserCommands(username, password)) {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, { msgtype: "m.text", body });
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+}
+
+// Re-issue only the account-reactivation commands (no create-user) for an
+// existing local account. Called from the login-retry recovery path when a
+// login still returns M_USER_DEACTIVATED after `ensureMatrixUser` (issue #1386):
+// on a delete→immediate-recreate race the admin bot can process the deletion's
+// `deactivate` *after* the ensure sequence's `reset-password`, so re-sending the
+// reactivation once the late deactivate has landed clears the flag.
+async function reissueMatrixReactivation(adminClient, username, password) {
+  for (const { body, delayMs } of buildReactivateCommands(username, password)) {
     await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, { msgtype: "m.text", body });
     await new Promise((r) => setTimeout(r, delayMs));
   }
@@ -1831,11 +2802,32 @@ async function attemptLoginMatrixUser(username, password) {
 // system the first attempt succeeds and returns immediately; on a slow one the
 // admin bot may not have finished create-user/enable-login by the time we try,
 // yielding a transient M_FORBIDDEN — we retry the login with bounded backoff up
-// to MATRIX_LOGIN_RETRY_CEILING_MS. Non-M_FORBIDDEN errors propagate at once.
-async function loginMatrixUser(username, password) {
+// to MATRIX_LOGIN_RETRY_CEILING_MS. Non-retryable errors propagate at once.
+//
+// When `adminClient` is supplied, a lingering M_USER_DEACTIVATED between retries
+// re-issues the account-reactivation admin command (issue #1386): the delete→
+// immediate-recreate race can leave the account deactivated at first login
+// because the deletion's `deactivate` was processed *after* the ensure
+// sequence's reactivating `reset-password`. Re-sending the reactivation, then
+// waiting out the backoff, lets the next login succeed once the late deactivate
+// has landed. Without an adminClient the loop behaves exactly as before (login
+// retries only) — every existing call site keeps its prior semantics.
+async function loginMatrixUser(username, password, adminClient = null) {
   return matrixLoginRetry.retryWhile(
     () => attemptLoginMatrixUser(username, password),
-    { ceilingMs: MATRIX_LOGIN_RETRY_CEILING_MS }
+    {
+      ceilingMs: MATRIX_LOGIN_RETRY_CEILING_MS,
+      onBeforeRetry: adminClient
+        ? async (err) => {
+            if (!matrixLoginRetry.isDeactivatedError(err)) return;
+            // Best-effort — a failed re-issue must not abort the retry loop;
+            // the next login attempt is the real gate.
+            await reissueMatrixReactivation(adminClient, username, password).catch((e) =>
+              console.warn(`[Orchestrator] reactivation re-issue for ${username} failed: ${e.message}`)
+            );
+          }
+        : null,
+    }
   );
 }
 
@@ -1889,8 +2881,8 @@ const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
 // The agent container mounts neither the _keys store nor the host deploy key,
 // yet startAgentProcess copies the orchestrator's whole process.env into the
 // agent — including the GIT_SSH_COMMAND that docker-compose sets for the
-// orchestrator itself (pointing at /root/.ssh/id_accenturecodefoundry, a file
-// that only exists in the orchestrator). Inherited blindly, that var made every
+// orchestrator itself (pointing at /root/.ssh/id_orchestrator, an optional
+// baseline key that only exists in the orchestrator). Inherited blindly, that var made every
 // agent's `git push` reference a key it does not have ("SSH key missing").
 //
 // So we ALWAYS strip the inherited value first, then — only when the env has an
@@ -1953,9 +2945,9 @@ function materializeAgentSshKey(id, env, childEnv) {
 }
 
 // Build the GIT_SSH_COMMAND value for an env with an attached SSH key. Falls
-// back to null so the caller can leave process.env's default in place (the
-// orchestrator container ships with a baseline SSH identity mounted via
-// docker-compose).
+// back to null so the caller can leave process.env's default in place — the
+// optional baseline identity from docker-compose (ORCHESTRATOR_SSH_KEY), which
+// is a dud /dev/null key unless the operator configured one.
 function buildGitSshCommand(env) {
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
   const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
@@ -2162,6 +3154,21 @@ function writeAgentKnowledgeDigest(id, teamId, storeRoot) {
   const tmp = target + ".tmp";
   fs.writeFileSync(tmp, markdown);
   fs.renameSync(tmp, target);
+  // #917: guarantee the scoped-knowledge stub exists so the CLAUDE.md
+  // `@`-import never dangles. STUB ONLY — the orchestrator never has the
+  // invocation prompt; the Python runtime is the single real writer and
+  // overwrites this before every run. Never overwrite an existing file (it may
+  // hold the last invocation's real matches, which the operator can browse).
+  const scoped = path.join(agentDir(id), SCOPED_KNOWLEDGE_FILENAME);
+  if (!fs.existsSync(scoped)) {
+    fs.writeFileSync(
+      scoped,
+      "# Task-Scoped Knowledge\n\n" +
+      "> GENERATED — do not edit. Auto-built before every run from team knowledge\n" +
+      "> whose auto-load triggers match the current task.\n\n" +
+      "No task-scoped knowledge for this session.\n",
+    );
+  }
 }
 
 // ── Legacy-memory migration (Memory/Knowledge unification, Phase 3) ─────────
@@ -2723,6 +3730,12 @@ function writeTeamKnowledgeConfig(teamId, patch) {
     clean.knowledgePromotionGates = gates;
   }
 
+  if ('decayHorizonDays' in src) {
+    const days = Number(src.decayHorizonDays);
+    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new Error('decayHorizonDays must be an integer 0..3650 (0 = off)');
+    clean.decayHorizonDays = days;
+  }
+
   if (!Object.keys(clean).length) throw new Error('no valid knowledge-config keys in patch');
   writeTeamKnowledgeOverrides(teamId, clean);
   return clean;
@@ -3042,6 +4055,287 @@ function writeArchivedIds(teamId, list) {
   fs.writeFileSync(p, JSON.stringify([...new Set(Array.isArray(list) ? list : [])], null, 2));
 }
 
+// Per-team operator validity windows (#916): a map { <canonicalId>: { validTo?,
+// supersededBy? } }. Same shared-volume JSON-per-team pattern as the archived-id
+// set; overlaid as fields (never a status) at each canonical re-projection.
+function _validityPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_VALIDITY_DIR, `${seg}.json`);
+}
+
+function readKnowledgeValidity(teamId) {
+  const p = _validityPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch { return {}; }
+}
+
+function writeKnowledgeValidity(teamId, map) {
+  const p = _validityPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_VALIDITY_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
+// Per-team curation-health record (#919) — sibling file of the candidate store
+// (<team>.health.json). Written by the nightly decay/health pass; served
+// read-only to the admin console's health strip.
+function _curationHealthPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${seg}.health.json`);
+}
+
+function readCurationHealth(teamId) {
+  const p = _curationHealthPath(teamId);
+  if (!p) return null;
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : null;
+  } catch { return null; }
+}
+
+function writeCurationHealth(teamId, health) {
+  const p = _curationHealthPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_SUGGESTIONS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(health, null, 2));
+}
+
+// Tolerant read of the whole live feed (the health counter needs the harvest
+// history; the file is bounded in practice and this runs once per backstop).
+function _readFeedEvents() {
+  let raw;
+  try { raw = fs.readFileSync(KNOWLEDGE_EVENTS_FILE, "utf8"); } catch { return []; }
+  const out = [];
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      if (obj && typeof obj === "object") out.push(obj);
+    } catch { /* keep going — one bad line never hides the history */ }
+  }
+  return out;
+}
+
+// #919 nightly decay sweep + curation-health refresh for one team. Runs inside
+// the curator backstop AFTER the collector pass (so the canonical clone and
+// candidate store are fresh). PROPOSES only: stale entries become
+// `source:"decay"` cards in the existing suggestion store; confirming a card in
+// the UI runs the exact same archive path as the manual Retire button. Best-
+// effort — any failure is logged, never thrown into the backstop loop.
+function runTeamDecaySweep(teamId) {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const resolved = resolveTeamKbRepo(teamId);
+  const rawEnv = resolved ? resolved.env : null;
+  const env = teamKnowledgeEnv(teamId, rawEnv); // #570: per-team knowledge config
+  const horizonDays = resolveDecayHorizonDays(env);
+
+  let raised = 0;
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (clonePath && fs.existsSync(path.join(clonePath, ".git"))) {
+    const storeRoot = path.join(clonePath, _kbStoreRel(env));
+    const rawEntries = readKbStoreEntries(storeRoot);
+    const candidates = readKnowledgeCandidates(teamId);
+    const plan = knowledgeDecay.planDecaySuggestions({
+      // post-fold: merged/archived/pending/rejected/expired (#916) already gone
+      entries: foldVisibleEntries(rawEntries, now),
+      retrieval: readRetrievalStats(teamId),
+      includedIds: buildKnowledgeDigest({ teamId, generatedAt: now, entries: rawEntries }).includedIds,
+      candidates,
+      horizonDays,
+      now,
+    });
+    if (plan.raise.length) {
+      writeKnowledgeCandidates(teamId, [...candidates, ...plan.raise]);
+      if (plan.batch) appendKnowledgeEvents([plan.batch]);
+      raised = plan.raise.length;
+    }
+  }
+
+  // Curation health (the Gap-3 silent-convergence monitor) — computed even when
+  // no clone exists yet; one `curation-health` feed event per state TRANSITION.
+  const health = knowledgeDecay.computeCurationHealth({
+    candidates: readKnowledgeCandidates(teamId),
+    events: _readFeedEvents(),
+    teamId,
+    now,
+  });
+  const transition = knowledgeDecay.planHealthTransition(readCurationHealth(teamId), health, { teamId, now });
+  writeCurationHealth(teamId, health);
+  if (transition) appendKnowledgeEvents([transition]);
+  return { raised, health: health.status };
+}
+
+// ── #918 embedding backend + per-team vector cache ──────────────────────────
+// The backend is a lazy singleton (model loads on first embed, only in the
+// backstop). A load failure (library/model absent) downgrades to unavailable
+// once, logged once — never an error loop, never on the push path.
+let _embeddingBackend = null;
+let _embeddingWarned = false;
+function getEmbeddingBackend() {
+  if (_embeddingBackend === null) {
+    _embeddingBackend = knowledgeEmbeddings.createEmbeddingBackend({});
+  }
+  return _embeddingBackend;
+}
+
+function _vectorsPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_VECTORS_DIR, `${seg}.jsonl`);
+}
+
+function readVectorCache(teamId) {
+  const p = _vectorsPath(teamId);
+  if (!p) return [];
+  try { return knowledgeEmbeddings.parseVectorCache(fs.readFileSync(p, "utf8")); } catch { return []; }
+}
+
+function writeVectorCache(teamId, rows) {
+  const p = _vectorsPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_VECTORS_DIR, { recursive: true });
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, knowledgeEmbeddings.serializeVectorCache(rows));
+  fs.renameSync(tmp, p);
+}
+
+// The `semantic` clustering context (#918) for one projection run: vectors from
+// the team's cache whose contentHash still matches the entry's current text,
+// plus the per-team cosine threshold. Null when the cache holds nothing usable
+// — the seam then runs bit-for-bit lexical-only, zero overhead.
+function teamSemanticCtx(teamId, entries, env) {
+  try {
+    const vectors = knowledgeEmbeddings.buildVectorLookup(readVectorCache(teamId), entries);
+    if (!vectors) return null;
+    const { cosineThreshold } = knowledgeConvergenceConfig(env);
+    return { vectors, cosineThreshold };
+  } catch { return null; }
+}
+
+// Nightly backstop embedding pass (#918): (re-)embed entries whose contentHash
+// is missing/stale, prune vectors of vanished ids. NEVER on the push path — a
+// freshly pushed entry matches lexically immediately and semantically after
+// this pass (the backstop re-runs the collector right after, idempotent via
+// stableSuggestionId). Best-effort throughout.
+async function runTeamEmbeddingPass(teamId) {
+  const backend = getEmbeddingBackend();
+  if (!backend.available) return { embedded: 0, skipped: backend.reason };
+  const clonePath = knowledgeFeed.canonicalClonePath(KNOWLEDGE_CLONE_ROOT, teamId);
+  if (!clonePath || !fs.existsSync(path.join(clonePath, ".git"))) return { embedded: 0, skipped: "no-clone" };
+  const resolved = resolveTeamKbRepo(teamId);
+  const env = teamKnowledgeEnv(teamId, resolved ? resolved.env : null);
+  const storeRoot = path.join(clonePath, _kbStoreRel(env));
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const entries = foldVisibleEntries(readKbStoreEntries(storeRoot), now);
+  const cache = readVectorCache(teamId);
+  const plan = knowledgeEmbeddings.planEmbeddingPass({ entries, cache });
+  if (plan.toEmbed.length === 0 && plan.pruned === 0) return { embedded: 0, skipped: null };
+  let fresh = [];
+  if (plan.toEmbed.length > 0) {
+    try {
+      const vectors = await backend.embed(plan.toEmbed.map((e) => e.text));
+      fresh = plan.toEmbed
+        .map((e, i) => ({ id: e.id, contentHash: e.contentHash, vector: vectors[i] }))
+        .filter((r) => Array.isArray(r.vector) && r.vector.length > 0);
+    } catch (err) {
+      if (!_embeddingWarned) {
+        _embeddingWarned = true;
+        console.warn(`[Orchestrator] embedding backend failed (semantic convergence stays off): ${err.message}`);
+      }
+      return { embedded: 0, skipped: "backend-error" };
+    }
+  }
+  writeVectorCache(teamId, [...plan.keep, ...fresh]);
+  return { embedded: fresh.length, pruned: plan.pruned, skipped: null };
+}
+
+// Per-team read-side retrieval aggregate (#915) — same shared-volume JSON-per-
+// team pattern. Written atomically (tmp+rename): the emitters are fire-and-
+// forget, so a torn read must never be possible.
+function _retrievalPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_RETRIEVAL_DIR, `${seg}.json`);
+}
+
+function readRetrievalStats(teamId) {
+  const p = _retrievalPath(teamId);
+  if (!p) return { since: null, entries: {} };
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      return { since: typeof obj.since === "string" ? obj.since : null, entries: obj.entries && typeof obj.entries === "object" ? obj.entries : {} };
+    }
+  } catch { /* fresh */ }
+  return { since: null, entries: {} };
+}
+
+function recordKnowledgeRetrieval(teamId, report) {
+  const p = _retrievalPath(teamId);
+  if (!p) throw new Error("invalid teamId");
+  const next = knowledgeRetrieval.applyRetrieval(readRetrievalStats(teamId), report);
+  fs.mkdirSync(KNOWLEDGE_RETRIEVAL_DIR, { recursive: true });
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next));
+  fs.renameSync(tmp, p);
+  return { entries: report.entryIds.length, source: report.source };
+}
+
+// Per-team operator auto-load triggers (#917): { <canonicalId>: loadTriggers[] }.
+// Same shared-volume JSON-per-team pattern as the validity sidecar; applied as
+// a field at each canonical re-projection so the agent-side scoped resolver
+// reads them straight off the canonical clone.
+function _triggersPath(teamId) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId);
+  if (!seg) return null;
+  return path.join(KNOWLEDGE_TRIGGERS_DIR, `${seg}.json`);
+}
+
+function readKnowledgeTriggers(teamId) {
+  const p = _triggersPath(teamId);
+  if (!p) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(p, "utf8"));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch { return {}; }
+}
+
+function writeKnowledgeTriggers(teamId, map) {
+  const p = _triggersPath(teamId);
+  if (!p) return;
+  fs.mkdirSync(KNOWLEDGE_TRIGGERS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map && typeof map === "object" ? map : {}, null, 2));
+}
+
+// Set / clear a canonical KB entry's auto-load triggers (#917, operator-
+// initiated via the item card). Empty/invalid list clears. Re-projects like the
+// validity setter so the canonical clone — the file the Python resolver reads —
+// carries the field immediately. Best-effort on the git side.
+function setKnowledgeTriggers(teamId, id, loadTriggers) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  const clean = normalizeLoadTriggers(loadTriggers);
+  const map = readKnowledgeTriggers(teamId);
+  if (clean) map[id] = clean; else delete map[id];
+  writeKnowledgeTriggers(teamId, map);
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] triggers re-projection for '${teamId}' failed: ${err.message}`));
+  } catch (err) {
+    console.warn(`[Orchestrator] triggers re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, loadTriggers: clean || [] };
+}
+
 // Per-team operator review decisions for supervised-review mode: a map
 // { <canonicalId>: "approved" | "rejected" }. Same shared-volume JSON-per-team
 // pattern as the archived-id set. An id absent from the map is "pending" while
@@ -3114,7 +4408,9 @@ function baselineReviewApprovals(teamId, env) {
     if (shardEntries.length === 0) return;
     const { simThreshold } = knowledgeConvergenceConfig(env);
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+    const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+      simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env), now,
+    });
     const decisions = readReviewDecisions(teamId);
     for (const kind of KNOWLEDGE_KINDS) {
       const bucket = proj.byKind[kind];
@@ -3219,7 +4515,11 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
 
   const { simThreshold, convergenceThreshold, relatedThreshold } = knowledgeConvergenceConfig(env);
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold, now });
+  // #918: the semantic clustering context — backstop-computed vectors, or null
+  // (bit-for-bit lexical) when no cache exists. Never blocks the push path.
+  const proj = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+    simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env), now,
+  });
 
   // Read the candidate store once — it drives both the promoted-status overlay on
   // the canonical files (Phase 4 git audit) and the suggestion / auto-promotion
@@ -3242,6 +4542,11 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // Canonical ids the operator archived (Phase 4 non-destructive curation) — the
   // same durable-overlay pattern as promoted, so an archive survives re-projection.
   const archivedCanonicalIds = new Set(readArchivedIds(teamId));
+  // Operator-set validity windows (#916) — same durable-sidecar pattern, applied
+  // as fields (not a status) in _serializeCanonicalKind.
+  const validityOverlay = readKnowledgeValidity(teamId);
+  // Operator-set auto-load triggers (#917) — same pattern.
+  const triggersOverlay = readKnowledgeTriggers(teamId);
 
   // Supervised-review overlay: when review mode is on, a canonical entry the
   // operator has not yet approved is stamped status:"pending" (held out of the
@@ -3302,6 +4607,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     const file = path.join(storeRoot, rel);
     const lines = _serializeCanonicalKind(bucket, promotedCanonicalIds, archivedCanonicalIds, {
       pendingIds: pendingCanonicalIds, rejectedIds: rejectedCanonicalIds, summaries: resolvedSummaries,
+      validity: validityOverlay, triggers: triggersOverlay,
     });
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -3569,7 +4875,7 @@ function raiseRelatedSuggestions(teamId, clusters, candidates, { relatedThreshol
 // status:"archived"; else one marked promoted is written status:"promoted"
 // (archived wins). Empty overlays ⇒ byte-identical to proj.lines[kind].
 function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) {
-  const { pendingIds, rejectedIds, summaries } = review;
+  const { pendingIds, rejectedIds, summaries, validity, triggers } = review;
   const canon = bucket.canonical.slice().sort(
     (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || String(a.id).localeCompare(String(b.id)),
   );
@@ -3598,6 +4904,27 @@ function _serializeCanonicalKind(bucket, promotedIds, archivedIds, review = {}) 
     // byte-identical to the pre-#635 projection.
     if (summaries && summaries.has(e.id)) {
       entry = { ...entry, summary: summaries.get(e.id) };
+    }
+    // Bitemporal-validity overlay (#916): FIELDS on the canonical entry, never a
+    // status — the line keeps status:"active" and readers derive "expired" from
+    // validTo. Sidecar-sourced (shards never carry these), so clearing = the id
+    // leaving the sidecar ⇒ the fields simply aren't re-applied. Empty sidecar ⇒
+    // byte-identical projection.
+    if (validity) {
+      const vv = validity[e.id];
+      if (vv && typeof vv === "object") {
+        const patch = {};
+        if (typeof vv.validTo === "string" && vv.validTo.trim() !== "") patch.validTo = vv.validTo.trim();
+        if (typeof vv.supersededBy === "string" && /^[0-9a-f]{12}$/.test(vv.supersededBy)) patch.supersededBy = vv.supersededBy;
+        if (Object.keys(patch).length > 0) entry = { ...entry, ...patch };
+      }
+    }
+    // Auto-load trigger overlay (#917): same sidecar-sourced field posture as
+    // validity — the canonical line carries the operator-authored triggers so
+    // the agent-side scoped resolver reads them off its checkout.
+    if (triggers) {
+      const tt = normalizeLoadTriggers(triggers[e.id]);
+      if (tt) entry = { ...entry, loadTriggers: tt };
     }
     out.push(serializeKnowledgeEntry(entry));
   }
@@ -3698,6 +5025,55 @@ function archiveKnowledgeEntry(teamId, id, archived) {
   return { id, archived: !!archived };
 }
 
+// Set / clear a canonical KB entry's validity window (#916, operator-initiated).
+// Non-destructive field overlay: updates the per-team validity sidecar, then
+// re-runs the collector so the canonical file is re-projected with the fields +
+// committed (git audit). Unlike archive there is NO promoted-entry guard —
+// expiring a promoted entry is allowed (AC5): the skill stays, the source entry
+// expires. `validTo` accepts a date (YYYY-MM-DD, normalized to the END of that
+// day so "valid until X" includes X) or a full ISO timestamp; null/'' clears.
+// `supersededBy` records semantic replacement (fact B replaces outdated fact A)
+// and NEVER by itself hides the old entry (AC4) — deliberately distinct from the
+// convergence merge's `mergedInto`. Best-effort on the git side.
+function setKnowledgeValidity(teamId, id, { validTo = null, supersededBy = null } = {}) {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error("invalid id");
+  let normalizedTo = null;
+  if (typeof validTo === "string" && validTo.trim() !== "") {
+    const raw = validTo.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) normalizedTo = `${raw}T23:59:59Z`;
+    else if (!Number.isNaN(Date.parse(raw))) normalizedTo = raw;
+    else throw new Error("validTo must be an ISO date or timestamp");
+  }
+  let normalizedBy = null;
+  if (typeof supersededBy === "string" && supersededBy.trim() !== "") {
+    if (!/^[0-9a-f]{12}$/.test(supersededBy.trim())) throw new Error("supersededBy must be a 12-char hex entry id");
+    normalizedBy = supersededBy.trim();
+  }
+  const map = readKnowledgeValidity(teamId);
+  if (!normalizedTo && !normalizedBy) {
+    delete map[id];
+  } else {
+    map[id] = {
+      ...(normalizedTo ? { validTo: normalizedTo } : {}),
+      ...(normalizedBy ? { supersededBy: normalizedBy } : {}),
+    };
+  }
+  writeKnowledgeValidity(teamId, map);
+  let env = null;
+  const resolved = resolveTeamKbRepo(teamId);
+  if (resolved) env = resolved.env;
+  // Re-project + commit so the change is reflected + git-audited (and the digest
+  // fan-out picks it up immediately). Best-effort, mirrors archiveKnowledgeEntry.
+  try {
+    refreshKnowledgeClone(teamId, { force: true, env });
+    runConvergenceCollector(teamId, env) // #855: async, non-blocking
+      .catch((err) => console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`));
+  } catch (err) {
+    console.warn(`[Orchestrator] validity re-projection for '${teamId}' failed: ${err.message}`);
+  }
+  return { id, validTo: normalizedTo, supersededBy: normalizedBy };
+}
+
 // Explicit, operator-initiated removal of the source KB entries a freshly-written
 // skill now supersedes (#559). Unlike archiveKnowledgeEntry this DELIBERATELY
 // bypasses the "cannot archive a promoted entry" guard (#553 AC7) — the promotion
@@ -3767,6 +5143,7 @@ let orchestratorSingleton = null;
 
 async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceThreshold, now, capRemaining, excludeCanonicalIds } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, synthesizeSkills } = knowledgeCurationConfig(env);
   // #779: the per-pass cap is shared across auto-extend + convergence promotions +
@@ -3812,6 +5189,7 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
       request: knowledgeCurator.buildSkillSynthesisRequest(item.candidate),
       synthesize: synthesizeSkills,
       frontmatter: { name: item.draft.name, description: item.draft.description },
+      binding: assistSynthBinding, // #1213: team-billed provider (null → .env)
     });
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -4061,10 +5439,18 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
 // other concurrent request (the 'orchestrator unreachable: fetch failed' bug). It is
 // now an async `fetch` with an `AbortSignal` timeout, so the loop stays free while
 // the LLM is in flight and only THIS logical operation waits. Every caller awaits it.
-async function _synthesizeSkillMd(env, request) {
-  const base = process.env.ANTHROPIC_BASE_URL;
-  const token = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
-  const model = process.env.ANTHROPIC_SYNTHESIS_MODEL
+// An optional `binding` {baseUrl, token, model} overrides the `.env` proxy so
+// synthesis bills against the chosen provider — a team's `assistLlmEndpointId`
+// (#1213, resolveAssistBindingForTeam) for curator auto-promotion/distillation,
+// or a user's console selection (#1214, resolveAssistBindingFromSelection) for
+// domain bootstrap. Absent (or with any field missing) → the `.env` fallback,
+// byte-identical to before. The token stays in-process; only these three values
+// ever reach fetch.
+async function _synthesizeSkillMd(env, request, binding) {
+  const base = (binding && binding.baseUrl) || process.env.ANTHROPIC_BASE_URL;
+  const token = (binding && binding.token) || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+  const model = (binding && binding.model)
+    || process.env.ANTHROPIC_SYNTHESIS_MODEL
     || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
     || process.env.ANTHROPIC_MODEL;
   if (!base || !token || !model || !request || !Array.isArray(request.messages)) return null;
@@ -4099,14 +5485,14 @@ async function _synthesizeSkillMd(env, request) {
 // synthesis (§3.3) when the team opted in. OFF (default) ⇒ the Phase-1 heuristic
 // draft verbatim (backward-compatible). ON ⇒ attempt LLM synthesis, else the
 // marked-un-synthesised fallback. Returns { skillMd, synthesised, note }.
-async function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter }) {
+async function _resolveSkillMd(env, { heuristicMd, request, synthesize, frontmatter, binding }) {
   // #805: the heuristic draft already carries frontmatter, so OFF is safe verbatim.
   // ON: hand the deterministic { name, description } to synthesisFallback so the LLM
   // output is guaranteed a valid frontmatter block (its own if present, else this).
   if (!synthesize) return { skillMd: heuristicMd, synthesised: null, note: null };
   const out = knowledgeCurator.synthesisFallback({
     heuristic: { name: null, skillMd: heuristicMd },
-    llmText: await _synthesizeSkillMd(env, request), // #855: async, non-blocking
+    llmText: await _synthesizeSkillMd(env, request, binding), // #855: async; #1213: team-billed binding
     frontmatter,
   });
   return {
@@ -4166,6 +5552,7 @@ function _readTeamSkillDoc(teamId, name) {
 // from the create-new auto-promotion path and debits the shared cap.
 async function autoExtendStep(teamId, env, clusters, candidates, existingSkills, { convergenceThreshold, now, capRemaining } = {}) {
   env = teamKnowledgeEnv(teamId, env); // #570: per-team knowledge config
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider
   const gates = resolvePromotionGates(env);
   const { maxAutoPromotionsPerPass, extendConfidenceFloor, synthesizeSkills } = knowledgeCurationConfig(env);
   const cap = Number.isInteger(capRemaining) ? Math.max(0, capRemaining) : maxAutoPromotionsPerPass;
@@ -4214,6 +5601,7 @@ async function autoExtendStep(teamId, env, clusters, candidates, existingSkills,
         request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.candidate),
         synthesize: true,
         frontmatter: { name: item.target.name, description: ext.description },
+        binding: assistSynthBinding, // #1213: team-billed provider (null → .env)
       })
       : { skillMd: ext.skillMd, synthesised: false, note: null };
     const synthesised = synth.synthesised === true;
@@ -4316,7 +5704,8 @@ async function _distillTeamSkill(teamId, envArg, name, { apply = true, now, auto
     domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
   } catch { domain = null; }
   const request = knowledgeDistillation.buildDistillationRequest(doc.skillMd, doc.provenance, { domain });
-  const llmText = await _synthesizeSkillMd(env, request); // #855: async, non-blocking
+  const assistSynthBinding = resolveAssistBindingForTeam(teamId); // #1213: team-billed synthesis provider (null → .env)
+  const llmText = await _synthesizeSkillMd(env, request, assistSynthBinding); // #855: async, non-blocking
   const result = knowledgeDistillation.applyDistillation({
     skillMd: doc.skillMd, provenance: doc.provenance, llmText, by: auto ? "curator" : "operator", now: ts,
   });
@@ -4407,7 +5796,9 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
     teamSquadMemberIds(teamId),
   );
   const { simThreshold } = knowledgeConvergenceConfig(env);
-  const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, { simThreshold }).clusters;
+  const clusters = knowledgeConvergence.buildCanonicalProjection(shardEntries, {
+    simThreshold, semantic: teamSemanticCtx(teamId, shardEntries, env),
+  }).clusters;
   const cluster = clusters.find((c) => c.memberIds.includes(entryId));
   if (!cluster) throw new Error(`entry '${entryId}' not found in the team knowledge base`);
 
@@ -4426,9 +5817,22 @@ function nominateKnowledgeEntry(agentId, entryId, note) {
   return cand;
 }
 
+// #855-class fix: `git push` / `gh pr create` are network round-trips (SSH to
+// GitHub, HTTPS API) that routinely take many seconds — run synchronously they
+// park the single-threaded event loop and freeze every other request (admin
+// API, session-log pushes, poller). Async execFile keeps the loop free; the
+// per-checkout queue preserves the serialization the blocking calls provided
+// implicitly, so overlapping pushes to one repo clone still never interleave.
+const _repoGitQueue = agentGitOps.makeKeyedQueue();
+
+async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
+  const { stdout } = await execFileP(cmd, args, { cwd, env, timeout });
+  return stdout.toString();
+}
+
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
 // setUpstream? }. Throws caller-facing Errors (safe to return over the API).
-function agentGitPush(id, env, body = {}) {
+async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -4436,12 +5840,16 @@ function agentGitPush(id, env, body = {}) {
   });
   const req = agentGitOps.normalizePushRequest(body);
   const gitEnv = _buildAgentGitEnv(id, repo, env);
+  return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
+}
+
+async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
 
   let branch = req.branch;
   if (!branch) {
-    branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    branch = (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
     if (branch === "HEAD") {
       throw new Error("workspace is in detached HEAD — check out a branch before pushing");
     }
@@ -4455,7 +5863,7 @@ function agentGitPush(id, env, body = {}) {
   pushArgs.push(req.remote, branch);
 
   try {
-    const stdout = run(pushArgs);
+    const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
     // the correlationId↔branch binding corroborates the branch-tier (C) join if a
     // PR is later opened on this head another way. Best-effort, never blocks.
@@ -4493,7 +5901,7 @@ function agentGitPush(id, env, body = {}) {
 // Push the current branch, then open a PR via `gh`. `body` = { repo?, title,
 // body?, base?, head?, draft? }. Stamps the agent marker into the PR body so the
 // GitHub poller can attribute the resulting events (loop protection).
-function agentCreatePr(id, env, body = {}) {
+async function agentCreatePr(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
     requestedRepo: body.repo,
@@ -4508,10 +5916,14 @@ function agentCreatePr(id, env, body = {}) {
   }
 
   const gitEnv = _buildAgentGitEnv(id, repo, env);
-  const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: repo.repoPath, env: gitEnv, stdio: "pipe", timeout }).toString();
+  return _repoGitQueue(repo.repoPath, () => _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body));
+}
 
-  let head = body.head != null ? String(body.head) : run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
+  const run = (args, timeout = 30_000) =>
+    _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
+
+  let head = body.head != null ? String(body.head) : (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head === "HEAD") {
     throw new Error("workspace is in detached HEAD — check out a branch before opening a PR");
   }
@@ -4522,7 +5934,7 @@ function agentCreatePr(id, env, body = {}) {
 
   // Ensure the branch exists on the remote before gh reads it.
   try {
-    run(["push", "--set-upstream", "origin", head]);
+    await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
     const detail = agentGitOps
       .sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString())
@@ -4561,12 +5973,7 @@ function agentCreatePr(id, env, body = {}) {
     const ghArgs = ["pr", "create", "--title", title, "--body-file", tmp, "--head", head];
     if (base) ghArgs.push("--base", base);
     if (body.draft) ghArgs.push("--draft");
-    const out = execFileSync("gh", ghArgs, {
-      cwd: repo.repoPath,
-      env: gitEnv,
-      stdio: "pipe",
-      timeout: 30_000,
-    }).toString();
+    const out = await _execRepo("gh", ghArgs, { cwd: repo.repoPath, env: gitEnv });
     const url = (out.match(/https?:\/\/\S+/) || [])[0] || null;
     // PR-link record (#655 §4.2, tier A): the exact "which run created this PR"
     // fact. prNumber from the URL just parsed; closes[] for the artifact graph
@@ -4646,17 +6053,146 @@ function _resolveRepoCommentContext(repoFullName) {
   return null;
 }
 
+// ── Parent-ticket binding (#1383) ──────────────────────────────────────────
+// A ticket binds an agent chat room to a parent GitHub issue. The authoritative
+// room-scoped binding + the session-log event live in admin-console (api.js);
+// here we own the GitHub round-trip and the workspace-root `ticket.json` (AC8)
+// that a running agent reads on its next invocation. Pure parsing/shapes are in
+// `ticket-store.js` (unit-tested); these are the thin fs/network adapters.
+
+// Contained path to an agent's workspace-root ticket.json. `id` is already
+// isSafePathSeg-validated by every caller; the path.relative return-value check
+// is the CodeQL-legible containment barrier (mirrors api.js safeSessionPath).
+function agentTicketPath(id) {
+  const base = path.resolve(AGENTS_DIR);
+  const full = path.resolve(base, id, "ticket.json");
+  const rel = path.relative(base, full);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return full;
+}
+
+function readAgentTicket(id) {
+  const fp = agentTicketPath(id);
+  if (!fp || !fs.existsSync(fp)) return null;
+  try {
+    const t = JSON.parse(fs.readFileSync(fp, "utf8"));
+    return ticketStore.isValidTicket(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAgentTicket(id, ticket) {
+  const fp = agentTicketPath(id);
+  if (!fp) throw new Error("bad agent id");
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const tmp = fp + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(ticket, null, 2));
+  fs.renameSync(tmp, fp);
+}
+
+function deleteAgentTicket(id) {
+  const fp = agentTicketPath(id);
+  if (!fp) return;
+  try {
+    fs.unlinkSync(fp);
+  } catch {
+    /* already gone */
+  }
+}
+
+// Resolve the GitHub token + declared repo full-names for an agent's env.
+// Returns null when the agent has no GitHub-enabled environment.
+function resolveAgentGithub(id) {
+  const cfg = loadAgentConfig(id);
+  const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  if (!env || !env.githubTokenId) return null;
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  const repos = Array.isArray(env.repositories)
+    ? env.repositories
+    : env.repository
+      ? [env.repository]
+      : [];
+  const envRepoFullNames = repos.map((r) => ghParseRepoFullName(r && r.url)).filter(Boolean);
+  return { token, envRepoFullNames };
+}
+
+function _ticketErr(message, statusCode) {
+  const e = new Error(message);
+  e.statusCode = statusCode;
+  return e;
+}
+
+// Bind a parent ticket to an agent (create a new issue or attach an existing
+// one), then materialise ticket.json at the workspace root. Returns the stored
+// ticket; throws a `statusCode`-tagged Error on a client/GitHub failure.
+async function bindAgentTicket(id, body) {
+  const gh = resolveAgentGithub(id);
+  if (!gh) throw _ticketErr("agent has no GitHub-enabled environment", 400);
+  const explicitRepo = body && typeof body.repo === "string" ? body.repo : null;
+  const mode = body && body.mode === "create" ? "create" : "attach";
+  let ticket;
+
+  if (mode === "create") {
+    const title = body && typeof body.title === "string" ? body.title.trim() : "";
+    if (!title) throw _ticketErr("title is required", 400);
+    const repoFullName = ticketStore.resolveRepoFullName(null, {
+      explicitRepo,
+      envRepoFullNames: gh.envRepoFullNames,
+    });
+    if (!repoFullName) throw _ticketErr("no target repository for this environment", 400);
+    const args = [`repos/${repoFullName}/issues`, "--method", "POST", "-f", `title=${title}`];
+    if (body && typeof body.issueBody === "string" && body.issueBody) {
+      args.push("-f", `body=${body.issueBody}`);
+    }
+    let issue;
+    try {
+      issue = JSON.parse(await _ghApi(gh.token, args));
+    } catch (err) {
+      throw _ticketErr(`GitHub issue create failed: ${err.message}`, 502);
+    }
+    ticket = ticketStore.ticketFromIssue(issue, repoFullName);
+  } else {
+    const parsed = ticketStore.parseIssueRef(body && body.ref);
+    if (!parsed) throw _ticketErr("ref must be an issue number or a GitHub issue URL", 400);
+    const repoFullName = ticketStore.resolveRepoFullName(parsed, {
+      explicitRepo,
+      envRepoFullNames: gh.envRepoFullNames,
+    });
+    if (!repoFullName) throw _ticketErr("no target repository for this environment", 400);
+    let issue;
+    try {
+      issue = await _flowGithubGetJson(`/repos/${repoFullName}/issues/${parsed.number}`, gh.token);
+    } catch (err) {
+      throw _ticketErr(`issue not found or not accessible: ${err.message}`, 404);
+    }
+    ticket = ticketStore.ticketFromIssue(issue, repoFullName);
+  }
+
+  if (!ticket) throw _ticketErr("could not resolve the issue", 502);
+  writeAgentTicket(id, ticket);
+  return ticket;
+}
+
 // gh api helper bound to a token — no repo checkout needed (`gh api` works from
-// anywhere). Returns stdout string; throws on non-zero exit.
-function _ghApi(token, args, input) {
+// anywhere). Returns stdout string; throws on non-zero exit. Async for the same
+// reason as _execRepo above: a gh network round-trip must not park the loop.
+async function _ghApi(token, args, input) {
   const env = { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token };
-  return execFileSync("gh", ["api", ...args], {
+  const pending = execFileP("gh", ["api", ...args], {
     env,
-    stdio: input === undefined ? "pipe" : ["pipe", "pipe", "pipe"],
-    input,
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,
-  }).toString();
+  });
+  if (input !== undefined) pending.child.stdin.end(input);
+  const { stdout } = await pending;
+  return stdout.toString();
 }
 
 async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
@@ -4686,7 +6222,7 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
     // stable marker; PATCH if the content changed, skip if identical, else create.
     let existing = null;
     try {
-      const raw = _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
+      const raw = await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--paginate"]);
       existing = prTokenComment.findExistingComment(JSON.parse(raw));
     } catch (err) {
       console.error(`[PR-token-comment] ${repoFullName}#${prNumber}: could not list comments: ${err.message}`);
@@ -4697,10 +6233,10 @@ async function postPrTokenComment(repoFullName, prNumber, _ghEvent) {
 
     if (existing) {
       if (typeof existing.body === "string" && existing.body.trim() === body.trim()) return; // no change
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/comments/${existing.id}`, "--method", "PATCH", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: updated existing comment ${existing.id}`);
     } else {
-      _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
+      await _ghApi(ctx.token, [`repos/${repoFullName}/issues/${prNumber}/comments`, "--method", "POST", "-f", `body=${body}`]);
       console.log(`[PR-token-comment] ${repoFullName}#${prNumber}: posted token-usage comment`);
     }
   } catch (err) {
@@ -5025,7 +6561,7 @@ function inspectAgentRepoStatuses(agentId, env) {
       base.pushed = base.upstream !== null && base.ahead === 0;
       base.ready  = base.clean && base.pushed;
     } catch (err) {
-      base.error = err.message || String(err);
+      base.error = errorMessage(err);
     }
 
     results.push(base);
@@ -5037,7 +6573,9 @@ function inspectAgentRepoStatuses(agentId, env) {
 // Update or insert a top-level YAML key in a frontmatter block. Quotes the
 // value if it contains characters that would break unquoted YAML.
 function upsertYamlField(yaml, key, value) {
-  const v = /[:\s#"]/.test(value) ? `"${String(value).replace(/"/g, '\\"')}"` : value;
+  const v = /[:\s#"\\]/.test(value)
+    ? `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+    : value;
   const re = new RegExp(`^${key}\\s*:.*$`, "m");
   if (re.test(yaml)) return yaml.replace(re, `${key}: ${v}`);
   return yaml.replace(/\s*$/, `\n${key}: ${v}\n`);
@@ -5082,6 +6620,81 @@ function enqueuePending(agentId, entry) {
     fs.writeFileSync(p, JSON.stringify(pending, null, 2));
   } catch (err) {
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
+  }
+}
+
+// #1173: pick the GitHub token an internal-channel emit uses to mirror its
+// label — the first environment whose repositories contain the repo, the same
+// first-env-wins rule the poller's plan applies. null when no env covers it.
+function resolveRepoGithubTokenId(repoFullName) {
+  const { parseRepoFullName } = require("./github-poller");
+  const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
+  const allowNonGithubHost = githubApiBase() !== DEFAULT_GITHUB_API_BASE;
+  let envIds = [];
+  try {
+    envIds = fs.readdirSync(ENVIRONMENTS_DIR).filter((n) => !n.startsWith("_"));
+  } catch { return null; }
+  for (const envId of envIds) {
+    const env = loadEnvironment(envId);
+    if (!env?.githubTokenId || !/^[A-Za-z0-9._-]+$/.test(env.githubTokenId)) continue;
+    const repos = Array.isArray(env.repositories)
+      ? env.repositories
+      : (env.repository ? [env.repository] : []);
+    for (const r of repos) {
+      if (parseRepoFullName(r?.url, { allowNonGithubHost }) === repoFullName) {
+        return env.githubTokenId;
+      }
+    }
+  }
+  return null;
+}
+
+// #1173: mirror a label onto an issue/PR after an internal-channel delivery.
+// Decoration only — the wake already went through the queue, so every failure
+// here becomes a returned warning, never a delivery failure (concept §4.2
+// step 3: enqueue first, stamp second). The add endpoint doesn't reliably
+// auto-create labels, so on a failed add the label is created (422 = already
+// exists, e.g. a lost race — fine) and the add retried once, mirroring the
+// runner's claim-swap behavior.
+async function stampMirrorLabel(repoFullName, number, label, warnings) {
+  const tokenId = resolveRepoGithubTokenId(repoFullName);
+  if (!tokenId) {
+    warnings.push(`no environment with a GitHub token covers ${repoFullName} — label not stamped`);
+    return false;
+  }
+  let token;
+  try {
+    token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+  } catch (err) {
+    warnings.push(`cannot read GitHub token '${tokenId}': ${err.message} — label not stamped`);
+    return false;
+  }
+  const { githubApiBase } = require("./github-api-base");
+  const base = githubApiBase();
+  const headers = {
+    "Authorization": `Bearer ${token}`,
+    "Accept": "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const addLabel = () => fetch(`${base}/repos/${repoFullName}/issues/${number}/labels`, {
+    method: "POST", headers, body: JSON.stringify({ labels: [label] }),
+  });
+  try {
+    let resp = await addLabel();
+    if (!resp.ok) {
+      await fetch(`${base}/repos/${repoFullName}/labels`, {
+        method: "POST", headers,
+        body: JSON.stringify({ name: label, color: "ededed", description: "internal-channel mirror label" }),
+      }).catch(() => {});
+      resp = await addLabel();
+    }
+    if (resp.ok) return true;
+    warnings.push(`label stamp failed: GitHub returned ${resp.status}`);
+    return false;
+  } catch (err) {
+    warnings.push(`label stamp failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -5165,6 +6778,28 @@ function drainPending(agentId) {
     catch (err) { console.error(`[Orchestrator] drainPending clear ${agentId}: ${err.message}`); }
   }
   return entries;
+}
+
+// Pop and return ONLY the head of the pending queue, persisting the remaining
+// tail (#1195 follow-up). The agent drains one entry per round-trip, executes
+// it (a triggered run can take many minutes), then asks for the next — so
+// entries 2..N stay durably queued until their turn instead of living in the
+// agent's volatile in-memory list for the whole first run. A container
+// restart mid-run then loses at most the single in-flight entry (its #506
+// marker flags it on next startup), never the still-queued tail. Returns null
+// when the queue is empty. FIFO, matching the agent-side drain order.
+function drainPendingOne(agentId) {
+  const p = pendingPath(agentId);
+  let entries = [];
+  try {
+    if (fs.existsSync(p)) entries = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!Array.isArray(entries)) entries = [];
+  } catch { entries = []; }
+  if (!entries.length) return null;
+  const head = entries.shift();
+  try { fs.writeFileSync(p, JSON.stringify(entries, null, 2)); }
+  catch (err) { console.error(`[Orchestrator] drainPendingOne clear ${agentId}: ${err.message}`); }
+  return head;
 }
 
 // Append a bp-event-batch entry to an agent's pending queue. The agent drain
@@ -5491,6 +7126,35 @@ class Orchestrator {
         // live graph reproduces a materialised draft's stage layout.
         ...(Array.isArray(extra.stages) && extra.stages.length
           ? { stages: extra.stages.filter(s => typeof s === 'string') } : {}),
+        // Authoritative gate/brake label registry (#928). Gate-ness is
+        // configuration, not a naming convention, and the LIVE graph has no
+        // bundle to read `labels[]` from — so the team agent holds the registry
+        // (same reasoning as `stages` above) and the graph builders read the
+        // `humanGate`/`brake` flags off it.
+        ...(Array.isArray(extra.labels) && extra.labels.length
+          ? {
+            labels: extra.labels
+              .filter(l => l && typeof l.name === 'string' && l.name.trim())
+              .map(l => ({ name: l.name.trim(), humanGate: !!l.humanGate, brake: !!l.brake })),
+          } : {}),
+        // Named human roles (#987) — first-class human flow nodes, held on the
+        // team agent like `stages`/`labels` (the live graph has no bundle to read
+        // them from). Passed through pre-normalized by the admin console; kept as
+        // objects with a string id.
+        ...(Array.isArray(extra.humans) && extra.humans.length
+          ? { humans: extra.humans.filter(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id.trim()) }
+          : {}),
+        // Hill-climb collector config (#1222) — held on the team agent like
+        // `stages`/`labels`; carried through materialise so an exported+re-imported
+        // team keeps its collector config. Only the config keys travel (the admin
+        // console normalizes via normalizeHillClimb); snapshot/applied-card state
+        // is per-instance run history and never rides the bundle.
+        ...(extra.hillClimb && typeof extra.hillClimb === "object" && !Array.isArray(extra.hillClimb)
+          ? { hillClimb: extra.hillClimb } : {}),
+        // Label suffix (#902): stored for extend-mode consistency checks and
+        // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
+        // stamped in the member configs.
+        ...(typeof extra.labelSuffix === 'string' && extra.labelSuffix ? { labelSuffix: extra.labelSuffix } : {}),
         enabled: true,
       };
       saveAgentConfig(id, teamConfig);
@@ -5509,7 +7173,7 @@ class Orchestrator {
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
 
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, displayName);
 
     // Seed agent workspace using the chosen environment (infrastructure) and
@@ -5691,6 +7355,10 @@ class Orchestrator {
         // stage layout after materialisation.
         ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
+        // A member created while its team is disabled is tagged so
+        // enableTeam brings it back automatically later — see
+        // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+        ...(isTeamDisabled(teamCfg) ? { disabledByTeam: true } : {}),
       };
       saveAgentConfig(memberId, stubConfig);
       // Pre-write triggers so the materialized agent has them immediately;
@@ -5718,7 +7386,7 @@ class Orchestrator {
     const userId = `@${memberId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, memberId, password);
-    const token = await loginMatrixUser(memberId, password);
+    const token = await loginMatrixUser(memberId, password, this.adminClient);
     await setDisplayName(token, userId, memberDisplayName);
 
     const seedResult = seedAgentWorkspace(memberId, env, {
@@ -5769,7 +7437,10 @@ class Orchestrator {
       // Process stage band (#362 E) — recorded so the live graph reproduces the
       // draft's stage layout after materialisation.
       ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
-      enabled: true,
+      // A member created while its team is disabled comes up disabled too,
+      // tagged so enableTeam brings it back automatically — see
+      // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
+      ...newMemberFieldsForTeam(teamCfg),
     };
     saveAgentConfig(memberId, memberConfig);
     saveAgentPrompt(memberId, effectivePrompt, "team-member", env);
@@ -5779,7 +7450,7 @@ class Orchestrator {
     }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
-    startAgentProcess(memberConfig);
+    if (memberConfig.enabled !== false) startAgentProcess(memberConfig);
 
     console.log(
       `[Orchestrator] Created team-member ${memberId} (team=${teamId}` +
@@ -6780,12 +8451,39 @@ class Orchestrator {
     return { source, suggested, siblings };
   }
 
+  // Throws a team-disabled error if cfg is a team-member whose parent team
+  // is currently disabled — the lockout for the team-wide disable feature
+  // (docs/superpowers/specs/2026-07-31-team-wide-disable-design.md). A
+  // member's own enable/disable toggle must not do anything while its team
+  // is off; this guard makes that true no matter which route calls in
+  // (PUT /api/agents/:id, the internal /enable|/disable routes, or any
+  // future caller).
+  //
+  // `bypass` is for disableTeam's OWN internal per-member disableAgent()
+  // calls only — never set by any external route. Without it, retrying
+  // disableTeam after a partial failure (team already flipped to disabled,
+  // one member still enabled because its disableAgent() call failed for an
+  // unrelated reason) would deadlock: this guard would now block that same
+  // member's disableAgent() forever, and it's never disabledByTeam-tagged
+  // (its disable never succeeded), so enableTeam can't reach it either.
+  _assertNotLockedByTeam(cfg, bypass = false) {
+    if (bypass) return;
+    const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+    if (isMemberLockedByTeam(cfg, teamCfg)) {
+      const err = new Error(`Team '${cfg.parentTeamId}' is disabled — enable the team first`);
+      err.code = 'team-disabled';
+      err.teamId = cfg.parentTeamId;
+      throw err;
+    }
+  }
+
   // Materialize a stub bp-instance agent (or re-enable a previously-active
   // one). Idempotent: a stub gets full provisioning on the first call;
   // subsequent calls just (re)spawn the agent-runner process.
   async enableAgent(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg);
 
     // Already-materialized agents: just flip enabled and respawn.
     if (cfg.token) {
@@ -6820,7 +8518,7 @@ class Orchestrator {
     const userId = `@${id}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, cfg.displayName);
 
     const seedResult = seedAgentWorkspace(id, env, {
@@ -6889,32 +8587,15 @@ class Orchestrator {
   //   executions start, but leave the process running to let the current
   //   invocation finish naturally.
   // mode === 'abort'  → write enabled=false and kill the process right away.
-  async disableAgent(id, { mode } = {}) {
+  async disableAgent(id, { mode, bypassTeamLock = false } = {}) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
+    this._assertNotLockedByTeam(cfg, bypassTeamLock);
 
     const isRunning = agentProcesses.has(id);
 
     if (!mode && isRunning) {
-      // Check for active state before disabling without an explicit mode.
-      let isBusy = false;
-      try {
-        const status = JSON.parse(
-          fs.readFileSync(agentStatePath(id, 'status.json'), 'utf8'), // control-plane copy preferred (#185)
-        );
-        isBusy = status?.state === 'busy';
-      } catch { /* no status file = idle */ }
-
-      let activeTriggers = [];
-      try {
-        const triggers = loadTriggers(id); // canonical copy (#185 Phase 2)
-        if (Array.isArray(triggers)) {
-          activeTriggers = triggers
-            .filter(t => t.enabled !== false && t.id)
-            .map(t => ({ id: t.id, type: t.type, description: t.description || null }));
-        }
-      } catch { /* no triggers file */ }
-
+      const { busy: isBusy, activeTriggers } = agentBusyState(id);
       if (isBusy || activeTriggers.length > 0) {
         return {
           id,
@@ -6938,6 +8619,139 @@ class Orchestrator {
     }
 
     return { id, enabled: false };
+  }
+
+  // Members + running/busy/trigger state for the team-wide disable/enable
+  // preview dialog. Read-only — makes no config changes.
+  listTeamMembersWithState(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+
+    const members = teamMemberConfigs(teamId)
+      .map((c) => {
+        const { busy, activeTriggers } = agentBusyState(c.id);
+        return {
+          id: c.id,
+          displayName: c.displayName || c.id,
+          enabled: c.enabled !== false,
+          disabledByTeam: c.disabledByTeam === true,
+          running: agentProcesses.has(c.id),
+          busy,
+          activeTriggers,
+        };
+      });
+
+    return { teamId, teamEnabled: !isTeamDisabled(teamCfg), members };
+  }
+
+  // Disable every currently-enabled member of teamId in one bulk action,
+  // tagging each one disabledByTeam so enableTeam later knows to bring back
+  // only these — members already enabled===false are left completely
+  // untouched (see docs/superpowers/specs/2026-07-31-team-wide-disable-design.md).
+  // Idempotent/retry-safe: the team config is flipped to disabled=false
+  // unconditionally at the end EVEN IF some members failed, so a retry after
+  // a partial failure must still be able to disable the members that are
+  // still enabled — bypassTeamLock:true on the per-member disableAgent()
+  // call below is what makes that retry actually work (see
+  // _assertNotLockedByTeam's comment for why a retry would otherwise
+  // deadlock on any member left enabled by the first attempt).
+  async disableTeam(teamId, { mode } = {}) {
+    if (mode !== 'drain' && mode !== 'abort') {
+      throw new Error("mode must be 'drain' or 'abort'");
+    }
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const memberConfigs = teamMemberConfigs(teamId);
+    const { toDisable, skip } = planTeamDisable(memberConfigs);
+
+    const disabled = [];
+    const failed = [];
+    for (const id of toDisable) {
+      try {
+        await this.disableAgent(id, { mode, bypassTeamLock: true });
+      } catch (err) {
+        // disableAgent never touched disk (it threw before/at its own save,
+        // e.g. the lockout guard or "not found") — nothing to reconcile.
+        failed.push({ id, error: err.message });
+        continue;
+      }
+      // disableAgent's own work (warning-check/mode/stop-process) is now
+      // confirmed done: enabled=false is already on disk. Tag
+      // disabledByTeam in one more save so enableTeam later knows to bring
+      // this member back. If that save throws, the member is left
+      // disabled-but-untagged and enableTeam would never find it again — so
+      // best-effort roll it back to enabled here, keeping the on-disk state
+      // consistent with reporting it under `failed` (never disabled).
+      try {
+        const cfg = loadAgentConfig(id);
+        const updated = { ...cfg, disabledByTeam: true };
+        saveAgentConfig(id, updated);
+        this.agentConfigs.set(id, { config: updated });
+        disabled.push(id);
+      } catch (err) {
+        try {
+          const cfg = loadAgentConfig(id);
+          const reverted = { ...cfg, enabled: true };
+          saveAgentConfig(id, reverted);
+          this.agentConfigs.set(id, { config: reverted });
+        } catch (rollbackErr) {
+          console.error(`[Orchestrator] team ${teamId}: member ${id} was disabled but could not be tagged disabledByTeam, AND the rollback to enabled also failed — it is now disabled without disabledByTeam tracking and needs manual re-enable: ${rollbackErr.message}`);
+        }
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    const teamUpdated = { ...teamCfg, enabled: false };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    console.log(`[Orchestrator] team ${teamId} disabled → ${disabled.length} member(s) disabled, ${skip.length} already off, ${failed.length} failed`);
+    return { teamId, disabled, skipped: skip, failed };
+  }
+
+  // Re-enable every member disableTeam previously tagged disabledByTeam.
+  // Members disabled independently before the team went down, or never
+  // activated, are left exactly as they are (see the design spec). The
+  // team's own config flips to enabled FIRST, so the per-member
+  // enableAgent() calls below don't trip their own lockout guard.
+  async enableTeam(teamId) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+
+    const teamUpdated = { ...teamCfg, enabled: true };
+    saveAgentConfig(teamId, teamUpdated);
+    this.agentConfigs.set(teamId, { config: teamUpdated });
+
+    const memberConfigs = teamMemberConfigs(teamId);
+    const { toEnable, skip } = planTeamEnable(memberConfigs);
+
+    const enabled = [];
+    const failed = [];
+    for (const id of toEnable) {
+      try {
+        await this.enableAgent(id);
+        // Deliberate asymmetry vs. disableTeam's rollback: if this tag-clear
+        // write fails after enableAgent() already succeeded, the member is
+        // left enabled but still tagged disabledByTeam. That's harmless — the
+        // member is already up and working, and the stale tag self-heals on
+        // the next disable/enable cycle. disableTeam rolls back instead
+        // because leaving a member disabled-and-untagged there would make it
+        // invisible to future enableTeam calls, which matters more.
+        const cfg = loadAgentConfig(id);
+        const { disabledByTeam, ...rest } = cfg;
+        saveAgentConfig(id, rest);
+        this.agentConfigs.set(id, { config: rest });
+        enabled.push(id);
+      } catch (err) {
+        failed.push({ id, error: err.message });
+      }
+    }
+
+    console.log(`[Orchestrator] team ${teamId} enabled → ${enabled.length} member(s) re-enabled, ${skip.length} left as-is, ${failed.length} failed`);
+    return { teamId, enabled, skipped: skip, failed };
   }
 
   // Re-inject an environment's credentials into every running agent bound to it.
@@ -6974,6 +8788,56 @@ class Orchestrator {
       console.log(`[Orchestrator] env ${envId} credential change (${reason || 'update'}) → respawned ${respawned.length} agent(s): ${respawned.join(', ')}`);
     }
     return { envId, respawned, skipped };
+  }
+
+  // Recreate a single running agent's container so a spawn-time change (e.g. a
+  // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
+  // left untouched — it picks up the new binding on its next enable. Fresh-reads
+  // the on-disk config so a just-written override is honoured.
+  respawnAgent(id, { reason } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.enabled === false || !cfg.token || !agentProcesses.has(id)) {
+      return { id, respawned: false };
+    }
+    this.agentConfigs.set(id, { config: cfg });
+    startAgentProcess(cfg); // stops old container, recreates with fresh env
+    console.log(`[Orchestrator] agent ${id} respawned (${reason || 'update'})`);
+    return { id, respawned: true };
+  }
+
+  // Sync an environment's declared repositories into an already-created agent's
+  // workspace (issue #1342). Repos are otherwise only cloned when the agent is
+  // first seeded, so a repo added to the environment after the fact never
+  // reaches existing agents. This clones only the repos that are MISSING from
+  // the workspace — already-cloned repos are left untouched (no fetch, no
+  // branch switch, no re-clone). Reuses the same clone helper (and therefore
+  // the env's SSH-key / GitHub-token resolution and per-env clone cache) as
+  // creation-time seeding. The workspace volume is shared with the running
+  // container, so cloned files appear inside the agent without a respawn.
+  syncAgentRepositories(agentId) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const environmentId = cfg.environmentId || null;
+    const env = environmentId ? loadEnvironment(environmentId) : null;
+    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const workspace = agentDir(agentId);
+
+    // A stub / never-materialized agent has no workspace on disk — there is
+    // nothing to clone into (git would fail on a missing cwd). Report honestly.
+    if (repositories.length && !fs.existsSync(workspace)) {
+      return { agentId, environmentId, repos: [], noWorkspace: true, summary: summarizeRepoResults([]) };
+    }
+
+    const repos = syncAgentRepoPlan(repositories, {
+      hasGit: (name) => fs.existsSync(path.join(workspace, name, ".git")),
+      clone: (repo) => cloneRepository(workspace, repo, env?.githubTokenId || null, env?.id || null),
+    });
+    return { agentId, environmentId, repos, summary: summarizeRepoResults(repos) };
   }
 
   // Reset an agent back to its stub state: stop the process, deactivate the
@@ -7155,7 +9019,7 @@ class Orchestrator {
       if (hasChanges) {
         runGit([
           "-c", "user.name=Orchestrator",
-          "-c", "user.email=orchestrator@e-vgh-claw.local",
+          "-c", "user.email=orchestrator@agent-studio.local",
           "commit",
           "-m", `[claim] BP ${cfg.bpSlug || cfg.bpId} by ${stubId}`,
         ]);
@@ -7214,7 +9078,7 @@ class Orchestrator {
     const userId = `@${id}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-    const token = await loginMatrixUser(id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
     await setDisplayName(token, userId, cfg.displayName);
 
     // Workspace was already seeded at config-create time; no second seed.
@@ -7249,7 +9113,7 @@ class Orchestrator {
     const userId = `@${instanceId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, instanceId, password);
-    const token = await loginMatrixUser(instanceId, password);
+    const token = await loginMatrixUser(instanceId, password, this.adminClient);
     await setDisplayName(token, userId, instanceDisplayName);
 
     // Initial grant for a blueprint instance: one-time copy of the env's
@@ -7314,7 +9178,7 @@ class Orchestrator {
     const userId = `@${newId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, newId, password);
-    const token = await loginMatrixUser(newId, password);
+    const token = await loginMatrixUser(newId, password, this.adminClient);
     await setDisplayName(token, userId, newDisplayName);
 
     // Copy workspace — skip runtime-only files
@@ -7415,7 +9279,7 @@ class Orchestrator {
     const userId = `@${agentId}:local`;
 
     if (this.adminClient) await ensureMatrixUser(this.adminClient, agentId, password);
-    const token = await loginMatrixUser(agentId, password);
+    const token = await loginMatrixUser(agentId, password, this.adminClient);
     await setDisplayName(token, userId, displayName);
 
     // Copy the staged workspace into place, skipping runtime-only files we
@@ -8098,7 +9962,11 @@ async function main() {
         // unified memory hint all flip together — byte-identical to what the
         // runtime resolves via _memory_model_unified().
         const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef });
+        // Same gate as the seed path (#1286): the section appears iff the agent
+        // actually carries mount(s). Resolved list (#1290) carries each folder's
+        // target + access mode (#1289), so preview is byte-identical to seeded.
+        const contextMounts = resolveContextMounts(cfg);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMounts });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
@@ -8113,6 +9981,7 @@ async function main() {
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
             hasSkills: skills.length > 0,
             hasKnowledgeDigest: !!knowledgeDigestRef,
+            hasContextMount: contextMounts.length > 0,
             environmentId: cfg.environmentId || null,
             environmentName: (env && env.name) || null,
           },
@@ -8121,6 +9990,227 @@ async function main() {
         console.error(`[Orchestrator] prompt-preview error for ${id}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // Rebuild an agent's CLAUDE.md after a config change the prompt is gated on
+    // (#1286: setting/clearing the context mount). Idempotent and best-effort —
+    // it always answers 200 with what happened.
+    const promptRebuildMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/prompt-rebuild$/);
+    if (promptRebuildMatch) {
+      const id = decodeURIComponent(promptRebuildMatch[1]);
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', async () => {
+        let reason = 'config change';
+        try { reason = (JSON.parse(body || '{}').reason) || reason; } catch { /* keep default */ }
+        const rebuilt = await rebuildAgentPrompt(id, reason);
+        sendJson(res, 200, { rebuilt });
+      });
+      return;
+    }
+
+    // ── Read-only context-folder browsing (#1286) ─────────────────────────
+    // The host folder mounted by #1283 exists ONLY inside the agent's own
+    // container — the console reads the pool volume from its own container and
+    // has no view of it. So the listing/read runs where the folder actually is:
+    // a one-shot, read-only exec in that container. Guards, in order:
+    //   • the agent must actually carry a `contextMount` (else 404 — an agent
+    //     without one has no context surface at all);
+    //   • the requested path is normalised here (no traversal, no absolute
+    //     path) and re-checked inside the container by realpath containment,
+    //     which is what stops a symlink from reaching the rest of the host;
+    //   • only `list` and a capped `read` exist — there is no write mode.
+    const contextBrowseMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/(tree|file|download)(\?.*)?$/);
+    if (contextBrowseMatch) {
+      const id = decodeURIComponent(contextBrowseMatch[1]);
+      const kind = contextBrowseMatch[2];
+      (async () => {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+        // #1290: an agent has a context surface iff it has at least one folder
+        // (multi-folder field or the legacy single-folder field). The browse
+        // program lists under /context, and each folder's target (`/context` or
+        // `/context/<slug>`) is a real path there, so a `<slug>/…` rel resolves
+        // with no per-folder branch here.
+        if (resolveContextMounts(cfg).length === 0) {
+          return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+        }
+        const rel = normalizeContextRel(new URL(req.url, 'http://localhost').searchParams.get('path') || '');
+        if (!rel.ok) return sendJson(res, 400, { error: rel.error, code: 'invalid-path' });
+
+        const cap = kind === 'download' ? CONTEXT_DOWNLOAD_MAX_BYTES : CONTEXT_FILE_MAX_BYTES;
+        const argv = kind === 'tree' ? buildListArgv(rel.rel) : buildReadArgv(rel.rel, cap);
+        // Output budget: base64 inflates by 4/3, plus the JSON envelope.
+        const maxBytes = kind === 'tree' ? 16 * 1024 * 1024 : Math.ceil(cap * 1.4) + 64 * 1024;
+
+        let out;
+        try {
+          out = await execInAgentContainer(id, argv, { timeoutMs: BROWSE_TIMEOUT_MS, maxBytes });
+        } catch (err) {
+          const code = err && err.code ? err.code : 'exec-failed';
+          const status = code === 'no-container' ? 409
+                       : code === 'timeout' ? 504
+                       : code === 'too-large' ? 413
+                       : 502;
+          const message = code === 'no-container'
+            ? 'The agent is not running, so its context folder cannot be read'
+            : `Reading the context folder failed (${code})`;
+          console.warn(`[Orchestrator] context browse ${kind} for ${id}: ${err.message}`);
+          return sendJson(res, status, { error: message, code });
+        }
+
+        const parsed = parseBrowseOutput(out.stdout);
+        if (!parsed.ok) {
+          if (parsed.code === 'exec-failed') {
+            console.warn(`[Orchestrator] context browse ${kind} for ${id}: ${parsed.error} (exit ${out.exitCode}, stderr ${String(out.stderr).slice(0, 200)})`);
+          }
+          return sendJson(res, statusForBrowseCode(parsed.code), { error: parsed.error, code: parsed.code });
+        }
+        if (kind === 'tree') {
+          return sendJson(res, 200, {
+            path: parsed.result.path || '',
+            items: sortContextItems(parsed.result.items),
+            truncated: !!parsed.result.truncated,
+          });
+        }
+        return sendJson(res, 200, parsed.result);
+      })().catch((err) => {
+        console.error(`[Orchestrator] context browse error for ${id}: ${err.message}`);
+        sendJson(res, 500, { error: 'context browse failed' });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: DELETE a file/dir inside a mounted folder ──
+    // The mount lives only in the agent's container, so the mutation runs there.
+    // Guarded twice like browsing (request-side path normalise + in-container
+    // realpath containment), plus a per-mount readWrite gate here and the kernel
+    // EROFS backstop on a read-only bind mount.
+    const contextDeleteMatch = req.method === 'DELETE' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/file(\?.*)?$/);
+    if (contextDeleteMatch) {
+      const id = decodeURIComponent(contextDeleteMatch[1]);
+      (async () => {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+        const mounts = resolveContextMounts(cfg);
+        if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+        const rel = normalizeContextRel(new URL(req.url, 'http://localhost').searchParams.get('path') || '');
+        if (!rel.ok) return sendJson(res, 400, { error: rel.error, code: 'invalid-path' });
+        if (!rel.rel) return sendJson(res, 400, { error: 'refusing to delete the mount root', code: 'invalid-path' });
+        const mount = resolveContextMountForRel(mounts, rel.rel);
+        if (!mount) return sendJson(res, 404, { error: 'not found', code: 'not-found' });
+        if (!mount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+        const r = await runContextWriteExec(id, buildDeleteArgv(rel.rel));
+        if (!r.ok) return sendJson(res, r.status, { error: r.error, code: r.code });
+        return sendJson(res, 200, r.result);
+      })().catch((err) => {
+        console.error(`[Orchestrator] context delete error for ${id}: ${err.message}`);
+        sendJson(res, 500, { error: 'context delete failed' });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: MOVE (rename/relocate) within ONE folder ──
+    // Source and destination directory must belong to the SAME read-write mount;
+    // a cross-folder or workspace↔context move is not a rename (different
+    // filesystems) and is refused here (and never offered by the UI).
+    const contextMoveMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/move$/);
+    if (contextMoveMatch) {
+      const id = decodeURIComponent(contextMoveMatch[1]);
+      let body = '';
+      req.on('data', d => { body += d; });
+      req.on('end', () => {
+        (async () => {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+          const mounts = resolveContextMounts(cfg);
+          if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+          let parsed;
+          try { parsed = JSON.parse(body || '{}'); } catch { return sendJson(res, 400, { error: 'invalid JSON body', code: 'bad-body' }); }
+          const from = normalizeContextRel(parsed.from || '');
+          const toDir = normalizeContextRel(parsed.toDir || '');
+          if (!from.ok) return sendJson(res, 400, { error: from.error, code: 'invalid-path' });
+          if (!toDir.ok) return sendJson(res, 400, { error: toDir.error, code: 'invalid-path' });
+          if (!from.rel) return sendJson(res, 400, { error: 'refusing to move the mount root', code: 'invalid-path' });
+          const srcMount = resolveContextMountForRel(mounts, from.rel);
+          const dstMount = resolveContextMountForRel(mounts, toDir.rel);
+          if (!srcMount || !dstMount) return sendJson(res, 404, { error: 'not found', code: 'not-found' });
+          if (srcMount.target !== dstMount.target) {
+            return sendJson(res, 400, { error: 'cannot move between different context folders', code: 'cross-folder' });
+          }
+          if (!srcMount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+          const r = await runContextWriteExec(id, buildMoveArgv(from.rel, toDir.rel));
+          if (!r.ok) return sendJson(res, r.status, { error: r.error, code: r.code });
+          return sendJson(res, 200, r.result);
+        })().catch((err) => {
+          console.error(`[Orchestrator] context move error for ${id}: ${err.message}`);
+          sendJson(res, 500, { error: 'context move failed' });
+        });
+      });
+      return;
+    }
+
+    // ── Read-write context mount: UPLOAD one file into a mounted folder ──
+    // Body is the raw file bytes (octet-stream); `path` is the target directory
+    // and `name` the (possibly folder-upload) relative file path. `prepare-upload`
+    // validates + de-duplicates the name in-container, then the bytes go in via
+    // the libpod archive endpoint (the only ARG_MAX/stdin-free write channel).
+    const contextUploadMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/context\/upload(\?.*)?$/);
+    if (contextUploadMatch) {
+      const id = decodeURIComponent(contextUploadMatch[1]);
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const chunks = [];
+      let total = 0;
+      let tooBig = false;
+      req.on('data', (c) => {
+        if (tooBig) return;
+        total += c.length;
+        if (total > CONTEXT_UPLOAD_MAX_BYTES) { tooBig = true; chunks.length = 0; return; }
+        chunks.push(c);
+      });
+      req.on('end', () => {
+        (async () => {
+          if (tooBig) return sendJson(res, 413, { error: 'file too large', code: 'too-large' });
+          const cfg = loadAgentConfig(id);
+          if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
+          const mounts = resolveContextMounts(cfg);
+          if (mounts.length === 0) return sendJson(res, 404, { error: 'agent has no context folder', code: 'no-context-mount' });
+          const dir = normalizeContextRel(params.get('path') || '');
+          if (!dir.ok) return sendJson(res, 400, { error: dir.error, code: 'invalid-path' });
+          const mount = resolveContextMountForRel(mounts, dir.rel);
+          if (!mount) return sendJson(res, 404, { error: 'target directory not found', code: 'not-found' });
+          if (!mount.readWrite) return sendJson(res, 403, { error: 'this context folder is mounted read-only', code: 'read-only' });
+          const name = sanitizeUploadName(params.get('name') || '');
+          if (!name) return sendJson(res, 400, { error: 'invalid filename', code: 'invalid-path' });
+          // Validate the target dir + resolve a collision-free entry name.
+          const prep = await runContextWriteExec(id, buildPrepareUploadArgv(dir.rel, name));
+          if (!prep.ok) return sendJson(res, prep.status, { error: prep.error, code: prep.code });
+          const buf = Buffer.concat(chunks);
+          let tar;
+          try {
+            tar = buildTar([{ name: prep.result.entry, body: buf }]);
+          } catch (err) {
+            return sendJson(res, 400, { error: `could not package the upload (${err.message})`, code: 'bad-entry' });
+          }
+          try {
+            await putArchiveToAgentContainer(id, prep.result.base, tar, { timeoutMs: WRITE_TIMEOUT_MS });
+          } catch (err) {
+            const code = err && err.code ? err.code : 'exec-failed';
+            const status = code === 'no-container' ? 409 : code === 'read-only' ? 403 : code === 'denied' ? 403 : code === 'timeout' ? 504 : 502;
+            return sendJson(res, status, { error: `upload failed (${code})`, code });
+          }
+          return sendJson(res, 200, { uploaded: [{ name: prep.result.entry, size: buf.length }] });
+        })().catch((err) => {
+          console.error(`[Orchestrator] context upload error for ${id}: ${err.message}`);
+          sendJson(res, 500, { error: 'context upload failed' });
+        });
+      });
+      return;
     }
 
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
@@ -8293,7 +10383,7 @@ async function main() {
           const userId = `@${agentId}:local`;
 
           if (orchestrator.adminClient) await ensureMatrixUser(orchestrator.adminClient, agentId, password);
-          const token = await loginMatrixUser(agentId, password);
+          const token = await loginMatrixUser(agentId, password, orchestrator.adminClient);
           await setDisplayName(token, userId, displayName);
 
           // Initial grant for an ephemeral agent: one-time copy of the env's
@@ -8632,6 +10722,22 @@ async function main() {
       return;
     }
 
+    // Drain ONE entry (#1195 follow-up): pop the head, keep the tail durably
+    // queued. The agent loops this per entry so a long first run can't leave
+    // the rest stranded in a volatile in-memory list.
+    const pendingDrainOneMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/pending-drain-one$/);
+    if (pendingDrainOneMatch) {
+      const id = decodeURIComponent(pendingDrainOneMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, entry: drainPendingOne(id) }));
+      return;
+    }
+
     // ── Enqueue a pending entry (#185 Phase 2) ────────────────────────────
     // The admin-console is a separate process, so to keep this queue
     // single-writer (and the drain race-free) it hands entries in through us
@@ -8662,6 +10768,151 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Internal-channel emit (#1173, epic #1172) ─────────────────────────
+    // A producer agent announces "label L set on issue/PR #n of repo R"
+    // (via the `aee-emit` CLI) and the wake is delivered directly to every
+    // `transport: 'internal'` listener — enqueue FIRST, then mirror the label
+    // onto GitHub as decoration (best-effort). Internal-transport triggers
+    // are excluded from the poller plan (`pollerSubscribes`), so the mirror
+    // stamp can never double-deliver. docs/internal-channels-concept.md §4.2.
+    if (req.method === 'POST' && req.url === '/internal/flow-emit') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        let parsed;
+        try {
+          parsed = flowEmit.validateEmitRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { agentId, repo, label, target } = parsed.value;
+          const key = flowEmit.eventKeyForKind(target.kind);
+          const agents = listAgentIds().map((aid) => ({
+            agentId: aid,
+            enabled: loadAgentConfig(aid)?.enabled !== false,
+            triggers: loadTriggers(aid),
+          }));
+          const listeners = flowEmit.matchInternalListeners(
+            { repo, label, kind: target.kind }, agents);
+          const ghEvent = flowEmit.buildSyntheticEvent({
+            repo, label, kind: target.kind, number: target.number,
+            producerId: agentId,
+            eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
+            now: new Date().toISOString(),
+          });
+          for (const l of listeners) {
+            enqueuePending(l.agentId, flowEmit.buildPendingEntry(l.triggerId, key, ghEvent));
+            console.log(
+              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
+              `by ${agentId} → agent=${l.agentId} trigger=${l.triggerId}`);
+          }
+          const warnings = [];
+          const labelStamped = await stampMirrorLabel(repo, target.number, label, warnings);
+          // Same transparency log the poller writes, tagged with the delivery
+          // path — internal and polled events share one operator timeline.
+          githubEventLog.record({
+            ...githubEventLog.buildEventEntry({
+              ghEvent, repoFullName: repo, key,
+              outcomes: listeners.map((l) => ({
+                agentId: l.agentId, triggerId: l.triggerId,
+                status: 'delivered', reason: null, digest: false,
+              })),
+            }),
+            source: 'internal',
+            emittedBy: agentId,
+          });
+          if (listeners.length === 0) {
+            console.log(
+              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
+              `by ${agentId} matched no internal listener (label ${labelStamped ? 'stamped' : 'NOT stamped'})`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            matched: listeners.length,
+            listeners,
+            labelStamped,
+            warnings,
+          }));
+        } catch (err) {
+          console.error(`[Orchestrator] flow-emit error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Team roster for the loop verifier (#933) ──────────────────────────
+    // A team loop agent with an empty `verify` reads its sibling roster to
+    // enforce a *different* verifier (concept §4.6 decision 1). Read-only.
+    const teamRosterMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/team-roster$/);
+    if (teamRosterMatch) {
+      const id = decodeURIComponent(teamRosterMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const configs = listAgentIds().map((aid) => {
+          const c = loadAgentConfig(aid);
+          return c ? { ...c, id: aid } : null;
+        });
+        const roster = computeTeamRoster(id, configs);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...roster }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // ── Loop verifier verdict rendezvous (#933, AC2) ──────────────────────
+    // POST: the target verifier agent posts its pass/fail verdict for a token.
+    // GET:  the requesting loop polls for that verdict.
+    if (req.method === 'POST' && req.url.split('?')[0] === '/internal/loop-verify/verdict') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const token = payload && payload.token;
+          if (typeof token !== 'string' || !token) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'token required' }));
+            return;
+          }
+          loopVerifyStore.set(token, payload.passed, payload.output);
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/loop-verify/verdict') {
+      const token = new URL(req.url, 'http://localhost').searchParams.get('token') || '';
+      if (!token) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'token required' }));
+        return;
+      }
+      const verdict = loopVerifyStore.get(token);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ...verdict }));
       return;
     }
 
@@ -8819,6 +11070,84 @@ async function main() {
       return;
     }
 
+    // ── Parent-ticket binding (#1383) ─────────────────────────────────────
+    // Agents register a child issue on the bound parent ticket (AC6). Checked
+    // before the bare /ticket route (anchored regexes make them disjoint, but
+    // order keeps intent clear).
+    const ticketChildrenMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/ticket\/children$/);
+    if (ticketChildrenMatch) {
+      const id = decodeURIComponent(ticketChildrenMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          if (!isSafePathSeg(id)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+            return;
+          }
+          const { number } = JSON.parse(body || '{}');
+          const parent = readAgentTicket(id);
+          if (!parent) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'no parent ticket bound' }));
+            return;
+          }
+          const next = ticketStore.addChild(parent, number);
+          if (!next) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'child must be a positive issue number' }));
+            return;
+          }
+          writeAgentTicket(id, next);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, children: next.children }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // GET reads the materialised ticket.json; POST binds (create/attach, calls
+    // GitHub with the env PAT + writes ticket.json — AC2/AC3/AC8); DELETE unbinds.
+    const ticketMatch = req.url.match(/^\/internal\/agents\/([^/]+)\/ticket$/);
+    if (ticketMatch && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
+      const id = decodeURIComponent(ticketMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ticket: readAgentTicket(id) }));
+        return;
+      }
+      if (req.method === 'DELETE') {
+        deleteAgentTicket(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      // POST — bind (async GitHub round-trip).
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const ticket = await bindAgentTicket(id, JSON.parse(body || '{}'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ticket }));
+        } catch (err) {
+          const code = err.statusCode || 500;
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Triggers: agent pull (#185 Phase 2) ───────────────────────────────
     // The isolated agent fetches its canonical triggers on each sync tick and
     // whenever SIGUSR2 wakes it. Read-only.
@@ -8876,7 +11205,7 @@ async function main() {
       const id = decodeURIComponent(putTriggersMatch[1]);
       let body = '';
       req.on('data', (d) => { body += d; if (body.length > 4_000_000) req.destroy(); });
-      req.on('end', () => {
+      req.on('end', async () => {
         if (!isSafePathSeg(id)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
@@ -8889,9 +11218,17 @@ async function main() {
             res.end(JSON.stringify({ ok: false, error: 'triggers must be an array' }));
             return;
           }
+          // #962: capture the autonomy state BEFORE the write; if this add/
+          // remove flips it, the agent's CLAUDE.md must be rebuilt (the
+          // Trigger-management docs are gated on autonomy). The role comes from
+          // config; agentIsAutonomous falls back safely if it's missing.
+          const wasAutonomous = agentIsAutonomous(id, loadAgentConfig(id)?.role);
           saveTriggers(id, triggers);
           const proc = agentProcesses.get(id);
           if (proc) proc.kill('SIGUSR2');
+          // Rebuild + reseed CLAUDE.md only when autonomy actually flipped
+          // (no-op otherwise). Best-effort — never fails the trigger write.
+          await reconcileAgentAutonomyPrompt(id, wasAutonomous);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
@@ -9078,9 +11415,9 @@ async function main() {
           res.end(JSON.stringify(result));
         } catch (err) {
           console.error(`[Orchestrator] enableAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
+          const status = httpStatusForAgentActionError(err);
           res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
         }
       })();
       return;
@@ -9113,6 +11450,143 @@ async function main() {
       return;
     }
 
+    // ── Create GitHub labels for a team (label-suffix provisioning, #902) ─────
+    // Called best-effort after materialisation: creates any missing labels in the
+    // target repo via the env's PAT. 422 (already-exists) is silently ignored.
+    // Failures are warnings, never errors — the team is already created.
+    const githubLabelsMatch = req.method === 'POST' && req.url.match(/^\/internal\/environments\/([^/]+)\/github-labels$/);
+    if (githubLabelsMatch) {
+      const envId = decodeURIComponent(githubLabelsMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const labels = Array.isArray(parsed.labels) ? parsed.labels.filter(s => typeof s === 'string') : [];
+        const color = typeof parsed.color === 'string' && /^[0-9a-fA-F]{6}$/.test(parsed.color)
+          ? parsed.color : null;
+        if (!labels.length || !color) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'labels (string[]) and color (6-hex) required' }));
+          return;
+        }
+        try {
+          const env = loadEnvironment(envId);
+          if (!env) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Environment '${envId}' not found` }));
+            return;
+          }
+          if (!env.githubTokenId) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['No GitHub token on environment — skipping label provisioning'] }));
+            return;
+          }
+          let ghToken;
+          try {
+            ghToken = fs.readFileSync(path.join(GH_TOKENS_DIR, env.githubTokenId), 'utf8').trim();
+          } catch (err) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: [`Cannot read GitHub token: ${err.message}`] }));
+            return;
+          }
+          // Derive owner/repo from the environment's primary repo URL.
+          const repos = Array.isArray(env.repositories) ? env.repositories : (env.repository ? [env.repository] : []);
+          const primaryUrl = repos[0]?.url || '';
+          const repoMatch = primaryUrl.match(/github\.com[/:]([^/]+)\/([^/ .]+?)(?:\.git)?\s*$/);
+          if (!repoMatch) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, created: [], skipped: labels, warnings: ['Cannot parse GitHub owner/repo from environment URL — skipping label provisioning'] }));
+            return;
+          }
+          const [, owner, repo] = repoMatch;
+          const created = [];
+          const skipped = [];
+          const warnings = [];
+          for (const labelName of labels) {
+            try {
+              const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/labels`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${ghToken}`,
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                },
+                body: JSON.stringify({ name: labelName, color }),
+              });
+              if (resp.status === 201) {
+                created.push(labelName);
+              } else if (resp.status === 422) {
+                skipped.push(labelName);
+              } else {
+                const errBody = await resp.text().catch(() => '');
+                warnings.push(`Label '${labelName}': GitHub returned ${resp.status} — ${errBody.slice(0, 200)}`);
+                skipped.push(labelName);
+              }
+            } catch (err) {
+              warnings.push(`Label '${labelName}': ${err.message}`);
+              skipped.push(labelName);
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, created, skipped, warnings }));
+        } catch (err) {
+          console.error(`[Orchestrator] github-labels error for env ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Respawn a single running agent ──────────────────────────────────
+    // Fired by the admin-console after a per-agent spawn-time change (e.g. the
+    // Model-Provider override) so the running container is recreated with the
+    // fresh binding. No-op for disabled/stub agents. Best-effort on the caller.
+    const respawnAgentMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/respawn$/);
+    if (respawnAgentMatch) {
+      const id = decodeURIComponent(respawnAgentMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        try {
+          const result = orchestrator.respawnAgent(id, { reason: parsed.reason });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] respawnAgent error for ${id}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404 : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Sync an environment's repos into an existing agent's workspace ──────
+    // Fired by the admin-console "Sync repositories" action (#1342). Clones any
+    // repos the environment declares that are missing from this agent's
+    // workspace; idempotent (already-cloned repos are left untouched). Returns
+    // a per-repo result the console streams to the operator.
+    const syncReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/sync-repositories$/);
+    if (syncReposMatch) {
+      const id = decodeURIComponent(syncReposMatch[1]);
+      try {
+        const result = orchestrator.syncAgentRepositories(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error(`[Orchestrator] syncAgentRepositories error for ${id}: ${err.message}`);
+        const status = err.code === 'not-found' || /not found/i.test(err.message) ? 404 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     const disableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/disable$/);
     if (disableMatch) {
       const id = decodeURIComponent(disableMatch[1]);
@@ -9132,9 +11606,9 @@ async function main() {
             res.end(JSON.stringify(result));
           } catch (err) {
             console.error(`[Orchestrator] disableAgent error for ${id}: ${err.message}`);
-            const status = /not found/i.test(err.message) ? 404 : 500;
+            const status = httpStatusForAgentActionError(err);
             res.writeHead(status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
+            res.end(JSON.stringify({ error: err.message, ...(err.code ? { code: err.code, teamId: err.teamId } : {}) }));
           }
         })();
       });
@@ -9214,7 +11688,7 @@ async function main() {
       const id = decodeURIComponent((gitPushMatch || gitPrMatch)[1]);
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => {
         let parsed = {};
         try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
         try {
@@ -9225,11 +11699,11 @@ async function main() {
             return;
           }
           const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-          const result = gitPushMatch ? agentGitPush(id, env, parsed) : agentCreatePr(id, env, parsed);
+          const result = gitPushMatch ? await agentGitPush(id, env, parsed) : await agentCreatePr(id, env, parsed);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           // 424 (Failed Dependency) + stable code for a missing GitHub token —
           // distinct from a real git failure so the agent can tell "no PAT in
           // this environment" apart from a non-fast-forward reject;
@@ -9277,7 +11751,7 @@ async function main() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           // 409 for a git-level refusal the operator can act on (dirty tree,
           // diverged branch, checkout/pull failure); 400 for bad requests.
           const status = err && err.gitFailed ? 409 : 400;
@@ -9319,11 +11793,52 @@ async function main() {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));
         } catch (err) {
-          const msg = (err && err.message) ? err.message : String(err);
+          const msg = errorMessage(err);
           const status = err && err.gitFailed ? 409 : 400;
           console.warn(`[Orchestrator] knowledge push for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: msg }));
+        }
+      });
+      return;
+    }
+
+    // ── Read-side retrieval telemetry (#915) — the READ choke-point ─────────────
+    // `knowledge search` is fully local in the agent container (a checkout scan;
+    // it never touches us) and the container cannot write the shared volume, so
+    // the read signal arrives over this endpoint — the same agent→orchestrator
+    // pattern as the knowledge push. Updates the compact per-team aggregate
+    // ONLY; never events.jsonl, never the SSE feed.
+    const knRetrievalMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/knowledge\/retrieval$/);
+    if (knRetrievalMatch) {
+      const id = decodeURIComponent(knRetrievalMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          let payload = {};
+          try { payload = JSON.parse(body || '{}'); } catch { payload = {}; }
+          const v = knowledgeRetrieval.validateRetrieval(payload, {
+            now: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          });
+          if (!v.ok) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: v.error }));
+            return;
+          }
+          const teamId = agentKnowledgeTeamId(cfg); // server-side, same as push
+          const result = recordKnowledgeRetrieval(teamId, v);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, teamId, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9343,7 +11858,7 @@ async function main() {
         try {
           result = refreshKnowledgeClone(String(teamId), { force: false });
         } catch (err) {
-          result = { refreshedAt: null, warnings: [String(err && err.message || err)] };
+          result = { refreshedAt: null, warnings: [errorMessage(err)] };
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, ...result }));
@@ -9373,7 +11888,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, candidate }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9486,7 +12001,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9514,7 +12029,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9560,7 +12075,10 @@ async function main() {
               const req2 = knowledgeDomains.buildBootstrapRequest(
                 Array.isArray(p.lessons) ? p.lessons : [], { roles: teamSquadRoleTokens(teamId) },
               );
-              const text = await _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2); // #855: async, non-blocking
+              // #1214: bill against the user's header-selected provider (ids forwarded
+              // by the console proxy; token resolved locally). Unusable/absent → .env.
+              const binding = resolveAssistBindingFromSelection(String(p.assistEndpointId || ''), String(p.model || ''));
+              const text = await _synthesizeSkillMd(teamKnowledgeEnv(teamId, null), req2, binding); // #855: async, non-blocking
               const llmProposed = knowledgeDomains.parseBootstrapResponse(text, { now });
               // `fallback` tells the UI the LLM target was unavailable/unusable and the
               // proposal is the deterministic role-seed instead (AC1 — visible fallback).
@@ -9584,7 +12102,7 @@ async function main() {
           return respond(r.doc);
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9613,7 +12131,7 @@ async function main() {
           res.end(JSON.stringify({ ok: result.reason !== 'not-found', ...result }));
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9699,7 +12217,7 @@ async function main() {
           const e = new Error(`unknown op '${op}'`); e.status = 400; throw e;
         } catch (err) {
           res.writeHead(err && err.status === 400 ? 400 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9722,7 +12240,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9746,7 +12264,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, config: result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9770,7 +12288,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9805,7 +12323,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9827,7 +12345,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9848,7 +12366,49 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set / clear a KB entry's validity window (#916 bitemporal validity) ─────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/validity') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = setKnowledgeValidity(teamId, id, { validTo: p.validTo ?? null, supersededBy: p.supersededBy ?? null });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Set / clear a KB entry's auto-load triggers (#917 scoped knowledge) ─────
+    if (req.method === 'POST' && req.url === '/internal/knowledge/triggers') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          const teamId = String(p.teamId || '');
+          const id = String(p.id || '');
+          if (!AGENT_ID_RE.test(teamId)) throw new Error('invalid teamId');
+          const result = setKnowledgeTriggers(teamId, id, p.loadTriggers);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9868,7 +12428,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -9893,7 +12453,7 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: (err && err.message) || String(err) }));
+          res.end(JSON.stringify({ ok: false, error: errorMessage(err) }));
         }
       });
       return;
@@ -10088,6 +12648,70 @@ async function main() {
       return;
     }
 
+    // ── List a team's members with running/busy/trigger state ────────────
+    // Feeds the team-wide disable/enable preview dialog in the admin console.
+    const teamMembersMatch = req.method === 'GET' && req.url.match(/^\/internal\/teams\/([^/]+)\/members$/);
+    if (teamMembersMatch) {
+      const teamId = decodeURIComponent(teamMembersMatch[1]);
+      try {
+        const result = orchestrator.listTeamMembersWithState(teamId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        const status = httpStatusForTeamActionError(err);
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // ── Disable an entire team's members in one bulk action ───────────────
+    // Body: { mode: 'drain' | 'abort' } — required, applied uniformly to
+    // every currently-enabled member (the preview dialog already showed the
+    // operator which members are busy before they picked one mode).
+    const teamDisableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/disable$/);
+    if (teamDisableMatch) {
+      const teamId = decodeURIComponent(teamDisableMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.disableTeam(teamId, { mode: parsed.mode });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] disableTeam error for ${teamId}: ${err.message}`);
+            const status = httpStatusForTeamActionError(err, { hasMode: true });
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
+      return;
+    }
+
+    // ── Re-enable an entire team's cascade-disabled members ───────────────
+    const teamEnableMatch = req.method === 'POST' && req.url.match(/^\/internal\/teams\/([^/]+)\/enable$/);
+    if (teamEnableMatch) {
+      const teamId = decodeURIComponent(teamEnableMatch[1]);
+      (async () => {
+        try {
+          const result = await orchestrator.enableTeam(teamId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] enableTeam error for ${teamId}: ${err.message}`);
+          const status = httpStatusForTeamActionError(err);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
     // POST /internal/teams/:teamId/members — add member to team
     // Body (all optional): { id, displayName, systemPromptOverride,
     //   skillsOverride, sessionPolicy, triggers }
@@ -10156,6 +12780,272 @@ async function main() {
         console.error(`[Orchestrator] digest-status error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // GET /internal/teams/:teamId/knowledge/curation-health — the #919 health
+    // record the nightly pass persists. `status: "unknown"` until the first
+    // pass has run (never a 404 — "no record yet" is a valid answer).
+    const curationHealthMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/curation-health$/);
+    if (curationHealthMatch) {
+      const teamId = decodeURIComponent(curationHealthMatch[1]);
+      try {
+        const health = readCurationHealth(teamId);
+        return sendJson(res, 200, { teamId, ...(health || { status: 'unknown' }) });
+      } catch (err) {
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // GET /internal/teams/:teamId/knowledge/retrieval-stats — the read-side
+    // aggregate (#915): per-entry last-used truth + the `since` baseline the
+    // Gap-5 decay sweep needs. Empty aggregate (no telemetry yet) is a valid
+    // 200, never a 404 — "no data" is itself the cold-start signal.
+    const retrievalStatsMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/knowledge\/retrieval-stats$/);
+    if (retrievalStatsMatch) {
+      const teamId = decodeURIComponent(retrievalStatsMatch[1]);
+      try {
+        return sendJson(res, 200, { teamId, ...readRetrievalStats(teamId) });
+      } catch (err) {
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // GET /internal/teams/:teamId/flow-anomalies — observe-only stall detection
+    // (#959, concept §4.1/§4.3). Derives the team's expected label state machine
+    // from member ports, sweeps GitHub + run state with the poller's PAT, and
+    // returns the classified anomaly list. Skipped during maintenance mode (the
+    // sweep is a poll, and repairs — a later phase — must not fire in the window).
+    const flowAnomaliesMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/flow-anomalies(?:\?.*)?$/);
+    if (flowAnomaliesMatch) {
+      const teamId = decodeURIComponent(flowAnomaliesMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, anomalies: [], generatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await computeTeamFlowAnomalies(teamId);
+          return sendJson(res, 200, { maintenance: false, ...result });
+        } catch (err) {
+          console.error(`[Orchestrator] flow-anomalies error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/teams/:teamId/hill-climb/metrics — the latest persisted
+    // metrics snapshot (hill-climbing loop Phase 1, #1222). Read-only; returns
+    // the most recent day-keyed snapshot or { snapshot: null } if the team has
+    // never had a pass. Never re-computes (that is the POST .../run path).
+    const hillClimbGetMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/metrics(?:\?.*)?$/);
+    if (hillClimbGetMatch) {
+      const teamId = decodeURIComponent(hillClimbGetMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') {
+          return sendJson(res, 404, { error: 'agent team not found' });
+        }
+        const snapshot = readLatestHillClimbSnapshot(teamId);
+        return sendJson(res, 200, { teamId, snapshot: snapshot || null });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb metrics error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/run — manual metrics pass (#1222).
+    // Same code path as the scheduled daily timer, behind the per-team
+    // single-flight lock: a manual run while a pass is already in flight is
+    // rejected 409 pass-running. Skipped during maintenance mode (same gate as
+    // the anomaly-history sweep). Overwrites the same-day snapshot.
+    const hillClimbRunMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/run$/);
+    if (hillClimbRunMatch) {
+      const teamId = decodeURIComponent(hillClimbRunMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, { teamId, maintenance: true, snapshot: null });
+          }
+          const out = await runHillClimbPass(teamId);
+          if (!out.ok) {
+            return sendJson(res, 409, { error: out.reason });
+          }
+          // The run also folded the deterministic heuristic cards into the store
+          // (#1224) and returns the secret-free analyst `digest`; the console
+          // runs the LLM analyst over it and POSTs any cards back to
+          // .../hill-climb/cards/merge. Cards are proposals only.
+          return sendJson(res, 200, {
+            teamId, maintenance: false, snapshot: out.snapshot,
+            cards: out.cards, merge: out.merge, digest: out.digest, autonomy: out.autonomy,
+          });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb run error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/teams/:teamId/hill-climb/cards — the persisted improvement
+    // cards (#1224). Read-only; returns the full card list across their whole
+    // lifecycle so the Improvements panel can render open cards + the closed
+    // ledger. Never re-computes.
+    const hillClimbCardsMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards(?:\?.*)?$/);
+    if (hillClimbCardsMatch) {
+      const teamId = decodeURIComponent(hillClimbCardsMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+        // `autonomy` rides along so the console can gate the Apply action (#1225)
+        // before it runs any mutation, without a second round-trip.
+        const { autonomy } = hillClimbCardConfig(teamId);
+        return sendJson(res, 200, { teamId, autonomy, cards: readHillClimbCards(teamId) });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb cards error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/merge — hand-back path for
+    // the console's server-side analyst (#1224). Body: { cards: [...] } (raw
+    // analyst JSON). Every card is re-validated through the schema here (the
+    // store is the authority — the analyst is untrusted) and merged under the
+    // budget/dedup/cooldown rules. Proposals only; nothing mutates agent config.
+    const hillClimbMergeMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/merge$/);
+    if (hillClimbMergeMatch) {
+      const teamId = decodeURIComponent(hillClimbMergeMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const { autonomy } = hillClimbCardConfig(teamId);
+          if (autonomy < 1) return sendJson(res, 200, { teamId, autonomy, merge: null, cards: readHillClimbCards(teamId) });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const incoming = Array.isArray(body.cards) ? body.cards : [];
+          const merge = mergeAndPersistHillClimbCards(teamId, incoming, { source: 'analyst' });
+          return sendJson(res, 200, {
+            teamId,
+            merge: { added: merge.added, bumped: merge.bumped, deferred: merge.deferred, rejected: merge.rejected },
+            cards: merge.cards,
+          });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb cards merge error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/dismiss — flip a card
+    // to 'dismissed' so it is not re-raised (#1224). Human action; card-state
+    // only, never touches agent config.
+    const hillClimbDismissMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/dismiss$/);
+    if (hillClimbDismissMatch) {
+      const teamId = decodeURIComponent(hillClimbDismissMatch[1]);
+      const cardId = decodeURIComponent(hillClimbDismissMatch[2]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+        const card = dismissHillClimbCard(teamId, cardId);
+        if (!card) return sendJson(res, 404, { error: 'card not found' });
+        return sendJson(res, 200, { teamId, card });
+      } catch (err) {
+        console.error(`[Orchestrator] hill-climb card dismiss error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/apply — record an
+    // APPLIED card (hill-climbing loop Phase 2b, #1225). The console has already
+    // run the card's declared apply path through the existing audited choke-point
+    // (as the acting human); this only stamps the outcome onto the card so #1226
+    // can measure it. Autonomy < 2 refuses (apply is a level-2 action even via a
+    // direct call), and only an open card can be applied. Body: { appliedBy?,
+    // undo?, configVersionRef? } gathered console-side before the mutation.
+    const hillClimbApplyMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/apply$/);
+    if (hillClimbApplyMatch) {
+      const teamId = decodeURIComponent(hillClimbApplyMatch[1]);
+      const cardId = decodeURIComponent(hillClimbApplyMatch[2]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const result = applyHillClimbCard(teamId, cardId, {
+            appliedBy: body.appliedBy || null,
+            undo: body.undo || null,
+            configVersionRef: body.configVersionRef || null,
+          });
+          if (!result.ok) {
+            const status = result.code === 'card-not-found' ? 404
+              : result.code === 'autonomy-locked' ? 403
+              : 409;
+            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
+          }
+          return sendJson(res, 200, { teamId, card: result.card });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb card apply error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/hill-climb/cards/:cardId/rollback — record a
+    // ROLLED-BACK card (hill-climbing loop Phase 3, #1226). The console has
+    // already executed the card's rollback plan through the existing audited
+    // choke-point (as the acting human); this only stamps the outcome + a fresh
+    // cooldown so the object re-enters detection after a full window. Autonomy
+    // < 2 refuses, and only a `regressed` card (one that carries a rollback
+    // offer) can be rolled back. Body: { rolledBackBy?, undoResult? }.
+    const hillClimbRollbackMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/hill-climb\/cards\/([^/]+)\/rollback$/);
+    if (hillClimbRollbackMatch) {
+      const teamId = decodeURIComponent(hillClimbRollbackMatch[1]);
+      const cardId = decodeURIComponent(hillClimbRollbackMatch[2]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') return sendJson(res, 404, { error: 'agent team not found' });
+          const body = JSON.parse((await readBody(req)) || '{}');
+          const result = rollbackHillClimbCard(teamId, cardId, {
+            rolledBackBy: body.rolledBackBy || null,
+            undoResult: body.undoResult || null,
+          });
+          if (!result.ok) {
+            const status = result.code === 'card-not-found' ? 404
+              : result.code === 'autonomy-locked' ? 403
+              : 409;
+            return sendJson(res, status, { error: result.code, autonomy: result.autonomy, status: result.status });
+          }
+          return sendJson(res, 200, { teamId, card: result.card });
+        } catch (err) {
+          console.error(`[Orchestrator] hill-climb card rollback error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
     }
 
     // POST /internal/teams/:teamId/skills/{activate,deactivate} — team-owned
@@ -10361,10 +13251,24 @@ async function main() {
           skipFirstMember,
           // For role: 'team' — ordered stage names for the process graph layout.
           stages,
+          // For role: 'team' — the gate/brake label registry (#928): the
+          // authoritative source for which labels are human approval gates
+          // (`humanGate`) and which pause the loop (`brake`).
+          labels,
+          // For role: 'team' — named human roles (#987): first-class human flow
+          // nodes the process graph binds the #981 touchpoints to. Declarative
+          // only; never materialised into an agent.
+          humans,
           // Initial skill grant (team-owned skills, skill-grants.js): the
           // team's active set / the standalone agent's own list. The
           // environment no longer contributes skills.
           skills,
+          // For role: 'team' — label suffix (#902): stored for extend-mode
+          // consistency and Flow-Editor dialog pre-fill.
+          labelSuffix,
+          // For role: 'team' — hill-climb collector config (#1222): the run-metrics
+          // window/floor/cron/excludeAgents, round-tripped with the bundle.
+          hillClimb,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -10399,12 +13303,30 @@ async function main() {
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
         if (Array.isArray(stages)) extra.stages = stages;
+        if (Array.isArray(labels)) extra.labels = labels;
+        if (Array.isArray(humans)) extra.humans = humans;
         if (Array.isArray(skills)) extra.skills = skills;
+        if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
+        if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err) {
         console.error(`[Orchestrator] Internal API create error: ${err.message}`);
+        // A login that stays M_USER_DEACTIVATED after the reactivation-retry loop
+        // (issue #1386) means the just-deleted account was still deactivated —
+        // e.g. re-creating the same id faster than the homeserver settled, or a
+        // build where reset-password can't clear the flag. Surface the actionable
+        // message + a stable code instead of a raw `Login failed: {...}` stack
+        // (409 = retryable conflict, not a bad request or a server fault).
+        if (matrixLoginRetry.isDeactivatedError(err)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: matrixLoginRetry.DEACTIVATED_USER_MESSAGE,
+            code: 'matrix_user_deactivated',
+          }));
+          return;
+        }
         // 400 for caller-fixable misconfigurations (missing env / token, clone
         // rejected by the remote) so the UI surfaces them as a validation
         // error rather than a generic 500 server error.
@@ -10591,7 +13513,13 @@ async function main() {
     for (const teamId of teamIds) {
       try {
         refreshKnowledgeClone(teamId, { force: true });
-        runConvergenceCollector(teamId) // #855: async, non-blocking
+        // #918: embed missing/stale vectors BEFORE the collector, so this very
+        // pass can already link semantically; then the collector (#855 async),
+        // then #919's decay/health sweep. Each step best-effort, chained.
+        runTeamEmbeddingPass(teamId)
+          .catch((err) => console.warn(`[Orchestrator] embedding pass for '${teamId}' failed: ${err.message}`))
+          .then(() => runConvergenceCollector(teamId))
+          .then(() => runTeamDecaySweep(teamId))
           .catch((err) => console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`));
       } catch (err) {
         console.warn(`[Orchestrator] curator backstop for '${teamId}' failed: ${err.message}`);
@@ -10622,6 +13550,115 @@ async function main() {
   };
   const reconcileTimer = setInterval(runSkillReconcile, RECONCILE_INTERVAL_MS);
   if (typeof reconcileTimer.unref === "function") reconcileTimer.unref();
+
+  // ============================================================
+  // Hill-climbing loop Phase 1 (#1221): scheduled flow-anomaly-sweep persistence.
+  // The live GET .../flow-anomalies endpoint computes and discards; recurrence
+  // detection (the hill-climber) and the flow-reconciliation Phase-4 responder's
+  // "third sighting" ladder both need history. An hourly timer (poller cadence
+  // class) re-runs the same sweep per Agent Team and appends one JSONL line to
+  // /workspace/teams/<teamId>/hill-climb/anomaly-history.jsonl, then prunes lines
+  // past the retention window (default 90 days). Skipped during maintenance mode
+  // (same gate as the endpoint — the sweep is a poll). Best-effort: a failed sweep
+  // records an errors-only line and never throws out of the timer; a team with no
+  // repos/tokens produces no file and no errors.
+  // ============================================================
+  const anomalyHistory = require("./anomaly-history");
+  const HILL_CLIMB_ANOMALY_INTERVAL_MS = Math.max(
+    60_000,
+    Number(process.env.HILL_CLIMB_ANOMALY_INTERVAL_MS) || 60 * 60 * 1000,
+  );
+  let anomalyHistoryBusy = false;
+  const runAnomalyHistorySweep = async () => {
+    if (anomalyHistoryBusy) return; // overlap guard — a slow sweep must not stack
+    anomalyHistoryBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // maintenance suppresses scheduled sweeps
+      let teamIds;
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[Orchestrator] anomaly-history: team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        let result = null;
+        try {
+          result = await computeTeamFlowAnomalies(teamId);
+        } catch (err) {
+          // A sweep that threw outright still records an errors-only line so the
+          // gap is visible in history — never let it escape the timer.
+          anomalyHistory.record(teamId, anomalyHistory.buildHistoryEntry({ errors: [err.message] }));
+          anomalyHistory.pruneOldEntries(teamId);
+          continue;
+        }
+        // A team with no repos/tokens resolved produces no file and no errors.
+        if ((result.repos || []).length === 0 && (result.errors || []).length === 0) continue;
+        anomalyHistory.record(teamId, anomalyHistory.buildHistoryEntry(result));
+        anomalyHistory.pruneOldEntries(teamId);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] anomaly-history sweep failed: ${err.message}`);
+    } finally {
+      anomalyHistoryBusy = false;
+    }
+  };
+  const anomalyHistoryTimer = setInterval(runAnomalyHistorySweep, HILL_CLIMB_ANOMALY_INTERVAL_MS);
+  if (typeof anomalyHistoryTimer.unref === "function") anomalyHistoryTimer.unref();
+
+  // ============================================================
+  // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.
+  // Folds the team's log surfaces (session JSONL, usage spool, #1221's
+  // anomaly-history, the event-transparency log, audit / prompt-history) into the
+  // §4 run-metric catalog and persists one day-keyed snapshot per Agent Team at
+  // /workspace/teams/<teamId>/hill-climb/metrics/<date>.json (same-day re-run
+  // overwrites). Daily cadence (staggered like the curation crons), skipped during
+  // maintenance mode. Shares the per-team single-flight lock with the manual
+  // POST .../hill-climb/run endpoint (runHillClimbPass), so a scheduled and a
+  // manual pass never overlap and produce identical snapshots for identical
+  // inputs. Best-effort: a per-team failure is logged and never escapes the timer.
+  // ============================================================
+  const HILL_CLIMB_METRICS_INTERVAL_MS = Math.max(
+    60_000,
+    Number(process.env.HILL_CLIMB_METRICS_INTERVAL_MS) || 24 * 60 * 60 * 1000,
+  );
+  let hillClimbMetricsBusy = false;
+  const runHillClimbMetricsSweep = async () => {
+    if (hillClimbMetricsBusy) return; // overlap guard — a slow pass must not stack
+    hillClimbMetricsBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // maintenance suppresses scheduled passes
+      let teamIds;
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[Orchestrator] hill-climb metrics: team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await runHillClimbPass(teamId);
+        } catch (err) {
+          // Best-effort per team: a failed collection must not stop the others.
+          console.warn(`[Orchestrator] hill-climb metrics pass failed for ${teamId}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] hill-climb metrics sweep failed: ${err.message}`);
+    } finally {
+      hillClimbMetricsBusy = false;
+    }
+  };
+  const hillClimbMetricsTimer = setInterval(runHillClimbMetricsSweep, HILL_CLIMB_METRICS_INTERVAL_MS);
+  if (typeof hillClimbMetricsTimer.unref === "function") hillClimbMetricsTimer.unref();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

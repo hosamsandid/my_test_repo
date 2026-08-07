@@ -110,6 +110,20 @@ A lightweight 1:1 chat for talking to Matrix agents directly inside the Admin Co
 { "ts":"...", "type":"thinking",            "correlationId":"$evt:abc", "text":"..." }
 { "ts":"...", "type":"result",              "correlationId":"$evt:abc",
   "durationMs":12345, "tokens":{ "input":1200, "output":340 } }
+
+// A trigger firing. `triggerType` mirrors the trigger's `type`. A loop
+// iteration additionally carries its 1-based number + cap (#1155), so the log
+// renders it as "Loop · iteration N of M" and the composer can show live
+// progress; both fields are absent on non-loop firings.
+{ "ts":"...", "type":"trigger.fired",       "correlationId":"trigger:lp:...",
+  "triggerId":"lp", "triggerType":"loop", "loopIteration":3, "loopMaxIterations":25 }
+
+// A parent-ticket binding change (#1383). Appended by the admin console when a
+// human binds/rebinds or unbinds the GitHub issue this room is about. No
+// correlationId (it is an out-of-band human action, not a chat turn).
+{ "ts":"...", "type":"ticket.bound",   "repo":"owner/name", "number":1383,
+  "url":"https://github.com/owner/name/issues/1383", "title":"..." }
+{ "ts":"...", "type":"ticket.unbound" }
 ```
 
 `correlationId` is the Matrix event ID of the user message that triggered this work — lets the UI highlight log entries belonging to a chat bubble.
@@ -194,9 +208,9 @@ Five mergeable PRs. After PR #3 the feature is usable end-to-end; #4 and #5 are 
 **New files:**
 - `admin-console/src/pages/AgentChat.jsx` — top-level page, owns layout state (which agent, log panel open/closed).
 - `admin-console/src/pages/agent-chat/AgentList.jsx` — left rail.
-- `admin-console/src/pages/agent-chat/ChatPanel.jsx` — main column.
-- `admin-console/src/pages/agent-chat/Message.jsx` — single message bubble with `react-markdown`.
-- `admin-console/src/pages/agent-chat/MessageInput.jsx` — textarea, Cmd+Enter to send, optimistic insert.
+- `admin-console/src/pages/agent-chat/ChatPanel.jsx` — main column; hosts a per-user transcript font-size −/+ stepper in the session toolbar (#1437 — default 12px, range 10–18px). The message scroll container sets a scoped `--chat-font-size` CSS var that the message bubble reads; the chosen size is persisted server-side on the user record (`PUT /api/me/preferences` → `describeAuthz.chatFontSize` in the session), with a per-username `agentChat.fontSize.<username>` localStorage fallback for the env single-admin. Pure clamp/step/persist logic in `chat-font-size.js`.
+- `admin-console/src/pages/agent-chat/Message.jsx` — single message bubble with `react-markdown`; the bubble font-size reads `var(--chat-font-size, var(--eb-text-md))` so it scales with the toolbar stepper and falls back to the 14px token outside the chat view.
+- `admin-console/src/pages/agent-chat/MessageInput.jsx` — textarea, optimistic insert; a user-configurable send keybinding (`agentChat.sendKeybinding`: `ide` = Cmd/Ctrl+Enter sends / Enter newline, default; `chat` = Enter sends / Shift+Enter newline) with OS-aware (`⌘` vs `Ctrl`) placeholder + helper hints — pure logic in `message-send-keybinding.js`. The composer draft is persisted per agent under `agentChat.draft.<agentId>` (pure logic in `message-draft.js`) so text typed for one agent survives switching to another agent and back — restored on mount, cleared on a successful send (#1388). While the agent is busy on a chat turn or a launched loop, the primary-action button switches from Send to a single unified **Stop** (⏹) control (#1427) that aborts whatever is running via the existing session-stop path (`POST /api/agents/:id/session/:roomId/stop`) — the loop control is then launch-only (no second stop affordance), and a turn stop drops a distinct "Stopped by user" marker into the transcript. The Send-vs-Stop mode decision is the pure `composer-action.js`.
 - `admin-console/src/hooks/useSSE.js` — generic SSE hook with reconnect (exponential backoff) and `since` offset support, modeled on bp-explorer `sseClient()` (app.js:4518–4631).
 
 **Edits:**

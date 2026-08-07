@@ -43,14 +43,14 @@ test('parseLegacyEntities: one entry per H2/H3 section, flattened + capped', () 
     '---',
     'Polls the Events API every 30s.',
     '',
-    '### vgh-claw',
+    '### agent-studio',
     'The local Matrix stack.',
     '',
     '## empty-section',
   ].join('\n'));
   assert.equal(entities.length, 3);
   assert.equal(entities[0].text, 'github-poller: type: service Polls the Events API every 30s.');
-  assert.equal(entities[1].text, 'vgh-claw: The local Matrix stack.');
+  assert.equal(entities[1].text, 'agent-studio: The local Matrix stack.');
   assert.equal(entities[2].text, 'empty-section');
 });
 

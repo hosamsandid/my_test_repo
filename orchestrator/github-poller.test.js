@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 
 const {
   GitHubPoller,
+  pollerSubscribes,
   parseRepoFullName,
   effectiveHorizon,
   backfillHorizonStamps,
@@ -13,12 +14,15 @@ const {
   planBurstHandoffs,
   shouldFetchNextPage,
   prApiUrlToHtmlUrl,
+  labelFilterMatches,
   GRACE_MS,
   SEEN_MAX,
   BURST_CAP,
   PER_PAGE,
   MAX_PAGES,
 } = require("./github-poller");
+
+const realEvents = require("./github-poller-events.fixture.json");
 
 // ── parseRepoFullName (#711): github-only by default, fixture host when opted in ─
 
@@ -134,6 +138,127 @@ test("backfillHorizonStamps: guards non-arrays and missing stamp", () => {
   assert.deepEqual(backfillHorizonStamps(null, "2026-05-01T00:00:00Z"), { triggers: null, changed: false });
   const t = [{ id: "g1", type: "github-event" }];
   assert.deepEqual(backfillHorizonStamps(t, null), { triggers: t, changed: false });
+});
+
+// ── labelFilterMatches (webhook-shape coverage) ───────────────────────────────
+// These fixtures are WEBHOOK-shaped (nested `issue.labels`) — a shape the Events
+// API never emits (it puts the label set at the payload top level, see the
+// fixture-backed tests below). They exercise the nested fallback that still
+// serves the e2e fake-github and any future webhook ingress.
+
+const labeledEvent = (attributed, currentLabels) => ({
+  type: "IssuesEvent",
+  payload: {
+    action: "labeled",
+    label: attributed ? { name: attributed } : undefined,
+    issue: { number: 1, labels: (currentLabels || []).map((name) => ({ name })) },
+  },
+});
+
+test("labelFilterMatches: matches the directly-attributed label", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ready", ["ready"]), "ready"), true);
+});
+
+test("labelFilterMatches: no filter fires on any label change", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["ux"]), null), true);
+});
+
+test("labelFilterMatches: (webhook shape) recovers a collapsed multi-add via nested labels — attributed 'ux', 'ready' also present", () => {
+  // Webhook-shaped fallback: adding bug+ux+ready in one action surfaces
+  // labeled(ux); the 'ready' wake still fires because 'ready' is in the nested
+  // label set. (On the Events API the same recovery comes from payload.labels.)
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["bug", "ux", "ready"]), "ready"), true);
+});
+
+test("labelFilterMatches: still drops a labeled event when the wanted label is truly absent", () => {
+  assert.equal(labelFilterMatches(labeledEvent("ux", ["bug", "ux"]), "ready"), false);
+});
+
+test("labelFilterMatches: unlabeled matches only the removed label, not the current set", () => {
+  // On removal the wanted label is (correctly) gone from the current set; only
+  // the directly-named payload.label counts — no false-positive from siblings.
+  const unlabeled = {
+    type: "IssuesEvent",
+    payload: { action: "unlabeled", label: { name: "ready" }, issue: { number: 1, labels: [{ name: "bug" }] } },
+  };
+  assert.equal(labelFilterMatches(unlabeled, "ready"), true);
+  assert.equal(labelFilterMatches(unlabeled, "bug"), false); // 'bug' still present, but this event didn't touch it
+});
+
+test("labelFilterMatches: (webhook shape) pull_request labeled honours the nested label set", () => {
+  // Webhook-shaped only: a real Events-API PullRequestEvent never carries
+  // pull_request.labels (see the fixture-backed tests). Kept as fallback
+  // coverage for webhook ingress.
+  const prLabeled = {
+    type: "PullRequestEvent",
+    payload: {
+      action: "labeled",
+      label: { name: "needs-review" },
+      pull_request: { number: 7, labels: [{ name: "needs-review" }, { name: "revisions-required" }] },
+    },
+  };
+  assert.equal(labelFilterMatches(prLabeled, "revisions-required"), true);
+});
+
+test("labelFilterMatches: a truly reduced payload (no label set anywhere) only matches the attributed label", () => {
+  // Neither a top-level nor a nested label set — the degenerate case. The
+  // directly-attributed label still matches; an unrelated label finds no set to
+  // recover from and does not crash. (Real Events-API PR events are NOT this
+  // shape — they carry payload.labels; see incidentPrLabeled below.)
+  const reduced = { type: "PullRequestEvent", payload: { action: "labeled", label: { name: "x" }, pull_request: { number: 7 } } };
+  assert.equal(labelFilterMatches(reduced, "x"), true);
+  assert.equal(labelFilterMatches(reduced, "y"), false);
+});
+
+// ── labelFilterMatches (real Events-API payloads, #1376) ──────────────────────
+// Verbatim captured Events-API entries; assert the top-level `payload.labels`
+// set is what drives the match — the nested webhook arrays are wrong here.
+
+test("labelFilterMatches: (real) incident PR event 12860294824 matches the base wake label", () => {
+  // Regression test for #1376: payload.label is the ':completed' claim marker,
+  // but the base wake label 'florian-03:ready-for-review' is in payload.labels.
+  const ev = realEvents.incidentPrLabeled;
+  assert.equal(ev.id, "12860294824");
+  assert.equal(ev.payload.label.name, "florian-03:ready-for-review:completed");
+  assert.equal(Object.prototype.hasOwnProperty.call(ev.payload.pull_request, "labels"), false);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review"), true);
+});
+
+test("labelFilterMatches: (real) base wake fires on a PR carrying :wip / :completed claim markers", () => {
+  // The multi-round review/rework case: the base label coexists with claim
+  // markers; each such PR labeled event still wakes the base-label listener.
+  const ev = realEvents.incidentPrLabeled;
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review"), true);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready-for-review:completed"), true);
+});
+
+test("labelFilterMatches: (real) IssuesEvent uses event-time payload.labels, not the late-bound issue.labels snapshot", () => {
+  // Event 12842942084: payload.labels = ['florian-03:ready'] (event time), while
+  // payload.issue.labels = ['florian-03:ready:completed'] (a snapshot read 7 min
+  // later). The wake label must match; the late-bound-only label must NOT.
+  const ev = realEvents.lateBoundIssueLabeled;
+  assert.equal(ev.id, "12842942084");
+  assert.deepEqual(ev.payload.labels.map((l) => l.name), ["florian-03:ready"]);
+  assert.deepEqual(ev.payload.issue.labels.map((l) => l.name), ["florian-03:ready:completed"]);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready"), true);
+  assert.equal(labelFilterMatches(ev, "florian-03:ready:completed"), false);
+});
+
+test("labelFilterMatches: (real) top-level labels wins even though the direct label also matches", () => {
+  // Sanity: the attributed-label short-circuit doesn't hide the payload.labels
+  // path — matching the directly-named label still works on a real event.
+  const ev = realEvents.lateBoundIssueLabeled;
+  assert.equal(labelFilterMatches(ev, "florian-03:ready"), true);
+});
+
+test("labelFilterMatches: (fixture) genuinely webhook-shaped payload still recovers via nested labels", () => {
+  // No top-level payload.labels → nested fallback must keep working so the e2e
+  // fake-github path does not regress.
+  const ev = realEvents.webhookShapedIssueLabeled;
+  assert.equal(Object.prototype.hasOwnProperty.call(ev.payload, "labels"), false);
+  assert.equal(labelFilterMatches(ev, "team-x:ready"), true);
+  assert.equal(labelFilterMatches(ev, "bug"), true);
+  assert.equal(labelFilterMatches(ev, "absent"), false);
 });
 
 // ── passesHorizon (Baustein B): >= horizon − grace ────────────────────────────
@@ -435,4 +560,34 @@ test("_enrichPullRequestPayload: missing pull_request is untouched", async () =>
   const payload = {};
   const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
   assert.equal(out, payload);
+});
+
+// ── pollerSubscribes (#1173): internal-channel triggers never enter the plan ─
+//
+// The exclusion below is the SINGLE dedup mechanism of the internal-channels
+// design: /internal/flow-emit mirrors the label onto GitHub after delivering
+// the wake through the queue, and that stamp may never wake the listener a
+// second time via the poller (docs/internal-channels-concept.md §4.3).
+
+const subscribable = (over = {}) => ({
+  id: "t1", type: "github-event", repo: "org/repo",
+  events: ["issues.labeled"], labelFilter: "ready",
+  ...over,
+});
+
+test("pollerSubscribes: a plain github-event trigger subscribes", () => {
+  assert.equal(pollerSubscribes(subscribable()), true);
+  assert.equal(pollerSubscribes(subscribable({ transport: "github" })), true);
+});
+
+test("pollerSubscribes: transport 'internal' is excluded — the label mirror cannot double-deliver", () => {
+  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), false);
+});
+
+test("pollerSubscribes: disabled, wrong-type and malformed triggers are excluded", () => {
+  assert.equal(pollerSubscribes(subscribable({ enabled: false })), false);
+  assert.equal(pollerSubscribes(subscribable({ type: "cron" })), false);
+  assert.equal(pollerSubscribes(subscribable({ repo: undefined })), false);
+  assert.equal(pollerSubscribes(subscribable({ events: [] })), false);
+  assert.equal(pollerSubscribes(null), false);
 });

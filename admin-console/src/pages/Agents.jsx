@@ -1,20 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, Download, Upload, Copy,
+  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { inferMissingRoles } from './missing-roles-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
+import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
+import { summarizeTeamAction } from './team-action-summary.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -467,11 +470,13 @@ const ROLE_INFO = {
   },
   'team': {
     icon: Users,
-    title: 'Team',
+    title: 'Agent Team',
     short: 'A reusable template — spawn multiple team members from one prompt.',
     body: (
       <>
-        Stores a system-prompt template without creating an agent itself. Instead you click
+        A squad of agents working a repo — <em>not</em> the same thing as a <strong>Team</strong> on the
+        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Teams</Link> page (which is a human tenant / access scope).
+        This construct stores a system-prompt template without creating an agent itself. Instead you click
         <strong> Add Member</strong> on the team card to spawn one or more agents that all
         share the same prompt and Working Environment, but each gets its own workspace and
         its own conversation in the Agent Chat.
@@ -482,16 +487,49 @@ const ROLE_INFO = {
   'orchestrator': {
     icon: Workflow,
     title: 'Orchestrator',
-    short: 'Watches a directory of BriefingPacks and manages one agent per mission.',
+    short: 'Watches a folder of mission files and runs one agent per mission.',
     body: (
       <>
-        Pointed at a folder of ACE BriefingPacks. The orchestrator scans the folder, lists one
-        stub <em>bp-instance</em> per mission, and offers to materialise / claim the mission
-        when it transitions to <code>dispatched</code>. Each materialised mission becomes its
-        own agent with its own chat, executing the BriefingPack's LoopScript.
+        Pointed at a folder of <strong>missions</strong> — task files (<em>BriefingPacks</em>)
+        from an <strong>ACE (Agent Control Environment)</strong> briefings repository. The
+        orchestrator scans the folder and lists one stub agent per mission; when a mission is
+        marked <code>dispatched</code> it offers to turn that stub into a live agent with its
+        own chat, which then works the mission end to end. Open{' '}
+        <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flows</Link> to see
+        active orchestrators.
       </>
     ),
-    when: 'Use when you have a Briefings repository (ACE) that you want to drive end-to-end through this console.',
+    when: 'Use when you have an ACE briefings repository whose missions you want to drive end-to-end through this console.',
+  },
+  'team-member': {
+    icon: User,
+    title: 'Team Member',
+    short: 'One agent spawned from an Agent Team — most fields inherit from the team.',
+    body: (
+      <>
+        A single agent created with <strong>Add Member</strong> on an <strong>Agent Team</strong> card.
+        It is not created directly here: its system prompt, skills and MCP servers <em>inherit</em> from
+        the parent team unless you flip a field from <strong>Inherit</strong> to <strong>Custom</strong> to
+        override just that one. Its role, Working Environment and parent team are fixed at creation and
+        shown read-only — change the shared parts on the team, the per-member parts here.
+      </>
+    ),
+    when: 'You do not pick this role yourself — it is assigned when you add a member to a team.',
+  },
+  'bp-instance': {
+    icon: FileText,
+    title: 'Mission Agent (bp-instance)',
+    short: 'One agent per mission, managed by an Orchestrator from a BriefingPack.',
+    body: (
+      <>
+        A stub or materialised agent that an <strong>Orchestrator</strong> creates for a single mission it
+        found in an ACE (Agent Control Environment) BriefingPack. You do not create it directly: the
+        orchestrator lists one per mission and materialises it when the mission is dispatched. Its parent
+        orchestrator, mission ID and Mission Directory are inherited and shown read-only here — edit the
+        mission in its BriefingPack, not on this form.
+      </>
+    ),
+    when: 'You do not pick this role yourself — the orchestrator assigns it per mission.',
   },
 };
 
@@ -679,9 +717,9 @@ function MissionDirectoryField({ value, onChange, repoDirs }) {
 
   const helpText = (
     <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-      Path inside the agent's workspace where ACE BriefingPacks live — usually the directory of a cloned briefings repository.
+      Path inside the agent's workspace where the mission files live — usually a cloned ACE briefings repository.
       The <code>artifacts/briefings/</code> subdirectory is appended automatically.
-      On creation, the orchestrator scans this path and registers one stub <em>bp-instance</em> per mission found.
+      On creation, the orchestrator scans this path and registers one stub agent per mission it finds.
     </div>
   );
 
@@ -864,7 +902,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
             <span>
               Consider using the{' '}
               <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>
-                Team Wizard
+                Agent Team Wizard
               </Link>{' '}
               instead — it sets up the full team structure automatically.
             </span>
@@ -883,8 +921,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           }}>
             <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
             <span>
-              An Orchestrator monitors a directory of BriefingPacks (ACE task files) and manages their lifecycle.
-              Use this only if you are working with ACE LoopScripts. See{' '}
+              An Orchestrator watches a folder of <strong>missions</strong> — task files from an
+              ACE briefings repository — and runs one agent per mission.
+              Use this only if you have such a repository. See{' '}
               <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>
                 Flows
               </Link>{' '}
@@ -905,7 +944,9 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div>
         <div style={labelStyle}>Skills</div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-          The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          {form.role === 'team'
+            ? "The whole team's skill set, copied into every member's workspace at seed time — members inherit it unless they set their own override."
+            : "Skills copied into this agent's workspace at seed time. Only global-pool skills are offered here; team-tier skills become available once the agent belongs to a team and you edit it there."}
         </div>
         <SkillPicker
           skills={poolSkills}
@@ -1144,6 +1185,170 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
 }
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
+// Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
+// control: unlike the rest of the edit form (one PUT on Save), a mount change is
+// baked at container spawn time and re-provisions the agent, so it saves
+// immediately via its own PATCH endpoint and reports the respawn outcome. Each
+// folder gets a distinct, stable in-container path — a single legacy folder at
+// the bare `/context`, additional folders at `/context/<slug>` (the slug is
+// derived from the folder's basename server-side and de-duplicated). Availability
+// is local/self-hosted only — the capability probe disables the control (with an
+// explanation) on the hosted stack (AC8).
+function ContextMountControl({ agent }) {
+  const { data: capability } = useApi('/api/context-mount/capability');
+  const supported = capability ? !!capability.supported : null; // null = still loading
+  const mountPath = (capability && capability.mountPath) || '/context';
+
+  // Initial rows: the multi-folder field when present, else the legacy single
+  // folder, else empty. `slug`/`name` are carried (hidden) so a re-save keeps a
+  // folder's in-container path stable even if the host path is repointed.
+  const initialRows = () => {
+    if (Array.isArray(agent.contextMounts) && agent.contextMounts.length) {
+      return agent.contextMounts.map(m => ({
+        path: m.path || '',
+        name: m.name || '',
+        slug: m.slug || null,
+        readWrite: m.readWrite === true,
+        target: m.slug ? `${mountPath}/${m.slug}` : null,
+      }));
+    }
+    if (agent.contextMount) {
+      return [{ path: agent.contextMount, name: '', slug: null, readWrite: agent.contextMountRw === true, target: mountPath }];
+    }
+    return [];
+  };
+  const snapshot = (rs) => JSON.stringify(rs.map(r => ({ path: (r.path || '').trim(), readWrite: !!r.readWrite })));
+
+  const [rows, setRows] = useState(initialRows);
+  const [saved, setSaved] = useState(() => snapshot(initialRows()));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+
+  const dirty = snapshot(rows) !== saved;
+  const disabled = busy || supported === null;
+
+  const updateRow = (i, patch) => setRows(rs => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addRow = () => setRows(rs => [...rs, { path: '', name: '', slug: null, readWrite: false, target: null }]);
+  const removeRow = (i) => setRows(rs => rs.filter((_, idx) => idx !== i));
+
+  async function persist(nextRows) {
+    setBusy(true); setMsg(''); setErr('');
+    try {
+      const mounts = nextRows
+        .map(r => ({
+          path: (r.path || '').trim(),
+          readWrite: !!r.readWrite,
+          ...(r.name ? { name: r.name } : {}),
+          ...(r.slug ? { slug: r.slug } : {}),
+        }))
+        .filter(m => m.path);
+      const res = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/context-mount`, { mounts });
+      const applied = Array.isArray(res && res.mounts) ? res.mounts : [];
+      const appliedRows = applied.map(m => ({
+        path: m.hostPath || '',
+        name: m.name || '',
+        slug: m.slug || null,
+        readWrite: m.readWrite === true,
+        target: m.target || null,
+      }));
+      setRows(appliedRows);
+      setSaved(snapshot(appliedRows));
+      const n = appliedRows.length;
+      if (!n) {
+        setMsg('Context folders cleared. ' + (res && res.respawned ? 'Agent re-provisioned.' : 'Takes effect on the next start.'));
+      } else {
+        const suffix = n === 1 ? 'folder' : 'folders';
+        setMsg(res && res.respawned
+          ? `${n} ${suffix} mounted under ${mountPath}. Agent re-provisioned.`
+          : `Saved ${n} ${suffix}. Takes effect the next time the agent starts.`);
+      }
+    } catch (e) {
+      setErr((e && e.message) || 'Could not update the context folders');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={labelStyle}>Host context folders</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        Expose one or more folders from the host machine to this agent as live context.
+        Each folder's current contents appear inside the agent under <code>{mountPath}</code>
+        {' '}at its own path; changes the host makes are reflected on the agent's next access.
+        By default each folder is <strong>read-only</strong>; tick read-write to let the agent
+        create, modify and delete files in it — those changes land on the host. Saving
+        re-provisions the agent's container.
+      </div>
+      {supported === false ? (
+        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)' }}>
+          Not available in this environment — host-folder mounts are offered only on the
+          local / self-hosted stack.
+        </div>
+      ) : (
+        <>
+          {rows.length === 0 && (
+            <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)', fontStyle: 'italic' }}>
+              No folders attached. Add one below.
+            </div>
+          )}
+          {rows.map((row, i) => (
+            <div key={i} style={{ marginBottom: 'var(--eb-space-3)', paddingBottom: 'var(--eb-space-2)', borderBottom: '1px solid var(--eb-border-default)' }}>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={row.path}
+                  onChange={e => updateRow(i, { path: e.target.value })}
+                  placeholder="/absolute/path/on/the/host"
+                  disabled={disabled}
+                  style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)', flex: '1 1 auto', minWidth: 0 }}
+                />
+                <SecondaryBtn
+                  onClick={() => removeRow(i)}
+                  title="Remove this folder"
+                  style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto', flex: '0 0 auto' }}
+                >
+                  Remove
+                </SecondaryBtn>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-1)', cursor: disabled ? 'default' : 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={row.readWrite}
+                  onChange={e => updateRow(i, { readWrite: e.target.checked })}
+                  disabled={disabled}
+                />
+                <span style={helpTextStyle}>Mount read-write — let the agent write back to this folder (off by default).</span>
+              </label>
+              {row.target && (
+                <div style={{ ...helpTextStyle, marginTop: 'var(--eb-space-1)' }}>
+                  Mounts at <code>{row.target}</code>
+                </div>
+              )}
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+            <SecondaryBtn onClick={addRow} style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto' }}>
+              + Add folder
+            </SecondaryBtn>
+            <SecondaryBtn onClick={() => persist(rows)} style={{ opacity: (disabled || !dirty) ? 0.6 : 1, pointerEvents: (disabled || !dirty) ? 'none' : 'auto' }}>
+              {busy ? 'Saving…' : 'Save & re-provision'}
+            </SecondaryBtn>
+            {rows.length > 0 && (
+              <SecondaryBtn onClick={() => { setRows([]); persist([]); }} style={{ opacity: disabled ? 0.6 : 1, pointerEvents: disabled ? 'none' : 'auto' }}>
+                Clear all
+              </SecondaryBtn>
+            )}
+          </div>
+          {msg && <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{msg}</div>}
+          {err && <div role="alert" style={{ ...helpTextStyle, color: 'var(--eb-status-error)' }}>{err}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
   // `agent.skillsOverride` absent === inheriting from the parent team.
@@ -1270,6 +1475,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
           {agent.role}
         </div>
       </div>
+
+      <RoleDetailBanner role={agent.role} />
 
       <div>
         <div style={labelStyle}>Working Environment (read-only)</div>
@@ -1407,6 +1614,23 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
         </>
       )}
 
+      {agent.role !== 'team' && (
+        <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <ContextMountControl agent={agent} />
+        </div>
+      )}
+
+      {agent.role !== 'team' && agent.environmentId && (
+        <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <div style={labelStyle}>Repositories</div>
+          <SyncReposPanel
+            endpoint={`/api/agents/${encodeURIComponent(agent.id)}/sync-repositories`}
+            actionLabel="Sync repositories"
+            description={"Clone any repositories added to this agent's Working Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
+          />
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <PrimaryBtn onClick={() => onSave(buildSubmit())} saving={saving} disabled={!canSubmit}>
           {saving ? 'Saving…' : 'Save Changes'}
@@ -1481,7 +1705,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1540,13 +1764,14 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
             <ToggleSwitch
               checked={state === 'active'}
               onChange={() => onToggleEnabled(agent)}
-              label={state === 'active' ? 'Disable' : 'Enable'}
-              disabled={busy}
+              label={locked ? 'Team is disabled — enable the team first' : (state === 'active' ? 'Disable' : 'Enable')}
+              disabled={busy || locked}
             />
             <IconButton
               icon={PowerOff}
-              label="Deactivate"
-              title="Deactivate — reset to stub state"
+              label="Reset to stub"
+              title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+              danger
               onClick={() => onDeactivate(agent)}
               disabled={busy}
             />
@@ -1727,8 +1952,9 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
               />
               <IconButton
                 icon={PowerOff}
-                label="Deactivate"
-                title="Deactivate — reset to stub state"
+                label="Reset to stub"
+                title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+                danger
                 onClick={() => onDeactivate(agent)}
                 disabled={busyIds.has(agent.id)}
               />
@@ -1792,7 +2018,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1804,6 +2030,14 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
   });
 
   const children = agent.children || [];
+
+  // Loop-closing roles this team is missing relative to its inferred source
+  // process template (#1375). Null unless a template clearly matches — so
+  // unrelated / fully-covered teams show nothing.
+  const missingRoles = useMemo(
+    () => inferMissingRoles(agent, children, processTemplates),
+    [agent, children, processTemplates],
+  );
 
   return (
     <div style={{
@@ -1835,7 +2069,12 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)',
               background: 'var(--eb-bg-app)', padding: '2px 8px',
               borderRadius: 'var(--eb-radius-full)', border: '1px solid var(--eb-accent-primary)',
-            }}>Team</span>
+            }} title="A squad of agents working a repo — not the same as a Team on the Teams page">Agent Team</span>
+            <ToggleSwitch
+              checked={agent.enabled !== false}
+              onChange={() => onToggleTeam(agent)}
+              label={agent.enabled !== false ? 'Disable team' : 'Enable team'}
+            />
           </div>
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {agent.id} · env: {agent.environmentId}
@@ -1897,6 +2136,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
               tree={{ depth: 1, ancestorMore: [], isLast: idx === children.length - 1, hasChildren: false, isCollapsed: false }}
               navigate={navigate}
               busy={busyIds.has(child.id)}
+              locked={agent.enabled === false}
               onActivate={onActivate}
               onDeactivate={onDeactivate}
               onToggleEnabled={onToggleEnabled}
@@ -1907,6 +2147,45 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactiva
             />
           ))
         )
+      )}
+
+      {/* Missing loop-closing roles (#1375). Additive hint: only shown when the
+          team clearly matches a reference template and is missing roles from it.
+          Adding a role reuses the members endpoint and starts it disabled. */}
+      {expanded && missingRoles && missingRoles.missing.length > 0 && (
+        <div style={{
+          padding: 'var(--eb-space-4)',
+          borderTop: '1px solid var(--eb-border-default)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Info size={13} style={{ flexShrink: 0 }} />
+            Missing roles from the <strong style={{ color: 'var(--eb-text-secondary)' }}>{missingRoles.templateName}</strong> loop.
+            Add one to close a gap (e.g. no <code>merger</code> ⇒ merges stay manual). New roles start disabled.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+            {missingRoles.missing.map(role => {
+              const busy = addingRoleKey === `${agent.id}:${role.id}`;
+              return (
+                <button
+                  key={role.id}
+                  onClick={() => onAddRole(agent, missingRoles.templateId, role)}
+                  disabled={!!addingRoleKey}
+                  title={`Add the ${role.displayName} role from the ${missingRoles.templateName} template (starts disabled)`}
+                  style={{
+                    background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+                    borderRadius: 'var(--eb-radius-md)', cursor: addingRoleKey ? 'not-allowed' : 'pointer',
+                    padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
+                    opacity: addingRoleKey && !busy ? 0.5 : 1,
+                  }}
+                >
+                  <UserPlus size={13} /> {busy ? 'Adding…' : `Add ${role.displayName} role`}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1947,8 +2226,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           />
           <IconButton
             icon={PowerOff}
-            label="Deactivate"
-            title="Deactivate — reset to stub state"
+            label="Reset to stub"
+            title="Reset to stub — wipes the workspace (session history, cloned repos, in-workspace state). Not a pause; use the Disable toggle to pause."
+            danger
             onClick={() => onDeactivate(agent)}
             disabled={busy}
           />
@@ -2006,11 +2286,24 @@ export default function Agents() {
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null); // { agent, busy, activeTriggers }
   const [disableWarning, setDisableWarning] = useState(null); // { agent, busy, activeTriggers }
+  // Team-wide disable/enable: preview + confirm + result, mirroring the
+  // per-agent disableWarning flow but operating on every member at once.
+  const [teamActionPrompt, setTeamActionPrompt] = useState(null); // { team, action: 'disable'|'enable', members }
+  const [teamActionBusy, setTeamActionBusy] = useState(false);
+  const [teamActionError, setTeamActionError] = useState(null);
+  const [teamActionResult, setTeamActionResult] = useState(null); // { action, successIds, failedMembers }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
   const [addingMemberId, setAddingMemberId] = useState(null);
+  // Missing-blueprint-role detection (#1375): the full reference process-template
+  // bundles (roles + label registry), fetched once and handed to each TeamCard so
+  // it can infer which loop-closing roles the team is missing. The `/api/process-templates`
+  // list is slim (no roles/labels), so each bundle is fetched by id.
+  const [processTemplates, setProcessTemplates] = useState([]);
+  const [addingRoleKey, setAddingRoleKey] = useState(null); // `${teamId}:${roleId}` while adding
+  const [addRoleNotice, setAddRoleNotice] = useState(null); // { text } success toast
   const [busyIds, setBusyIds] = useState(new Set());
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
@@ -2042,6 +2335,26 @@ export default function Agents() {
     ...teamMembers.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
     ...bpInstances.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
   ].sort(byName);
+
+  // Load the full reference process-template bundles once (#1375). Best-effort:
+  // if the pool isn't seeded or the fetch fails, the missing-role hints simply
+  // don't appear — the rest of the page is unaffected. Only runs when at least
+  // one Agent Team exists to compare against.
+  useEffect(() => {
+    if (teams.length === 0) return;
+    if (processTemplates.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { templates } = await apiCall('GET', '/api/process-templates');
+        const list = Array.isArray(templates) ? templates : [];
+        const bundles = await Promise.all(list.map(t =>
+          apiCall('GET', `/api/process-templates/${encodeURIComponent(t.id)}`).catch(() => null)));
+        if (!cancelled) setProcessTemplates(bundles.filter(Boolean));
+      } catch { /* pool not seeded / unreachable — no hints, no error */ }
+    })();
+    return () => { cancelled = true; };
+  }, [teams.length, processTemplates.length]);
 
   function openPanel(mode, agent) {
     setSaveError(null);
@@ -2204,6 +2517,55 @@ export default function Agents() {
     }
   }
 
+  async function handleToggleTeam(team) {
+    const action = team.enabled === false ? 'enable' : 'disable';
+    setTeamActionError(null);
+    try {
+      const { members } = await apiCall('GET', `/api/teams/${team.id}/members`);
+      setTeamActionPrompt({ team, action, members });
+    } catch (e) {
+      setActionError(e.message);
+    }
+  }
+
+  async function handleTeamDisableConfirmed(mode) {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/disable`, { mode });
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'disable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
+    }
+  }
+
+  async function handleTeamEnableConfirmed() {
+    const { team, members } = teamActionPrompt;
+    setTeamActionBusy(true);
+    setTeamActionError(null);
+    try {
+      const result = await apiCall('POST', `/api/teams/${team.id}/enable`, {});
+      const summary = summarizeTeamAction(result, members);
+      setTeamActionPrompt(null);
+      refetch();
+      if (summary.failedMembers.length > 0) {
+        setTeamActionResult({ action: 'enable', ...summary });
+      }
+    } catch (e) {
+      setTeamActionError(e.message);
+    } finally {
+      setTeamActionBusy(false);
+    }
+  }
+
   async function handleSyncBps(agent) {
     setSyncingId(agent.id);
     try {
@@ -2225,6 +2587,35 @@ export default function Agents() {
       setActionError(e.message);
     } finally {
       setAddingMemberId(null);
+    }
+  }
+
+  // Add a loop-closing role a team is missing, from its inferred source process
+  // template (#1375). Reuses the members endpoint's process-template branch, then
+  // disables the fresh member so nothing wakes until the operator confirms (AC3).
+  async function handleAddRole(team, templateId, role) {
+    const key = `${team.id}:${role.id}`;
+    setAddingRoleKey(key);
+    setActionError(null);
+    setAddRoleNotice(null);
+    try {
+      const created = await apiCall('POST', `/api/agents/${team.id}/members`, {
+        processTemplateId: templateId,
+        roleId: role.id,
+      });
+      const memberId = (created && created.id) || `${team.id}-${role.id}`;
+      // Start disabled — reuse the existing member disable path (PUT enabled:false)
+      // rather than a new backend field, so nothing wakes until the operator
+      // enables it. Best-effort: the role is already added even if this fails.
+      try {
+        await apiCall('PUT', `/api/agents/${memberId}`, { enabled: false });
+      } catch { /* member added; leave enable state to the operator */ }
+      setAddRoleNotice({ text: `Added ${role.displayName || role.id} (disabled). Enable it when you're ready to close the loop.` });
+      refetch();
+    } catch (e) {
+      setActionError(e.message);
+    } finally {
+      setAddingRoleKey(null);
     }
   }
 
@@ -2375,19 +2766,26 @@ export default function Agents() {
               <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Use <Link to="/quickstart" style={{ color: 'var(--eb-accent-primary)' }}>Single Agent</Link> for the fastest setup.</td>
             </tr>
             <tr>
-              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Team / Team-member</strong></td>
-              <td style={{ padding: '4px 8px' }}>Part of a coordinated group. Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
+              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent Team / member</strong></td>
+              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
-              <td style={{ padding: '4px 8px' }}>Manages a folder of BriefingPacks (ACE workflow tasks). Only needed for ACE-based workflows.</td>
+              <td style={{ padding: '4px 8px' }}>Runs a folder of mission files from an <strong>ACE (Agent Control Environment)</strong> briefings repository. Only needed for ACE-based workflows.</td>
             </tr>
           </tbody>
         </table>
         <p style={{ margin: 0 }}>
           After creation the agent appears below as a card. <em>Active</em> agents are running and ready to chat;
           <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need
-          one click on <strong>Activate</strong> to come to life. You can edit, deactivate or delete each agent from its card.
+          one click on <strong>Activate</strong> to come to life.
+        </p>
+        <p style={{ margin: '8px 0 0' }}>
+          Three card actions do different things, from reversible to destructive: <strong>Disable</strong> (the toggle) simply
+          pauses the process and <em>keeps</em> the workspace — flip it back on to resume; <strong>Reset to stub</strong> (the
+          red power button) stops the agent and <em>wipes</em> its workspace — session history, cloned repos and any
+          in-workspace state are lost, though the stub config remains so it can be reactivated from scratch;
+          <strong> Delete</strong> removes the agent config entirely. Reach for Disable when you only want to pause.
         </p>
       </div>
 
@@ -2398,13 +2796,49 @@ export default function Agents() {
         </div>
       )}
 
+      {addRoleNotice && (
+        <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-success-bg, var(--eb-bg-elevated))', border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+          {addRoleNotice.text}
+          <button onClick={() => setAddRoleNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-status-success)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)' }}>Dismiss</button>
+        </div>
+      )}
+
       {totalCount === 0 ? (
         <div style={{
           padding: 'var(--eb-space-8)', textAlign: 'center',
           background: 'var(--eb-bg-surface)', border: '1px dashed var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-lg)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--eb-space-4)',
         }}>
-          No agents yet. Click <strong>+ New Agent</strong> to create the first one.
+          <p style={{ margin: 0 }}>No agents yet. Start with one of the guided paths:</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', justifyContent: 'center' }}>
+            <Link
+              to="/quickstart"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
+                background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              Create a single agent
+            </Link>
+            <Link
+              to="/team-setup"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
+                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+                border: '1px solid var(--eb-border-default)',
+                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
+              }}
+            >
+              Set up a team
+            </Link>
+          </div>
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)' }}>
+            Prefer full control? <strong>+ New Agent</strong> above is the advanced path.
+          </p>
         </div>
       ) : (
         <>
@@ -2433,12 +2867,16 @@ export default function Agents() {
               navigate={navigate}
               addingMember={addingMemberId === t.id}
               busyIds={busyIds}
+              processTemplates={processTemplates}
+              addingRoleKey={addingRoleKey}
+              onAddRole={handleAddRole}
               onEdit={a => openPanel('edit', a)}
               onDelete={a => setDeleteTarget(a)}
               onAddMember={handleAddMember}
               onActivate={handleActivate}
               onDeactivate={a => setDeactivateTarget(a)}
               onToggleEnabled={handleToggleEnabled}
+              onToggleTeam={handleToggleTeam}
               onEditChild={a => openPanel('edit', a)}
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
@@ -2564,15 +3002,16 @@ export default function Agents() {
 
       <ConfirmDialog
         open={!!deactivateTarget}
-        title="Deactivate Agent"
+        title="Reset agent to stub?"
         message={
           `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
           `This stops the agent process and wipes the workspace. ` +
           `The stub config is kept so the agent can be reactivated later — but session history, ` +
-          `cloned repositories, and any in-workspace state will be lost.`
+          `cloned repositories, and any in-workspace state will be lost. ` +
+          `To pause without losing anything, cancel and use the Disable toggle instead.`
         }
         variant="danger"
-        confirmLabel="Deactivate"
+        confirmLabel="Reset to stub"
         onConfirm={handleDeactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
       />
@@ -2595,6 +3034,63 @@ export default function Agents() {
         onDrain={() => handleDeactivateMode('drain')}
         onHardStop={() => handleDeactivateMode('hard-stop')}
         onCancel={() => setDeactivateWarning(null)}
+      />
+
+      <ConfirmDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
+        title={`Enable team "${teamActionPrompt?.team?.displayName ?? ''}"?`}
+        message={teamActionPrompt && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
+            </p>
+            <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
+                <li key={m.id}>{m.displayName}</li>
+              ))}
+            </ul>
+            {teamActionError && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{teamActionError}</p>
+            )}
+          </div>
+        )}
+        variant="info"
+        confirmLabel="Enable team"
+        busy={teamActionBusy}
+        onConfirm={handleTeamEnableConfirmed}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <TeamDisableDialog
+        open={!!teamActionPrompt && teamActionPrompt.action === 'disable'}
+        team={teamActionPrompt?.team}
+        members={teamActionPrompt?.members || []}
+        error={teamActionError}
+        busy={teamActionBusy}
+        onDrain={() => handleTeamDisableConfirmed('drain')}
+        onAbort={() => handleTeamDisableConfirmed('abort')}
+        onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
+      />
+
+      <ConfirmDialog
+        open={!!teamActionResult}
+        variant="danger"
+        alertOnly
+        title={teamActionResult?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
+        message={teamActionResult && (
+          <div>
+            <p style={{ marginTop: 0 }}>
+              {teamActionResult.failedMembers.length} member(s) could not be {teamActionResult.action === 'disable' ? 'disabled' : 'enabled'}:
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+              {teamActionResult.failedMembers.map(m => (
+                <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        onConfirm={() => setTeamActionResult(null)}
+        onCancel={() => setTeamActionResult(null)}
       />
     </div>
   );
@@ -2660,6 +3156,79 @@ function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAb
   );
 }
 
+function TeamDisableDialog({ open, team, members, error, busy, onDrain, onAbort, onCancel }) {
+  if (!open) return null;
+  const name = team?.displayName ?? team?.id ?? 'this team';
+  const toDisable = members.filter(m => m.enabled);
+  const busyCount = toDisable.filter(m => m.busy || (m.activeTriggers?.length ?? 0) > 0).length;
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Disable team" style={{
+      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 520,
+        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
+              Disable team "{name}"
+            </h3>
+            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+              {toDisable.length === 0
+                ? 'Every member is already disabled — this only marks the team itself as disabled.'
+                : `${toDisable.length} member${toDisable.length !== 1 ? 's' : ''} will be disabled${busyCount > 0 ? ` (${busyCount} currently busy or with active triggers)` : ''}. Choose how to proceed:`}
+            </p>
+            {toDisable.length > 0 && (
+              <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxHeight: 200, overflowY: 'auto' }}>
+                {toDisable.map(m => (
+                  <li key={m.id}>
+                    {m.displayName}
+                    {(m.busy || (m.activeTriggers?.length ?? 0) > 0) && (
+                      <span style={{ color: 'var(--eb-status-warning)' }}> — {m.busy ? 'busy' : `${m.activeTriggers.length} active trigger(s)`}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {members.some(m => !m.enabled) && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                {members.filter(m => !m.enabled).length} member(s) already disabled are left untouched.
+              </p>
+            )}
+            {error && (
+              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-2)' }}>{error}</p>
+            )}
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={onCancel} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Cancel</button>
+          <button onClick={onDrain} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Let running work finish</button>
+          <button onClick={onAbort} disabled={busy} style={{
+            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
+            color: 'var(--eb-text-inverted)', border: 'none',
+            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+          }}>Hard stop</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, onHardStop, onCancel }) {
   if (!open) return null;
   const name = agent?.displayName ?? agent?.id ?? 'this agent';
@@ -2670,7 +3239,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
   if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Deactivate agent" style={{
+    <div role="dialog" aria-modal="true" aria-label="Reset agent to stub" style={{
       position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
     }}>
@@ -2683,7 +3252,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
           <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Deactivate "{name}"
+              Reset "{name}" to stub
             </h3>
             <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
               {parts.length > 0
@@ -2691,7 +3260,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
                 : 'This agent has active state. Choose how to proceed:'}
             </p>
             <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to deactivate fully once the agent is idle.</li>
+              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to reset once the agent is idle.</li>
               <li><strong>Hard stop</strong> — kill the process immediately, then wipe the workspace.</li>
             </ul>
           </div>
@@ -2713,7 +3282,7 @@ function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, o
             color: 'var(--eb-text-inverted)', border: 'none',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Hard stop + Deactivate</button>
+          }}>Hard stop + reset</button>
         </div>
       </div>
     </div>

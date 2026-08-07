@@ -6,7 +6,7 @@ SSH keys are used by agents to clone and push to private Git repositories.
 
 **Registering a key** (`/ssh-keys`): Paste a private key into the console. It is stored at mode 0600. The console returns only the SHA256 fingerprint — the private key is never returned by the API after creation.
 
-**Deleting a key:** Keys can be deleted only when no Working Environment references them.
+**Deleting a key:** Keys can be deleted only when no Working Environment references them. The **Used by** column on the SSH Keys page shows which environments reference each key (count + hover tooltip); the delete dialog names any blocking environments as a bulleted list.
 
 **Using a key:** Assign the key to a repository entry in a Working Environment. When an agent is created, the orchestrator clones the repository using that key and configures the workspace's SSH agent accordingly.
 
@@ -15,6 +15,10 @@ SSH keys are used by agents to clone and push to private Git repositories.
 GitHub Personal Access Tokens (PATs) authorize the built-in GitHub poller to watch repository events.
 
 **Registering a token** (`/github-tokens`): Paste a GitHub PAT into the console. It is stored securely and displayed only as a masked prefix plus the last four characters.
+
+**Deleting a token:** Tokens can be deleted only when no Working Environment references them. The **Used by** column on the GitHub Tokens page shows which environments reference each token (count + hover tooltip); the delete dialog names any blocking environments as a bulleted list.
+
+**Editing / rotating a token:** The Edit panel can only rename a token and change its team ownership — the secret is create-only. To rotate an expiring or leaked token: create a new GitHub token, then repoint the Working Environment's "GitHub Token" field to the new one. Any agents running in that environment are restarted to pick up the new token — in-flight work is interrupted, so rotate at a quiet moment. Disabled agents pick up the fresh credential on their next enable.
 
 **Scope:** The token must have at minimum `repo` read access for the repositories you want to monitor. For writing commits and opening pull requests via `gh-as-agent`, it must also have `repo` write access and `workflow` access if Actions workflows are involved.
 

@@ -40,8 +40,7 @@
 
 const {
   buildProcessGraph,
-  isHumanGate,
-  isBrake,
+  compareHumanTouchpoints,
 } = require('./process-graph');
 const {
   buildProcessTemplate,
@@ -56,6 +55,12 @@ const ACTORS = {
   github: '@github',
   external: '@external',
   timer: '@timer',
+  // The generic `@human` actor (#981) is GONE (#987): a person is never an
+  // anonymous hub any more — every human touchpoint is a NAMED human-role node
+  // (`kind: 'human'`) or, when no role is wired yet, nothing at all plus an
+  // advisory lint. Gate/brake/delivery edges originate at or terminate on the
+  // named node; an unbound touchpoint keeps its `null` endpoint (the renderer
+  // drops it) so the canvas never grows a hub box again.
 };
 const ACTOR_META = {
   [ACTORS.github]: { actor: 'github', displayName: 'GitHub' },
@@ -81,7 +86,7 @@ function edgeId(e) {
   // two triggers on the same agent never collapse into one edge. For label
   // edges this keeps e.g. "wake when L is added" and "wake when L is removed"
   // (two triggers on the same label) as two independently editable edges.
-  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label'))
+  const trig = (e.triggerId && (e.on === 'event' || e.on === 'webhook' || e.on === 'timer' || e.on === 'label' || e.on === 'loop'))
     ? `#${e.triggerId}` : '';
   return `${kind}|${e.from == null ? '∅' : e.from}→${e.to == null ? '∅' : e.to}|${tail}${trig}`;
 }
@@ -116,6 +121,17 @@ function processEdgeToUnified(e) {
     // The scheduler is the source (#410) — no more self-loop.
     return { from: ACTORS.timer, to: e.to, on: 'timer', label: e.label, schedule, triggerId: e.triggerId };
   }
+  if (e.kind === 'loop') {
+    // Loop self-edge (#936): unlike the cron `timer` (rerouted from the @timer
+    // actor), a loop is genuinely the agent re-arming *itself*, so it stays a
+    // self-edge (from === to). The canvas renders it as a stop-contract badge
+    // inside the agent card (following the cron precedent, where schedules also
+    // render in-card rather than as a drawn line).
+    return {
+      from: e.from, to: e.to, on: 'loop', triggerId: e.triggerId,
+      ...(e.loop ? { loop: e.loop } : {}),
+    };
+  }
   if (e.kind === 'webhook') {
     // http trigger — fired by an external system via the webhook server (#410).
     return { from: ACTORS.external, to: e.to, on: 'webhook', label: e.label, triggerId: e.triggerId };
@@ -131,6 +147,13 @@ function processEdgeToUnified(e) {
     // Raw GitHub event — the repo itself is the source (#410).
     return { from: ACTORS.github, to: e.to, on: 'event', events: [e.label], triggerId: e.triggerId, external: true };
   }
+  if (e.kind === 'delivery') {
+    // Artifact delivery to a NAMED human role (#987): the producer's PR/issue is
+    // reviewed/merged by that person. Same on:'github' shape as a channel edge so
+    // it shares the artifact styling. buildProcessGraph only emits a delivery edge
+    // when a human role consumes it, so `e.to` is always a named node here.
+    return { from: e.from, to: e.to, on: 'github', artifact: e.artifact, audience: 'human' };
+  }
   // 'agent' label wiring, plus gate/brake (human-only) edges. The carrying
   // label events (issue/PR × added/removed) ride along for display.
   const u = { from: e.from, to: e.to, on: 'label', label: e.label, triggerId: e.triggerId };
@@ -139,17 +162,43 @@ function processEdgeToUnified(e) {
   // structured outcome; carry the outcome option id so the canvas can title the
   // edge with it and clicking focuses the Routing tab on that outcome.
   if (e.outcome) u.outcome = e.outcome;
-  if (e.kind === 'gate' || e.kind === 'brake' || isHumanGate(e.label) || isBrake(e.label)) {
+  // `kind` is already the authoritative, flag-derived classification (#928) —
+  // no name re-match here (the old `isHumanGate(e.label) || isBrake(e.label)`
+  // fallback keyed off the `human:*` convention and is gone).
+  // Brake hand-off (#987): an agent applied a brake label — the flow pauses on a
+  // HUMAN decision. It terminates on a named human role when one `consumes` the
+  // brake label (`e.to` set by buildProcessGraph); otherwise `e.to` is null and
+  // the edge is dropped (an advisory `unbound-brake` lint prompts wiring a role —
+  // no generic @human hub). Tagged `handoff` (deliberately NOT `gate` — the
+  // renderer styles "waiting on a person" distinctly from an approval-gate).
+  if (e.handoff === 'human' && e.from != null) {
+    u.to = e.to != null ? e.to : null;
+    u.handoff = 'human';
+    delete u.triggerId; // emit-side edge — there is no listening trigger behind it
+    if (e.kind === 'brake') u.brake = true;
+    return u;
+  }
+  if (e.kind === 'gate' || e.kind === 'brake') {
     u.gate = 'human';
   }
-  // Human-approval gates and brakes have no agent emitter (from: null in the
-  // process graph); a human acts on them through a GitHub label, so they
-  // originate at the @github actor. (Source/origin filters were removed, so
-  // there is no longer any per-trigger `from`-based human inference for plain,
-  // non-gate labels — those simply stay orphans.)
-  if (u.from == null && u.gate === 'human') u.from = ACTORS.github;
+  // A gate label bound to a NAMED human role keeps `e.from = <humanId>` from
+  // buildProcessGraph and stays as-is. An UNBOUND gate (registry `humanGate` flag,
+  // no human role emitting it) keeps `from: null` — the renderer drops it and an
+  // advisory `unbound-gate` lint prompts wiring a human role. No generic @human
+  // hub is synthesised any more (#987 supersedes the #981 @human actor).
   if (e.orphan) u.orphan = true;
   if (e.deadEnd) u.deadEnd = true;
+  // Declared open ends (#1004): a terminal/external outcome edge is a proper
+  // endpoint, not a dead-end — forwarded so the canvas renders the terminus.
+  if (e.endpoint) u.endpoint = e.endpoint;
+  if (e.note) u.note = e.note;
+  // Claim (#958): what the listener takes over when it wakes. Forwarded verbatim
+  // so the canvas can render the claim badge on the listener edge — same
+  // pass-through shape as the loop stop-contract blob (#936).
+  if (e.claim) u.claim = e.claim;
+  // Internal-channel transport (#1174): forwarded so the canvas styles the
+  // delivery path and the edge dialog can toggle it.
+  if (e.transport === 'internal') u.transport = 'internal';
   return u;
 }
 
@@ -164,16 +213,36 @@ function processEdgeToUnified(e) {
  * @param {Array} [edges] - explicit UnifiedEdge[] (e.g. on:'manual' hand-offs,
  *   operator-drawn dependencies). Derived label/timer/review/event/dependency/
  *   artifact edges are computed here and merged in.
+ * @param {object} [options]
+ * @param {Array}  [options.labels] - the authoritative label registry (#928),
+ *   forwarded to buildProcessGraph so gate/brake classification reads the
+ *   `humanGate`/`brake` flags instead of the label's name.
+ * @param {Array}  [options.humans] - named human roles (#987), forwarded to
+ *   buildProcessGraph. The synthesized `kind: 'human'` nodes are lifted into the
+ *   unified node set (below) so they participate in the layered layout; their
+ *   `consumes` bind gate/brake/PR/issue edges (in buildProcessGraph) and the
+ *   data-flow `file` deliveries (here).
  * @returns {{ nodes, edges, gates, labels, lints }}
  */
-function buildUnifiedGraph(nodes, edges) {
+function buildUnifiedGraph(nodes, edges, options) {
   const list = asArray(nodes);
   const nodeIds = new Set(list.map(n => n.id));
 
   // 1) Process-style edges (label / timer / review / event) + gates/labels +
   //    the Process lints — reuse the existing builder verbatim.
-  const pg = buildProcessGraph(list);
+  const pg = buildProcessGraph(list, { labels: options && options.labels, humans: options && options.humans });
   const pgNodeById = new Map(pg.nodes.map(n => [n.id, n]));
+  // Synthesized human nodes (#987) — first-class boxes that carry no data-flow
+  // ports; their `consumes` drive the `file`-delivery binding below.
+  const humanNodes = pg.nodes.filter(n => n.kind === 'human');
+  const humanFileConsumer = new Map(); // fileKey -> humanId (first match wins)
+  for (const h of humanNodes) {
+    for (const c of asArray(h.consumes)) {
+      if (c && c.artifact === 'file' && c.name && !humanFileConsumer.has(c.name)) {
+        humanFileConsumer.set(c.name, h.id);
+      }
+    }
+  }
 
   // Output nodes = Process node view enriched with the BP data-flow ports,
   // the expandable content/prompt, and the parent-child hierarchy (#362 UI).
@@ -197,6 +266,21 @@ function buildUnifiedGraph(nodes, edges) {
       channels: asArray(n.channels),
     };
   });
+
+  // Named human roles (#987) join the unified node set as first-class boxes.
+  // They carry no data-flow ports and no parent, so their effectiveStage is
+  // simply their own stage — they participate in the layered layout by their
+  // stage column, not in the actor column. Appended here so they flow through
+  // the same stage/children resolution below.
+  for (const h of humanNodes) {
+    outNodes.push({
+      ...h,
+      inputs: [], outputs: [], dependsOn: [],
+      content: typeof h.description === 'string' ? h.description : '',
+      parent: null, children: [], isParent: false,
+      stage: typeof h.stage === 'string' ? h.stage : '',
+    });
+  }
 
   // Effective stage: a node inherits its parent's stage by default and may
   // override it with its own (#362). Walked up the parent chain (cycle-safe).
@@ -307,6 +391,32 @@ function buildUnifiedGraph(nodes, edges) {
     push({ from, to, on: 'artifact', paths: [...paths].sort() });
   }
 
+  // 3a) Artifact deliveries to a person (#981): an output whose declared
+  //     `audience` is 'human' is consumed by a PERSON (a report, a review
+  //     document), not by an agent — drawn as producer → @human and exempted
+  //     from `unconsumed-output` in computeDataflowLints.
+  const artifactDeliveries = [];
+  for (const n of list) {
+    for (const a of asArray(n.outputs)) {
+      if (!a || typeof a !== 'object') continue;
+      const k = artifactKey(a);
+      if (!k) continue;
+      // A NAMED human role that `consumes` this output by name (#987) draws
+      // producer → role. An `audience: 'human'` flag with no role wired stays
+      // UNBOUND: it lists as a touchpoint and clears `unconsumed-output`, but its
+      // edge terminates on null (dropped by the renderer — no @human hub) and
+      // raises the advisory `unbound-delivery` lint.
+      const boundHuman = humanFileConsumer.get(k);
+      if (boundHuman) {
+        push({ from: n.id, to: boundHuman, on: 'artifact', paths: [k], audience: 'human' });
+        artifactDeliveries.push({ type: 'delivery', artifact: 'file', name: k, agentId: n.id, role: boundHuman });
+      } else if (a.audience === 'human') {
+        push({ from: n.id, to: null, on: 'artifact', paths: [k], audience: 'human' });
+        artifactDeliveries.push({ type: 'delivery', artifact: 'file', name: k, agentId: n.id });
+      }
+    }
+  }
+
   // 3b) GitHub channel edges (#380): a consumer's `channels` port declares which
   //     producer's PR/issue it reacts to. Producer → consumer, tagged with the
   //     artifact, the optional routing label, and the optional human-approval
@@ -319,6 +429,13 @@ function buildUnifiedGraph(nodes, edges) {
         from: ch.from, to: n.id, on: 'github', artifact,
         ...(ch.label ? { label: ch.label } : {}),
         ...(ch.gate === 'human' ? { gate: 'human' } : {}),
+        // Authored wake-prompt override (#868), surfaced so the channel edit
+        // dialog can pre-fill and round-trip it.
+        ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
+        // Internal-channel transport (#1194), surfaced so the channel edit dialog /
+        // Routing row can pre-fill the Delivery control and the canvas can style
+        // the edge. Only the non-default is carried (mirrors the port).
+        ...(ch.transport === 'internal' && ch.label && ch.gate !== 'human' ? { transport: 'internal' } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }
@@ -334,7 +451,9 @@ function buildUnifiedGraph(nodes, edges) {
   // 5) Actor pseudo-nodes (#410): append one node per actor that some edge
   //    references, so every trigger source is visible on the canvas. Views
   //    without trigger edges (BriefingPacks) naturally get none.
-  const usedActors = new Set(unifiedEdges.map(e => e.from).filter(isActorId));
+  // An actor may be a source (@github events, @human gate labels) OR a sink
+  // (@human brake hand-offs / artifact deliveries, #981) — scan both ends.
+  const usedActors = new Set(unifiedEdges.flatMap(e => [e.from, e.to]).filter(isActorId));
   for (const [id, meta] of Object.entries(ACTOR_META)) {
     if (!usedActors.has(id)) continue;
     outNodes.push({
@@ -351,7 +470,13 @@ function buildUnifiedGraph(nodes, edges) {
     ...computeDataflowLints(list, unifiedEdges),
   ];
 
-  return { nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels, lints };
+  return {
+    nodes: outNodes, edges: unifiedEdges, gates: pg.gates, labels: pg.labels,
+    // Process-level touchpoints plus the data-flow artifact deliveries (#981),
+    // merged into the one deterministic order.
+    humanTouchpoints: [...pg.humanTouchpoints, ...artifactDeliveries].sort(compareHumanTouchpoints),
+    lints,
+  };
 }
 
 // Data-flow + dependency lints layered on top of the Process lints (#365).
@@ -366,6 +491,21 @@ function computeDataflowLints(nodes, edges) {
     for (const p of inputPaths(n)) allInputs.add(p);
   }
 
+  // Output paths delivered to a person (#987): an `on: 'artifact'` edge tagged
+  // `audience: 'human'`. `to` set = a NAMED human role reads it; `to` null = an
+  // `audience: 'human'` flag with no role wired (unbound). Either way it is a
+  // declared consumer, so both clear the `unconsumed-output` smell — but an
+  // unbound one raises the advisory `unbound-delivery` prompting a role.
+  const humanDelivered = new Set(); // path -> delivered to some person
+  const unboundDelivered = new Map(); // path -> producerId (flag, no role)
+  for (const e of asArray(edges)) {
+    if (!e || e.on !== 'artifact' || e.audience !== 'human' || !Array.isArray(e.paths)) continue;
+    for (const p of e.paths) {
+      humanDelivered.add(p);
+      if (e.to == null && e.from != null && !unboundDelivered.has(p)) unboundDelivered.set(p, e.from);
+    }
+  }
+
   for (const n of list) {
     for (const p of inputPaths(n)) {
       if (!allOutputs.has(p)) {
@@ -375,14 +515,24 @@ function computeDataflowLints(nodes, edges) {
         });
       }
     }
+    // Outputs marked as declared open ends (#1004): terminal ("the end
+    // product") or external ("consumed outside this flow") — no smell.
+    const markedOutputs = new Set(asArray(n.outputs)
+      .filter(a => a && typeof a === 'object' && (a.terminal === true || a.external))
+      .map(a => artifactKey(a)).filter(Boolean));
     for (const p of outputPaths(n)) {
-      if (!allInputs.has(p)) {
-        lints.push({
-          code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
-          message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,
-        });
-      }
+      if (allInputs.has(p) || humanDelivered.has(p) || markedOutputs.has(p)) continue;
+      lints.push({
+        code: 'unconsumed-output', severity: 'info', nodeId: n.id, path: p,
+        message: `\`${n.id}\` produces output \`${p}\` but nothing consumes it.`,
+      });
     }
+  }
+  for (const [p, producerId] of unboundDelivered) {
+    lints.push({
+      code: 'unbound-delivery', severity: 'info', nodeId: producerId, path: p,
+      message: `\`${producerId}\` marks output \`${p}\` for a person but no human role reads it — wire a human role.`,
+    });
   }
 
   // Dependency cycles — over `on:'dependency'` edges only (ordering constraint).

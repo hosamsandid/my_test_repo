@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router';
 import Shell from './components/Shell';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
@@ -72,6 +72,7 @@ const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
 const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
 const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
 const About = lazy(() => import('./pages/About'));
+const GettingStarted = lazy(() => import('./pages/GettingStarted'));
 
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
@@ -155,6 +156,7 @@ export default function App() {
           <Route path="/patterns"           element={<PatternsCatalog />} />
           <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
           <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
+          <Route path="/getting-started" element={<GettingStarted />} />
           <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>

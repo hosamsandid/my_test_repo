@@ -1,0 +1,216 @@
+# Deploy Agent Studio to a hosted GKE environment (#1348): test or preprod,
+# both namespaces on the shared cluster (agent-studio, europe-west3-b,
+# acn-projectroots).
+#
+# Trunk-based releases: main is the trunk; a release is an annotated tag
+# vX.Y.Z on a main commit. Images are built and pushed with an IMMUTABLE tag —
+# the git tag for release deploys, sha-<8> for branch deploys — and the
+# deployments are pinned to it via the kustomize overlay (set-images.sh), so
+# "what runs where" is always identifiable from the cluster. No :latest, no
+# rollout-restart: the tag change itself rolls the pods (re-running the same
+# tag is a no-op by design).
+#
+#   environment=test     any ref (default main HEAD)
+#   environment=preprod  release tags vX.Y.Z only (guard job enforces it)
+#
+# Auth is keyless: the workflow exchanges its GitHub OIDC token for the
+# agent-studio-deployer service account via Workload Identity Federation — no
+# GCP keys are stored in GitHub. The WIF provider only accepts tokens from THIS
+# repository (attribute-condition on the provider). The SA needs
+# roles/container.developer PLUS the agentStudioDeployerRbac custom role
+# (infra/gcp/deployer.tf) — container.developer alone cannot patch RBAC
+# objects, and the overlay apply includes 10-rbac.yaml.
+#
+# Images are built natively on GitHub's amd64 runners — this replaces the local
+# cross-build path (Apple Silicon Macs build arm64 by default, which
+# crash-loops on GKE's x86 nodes with "exec format error").
+#
+# Trigger: manual (Actions tab -> "deploy-gke" -> Run workflow). Kept manual
+# for the same reason as deploy-gcp.yml: a deploy restarts services and
+# interrupts any agent session running at that moment.
+#
+# Scope: build + push + kubectl apply of the environment's overlay + rollout.
+# It does NOT create infrastructure (cluster, AR repo, static IPs/DNS — that
+# is infra/gcp/ Terraform) and does not run the Matrix bootstrap or create the
+# env Secret — first-time environment setup is deploy/k8s/gke-up.sh from an
+# operator machine (the deploy fails with a pointer if the Secret is missing).
+
+name: deploy-gke
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [test, preprod]
+        default: test
+      ref:
+        description: "Git ref to deploy — release tag vX.Y.Z (required for preprod) or branch/sha (test only)"
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for Workload Identity Federation
+
+concurrency:
+  group: gke-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  PROJECT: acn-projectroots
+  ZONE: europe-west3-b
+  CLUSTER: agent-studio
+  AR: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio
+  WIF_PROVIDER: projects/594390336049/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER_SA: agent-studio-deployer@acn-projectroots.iam.gserviceaccount.com
+
+jobs:
+  # Validates the ref against the environment's release policy and computes
+  # the immutable image tag + target namespace for the later jobs.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+      namespace: ${{ steps.compute.outputs.namespace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0 # merge-base needs history
+      - name: Validate ref / compute image tag
+        id: compute
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.ref }}"
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Release tag: must point into main's history (trunk-based).
+            git fetch --quiet origin main
+            git merge-base --is-ancestor "${REF}^{commit}" origin/main \
+              || { echo "::error::tag $REF is not on main" ; exit 1; }
+            TAG="$REF"
+          else
+            if [[ "${{ inputs.environment }}" == "preprod" ]]; then
+              echo "::error::preprod deploys release tags only (vX.Y.Z), got: $REF"
+              exit 1
+            fi
+            TAG="sha-$(git rev-parse --short=8 HEAD)"
+          fi
+          NS=agent-studio
+          [[ "${{ inputs.environment }}" == "preprod" ]] && NS=agent-studio-preprod
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
+          echo "Deploying ref '$REF' to ${{ inputs.environment }} ($NS) as images :$TAG"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Orchestrator tests
+        run: cd orchestrator && npm install && npm test
+      - name: Admin-console API tests
+        run: cd admin-console/api && npm install && npm test
+
+  deploy:
+    needs: [guard, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+      NS: ${{ needs.guard.outputs.namespace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Authenticate to GCP (WIF, keyless)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - name: Set up gcloud + GKE auth plugin
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west3-docker.pkg.dev --quiet
+
+      - name: Build and push images (linux/amd64, immutable tag)
+        run: |
+          set -euo pipefail
+          # The console footer shows the commit of the DEPLOYED ref (not the
+          # workflow-triggering sha — they differ when a tag/branch is chosen).
+          GIT_COMMIT="$(git rev-parse --short=8 HEAD)"
+          docker build -t "$AR/agent-studio-orchestrator:${TAG}"  orchestrator/
+          docker build -t "$AR/agent-studio-admin-console:${TAG}" --build-arg "GIT_COMMIT=${GIT_COMMIT}" admin-console/
+          docker build -t "$AR/agent-studio-bp-explorer:${TAG}"   bp-explorer/
+          docker build -t "$AR/as-agent:${TAG}" -f agent-image/Dockerfile agent-image/
+          for img in agent-studio-orchestrator agent-studio-admin-console agent-studio-bp-explorer as-agent; do
+            docker push "$AR/$img:${TAG}"
+          done
+
+      - name: Pin overlay to the tag
+        run: ./deploy/k8s/set-images.sh "${{ inputs.environment }}" "${TAG}"
+
+      - name: Apply core (namespace / RBAC / storage / conduwuit)
+        run: |
+          set -euo pipefail
+          # On rollout failure, print describe + logs so the CI log shows the
+          # real cause (CrashLoopBackOff reason, previous-container output)
+          # without needing cluster access.
+          rollout_or_diagnose() {
+            local d="$1"
+            kubectl -n "$NS" rollout status "deploy/$d" --timeout=300s && return 0
+            echo "::group::diagnostics: deploy/$d failed to roll out"
+            kubectl -n "$NS" get pods -l "app.kubernetes.io/component=$d" -o wide || true
+            kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$d" | tail -n 100 || true
+            echo "--- current container logs ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 || true
+            echo "--- previous container logs (crash loop) ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 --previous || true
+            echo "::endgroup::"
+            return 1
+          }
+          gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT"
+          kubectl apply -k "deploy/k8s/overlays/${{ inputs.environment }}/core"
+          rollout_or_diagnose conduwuit
+
+      - name: Require the environment's bootstrap Secret
+        run: |
+          kubectl -n "$NS" get secret agent-studio-env >/dev/null 2>&1 || {
+            echo "::error::Secret agent-studio-env missing in $NS — first-time setup is manual:"
+            echo "::error::  ./deploy/k8s/gke-up.sh --env ${{ inputs.environment }} --tag ${TAG}"
+            exit 1
+          }
+
+      - name: Apply app (orchestrator / admin-console / bp-explorer / ingress)
+        run: |
+          set -euo pipefail
+          # Same failure diagnostics as the core step (steps are separate
+          # shells, so the helper is duplicated rather than shared).
+          rollout_or_diagnose() {
+            local d="$1"
+            kubectl -n "$NS" rollout status "deploy/$d" --timeout=300s && return 0
+            echo "::group::diagnostics: deploy/$d failed to roll out"
+            kubectl -n "$NS" get pods -l "app.kubernetes.io/component=$d" -o wide || true
+            kubectl -n "$NS" describe pod -l "app.kubernetes.io/component=$d" | tail -n 100 || true
+            echo "--- current container logs ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 || true
+            echo "--- previous container logs (crash loop) ---"
+            kubectl -n "$NS" logs "deploy/$d" --all-containers --tail=100 --previous || true
+            echo "::endgroup::"
+            return 1
+          }
+          kubectl apply -k "deploy/k8s/overlays/${{ inputs.environment }}/app"
+          for d in orchestrator admin-console bp-explorer; do
+            rollout_or_diagnose "$d"
+          done
+          kubectl -n "$NS" get pods

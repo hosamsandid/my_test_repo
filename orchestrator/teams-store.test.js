@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -124,6 +124,86 @@ test('users: create / lookup by subject / promote', () => {
 test('users: subject required', () => {
   const { store } = freshStore();
   assert.throws(() => store.createUser({ displayName: 'x' }), /subject is required/);
+});
+
+// ---- GitHub handle (#1385) ------------------------------------------------
+
+test('githubHandle: normalize strips leading @ and whitespace', () => {
+  assert.equal(normalizeGithubHandle('  @octocat  '), 'octocat');
+  assert.equal(normalizeGithubHandle('octocat'), 'octocat');
+  assert.equal(normalizeGithubHandle('   '), '');
+  assert.equal(normalizeGithubHandle('@'), '');
+  assert.equal(normalizeGithubHandle(undefined), '');
+  assert.equal(normalizeGithubHandle(42), '');
+});
+
+test('githubHandle: coerce validates the GitHub username rules', () => {
+  assert.equal(coerceGithubHandle('@octocat'), 'octocat');
+  assert.equal(coerceGithubHandle('mona-lisa-9'), 'mona-lisa-9');
+  assert.equal(coerceGithubHandle(''), '');       // blank clears
+  assert.equal(coerceGithubHandle(undefined), ''); // absent clears
+  assert.throws(() => coerceGithubHandle('-bad'), /may not start or end with a hyphen/);
+  assert.throws(() => coerceGithubHandle('bad-'), /may not start or end with a hyphen/);
+  assert.throws(() => coerceGithubHandle('has space'), /letters, digits, and hyphens/);
+  assert.throws(() => coerceGithubHandle('a'.repeat(40)), /39 characters or fewer/);
+});
+
+test('githubHandle: persisted on create, defaults to empty, updatable and clearable', () => {
+  const { store } = freshStore();
+  // Absent on create → empty string, not undefined.
+  const plain = store.createUser({ subject: 'plain@corp.com' });
+  assert.equal(plain.githubHandle, '');
+
+  // Provided on create → normalized and stored.
+  const u = store.createUser({ subject: 'jane@corp.com', githubHandle: '@jane-gh' });
+  assert.equal(u.githubHandle, 'jane-gh');
+  assert.equal(store.getUser(u.id).githubHandle, 'jane-gh');
+
+  // Update sets a new value.
+  assert.equal(store.updateUser(u.id, { githubHandle: 'jane2' }).githubHandle, 'jane2');
+  // Blank clears it; an untouched update leaves it alone.
+  assert.equal(store.updateUser(u.id, { githubHandle: '  ' }).githubHandle, '');
+  store.updateUser(u.id, { githubHandle: 'jane3' });
+  assert.equal(store.updateUser(u.id, { displayName: 'Jane' }).githubHandle, 'jane3');
+
+  // An invalid handle is rejected at the store boundary.
+  assert.throws(() => store.updateUser(u.id, { githubHandle: 'bad handle' }), /letters, digits, and hyphens/);
+});
+
+// ---- chat font size (#1437) -----------------------------------------------
+
+test('chatFontSize: coerce validates the integer range [10,18]', () => {
+  assert.equal(coerceChatFontSize(12), 12);
+  assert.equal(coerceChatFontSize('16'), 16);
+  assert.equal(coerceChatFontSize(undefined), undefined); // absent → unset
+  assert.equal(coerceChatFontSize(null), undefined);
+  assert.equal(coerceChatFontSize(''), undefined);
+  assert.throws(() => coerceChatFontSize(9), /between 10 and 18/);
+  assert.throws(() => coerceChatFontSize(19), /between 10 and 18/);
+  assert.throws(() => coerceChatFontSize(12.5), /must be an integer/);
+  assert.throws(() => coerceChatFontSize('big'), /must be an integer/);
+});
+
+test('chatFontSize: only persisted when set; updatable and clearable', () => {
+  const { store } = freshStore();
+  // Absent on create → the field is not written (session default applies).
+  const plain = store.createUser({ subject: 'plain@corp.com' });
+  assert.equal(plain.chatFontSize, undefined);
+
+  // Provided on create → validated and stored.
+  const u = store.createUser({ subject: 'jane@corp.com', chatFontSize: 16 });
+  assert.equal(u.chatFontSize, 16);
+  assert.equal(store.getUser(u.id).chatFontSize, 16);
+
+  // Update sets a new value; a blank clears it back to unset.
+  assert.equal(store.updateUser(u.id, { chatFontSize: 10 }).chatFontSize, 10);
+  assert.equal(store.updateUser(u.id, { chatFontSize: '' }).chatFontSize, undefined);
+  // An untouched update leaves an existing value alone.
+  store.updateUser(u.id, { chatFontSize: 14 });
+  assert.equal(store.updateUser(u.id, { displayName: 'Jane' }).chatFontSize, 14);
+
+  // An out-of-range value is rejected at the store boundary.
+  assert.throws(() => store.updateUser(u.id, { chatFontSize: 42 }), /between 10 and 18/);
 });
 
 test('users: delete cascades memberships', () => {

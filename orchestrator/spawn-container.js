@@ -1,12 +1,19 @@
 'use strict';
 
+// Podman implementation of the container-runtime seam (see
+// container-runtime.js, including the seam discipline note). Its Kubernetes
+// twin is spawn-kubernetes-pod.js, whose header records the deliberate
+// runtime differences — new spawn-path features land on both or get listed
+// there.
+
 const http = require('http');
 const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');
+const { buildContextMountSpecs } = require('./context-mount');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
-const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'vgh-claw-314092';
+const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
 
@@ -511,7 +518,7 @@ async function reseedPerAgentVolume(id, paths) {
   return { reseeded: valid };
 }
 
-function spawnContainer({ id, env }) {
+function spawnContainer({ id, env, contextMounts }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -631,6 +638,25 @@ function spawnContainer({ id, env }) {
         no_new_privileges: true,
         remove: true,
       };
+      // Host-folder context mount(s) (#1283, multiple folders #1290). An admin
+      // may point this agent at one or more host directories, each bind-mounted
+      // at a distinct target — a single legacy folder at the fixed `/context`,
+      // additional folders at `/context/<slug>` — READ-ONLY by default or
+      // READ-WRITE per folder (#1289). Paths are validated at the API layer AND
+      // re-checked here (fail-closed): buildContextMountSpecs drops any entry
+      // that doesn't pass, so one bad folder produces no mount rather than a
+      // dangerous one and never blocks the others. Local/podman only — the API
+      // gate keeps these off config in non-local (hosted) environments.
+      // `mounts[]` is the libpod OCI bind array, distinct from the named-volume
+      // `volumes[]` above.
+      const contextSpecs = buildContextMountSpecs(contextMounts);
+      if (contextSpecs.length) {
+        createBody.mounts = contextSpecs;
+        for (const spec of contextSpecs) {
+          const mode = spec.options.includes('rw') ? 'read-write' : 'read-only';
+          console.log(`[spawn-container] ${id} -> ${mode} context mount ${spec.source} at ${spec.destination}`);
+        }
+      }
       if (Object.keys(resourceLimits).length) createBody.resource_limits = resourceLimits;
       return libpodRequest('POST', '/containers/create', createBody);
     })

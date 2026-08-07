@@ -20,6 +20,9 @@
 
 const crypto = require('crypto');
 const { serializeEntry } = require('./knowledge-store');
+// #918: pure cosine helpers only — the seam consumes pre-computed vectors via
+// the optional `semantic` clustering context; no model, no IO in this module.
+const knowledgeEmbeddings = require('./knowledge-embeddings');
 
 // ---------------------------------------------------------------------------
 // Text normalization + lexical similarity (decision b)
@@ -56,7 +59,9 @@ function jaccard(a, b) {
 }
 
 // The single similarity seam. Exact-normalized match short-circuits to 1.0;
-// otherwise token-set Jaccard. Range [0, 1]. Embeddings would replace ONLY this.
+// otherwise token-set Jaccard. Range [0, 1]. The #918 embedding layer plugs in
+// BESIDE this (semanticLinks below), never replacing it: lexical is the cheap
+// pre-filter and the always-there fallback.
 function similarity(aText, bText) {
   const na = normalizeText(aText);
   const nb = normalizeText(bText);
@@ -68,6 +73,22 @@ function similarity(aText, bText) {
 function similar(aText, bText, threshold) {
   const t = Number.isFinite(threshold) ? threshold : 0.6;
   return similarity(aText, bText) >= t;
+}
+
+// #918 semantic layer. `semantic` is the optional clustering context:
+//   { vectors: Map<entryId, number[]>, cosineThreshold }
+// built by the caller from the backstop-computed vector cache (only vectors
+// whose contentHash still matches the entry's text). Two entries link
+// semantically when BOTH have a cached vector and their cosine (clamped to
+// [0,1]) reaches the threshold. No context / no vector ⇒ false — behaviour is
+// bit-for-bit lexical-only, which is the disabled default.
+function semanticLinks(a, b, semantic) {
+  if (!semantic || !(semantic.vectors instanceof Map)) return false;
+  const va = semantic.vectors.get(a && a.id);
+  const vb = semantic.vectors.get(b && b.id);
+  if (!va || !vb) return false;
+  const t = Number.isFinite(semantic.cosineThreshold) ? semantic.cosineThreshold : 0.8;
+  return knowledgeEmbeddings.cosineUnit(va, vb) >= t;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,8 +149,15 @@ function entryKind(e) {
 //    The same lesson recorded once as a `fact` and once as a `convention` is one
 //    lesson and must converge; a merely fuzzy cross-kind pair is left apart to
 //    avoid over-merging differently-phrased lessons of different kinds.
-function entriesLink(a, b, simThreshold) {
-  if (entryKind(a) === entryKind(b)) return similar(a.text, b.text, simThreshold);
+//  - SEMANTIC (#918): a same-kind pair may also link on embedding cosine when
+//    the optional `semantic` context supplies vectors for both — additive, so
+//    without the context this is exactly the Phase-3 lexical behaviour.
+//    Cross-kind linking deliberately stays exact-only (embeddings would
+//    reintroduce the over-merging #605 ruled out).
+function entriesLink(a, b, simThreshold, semantic = null) {
+  if (entryKind(a) === entryKind(b)) {
+    return similar(a.text, b.text, simThreshold) || semanticLinks(a, b, semantic);
+  }
   const na = normalizeText(a.text);
   return na !== '' && na === normalizeText(b.text);
 }
@@ -161,16 +189,21 @@ function buildCluster(memberList) {
  * kinds converges while fuzzy matches stay within one kind. O(n²) worst case,
  * fine for a team KB (hundreds of entries) and keeps the logic obvious.
  * @param {object[]} entries  raw parsed shard entries (any agents, any kinds)
- * @param {{simThreshold?: number}} opts
+ * @param {{simThreshold?: number, semantic?: {vectors: Map, cosineThreshold: number}|null}} opts
  * @returns {object[]} clusters (see buildCluster)
  */
-function clusterEntries(entries, { simThreshold = 0.6 } = {}) {
+function clusterEntries(entries, { simThreshold = 0.6, semantic = null } = {}) {
   const items = sortMembers((Array.isArray(entries) ? entries : []).filter(isClusterable));
   const clusters = [];
   for (const e of items) {
     let joined = null;
     for (const c of clusters) {
-      if (c.members.some((m) => entriesLink(m, e, simThreshold))) {
+      // Lexical first (cheap, always-on); a link that only holds semantically
+      // flags the cluster so the suggestion card can show the "semantic match"
+      // hint — an operator sanity-checks a surprising grouping before promoting.
+      const lexicalHit = c.members.some((m) => entriesLink(m, e, simThreshold));
+      if (lexicalHit || (semantic && c.members.some((m) => entriesLink(m, e, simThreshold, semantic)))) {
+        if (!lexicalHit) c.semanticLink = true;
         c.members.push(e);
         joined = c;
         break;
@@ -179,7 +212,11 @@ function clusterEntries(entries, { simThreshold = 0.6 } = {}) {
     if (!joined) clusters.push({ members: [e] });
   }
   // Stable overall order: kind, then canonical createdAt, then id.
-  return clusters.map((c) => buildCluster(c.members)).sort(
+  return clusters.map((c) => {
+    const cluster = buildCluster(c.members);
+    if (c.semanticLink) cluster.semanticLink = true;
+    return cluster;
+  }).sort(
     (a, b) =>
       String(a.kind).localeCompare(String(b.kind)) ||
       entryCreatedMs(a.members[0]) - entryCreatedMs(b.members[0]) ||
@@ -263,9 +300,9 @@ function filterEntriesToTeam(entries, memberIds) {
  *   deterministic) the collector writes to <kind>/<kind>.jsonl — so re-running
  *   yields byte-identical files (idempotent, no spurious git churn).
  */
-function buildCanonicalProjection(entries, { simThreshold = 0.6, now } = {}) {
+function buildCanonicalProjection(entries, { simThreshold = 0.6, semantic = null, now } = {}) {
   const ts = typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const clusters = clusterEntries(entries, { simThreshold });
+  const clusters = clusterEntries(entries, { simThreshold, semantic });
   const byKind = {};
   for (const c of clusters) {
     if (!byKind[c.kind]) byKind[c.kind] = { canonical: [], tombstones: [] };
@@ -338,6 +375,9 @@ function toCandidate(cluster, { teamId, source = 'convergence', note, now } = {}
     raisedAt: ts,
   };
   if (typeof note === 'string' && note.trim()) cand.note = note.trim();
+  // #918: at least one member joined this cluster on embedding cosine alone —
+  // the card shows a "semantic match" hint so the operator can sanity-check.
+  if (cluster.semanticLink) cand.semanticMatch = true;
   return cand;
 }
 
@@ -740,6 +780,7 @@ module.exports = {
   jaccard,
   similarity,
   similar,
+  semanticLinks,
   isClusterable,
   filterEntriesToTeam,
   clusterEntries,

@@ -271,6 +271,15 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
   };
 }
 
+// Is this authz descriptor a subject the console actually knows — the env
+// single-admin or a registered user-store record? Basis for the IAP auto-login
+// gate (#1415): only known principals get a silent session; anyone else who
+// merely passed Google IAP falls through to the login form. Fail-closed on
+// missing/partial input.
+function isKnownPrincipal(authz) {
+  return !!(authz && (authz.envAdmin || authz.userId != null));
+}
+
 module.exports = {
   computeScope,
   visibleTeam,
@@ -280,6 +289,7 @@ module.exports = {
   canManageEnvironment,
   visibleUser,
   describeAuthz,
+  isKnownPrincipal,
   normalizeCredential,
   visibleCredential,
   assistSelectableEndpoint,

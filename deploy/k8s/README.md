@@ -210,8 +210,10 @@ SSO (Cloud IAP — `overlays/test/app/ingress.yaml` + `infra/gcp/ingress.tf`):
 **Single login (IAP → console session).** With `IAP_AUDIENCE` set in the
 console's environment, the IAP-verified Google identity logs you into the
 console directly — no second login form (`admin-console/api/iap-auth.js`).
-The password login stays as break-glass and is the only path on compose/kind
-(they never set `IAP_AUDIENCE`). Wiring it up (the audience is pinned per
+Auto-login applies only to registered Agent Studio users (Teams page) and the
+env admin (#1415); any other IAP-authenticated account sees the console login
+form. The password login stays as break-glass and is the only path on
+compose/kind (they never set `IAP_AUDIENCE`). Wiring it up (the audience is pinned per
 environment — never copy it between test and preprod):
 `docs/hosting/gcp/gke-runbook.md` §4.
 

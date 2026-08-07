@@ -388,6 +388,51 @@ test('github channel: derived channel triggers do not produce label/event edges'
   assert.ok(!g.lints.some(l => l.code === 'orphan-listener'));
 });
 
+// #1524 — a `channel: true` listener whose labelFilter matches NO channels port
+// on its node (installed post-hoc via POST /api/agents/:id/triggers copying the
+// derived shape, or an orphan a reconcile hasn't stripped) must wire as an
+// ordinary label listener, not skip and leave the producer's emit a false
+// dead-end. Mirrors the florian-03/florian-04 repro in the issue.
+test('#1524: a channel:true label listener with no backing port wires (not a dead-end)', () => {
+  const g = buildProcessGraph([
+    { id: 'reviewer', emits: ['revisions-required', 'ready-to-merge'], triggers: [
+      { id: 't-rev', type: 'github-event', events: ['pull_request.opened'], labelFilter: 'ready-for-review' },
+    ] },
+    { id: 'dev', emits: ['ready-for-review'], triggers: [
+      // Post-hoc trigger: carries channel:true + sources but the node has NO
+      // channels port for this label.
+      { id: 't-dev', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'revisions-required', channel: true, sources: ['reviewer'] },
+    ] },
+    { id: 'verifier', emits: [], triggers: [
+      { id: 't-ver', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-to-merge', channel: true, sources: ['reviewer'] },
+    ] },
+  ]);
+  const revToDev = g.edges.find(e => e.from === 'reviewer' && e.to === 'dev' && e.label === 'revisions-required');
+  assert.ok(revToDev && !revToDev.deadEnd, 'reviewer→dev over revisions-required is wired');
+  const revToVer = g.edges.find(e => e.from === 'reviewer' && e.to === 'verifier' && e.label === 'ready-to-merge');
+  assert.ok(revToVer && !revToVer.deadEnd, 'reviewer→verifier over ready-to-merge is wired');
+  assert.equal(g.edges.filter(e => e.deadEnd).length, 0, 'no false dead-ends');
+});
+
+// #1524 non-regression: a GENUINE derived channel trigger (labelFilter matches a
+// channels port) stays excluded from label wiring — its edge is the on:'github'
+// port edge drawn in unified-graph, so re-drawing it here would double the edge.
+test('#1524: a channel:true listener WITH a backing port stays excluded from label edges', () => {
+  const g = buildProcessGraph([
+    { id: 'producer', github: { producesPr: true }, emits: [], triggers: [] },
+    { id: 'consumer', emits: [],
+      channels: [{ artifact: 'pr', from: 'producer', label: 'ready-for-review' }],
+      triggers: [
+        { id: 'consumer-on-pr-ready-for-review', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', channel: true, sources: ['producer'] },
+      ] },
+  ]);
+  assert.equal(
+    g.edges.filter(e => e.label === 'ready-for-review').length, 0,
+    'the derived channel listener draws no label edge here (unified-graph draws the port edge)',
+  );
+  assert.ok(!g.edges.some(e => e.external), 'no external event edges for the derived listener');
+});
+
 test('lint: duplicate-listener flags a manual trigger duplicating a derived channel listener; removing it clears the lint (\#826)', () => {
   const derived = { id: 'rev-on-pr', type: 'github-event', channel: true,
     events: ['pull_request.opened', 'pull_request.reopened'] };

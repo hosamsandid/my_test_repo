@@ -9,7 +9,7 @@ const {
   canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
-  canViewUsageStatistics, assistSelectableEndpoint,
+  canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
 } = require('./scope');
 
 const users = [
@@ -485,4 +485,65 @@ test('provider switch: even a System Admin cannot target a provider the agent te
   // … but the switch is gated on the AGENT team's entitlement, not the caller's
   // visibility: a 'risk' agent still can't be bound to a 'payments' provider.
   assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false);
+});
+
+// ── Agent → human tenant resolution ─────────────────────────────────────────
+// A team-member's tenant is its parent Agent Team's `teamId`. `parentTeamId`
+// itself is an Agent-Team id in a different namespace and must never be used as
+// a tenant — doing so silently empties every team-scoped lookup whenever the
+// Agent Team's id is not also a human Team id.
+
+const tenantAgents = {
+  // Agent Team 'sdlc-2-0' is owned by the human team 'default'.
+  'sdlc-2-0': { id: 'sdlc-2-0', role: 'team', teamId: 'default' },
+  'sdlc-2-0-analyst': { id: 'sdlc-2-0-analyst', role: 'team-member', teamId: 'default', parentTeamId: 'sdlc-2-0' },
+  // A member whose own stamp drifted away from its parent's tenant.
+  'sdlc-2-0-dev': { id: 'sdlc-2-0-dev', role: 'team-member', teamId: 'stale', parentTeamId: 'sdlc-2-0' },
+  // Agent Team whose id coincides with a human team id (the case that hid the bug).
+  payments: { id: 'payments', role: 'team', teamId: 'payments' },
+  'payments-dev': { id: 'payments-dev', role: 'team-member', teamId: 'payments', parentTeamId: 'payments' },
+  standalone: { id: 'standalone', role: 'agent', teamId: 'risk' },
+};
+const loadTenantAgent = (id) => tenantAgents[id] || null;
+
+test('tenant: a team-member resolves to its parent Agent Team\'s human team, not the Agent-Team id', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent), 'default');
+  // The regression this guards: 'sdlc-2-0' is an Agent Team, not a human team,
+  // so using it as a tenant made every provider invisible.
+  assert.notEqual(resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent), 'sdlc-2-0');
+});
+
+test('tenant: the parent wins over a drifted own stamp', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0-dev'], loadTenantAgent), 'default');
+});
+
+test('tenant: the coinciding-id case keeps resolving as before', () => {
+  assert.equal(resolveAgentTenant(tenantAgents['payments-dev'], loadTenantAgent), 'payments');
+});
+
+test('tenant: agents without a parent use their own teamId', () => {
+  assert.equal(resolveAgentTenant(tenantAgents.standalone, loadTenantAgent), 'risk');
+  assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0'], loadTenantAgent), 'default');
+});
+
+test('tenant: falls back to the own stamp when the parent is missing or unstamped', () => {
+  const orphan = { id: 'orphan', role: 'team-member', teamId: 'risk', parentTeamId: 'gone' };
+  assert.equal(resolveAgentTenant(orphan, loadTenantAgent), 'risk');
+  const unstamped = { id: 'u', role: 'team-member', teamId: 'risk', parentTeamId: 'no-team' };
+  assert.equal(resolveAgentTenant(unstamped, () => ({ id: 'no-team', role: 'team' })), 'risk');
+});
+
+test('tenant: defaults to the default team on missing input', () => {
+  assert.equal(resolveAgentTenant(null, loadTenantAgent), 'default');
+  assert.equal(resolveAgentTenant({ id: 'x' }, loadTenantAgent), 'default');
+  assert.equal(resolveAgentTenant({ id: 'x', parentTeamId: 'sdlc-2-0' }, undefined), 'default');
+});
+
+test('tenant: the resolved tenant is what unlocks the team-scoped provider set', () => {
+  // End-to-end of the reported bug: the providers assigned to 'default' are
+  // reachable for a member of an Agent Team whose id is not a human team.
+  const systemEp = { id: 'ep-shared', scope: 'system', assignedTeamIds: ['default'] };
+  const tenant = resolveAgentTenant(tenantAgents['sdlc-2-0-analyst'], loadTenantAgent);
+  assert.equal(credentialVisibleToTeam(systemEp, tenant), true);
+  assert.equal(credentialVisibleToTeam(systemEp, 'sdlc-2-0'), false); // pre-fix behaviour
 });

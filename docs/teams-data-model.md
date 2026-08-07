@@ -72,6 +72,29 @@ Every agent construct, Working Environment, and credential carries a `teamId`:
 Creation paths accept an optional `teamId`; when supplied it must reference an
 existing team, otherwise the request is rejected (400). Absent = default team.
 
+### Resolving an agent's tenant
+
+**`parentTeamId` is never a tenant.** It names the **Agent Team** construct — a
+different namespace from the human Team ids in `teams/index.json`. Using it as a
+tenant only appears to work while an Agent Team happens to share its id with a
+human Team; otherwise it names a team that does not exist and every team-scoped
+lookup (credential entitlement, agent visibility, management gates) fails closed
+on an empty result — e.g. an empty Model Provider list in the chat's provider
+switcher.
+
+A team-member's tenant is therefore resolved by dereferencing its parent Agent
+Team and reading *that* agent's `teamId`, falling back to the member's own stamp
+when the parent is missing or unstamped. The rule lives in two pure, mirrored
+modules (the containers do not share code): `resolveAgentTenant` in
+`admin-console/api/scope.js` (used by `agentTeamId` → `agentMetaForScope`,
+`usableEndpointsForTeam`) and `orchestrator/agent-tenant.js` (used by
+`resolveAssistBindingForTeam`). `backfillResourceOwnership()` additionally
+realigns any member whose stored `teamId` disagrees with its parent, so the
+on-disk value matches what the resolver reports.
+
+Deliberately *not* covered: the usage records and PR-event log, which group by
+Agent Team on purpose — those metrics are per squad, not per tenant.
+
 ## Bootstrap & migration
 
 On orchestrator startup (`main()`), after the legacy role migration:

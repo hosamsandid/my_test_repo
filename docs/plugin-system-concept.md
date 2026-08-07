@@ -195,8 +195,12 @@ standalone agents carry their own. Resolution via a sibling of
 install. Working Environments are untouched.
 
 A grant carries one setting beyond on/off: its **scope granularity**
-(`scopeGranularity: "team" | "agent"`, default `team`, offerable only within
-the manifest's `scopes`). It decides whether the granted squad shares one
+(`scopeGranularity: "team" | "agent"`, offerable only within the manifest's
+`scopes`). The default is **per-manifest** (decided with plugin #1, §10): a
+manifest may declare `defaultScopeGranularity` within its `scopes`, and absent
+that the platform default is `team`. The podman sandbox declares `agent`
+because per-agent stacks are its natural reading; a shared expensive backend
+omits the field and keeps `team`. It decides whether the granted squad shares one
 broker-side identity or every member gets its own — see §4.6, where the
 consequences live. It is a property of the grant, not of the plugin, because
 the same plugin is shared infrastructure for one team and per-agent
@@ -271,8 +275,11 @@ Applies to plugin CLIs **and** (incrementally) to the built-in ones:
   deleting one member tears down only that member's resources; the squad's
   other scopes are untouched.
 - **Quotas are mandatory manifest/config fields** for resource-creating
-  plugins (max objects, TTL). Rationale: a loop-triggered agent creating one
-  resource per iteration is a runaway the #611 backstop cannot see. Quotas
+  plugins — the manifest `quota` field (`{ maxObjects, ttlSeconds? }`; the
+  podman sandbox ships `maxObjects: 8`). Rationale: a loop-triggered agent
+  creating one resource per iteration is a runaway the #611 backstop cannot
+  see, so the cap lives in the manifest, not a single platform-wide Settings
+  toggle (the #1287 global container cap, now retired). Quotas
   are **per scope**, so agent granularity on an eight-member squad multiplies
   the worst-case footprint eightfold — the grant UI states that resulting
   ceiling before the toggle is flipped, rather than letting an admin discover
@@ -578,12 +585,18 @@ before it moves from catalog to roadmap.
   most maintenance-prone building block; defer until a real user insists.
 - **Approval UX**: DM-based confirm (v1) vs. wiring into the flow human-gate
   registry — revisit when the first `requiresApproval` plugin ships.
-- **Default scope granularity per plugin**: `team` is the safe default for
+- ~~**Default scope granularity per plugin**: `team` is the safe default for
   shared, expensive backends, but for a sandbox-style plugin agent granularity
   may be the *expected* behaviour and a team default the surprising one. Let
   each manifest declare its own default within `scopes`, or keep one
   platform-wide default? Decide with plugin #1, which is exactly the case
-  where agent granularity is the natural reading.
+  where agent granularity is the natural reading.~~ **Decided (Phase 3, #1519,
+  plugin #1): per-manifest.** A manifest may declare `defaultScopeGranularity`
+  (validated to be within its own `scopes`); absent, the platform default
+  stays `team`. The podman sandbox declares `agent`, so a grant defaults to
+  per-agent stacks — the natural reading for a container sandbox — while a
+  shared, expensive backend simply omits the field and keeps the `team`
+  default. See §4.4.
 - **Claude Code plugins as "agent plugins"**: worth adopting the CLI's own
   marketplace format as a distribution channel for agent-side content
   (skills, commands, hooks)? It solves a different problem than this

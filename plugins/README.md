@@ -32,8 +32,25 @@ Validated by the pure `admin-console/api/plugin-manifest.js` (the
 - `ui.routes[].minRole` — role-gated UI routes; **validated and reserved** in
   Phase 1, the proxy/enforcement lands in Phase 5.
 
+- `scopes` — the scope granularities the broker honours (`["team"]` or
+  `["team","agent"]`); bounds what a grant may choose (Phase 2). A manifest may
+  also declare `defaultScopeGranularity` (within `scopes`) — the grant default
+  when the admin does not choose one; absent, the platform default is `team`.
+- `quota` — `{ maxObjects, ttlSeconds? }`, the **per-scope** resource cap for a
+  resource-creating plugin (§4.6), so agent granularity on an n-member squad
+  costs n× the footprint (stated as a ceiling in the grant UI).
+
 ## `dummy-echo`
 
 A no-op reference plugin used to exercise the core machinery end to end (sidecar
 lifecycle, grant-driven network attachment, uninstall reconciliation) before a
 real broker (Phase 3) exists. Its CLI echoes its arguments back.
+
+## `podman-sandbox` (plugin #1)
+
+The first real broker (Phase 3, #1519): a governed container sandbox — PR
+#1287's `podman-mcp` broker reworked onto the plugin machinery. Agents drive
+their own compose stacks with the `aee-podman` CLI (`aee-podman compose up -f
+compose.yml`); the broker holds the libpod socket and scopes every container to
+the caller. Declares `defaultScopeGranularity: "agent"` (the §10 decision) and a
+per-scope `quota`. See `podman-sandbox/README.md`.

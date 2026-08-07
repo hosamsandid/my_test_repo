@@ -153,7 +153,7 @@ Reorder the list by dragging the grip handle (⠿, visible on hover) to relocate
 
 ### Middle panel — Chat
 
-Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar shows whether a Claude session is active and offers:
+Markdown rendering with syntax-highlighted code blocks (dual light/dark themes), sticky scroll, scroll-up backfill of older messages, and optimistic send. The session toolbar offers (session-active status is not repeated here — it is shown per agent in the left list):
 
 - **Reset Session** — drop the session pointer so the next message starts fresh
 - **Save & Learn** — summarize the conversation to memory and push durable lessons to the team knowledge base; the session stays open

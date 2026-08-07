@@ -566,7 +566,7 @@ before it moves from catalog to roadmap.
   proof that a credential-backed broker is thin; also validates the
   `requiresApproval` flow and (if the product decision falls that way) the
   iframe UI.
-- **Phase 6 — contract alignment**: align built-in CLIs to the
+- **Phase 6 — contract alignment** *(shipped — #1536)*: align built-in CLIs to the
   contract conventions (no mechanism change). Documented in
   [`cli-contract.md`](cli-contract.md); conformance-tested in
   `agent-image/scripts/test_cli_contract.py`.

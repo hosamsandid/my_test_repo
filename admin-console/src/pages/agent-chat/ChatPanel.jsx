@@ -108,8 +108,8 @@ export default function ChatPanel({
 
   // Active Claude `--resume <sessionId>` pointer for this (agent, room).
   // The pointer file is written by the runner after every successful
-  // invocation and read back here so the UI can show a "Session active"
-  // badge and offer reset controls.
+  // invocation and read back here so the UI can gate the reset/learn
+  // controls on whether a resumable session exists.
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
@@ -1064,7 +1064,6 @@ export default function ChatPanel({
         color: 'var(--eb-text-muted)',
         minWidth: 0,
       }}>
-        <SessionBadge active={!!sessionId} updatedAt={sessionUpdatedAt} />
         <button
           type="button"
           onClick={handleFullLearn}
@@ -1081,7 +1080,7 @@ export default function ChatPanel({
           type="button"
           onClick={handleResetSession}
           disabled={!sessionId || resetting || learnPending || disabled}
-          title="Clear the session — the next message starts a new conversation with no memory of this one"
+          title="This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one."
           style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
         >
           {resetting
@@ -1719,31 +1718,6 @@ function ContextResetSeparator({ ts }) {
       </span>
       <div style={{ flex: 1, height: 1, background: 'var(--eb-status-warning)' }} />
     </div>
-  );
-}
-
-function SessionBadge({ active }) {
-  return (
-    <span
-      title="This room keeps one running Claude session; your next message resumes it. Reset Session starts fresh with no memory of this conversation."
-      style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 'var(--eb-space-1)',
-      fontSize: 'var(--eb-text-xs)',
-      color: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
-      fontWeight: 'var(--eb-font-medium)',
-      cursor: 'help',
-    }}>
-      <span style={{
-        width: 7,
-        height: 7,
-        borderRadius: 'var(--eb-radius-full)',
-        background: active ? 'var(--eb-status-info)' : 'var(--eb-text-muted)',
-        display: 'inline-block',
-      }} />
-      {active ? 'Session active' : 'New session'}
-    </span>
   );
 }
 

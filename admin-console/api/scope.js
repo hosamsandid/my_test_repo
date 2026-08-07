@@ -15,6 +15,11 @@
 // Pure (no IO) so it is unit-testable; the api wires it with the on-disk
 // users/memberships indexes.
 
+// Default Agent-Chat transcript font size in px (#1437). Kept in sync with
+// CHAT_FONT_SIZE_DEFAULT in orchestrator/teams-store.js (the authoritative
+// validator) — the two live in separate images, so the constant is duplicated.
+const CHAT_FONT_SIZE_DEFAULT = 12;
+
 function computeScope({ username, adminUsername, users = [], memberships = [] } = {}) {
   // No identity → see nothing (the auth gate normally guarantees a username;
   // this is a defensive fail-closed default, never reached for the env admin).
@@ -261,12 +266,19 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
   // the env single-admin credential has no user record and so carries none.
   const self = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
   const githubHandle = (self && typeof self.githubHandle === 'string') ? self.githubHandle : '';
+  // Per-user Agent-Chat transcript font size (#1437). Read the caller's own
+  // stored preference; anyone without a set value — including the env
+  // single-admin, which has no user record — gets the 12px default.
+  const chatFontSize = (self && Number.isFinite(self.chatFontSize))
+    ? self.chatFontSize
+    : CHAT_FONT_SIZE_DEFAULT;
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
     systemAdmin: scope.all && !envAdmin, // a non-env-admin with full visibility is a System-Admin user
     userId: scope.userId,
     githubHandle,
+    chatFontSize,
     teams,
   };
 }

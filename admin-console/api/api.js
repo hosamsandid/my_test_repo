@@ -10589,6 +10589,35 @@ app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}/password`);
 });
 
+// Self-service per-user preferences (#1437). A logged-in user updates their OWN
+// profile settings (currently just the Agent-Chat transcript font size) without
+// System-Admin rights. The write is pinned to the caller's OWN resolved userId
+// (never an id from the request), so — unlike the admin CRUD above — it can
+// touch no other user's record. The env single-admin has no user record
+// (scope.userId === null): accept the value so the client's optimistic apply +
+// per-user localStorage fallback still work, but report it as not persisted
+// server-side. teamsStore.updateUser is the authoritative validator (range /
+// integer check → 400).
+app.put('/api/me/preferences', apiLimiter, (req, res) => {
+  const scope = getScope(req);
+  const patch = {};
+  if (req.body && req.body.chatFontSize !== undefined) {
+    patch.chatFontSize = req.body.chatFontSize;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ error: 'No supported preference in request body', code: 'no_preference' });
+  }
+  if (scope.userId == null) {
+    return res.json({ persisted: false });
+  }
+  return callAdmin('PUT', `users/${encodeURIComponent(scope.userId)}`, patch)
+    .then(({ status, data }) => {
+      if (status >= 400) return res.status(status).json(data);
+      res.json({ persisted: true, user: data });
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
+});
+
 // Memberships — list filtered to the caller's teams (AC2); mutations require
 // team-admin of the target team (AC3).
 app.get('/api/admin/memberships', (req, res) => {

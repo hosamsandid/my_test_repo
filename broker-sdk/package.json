@@ -1,0 +1,10 @@
+{
+  "name": "aee-broker-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-free obligations SDK every plugin broker sidecar imports (plugin system Phase 4, epic #1516).",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

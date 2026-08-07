@@ -12,9 +12,29 @@ const os = require('os');
 const path = require('path');
 const YAML = require('yaml');
 
-const { verify } = require('./podman-token');
-const { OWNER_LABEL_KEY, ownerLabelArg, isOwned, filterOwned } = require('./owner-scope');
-const { maskEnvValues, maskEnvValuesOrDefault } = require('./mask-env');
+// Broker SDK (plugin system Phase 4, #1520): the obligations every plugin
+// broker shares — bearer-token verification, ownership-label scope filtering,
+// secret masking, and the health/teardown routes — now come from the shared
+// SDK instead of this broker's own podman-token.js / owner-scope.js /
+// mask-env.js copies (those stay in the tree as the SDK's extraction seed +
+// reference tests). Two intentional generalisations ride along: the bearer
+// token is the 3-field platform scope token `{pluginId, scopeId}` (the broker
+// still enforces on scopeId and never branches on pluginId or granularity), and
+// the owner label is the platform-wide `aee.plugin.owner` (broker-sdk/
+// scope-filter.js) so the orchestrator's teardown/reconcile pass and this
+// broker agree on which resources belong to a scope. Container isolation
+// behaviour is otherwise unchanged.
+const {
+  verifyScopeToken,
+  OWNER_LABEL_KEY,
+  ownerLabelArg,
+  isOwned,
+  filterOwned,
+  maskEnvValues,
+  maskSecretsOrDefault,
+  healthEndpoint,
+  teardownScopeEndpoint,
+} = require('../broker-sdk');
 const { validateComposeFile } = require('./compose-validate');
 const { enforceNetworkIsolation, injectResourceDefaults } = require('./compose-harden');
 
@@ -338,7 +358,7 @@ function toolComposeLogs(scopeId, { projectName, tail } = {}) {
   }
   const n = Number.isInteger(tail) && tail > 0 ? tail : 100;
   const r = podmanCompose(['-p', project, '--file', composePath, 'logs', '--tail', String(n)]);
-  if (r.code !== 0) throw new Error(maskEnvValuesOrDefault(r.stderr.trim(), 'podman-compose logs failed'));
+  if (r.code !== 0) throw new Error(maskSecretsOrDefault(r.stderr.trim(), 'podman-compose logs failed'));
   return { project, output: maskEnvValues(r.stdout) };
 }
 
@@ -529,20 +549,23 @@ function buildMcpServer(scopeId) {
 }
 
 // --- auth ------------------------------------------------------------------
-// Auth: extract + verify the bearer token → scopeId. Reject otherwise.
+// Auth: extract + verify the bearer token → scopeId. Reject otherwise. The
+// broker-sdk verifyScopeToken parses the `Bearer <token>` header (prefix check,
+// no ReDoS-prone regex) and returns {pluginId, scopeId}; the broker enforces on
+// scopeId alone — it never learns, nor branches on, whether the scope is a team
+// or a single agent (granularity opacity, §4.9).
 function scopeFromAuth(req) {
-  const h = req.headers['authorization'] || '';
-  // Every caller in this codebase builds this header as the literal template
-  // `Bearer ${token}` (single space, no variance) — see admin-console/api/api.js
-  // and orchestrator/orchestrator.js — so a plain prefix check is sufficient
-  // and avoids the ReDoS-prone `/^Bearer\s+(.+)$/` regex on attacker-controlled
-  // header input.
-  if (!h.startsWith('Bearer ')) return null;
-  const token = h.slice(7);
-  if (!token) return null;
-  const v = verify(token, SIGNING_SECRET);
+  const v = verifyScopeToken(req, SIGNING_SECRET);
   return v ? v.scopeId : null;
 }
+
+// Health + teardown are the two plain-REST routes the orchestrator calls on
+// EVERY broker (§4.9), now provided by the SDK. Teardown is keyed on the
+// token's scopeId, so ONE handler serves both team deletion and single-member
+// deletion at agent granularity; the SDK guarantees resources are reaped before
+// the caller invalidates the token.
+const handleHealth = healthEndpoint();
+const handleTeardown = teardownScopeEndpoint((scopeId) => teardownScope(scopeId), { secret: SIGNING_SECRET });
 
 // --- HTTP wiring -------------------------------------------------------------
 const httpServer = http.createServer((req, res) => {
@@ -556,34 +579,18 @@ const httpServer = http.createServer((req, res) => {
 
 async function handleRequest(req, res) {
   if (req.method === 'GET' && req.url === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    await handleHealth(req, res);
     return;
   }
 
   // Plain internal REST route (NOT the MCP protocol surface) dedicated to
   // scope teardown on agent/team deletion — see teardownScope() above for
   // why this is a direct podman()-level cleanup rather than a full MCP
-  // JSON-RPC round-trip. Same bearer-token auth as /mcp.
+  // JSON-RPC round-trip. Same bearer-token auth as /mcp; the SDK handler
+  // verifies the token, runs teardownScope(scopeId), and reports the reaped
+  // set (best-effort — a reap error is a 200 `ok:false`, never a hard failure).
   if (req.method === 'POST' && req.url === '/internal/teardown-scope') {
-    const scopeId = scopeFromAuth(req);
-    if (!scopeId) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
-    let result;
-    try {
-      result = teardownScope(scopeId);
-    } catch (err) {
-      // Never surface as a hard failure to a best-effort cleanup caller —
-      // report what we know and let the caller log it.
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, removed: [], errors: [{ error: (err && err.message) || String(err) }] }));
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, ...result }));
+    await handleTeardown(req, res);
     return;
   }
 

@@ -565,10 +565,10 @@ before it moves from catalog to roadmap.
   selector bounded by the manifest's `scopes`), audit JSONL.
 - **Phase 3 — plugin #1** *(shipped — #1537)*: rework PR #1287 onto the machinery per §6; delete
   the special cases; `aee-podman` domain CLI.
-- **Phase 4 — Broker SDK**: extract the §4.9 module set from plugin #1's
-  broker (token verify, scope filtering, audit writer, secret masking,
-  health/teardown routes, approval pen); retrofit plugin #1 onto it so the
-  SDK has a live consumer from day one.
+- **Phase 4 — Broker SDK** *(shipped — #1520)*: extract the §4.9 module set
+  from plugin #1's broker (token verify, scope filtering, audit writer, secret
+  masking, health/teardown routes, approval pen) into `broker-sdk/`; retrofit
+  plugin #1 (`podman-mcp/`) onto it so the SDK has a live consumer from day one.
 - **Phase 5 — plugin #2 (test management)**: built **on the SDK** — the
   proof that a credential-backed broker is thin; also validates the
   `requiresApproval` flow and (if the product decision falls that way) the

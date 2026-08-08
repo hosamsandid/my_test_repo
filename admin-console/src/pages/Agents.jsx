@@ -1218,6 +1218,7 @@ function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel })
   const [includeTriggers, setIncludeTriggers] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [done, setDone] = useState(null); // created template id
 
   const trimmedId = templateId.trim();
   const idError = trimmedId && !TEMPLATE_ID_RE.test(trimmedId)
@@ -1237,7 +1238,9 @@ function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel })
         patternRole,
         includeTriggers,
       });
-      if (!ok) {
+      if (ok) {
+        setDone(data?.id || trimmedId);
+      } else {
         if (data?.code === 'id-conflict') {
           setTemplateId(suggestTemplateId(trimmedId, existingTemplateIds));
         }
@@ -1249,6 +1252,33 @@ function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel })
       setBusy(false);
     }
   }
+
+  if (done) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+          Saved <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> as the
+          Agent Template <strong style={{ color: 'var(--eb-text-primary)' }}>{done}</strong>. It now appears on the
+          Agent Templates page with a <em>Custom</em> badge, ready to create new agents from.
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <Link
+            to="/role-templates"
+            style={{
+              display: 'inline-flex', alignItems: 'center', padding: '8px 16px',
+              borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-accent-primary)',
+              color: 'var(--eb-text-inverted)', fontWeight: 600, textDecoration: 'none',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            Open Agent Templates
+          </Link>
+          <SecondaryBtn onClick={onCancel}>Close</SecondaryBtn>
+        </div>
+      </div>
+    );
+  }
+
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -1307,9 +1337,17 @@ function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel })
         </select>
       </div>
 
-      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        <input type="checkbox" checked={includeTriggers} onChange={e => setIncludeTriggers(e.target.checked)} />
-        Include this agent's triggers in the template
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={includeTriggers}
+          onChange={e => setIncludeTriggers(e.target.checked)}
+          style={{ marginTop: 3 }}
+        />
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+          <strong style={{ color: 'var(--eb-text-primary)' }}>Include triggers</strong> — carry the agent's
+          triggers into the template. Off by default; leave off for a prompt-and-skills-only template.
+        </span>
       </label>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
@@ -2602,12 +2640,6 @@ export default function Agents() {
       body: JSON.stringify(form),
     });
     const data = await resp.json().catch(() => ({}));
-    if (resp.ok) {
-      closePanel();
-      setAddRoleNotice({
-        text: `Template '${data.id}' saved — find it on the Agent Templates page.`,
-      });
-    }
     return { ok: resp.ok, status: resp.status, data };
   }
 

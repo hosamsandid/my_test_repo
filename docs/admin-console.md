@@ -8,7 +8,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
 | **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
-| **Agents** | `/agents` | Create, edit, enable/disable, delete, export, and import agents |
+| **Agents** | `/agents` | Create, edit, enable/disable, delete, export, import, clone, and save as template agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
 | **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller and HTTPS repository access |

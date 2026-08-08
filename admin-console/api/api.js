@@ -49,6 +49,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const agentToTemplate = require('./agent-to-template');
+const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -3022,6 +3023,123 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
+});
+
+/* ─── Extract Agent Template (#1509) ────────────────────────────────── */
+
+// Snapshot a proven live agent — a standalone chat agent OR an individual team
+// member — into a reusable, team-neutral USER-tier Agent Template (the inverse
+// of team materialisation). One-shot: no ongoing link to the source agent, and
+// the source is left completely unchanged (AC-10). Whole team / orchestrator /
+// bp-instance agents are rejected defensively (AC-1) — the action is only
+// offered on standalone / team-member cards in the UI.
+//
+// Field mapping lives in the pure extract-template.js module; here we resolve
+// the impure inputs off disk: the EFFECTIVE prompt (rendered AGENT-PROMPT.md,
+// falling back to the config override — same definition the export path uses),
+// the effective skill grant (member override → own skills[] → parent team's),
+// the effective sessionPolicy, and the live triggers.json.
+app.post('/api/agents/:id/extract-template', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  // Contain the source id before any fs read (path.resolve + path.relative is
+  // the in-flow sanitiser CodeQL recognises; AGENT_ID_RE alone isn't followed
+  // through the destructure). Every id-derived path is built from srcAgentDir.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const srcAgentDir = path.resolve(agentsBaseDir, id);
+  const srcRel = path.relative(agentsBaseDir, srcAgentDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel) || !srcRel) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  const srcCfg = readJsonFile(path.join(srcAgentDir, 'config.json'), null);
+  if (!srcCfg) return res.status(404).json({ error: 'Agent not found' });
+
+  // Eligibility (AC-1): only standalone `agent` and `team-member` sources.
+  const srcRole = srcCfg.role || 'agent';
+  if (srcRole !== 'agent' && srcRole !== 'team-member') {
+    return res.status(400).json({
+      error: 'Only standalone agents and team members can be extracted into a template.',
+      code: 'ineligible-role',
+    });
+  }
+
+  // Admin-gated over the source agent's owning team (AC-11), same rule as clone.
+  if (!canManageAgent(getScope(req), agentMetaForScope(srcCfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const nes = (v) => typeof v === 'string' && v.trim() !== '';
+  const { displayName, description, category, patternRole, includeTriggers } = req.body || {};
+  const templateId = typeof (req.body || {}).id === 'string' ? req.body.id.trim() : '';
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(templateId)) {
+    return res.status(400).json({
+      error: 'id must be a slug: lowercase letters, digits and hyphens, not starting with a hyphen',
+    });
+  }
+
+  // Effective prompt: the rendered AGENT-PROMPT.md (what the agent actually runs
+  // with — for a team member this is the applied override, not the base template
+  // it was assembled from), falling back to the stored override. Same source of
+  // truth as GET /api/process/template.
+  const effectivePrompt = readAgentSystemPrompt(id) || srcCfg.systemPrompt || '';
+
+  // Effective skill grant (orchestrator/skill-grants.js semantics): member
+  // override → own skills[] → parent team's skills[].
+  let parentCfg = null;
+  if (srcRole === 'team-member' && srcCfg.parentTeamId) {
+    const parentDir = path.resolve(agentsBaseDir, String(srcCfg.parentTeamId));
+    const parentRel = path.relative(agentsBaseDir, parentDir);
+    if (!parentRel.startsWith('..') && !path.isAbsolute(parentRel)) {
+      parentCfg = readJsonFile(path.join(parentDir, 'config.json'), null);
+    }
+  }
+  const effectiveSkills = Array.isArray(srcCfg.skillsOverride) ? srcCfg.skillsOverride
+    : Array.isArray(srcCfg.skills) ? srcCfg.skills
+      : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
+        : [];
+
+  const liveTriggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+
+  const template = extractTemplate.buildExtractedTemplate({
+    id: templateId,
+    displayName: nes(displayName) ? displayName.trim() : (srcCfg.displayName || id),
+    description,
+    // category/patternRole are user-editable; fall back to inference if omitted.
+    category: nes(category) ? category
+      : extractTemplate.inferTemplateCategory(srcCfg, liveTriggers),
+    patternRole: nes(patternRole) ? patternRole
+      : extractTemplate.inferPatternRole(srcCfg,
+        extractTemplate.inferTemplateCategory(srcCfg, liveTriggers)),
+    prompt: effectivePrompt,
+    skills: effectiveSkills,
+    sessionPolicy: srcCfg.sessionPolicy || 'persistent',
+    triggers: Array.isArray(liveTriggers) ? liveTriggers : [],
+    includeTriggers: includeTriggers === true,
+  });
+
+  const { valid, errors } = agentTemplateStore.validateTemplate(template, { requireId: true });
+  if (!valid) return res.status(400).json({ error: errors[0], errors });
+
+  // Collision across BOTH tiers — never silently overwrite (AC-9). The UI
+  // re-suggests an id on this code and lets the operator retry.
+  if (readTemplateFile(AGENT_TEMPLATES_DIR, templateId) || readTemplateFile(USER_AGENT_TEMPLATES_DIR, templateId)) {
+    return res.status(409).json({
+      error: `A template with id '${templateId}' already exists — choose a different id.`,
+      code: 'id-conflict',
+      templateId,
+    });
+  }
+
+  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, templateId);
+  if (!file) return res.status(400).json({ error: 'Invalid template id' });
+  try {
+    fs.mkdirSync(USER_AGENT_TEMPLATES_DIR, { recursive: true });
+    writeJsonAtomic(file, template);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to save template: ${err.message}` });
+  }
+  res.status(201).json({ id: templateId, origin: 'user' });
 });
 
 /* ─── Agent Export / Import ─────────────────────────────────────────── */

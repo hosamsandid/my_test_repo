@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus,
+  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus, BookmarkPlus,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { inferMissingRoles } from './missing-roles-view.js';
@@ -1184,6 +1184,194 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
   );
 }
 
+/* ── Save as Template Form ──────────────────────────────────────────── */
+// Promote a live agent into a reusable, team-neutral Agent Template (#1509) —
+// a one-step alternative to hand-authoring one on the Agent Templates page.
+// Only offered for `agent` and `team-member` source cards (see LeafAgentCard /
+// AgentRow); the backend also rejects any other role defensively. The dialog
+// pre-fills a server-computed suggestion (unique id + inferred category /
+// patternRole), which the operator can edit before confirming.
+function SaveAsTemplateForm({ agent, onSubmit, onCancel }) {
+  const [loading, setLoading] = useState(true);
+  const [tmplId, setTmplId] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('chat');
+  const [patternRole, setPatternRole] = useState('standalone');
+  const [includeTriggers, setIncludeTriggers] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null); // created template id
+
+  // Fetch the server-computed suggestion when the dialog opens.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const resp = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/extract-template`);
+        const data = await resp.json().catch(() => ({}));
+        if (!alive) return;
+        if (resp.ok) {
+          setTmplId(data.id || '');
+          setDisplayName(data.displayName || agent.displayName || agent.id);
+          setDescription(data.description || '');
+          setCategory(data.category || 'chat');
+          setPatternRole(data.patternRole || 'standalone');
+        } else {
+          setError(data?.error || 'Could not prepare a template from this agent.');
+        }
+      } catch (e) {
+        if (alive) setError(e.message);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [agent.id]);
+
+  const trimmedId = tmplId.trim();
+  const idError = trimmedId && !/^[a-z0-9][a-z0-9-]*$/.test(trimmedId)
+    ? 'Lowercase letters, digits and hyphens only, not starting with a hyphen.'
+    : null;
+  const canSubmit = !loading && trimmedId && !idError && displayName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        id: trimmedId,
+        displayName: displayName.trim(),
+        description: description.trim() || undefined,
+        category,
+        patternRole,
+        includeTriggers,
+      });
+      if (ok) {
+        setDone(data?.id || trimmedId);
+      } else {
+        setError(data?.error || 'Save failed.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+          Saved <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> as the
+          Agent Template <strong style={{ color: 'var(--eb-text-primary)' }}>{done}</strong>. It now appears on the
+          Agent Templates page with a <em>Custom</em> badge, ready to create new agents from.
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <Link
+            to="/role-templates"
+            style={{
+              display: 'inline-flex', alignItems: 'center', padding: '8px 16px',
+              borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-accent-primary)',
+              color: 'var(--eb-text-inverted)', fontWeight: 600, textDecoration: 'none',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            Open Agent Templates
+          </Link>
+          <SecondaryBtn onClick={onCancel}>Close</SecondaryBtn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Capture <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id}) as a
+        reusable Agent Template — a one-shot snapshot of its prompt, skills and configuration.
+        The source agent is left unchanged, and there is no ongoing link between the two.
+      </div>
+
+      <FormInput
+        label="Template ID"
+        required
+        value={tmplId}
+        onChange={v => setTmplId(v.toLowerCase())}
+        error={idError}
+        placeholder={loading ? 'Loading…' : 'e.g. cobol-specialist'}
+      />
+
+      <FormInput
+        label="Display Name"
+        required
+        value={displayName}
+        onChange={setDisplayName}
+        placeholder="COBOL Specialist"
+      />
+
+      <div>
+        <div style={labelStyle}>Description</div>
+        <input
+          style={inputStyle}
+          value={description}
+          onChange={e => setDescription(e.target.value)}
+          placeholder="What this template is for (optional)."
+        />
+      </div>
+
+      <div>
+        <div style={labelStyle}>Role type</div>
+        <select value={category} onChange={e => setCategory(e.target.value)} style={inputStyle}>
+          <option value="chat">chat — always-on companion; responds to direct messages</option>
+          <option value="reactive">reactive — event-driven; wakes on GitHub events or label triggers</option>
+          <option value="pattern">pattern — scaffold role</option>
+        </select>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Pattern role</div>
+        <select value={patternRole} onChange={e => setPatternRole(e.target.value)} style={inputStyle}>
+          <option value="standalone">standalone</option>
+          <option value="scout">scout</option>
+          <option value="author">author</option>
+          <option value="companion">companion</option>
+          <option value="intake">intake</option>
+        </select>
+        <div style={{ ...helpTextStyle, marginTop: 'var(--eb-space-1)' }}>
+          Pre-filled by inference from the source agent's role — edit if it fits a different flow slot.
+        </div>
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={includeTriggers}
+          onChange={e => setIncludeTriggers(e.target.checked)}
+          style={{ marginTop: 3 }}
+        />
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+          <strong style={{ color: 'var(--eb-text-primary)' }}>Include triggers</strong> — carry the agent's
+          triggers into the template. Off by default; leave off for a prompt-and-skills-only template.
+        </span>
+      </label>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Saving…' : 'Save as Template'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 // Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
 // control: unlike the rest of the edit form (one PUT on Save), a mount change is
@@ -1705,7 +1893,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, onSaveTemplate, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1798,6 +1986,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         )}
         {onClone && (
           <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+        )}
+        {onSaveTemplate && !isStub && (
+          <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent as a reusable Agent Template" onClick={() => onSaveTemplate(agent)} />
         )}
         <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
@@ -2018,7 +2209,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onSaveTemplateChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -2144,6 +2335,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
               onDelete={onDeleteChild}
               onExport={onExport}
               onClone={onCloneChild}
+              onSaveTemplate={onSaveTemplateChild}
             />
           ))
         )
@@ -2192,7 +2384,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, onSaveTemplate, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -2237,6 +2429,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           {onClone && (
             <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          )}
+          {onSaveTemplate && (
+            <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent as a reusable Agent Template" onClick={() => onSaveTemplate(agent)} />
           )}
           <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
@@ -2428,6 +2623,19 @@ export default function Agents() {
       closePanel();
       refetch();
     }
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // Save-as-template dialog submitted (#1509). Returns the parsed response so
+  // the form can surface a 409 id-conflict and show a success state without
+  // closing. The source agent is never mutated — only refetch to stay current.
+  async function handleSaveTemplateSubmit(fields) {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(selectedAgent.id)}/extract-template`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    });
+    const data = await resp.json().catch(() => ({}));
     return { ok: resp.ok, status: resp.status, data };
   }
 
@@ -2881,6 +3089,7 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
               onCloneChild={a => openPanel('clone', a)}
+              onSaveTemplateChild={a => openPanel('save-template', a)}
             />
           ))}
           {leaves.map(a => (
@@ -2895,6 +3104,7 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
               onExport={handleExport}
               onClone={ag => openPanel('clone', ag)}
+              onSaveTemplate={ag => openPanel('save-template', ag)}
             />
           ))}
           {orphans.length > 0 && (
@@ -2955,6 +3165,21 @@ export default function Agents() {
             teams={teams}
             existingIds={existingAgentIds}
             onSubmit={handleCloneSubmit}
+            onCancel={closePanel}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'save-template' && !!selectedAgent}
+        onClose={closePanel}
+        title={`Save as Template — ${selectedAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {selectedAgent && panelMode === 'save-template' && (
+          <SaveAsTemplateForm
+            agent={selectedAgent}
+            onSubmit={handleSaveTemplateSubmit}
             onCancel={closePanel}
           />
         )}

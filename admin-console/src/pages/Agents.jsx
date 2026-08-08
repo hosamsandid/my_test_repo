@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus,
+  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus, BookmarkPlus,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { inferMissingRoles } from './missing-roles-view.js';
@@ -1184,6 +1184,144 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
   );
 }
 
+/* ── Extract Template Form (#1509) ──────────────────────────────────── */
+// "Save as template" — snapshot a live agent (standalone or team member) into
+// a reusable, team-neutral user-tier Agent Template. Mirrors CloneAgentForm:
+// a suggested unique id, a review/confirm dialog, and 409 id-conflict handling.
+// The server is the source of truth for the mapping (effective prompt / skills /
+// sessionPolicy / triggers) and for id uniqueness across both template tiers.
+
+// Derive a slug-valid template id (lowercase letters/digits/hyphens) from an
+// agent id, unique across the supplied existing-id set. Server still enforces.
+function suggestTemplateId(sourceId, existingIds) {
+  const base = String(sourceId || '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-{2,}/g, '-')
+    .replace(/^-+/, '').replace(/-+$/, '') || 'agent-template';
+  if (!existingIds.has(base)) return base;
+  let n = 2;
+  while (existingIds.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel }) {
+  // Client-side pre-fill of the editable category/patternRole (AC-2); the
+  // server re-infers if either is omitted. A team member or a per-invocation
+  // agent reads as event-driven ("reactive"); otherwise a "chat" companion.
+  const reactive = agent.role === 'team-member' || agent.sessionPolicy === 'per-invocation';
+  const [templateId, setTemplateId] = useState(() => suggestTemplateId(agent.id, existingTemplateIds));
+  const [displayName, setDisplayName] = useState(agent.displayName || agent.id);
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState(reactive ? 'reactive' : 'chat');
+  const [patternRole, setPatternRole] = useState(reactive ? 'author' : 'companion');
+  const [includeTriggers, setIncludeTriggers] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const trimmedId = templateId.trim();
+  const idError = trimmedId && !TEMPLATE_ID_RE.test(trimmedId)
+    ? 'Lowercase letters, digits and hyphens only; must not start with a hyphen.'
+    : null;
+  const canSubmit = trimmedId && !idError && displayName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        id: trimmedId,
+        displayName: displayName.trim(),
+        description: description.trim() || undefined,
+        category,
+        patternRole,
+        includeTriggers,
+      });
+      if (!ok) {
+        if (data?.code === 'id-conflict') {
+          setTemplateId(suggestTemplateId(trimmedId, existingTemplateIds));
+        }
+        setError(data?.error || 'Could not save template.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Captures <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id})
+        — its effective prompt, skills and configuration — as a reusable, team-neutral Agent
+        Template. This is a one-shot snapshot: the agent is left unchanged and stays independent
+        of the template. The template appears on the <em>Agent Templates</em> page.
+      </div>
+
+      <FormInput
+        label="Template ID"
+        required
+        value={templateId}
+        onChange={v => setTemplateId(v)}
+        error={idError}
+        placeholder="e.g. tuned-developer"
+      />
+
+      <FormInput
+        label="Display Name"
+        required
+        value={displayName}
+        onChange={setDisplayName}
+        placeholder="e.g. Tuned Developer"
+      />
+
+      <FormInput
+        label="Description"
+        value={description}
+        onChange={setDescription}
+        placeholder="What this template is for (optional)"
+      />
+
+      <div>
+        <div style={labelStyle}>Role type</div>
+        <select value={category} onChange={e => setCategory(e.target.value)} style={inputStyle}>
+          <option value="chat">chat — always-on companion; responds to direct messages</option>
+          <option value="reactive">reactive — event-driven; wakes on GitHub / label triggers</option>
+          <option value="pattern">pattern — scaffold role</option>
+        </select>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Pattern role</div>
+        <select value={patternRole} onChange={e => setPatternRole(e.target.value)} style={inputStyle}>
+          {['scout', 'author', 'companion', 'intake', 'standalone'].map(r => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        <input type="checkbox" checked={includeTriggers} onChange={e => setIncludeTriggers(e.target.checked)} />
+        Include this agent's triggers in the template
+      </label>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Saving…' : 'Save as template'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 // Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
 // control: unlike the rest of the edit form (one PUT on Save), a mount change is
@@ -1705,7 +1843,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, onExtractTemplate, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1798,6 +1936,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         )}
         {onClone && (
           <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+        )}
+        {onExtractTemplate && !isStub && (
+          <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent's prompt, skills and config as a reusable Agent Template" onClick={() => onExtractTemplate(agent)} />
         )}
         <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
@@ -2018,7 +2159,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onExtractTemplateChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -2144,6 +2285,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
               onDelete={onDeleteChild}
               onExport={onExport}
               onClone={onCloneChild}
+              onExtractTemplate={onExtractTemplateChild}
             />
           ))
         )
@@ -2192,7 +2334,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, onExtractTemplate, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -2237,6 +2379,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           {onClone && (
             <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          )}
+          {onExtractTemplate && (
+            <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent's prompt, skills and config as a reusable Agent Template" onClick={() => onExtractTemplate(agent)} />
           )}
           <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
@@ -2309,6 +2454,9 @@ export default function Agents() {
   const [importSuccess, setImportSuccess] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const importFileRef = useRef(null);
+  // Existing template ids (both tiers) for the "Save as template" unique-id
+  // suggestion (#1509), fetched lazily when the dialog opens.
+  const [extractTemplateIds, setExtractTemplateIds] = useState(() => new Set());
 
   const agents = rawAgents || [];
   const existingAgentIds = useMemo(() => new Set(agents.map(a => a.id)), [agents]);
@@ -2427,6 +2575,38 @@ export default function Agents() {
     if (resp.ok) {
       closePanel();
       refetch();
+    }
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // "Save as template" (#1509). Fetch the existing template ids first (both
+  // tiers) so the dialog can seed a unique id suggestion, then open the panel.
+  // Best-effort: an unreachable list just yields an empty set (server still
+  // enforces uniqueness with a 409).
+  async function openExtractPanel(agent) {
+    let ids = new Set();
+    try {
+      const { templates } = await apiCall('GET', '/api/agent-templates');
+      ids = new Set((Array.isArray(templates) ? templates : []).map(t => t.id));
+    } catch { /* list unreachable — empty set, server still guards uniqueness */ }
+    setExtractTemplateIds(ids);
+    openPanel('extract', agent);
+  }
+
+  // Extract dialog submitted. Returns the parsed response so the form can react
+  // to a 409 id-conflict (re-suggest an id) without closing.
+  async function handleExtractSubmit(form) {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(selectedAgent.id)}/extract-template`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      closePanel();
+      setAddRoleNotice({
+        text: `Template '${data.id}' saved — find it on the Agent Templates page.`,
+      });
     }
     return { ok: resp.ok, status: resp.status, data };
   }
@@ -2881,6 +3061,7 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
               onCloneChild={a => openPanel('clone', a)}
+              onExtractTemplateChild={a => openExtractPanel(a)}
             />
           ))}
           {leaves.map(a => (
@@ -2895,6 +3076,7 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
               onExport={handleExport}
               onClone={ag => openPanel('clone', ag)}
+              onExtractTemplate={ag => openExtractPanel(ag)}
             />
           ))}
           {orphans.length > 0 && (
@@ -2955,6 +3137,22 @@ export default function Agents() {
             teams={teams}
             existingIds={existingAgentIds}
             onSubmit={handleCloneSubmit}
+            onCancel={closePanel}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'extract' && !!selectedAgent}
+        onClose={closePanel}
+        title={`Save as template — ${selectedAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {selectedAgent && panelMode === 'extract' && (
+          <ExtractTemplateForm
+            agent={selectedAgent}
+            existingTemplateIds={extractTemplateIds}
+            onSubmit={handleExtractSubmit}
             onCancel={closePanel}
           />
         )}

@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass,
+  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -73,6 +73,7 @@ const NAV = [
     { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3, adminOnly: true },
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles, credAdmin: true },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
+    { path: '/plugins',      label: 'Plugins',             Icon: Puzzle,  adminOnly: true },
     { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
   ]},
@@ -95,6 +96,7 @@ const BREADCRUMBS = {
   '/token-usage':  'Token Usage',
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
+  '/plugins':      'Plugins',
   '/teams':        'Teams',
   '/patterns':               'Patterns Catalog',
   '/patterns/sdlc':          'Patterns Catalog / SDLC',

@@ -94,6 +94,15 @@ const { buildTar } = require("./tar-single");
 // pods/exec on kubernetes — selected the same way as container-runtime.
 const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+// Plugin system (#1516). The grant is the sibling of the skill grant — it lives
+// on the agent construct, never on the environment — and (de)activation is the
+// same additive live file sync, no respawn (#1547).
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
+const { planWorkspaceSync } = require("./plugin-sync");
+const { resolveScopeId } = require("./plugin-scope");
+const pluginRegistry = require("./plugin-registry");
+const pluginRuntime = require("./plugin-runtime");
+const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
@@ -371,7 +380,7 @@ function resolveAssistBindingFromSelection(endpointId, modelId) {
 const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
-const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume, perAgentNetworkName } = require("./container-runtime");
 // Host-folder context mounts (#1283) are a LOCAL/self-hosted-only feature. On
 // the podman runtime they are always available; on Kubernetes they are an
 // EXPLICIT opt-in (#1319, AEE_K8S_CONTEXT_HOSTPATH=1): the mount renders as a
@@ -1100,10 +1109,13 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // from, so the prompt can never claim a folder the container doesn't have —
   // each entry carries its in-container target and read/write mode (#1289).
   const contextMounts = resolveContextMounts(cfg || {});
+  // #1547: same discipline as skills — resolve the plugin grant from the config
+  // here rather than threading it through every caller.
+  const plugins = agentPluginDisplays(cfg);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
 }
 
@@ -1930,6 +1942,43 @@ function agentSkillDescriptions(id, teamId, skills) {
   return out;
 }
 
+// The display data the gated "Plugin Capabilities" CLAUDE.md block is built
+// from (#1547): the agent's RESOLVED plugin grant joined with each plugin's
+// installed manifest. Built from the grant, never from the seeded config file's
+// contents (§4.7) — and a granted-but-uninstalled plugin contributes nothing,
+// so the prompt can't advertise a CLI the workspace doesn't have.
+function agentPluginDisplays(cfg) {
+  if (!cfg) return [];
+  let grant;
+  try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { return []; }
+  if (!Array.isArray(grant) || grant.length === 0) return [];
+  let manifests;
+  try { manifests = pluginRegistry.installedManifests(); } catch { return []; }
+  return grant
+    .map((g) => pluginRegistry.promptDisplayFor(manifests[g.id], g.scopeGranularity))
+    .filter(Boolean);
+}
+
+// Full plugin reconcile (#1547): sidecars first (so a newly-installed plugin
+// has something to attach), then grant-driven network attachment for every
+// installed plugin. Used at boot and after an install/uninstall — idempotent,
+// so calling it more often than necessary is harmless.
+async function reconcilePluginsAndAttachments() {
+  const sidecars = await pluginRuntime.reconcilePluginSidecars();
+  if (sidecars.supported === false) return { sidecars, networks: [] };
+  let networks = [];
+  if (orchestratorSingleton) {
+    try {
+      networks = await orchestratorSingleton._reconcilePluginNetworks(
+        Object.keys(pluginRegistry.installedManifests()),
+      );
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin network reconcile failed: ${err.message}`);
+    }
+  }
+  return { sidecars, networks };
+}
+
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the
 // ordering / conditional-gating / de-duplication rules live in the pure,
 // unit-tested `prompt-assembly` module, which the prompt-preview endpoint also
@@ -1959,6 +2008,9 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     env,
     skills: Array.isArray(opts.skills) ? opts.skills : [],
     skillDescriptions: opts.skillDescriptions && typeof opts.skillDescriptions === "object" ? opts.skillDescriptions : {},
+    // Resolved plugin grant → the gated Plugin Capabilities section (#1547).
+    // Empty → the section is absent entirely, like Skills.
+    plugins: Array.isArray(opts.plugins) ? opts.plugins : [],
     blueprintId,
     autonomous: !!opts.autonomous,
     // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
@@ -7883,6 +7935,247 @@ class Orchestrator {
     return { agentId: id, skillName: name, active, result };
   }
 
+  // ── Plugin activation (#1547) ─────────────────────────────────────────────
+  // The plugin sibling of the skill activation above, and deliberately the same
+  // shape: an idempotent grant edit on the agent construct, then an ADDITIVE
+  // FILE SYNC into the live workspace — no respawn. A plugin CLI is a static
+  // file read per invocation, exactly like a skill, and `.aee/bin` is on the
+  // agent's PATH from container start, so a grant becomes usable immediately
+  // (docs/plugin-system-concept.md §4.5).
+  //
+  // What a plugin adds over a skill is the NETWORK and the TOKEN: the sidecar
+  // must be reachable from this agent's per-agent network, and the workspace
+  // gets a 0600 config carrying a scope token minted for the grant's
+  // granularity. Both are handled by planWorkspaceSync + the runtime adapter.
+
+  // Apply one agent's move from prevGrant to nextGrant.
+  async _syncPluginIntoWorkspace(id, cfg, prevGrant, nextGrant) {
+    const manifests = pluginRegistry.installedManifests();
+    const plan = planWorkspaceSync({
+      agentCfg: cfg,
+      prevGrant,
+      nextGrant,
+      manifests,
+      resolveScopeId,
+      mintToken: (pluginId, scopeId) => pluginRuntime.mintScopeToken(pluginId, scopeId),
+      networkNameFor: perAgentNetworkName,
+    });
+
+    const dir = agentDir(id);
+    const written = [];
+    const removed = [];
+    const errors = [];
+
+    for (const item of plan.write) {
+      const dest = path.join(dir, item.path);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        if (item.copyFrom) {
+          // `copyFrom` is the manifest's registry-relative cli.entrypoint.
+          // Match on entrypoint AND cli name so two plugins shipping the same
+          // relative path can't be confused for one another, and resolve the
+          // absolute source through the registry so the containment check
+          // happens in exactly one place.
+          const cliName = path.basename(item.path);
+          const manifest = Object.values(manifests).find(
+            (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+          );
+          const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+          if (!src) { errors.push({ path: item.path, error: 'CLI entrypoint not resolvable' }); continue; }
+          fs.copyFileSync(src, dest);
+        } else {
+          fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+        }
+        // chmod AFTER write: writeFileSync's mode option is masked by umask,
+        // and the token config must be 0600 exactly.
+        fs.chmodSync(dest, item.mode);
+        written.push(item.path);
+      } catch (err) {
+        errors.push({ path: item.path, error: err.message });
+      }
+    }
+
+    for (const rel of plan.remove) {
+      try {
+        fs.rmSync(path.join(dir, rel), { force: true });
+        removed.push(rel);
+      } catch (err) {
+        errors.push({ path: rel, error: err.message });
+      }
+    }
+
+    // Rebuild CLAUDE.md so the Plugin Capabilities gate + lines match the new
+    // grant (the config is already saved by the caller, as for skills).
+    try {
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      const promptPath = path.join(dir, AGENT_PROMPT_FILENAME);
+      const prompt = fs.existsSync(promptPath)
+        ? fs.readFileSync(promptPath, "utf8")
+        : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+      saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
+    }
+
+    await reseedAgent(id, ["CLAUDE.md", ".aee"]);
+    return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
+  }
+
+  // Reconnect every touched plugin's sidecar to exactly the per-agent networks
+  // its current grant implies. Reconciled from truth rather than applied as a
+  // delta, so a missed event or a manual disconnect self-heals on the next
+  // grant edit.
+  async _reconcilePluginNetworks(pluginIds) {
+    const results = [];
+    const configs = listAgentIds().map((id) => loadAgentConfig(id)).filter(Boolean);
+    for (const pluginId of new Set(pluginIds)) {
+      const granted = configs
+        .filter((c) => c.token) // a stub has no container, so no network
+        .filter((c) => {
+          try { return !!pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
+          catch { return false; }
+        })
+        .map((c) => c.id);
+      results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
+    }
+    return results;
+  }
+
+  // Validate that a plugin may be granted at the requested granularity. The UI
+  // bounds the choice too, but the server is the authority (§4.4).
+  _resolvePluginGrant(pluginId, scopeGranularity) {
+    const id = typeof pluginId === "string" ? pluginId.trim() : "";
+    if (!id) throw new Error("pluginId required");
+    const entry = pluginRegistry.readPluginManifest(id);
+    if (!entry.ok) throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    const granularity = scopeGranularity || defaultGranularity(entry.manifest);
+    const problem = assertGranularityGrantable(entry.manifest, granularity);
+    if (problem) throw new Error(problem);
+    return { manifest: entry.manifest, granularity };
+  }
+
+  // (De)activate a plugin for a whole team: the grant edit lands on the team
+  // agent, the file sync fans out to every materialized member — the same
+  // override semantics as skills (a member with its own pluginsOverride is
+  // skipped unless explicitly opted in).
+  async setTeamPluginActive(teamId, pluginId, { active = true, includeMembers = [], scopeGranularity = null } = {}) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const id = pluginId.trim();
+
+    const before = Array.isArray(teamCfg.plugins) ? teamCfg.plugins.slice() : [];
+    const { field, list } = planAgentPluginGrantEdit(teamCfg, { id, scopeGranularity: granularity }, active, loadAgentConfig);
+    teamCfg[field] = list;
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = listAgentIds()
+      .map((mid) => loadAgentConfig(mid))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const plan = planPluginSync({ members, grant: { id, scopeGranularity: granularity }, includeMembers });
+
+    const results = [];
+    for (const step of plan) {
+      if (step.action === "stub") {
+        // Consistent by construction: the team list already carries (or no
+        // longer carries) the grant; the normal seed path applies it at enable.
+        results.push({ agentId: step.agentId, status: "stub" });
+        continue;
+      }
+      if (step.action === "skip-override") {
+        results.push({ agentId: step.agentId, status: "skipped-override" });
+        continue;
+      }
+      const cfg = members.find((m) => m.id === step.agentId);
+      if (!cfg) continue;
+      // The member's grant BEFORE this edit — resolved against the team's
+      // pre-edit list, so a member that inherits sees the real transition.
+      const prev = effectivePlugins(cfg, (wanted) => (wanted === teamId ? { ...teamCfg, plugins: before } : loadAgentConfig(wanted)));
+
+      if (step.action === "sync-override") {
+        // Explicit opt-in: persist the grant on the member's OWN list, exactly
+        // as the skill path does. Without this the sync would seed files the
+        // next full re-seed silently drops, because an override member's own
+        // list — not the team's — is its grant.
+        const edit = planAgentPluginGrantEdit(cfg, { id, scopeGranularity: granularity }, active, loadAgentConfig);
+        cfg[edit.field] = edit.list;
+        saveAgentConfig(step.agentId, cfg);
+        this.agentConfigs.set(step.agentId, { config: cfg });
+      }
+
+      const next = effectivePlugins(cfg, loadAgentConfig);
+      results.push(await this._syncPluginIntoWorkspace(step.agentId, cfg, prev, next));
+    }
+
+    const networks = await this._reconcilePluginNetworks([id]);
+    console.log(`[Orchestrator] Team ${teamId}: plugin '${id}' ${active ? "activated" : "deactivated"} (${granularity}) on ${results.length} member(s)`);
+    return { teamId, pluginId: id, scopeGranularity: granularity, active, members: results, networks };
+  }
+
+  // Same for a single non-member agent (standalone / orchestrator) or for one
+  // team-member overriding its team's grant.
+  async setAgentPluginActive(id, pluginId, { active = true, scopeGranularity = null } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const pid = pluginId.trim();
+
+    const prev = effectivePlugins(cfg, loadAgentConfig);
+    const { field, list } = planAgentPluginGrantEdit(cfg, { id: pid, scopeGranularity: granularity }, active, loadAgentConfig);
+    cfg[field] = list;
+    saveAgentConfig(id, cfg);
+    this.agentConfigs.set(id, { config: cfg });
+    const next = effectivePlugins(cfg, loadAgentConfig);
+
+    const result = cfg.token
+      ? await this._syncPluginIntoWorkspace(id, cfg, prev, next)
+      : { agentId: id, status: "stub" };
+    const networks = await this._reconcilePluginNetworks([pid]);
+    console.log(`[Orchestrator] Agent ${id}: plugin '${pid}' ${active ? "activated" : "deactivated"} (${granularity}) — ${result.status}`);
+    return { agentId: id, pluginId: pid, scopeGranularity: granularity, active, result, networks };
+  }
+
+  // Reap a deleting agent's plugin-owned resources BEFORE its token stops being
+  // honoured (§4.9). At `team` granularity the scopeId is shared, so a member's
+  // deletion must NOT tear down the squad's pool — only the last holder does.
+  // Best-effort throughout: an unreachable broker never blocks a deletion.
+  async teardownAgentPluginScopes(id, cfg) {
+    if (!cfg || !cfg.token) return [];
+    let grant;
+    try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { return []; }
+    if (!Array.isArray(grant) || grant.length === 0) return [];
+    const manifests = pluginRegistry.installedManifests();
+
+    const siblings = listAgentIds()
+      .filter((other) => other !== id)
+      .map((other) => loadAgentConfig(other))
+      .filter(Boolean);
+
+    const out = [];
+    for (const g of grant) {
+      const manifest = manifests[g.id];
+      if (!manifest) continue;
+      const scopeId = resolveScopeId(cfg, g.scopeGranularity);
+      if (!scopeId) continue;
+      const stillHeld = siblings.some((s) => {
+        try {
+          const sg = pluginGrantFor(effectivePlugins(s, loadAgentConfig), g.id);
+          return sg && resolveScopeId(s, sg.scopeGranularity) === scopeId;
+        } catch { return false; }
+      });
+      if (stillHeld) {
+        out.push({ pluginId: g.id, scopeId, skipped: "scope-still-held" });
+        continue;
+      }
+      try { out.push(await pluginRuntime.teardownScope(manifest, scopeId)); }
+      catch (err) { out.push({ pluginId: g.id, scopeId, ok: false, error: err.message }); }
+    }
+    return out;
+  }
+
   // Scan an orchestrator agent's briefings directory and ensure a disabled
   // stub config exists for each BP. Returns the list of stub agent IDs that
   // are now present (both newly created and already existing).
@@ -9541,6 +9834,14 @@ async function main() {
   try { migrateUnifiedAgentsMemory(); }
   catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
 
+  // Plugin broker sidecars (#1547): bring the live set in line with the
+  // installed registry — start what is installed, stop orphans of anything
+  // uninstalled while we were down. Best-effort and non-blocking: a broken
+  // plugin image must never stop the stack from booting. Inert on the
+  // kubernetes runtime (see spawn-kubernetes-pod.js Deliberate differences).
+  reconcilePluginsAndAttachments()
+    .catch((err) => console.warn(`[Orchestrator] plugin reconcile at boot failed: ${err.message}`));
+
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
     // Teams data model (#299) — CRUD for the human Team / users / memberships.
@@ -9964,7 +10265,12 @@ async function main() {
         // actually carries mount(s). Resolved list (#1290) carries each folder's
         // target + access mode (#1289), so preview is byte-identical to seeded.
         const contextMounts = resolveContextMounts(cfg);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMounts });
+        // Same resolution as the seed path (#1547): the grant joined with the
+        // installed manifests, so the preview's Plugin Capabilities gate is
+        // byte-identical to what gets seeded — including the case where a
+        // granted plugin has since been uninstalled.
+        const plugins = agentPluginDisplays(cfg);
+        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, knowledgeDigestRef, contextMounts });
         const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
         return sendJson(res, 200, {
           agentId: id,
@@ -9978,6 +10284,7 @@ async function main() {
             blueprintInstance: !!blueprintId,
             hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
             hasSkills: skills.length > 0,
+            hasPlugins: plugins.length > 0,
             hasKnowledgeDigest: !!knowledgeDigestRef,
             hasContextMount: contextMounts.length > 0,
             environmentId: cfg.environmentId || null,
@@ -10308,6 +10615,13 @@ async function main() {
                     // Materialized child — best-effort Matrix cleanup.
                     await orchestrator.deactivateMatrixUser(childId);
                   }
+                  // Reap plugin-owned resources BEFORE the config (and with it
+                  // the grant this scope is derived from) is deleted — §4.9
+                  // requires the reap to precede token invalidation. Deleting
+                  // members one at a time is safe: each checks whether a
+                  // sibling still holds the same scopeId, so at `team`
+                  // granularity only the last one actually tears down.
+                  await orchestrator.teardownAgentPluginScopes(childId, childCfg);
                   deleteAgentFiles(childId);
                   if (PER_AGENT_VOLUME) await removePerAgentVolume(childId).catch(e =>
                     console.warn(`[Orchestrator] volume teardown ${childId}: ${e.message}`));
@@ -10328,6 +10642,11 @@ async function main() {
           }
 
           stopAgentProcess(id);
+          // Same ordering rule as the cascade above: reap first, delete after.
+          if (parentCfg) {
+            await orchestrator.teardownAgentPluginScopes(id, parentCfg).catch(e =>
+              console.warn(`[Orchestrator] plugin teardown ${id}: ${e.message}`));
+          }
           deleteAgentFiles(id);
           if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
             console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
@@ -13115,6 +13434,113 @@ async function main() {
             : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Plugin grant + registry routes (#1547) ────────────────────────────
+    // Deliberately mirroring the skill routes above: the plugin grant is their
+    // sibling and (de)activation is the same additive live sync, no respawn.
+
+    // POST /internal/plugins/reconcile — start sidecars for installed plugins,
+    // stop orphans of uninstalled ones. Called by the console after an
+    // install/uninstall and once at orchestrator startup. Idempotent.
+    if (req.method === 'POST' && req.url === '/internal/plugins/reconcile') {
+      (async () => {
+        try {
+          const result = await reconcilePluginsAndAttachments();
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] plugin reconcile error: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/plugins — the installed registry as the orchestrator sees
+    // it, including which sidecars are actually running. The console has its
+    // own view of the registry directory; this one answers "what is LIVE".
+    if (req.method === 'GET' && req.url === '/internal/plugins') {
+      (async () => {
+        try {
+          const entries = pluginRegistry.listPlugins();
+          let live = [];
+          try { live = await pluginRuntime.listLiveSidecars(); } catch { /* runtime down: report none */ }
+          const running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean));
+          return sendJson(res, 200, {
+            plugins: entries.map((e) => ({
+              id: e.id,
+              ok: e.ok,
+              errors: e.errors,
+              manifest: e.manifest,
+              sidecarRunning: running.has(e.id),
+            })),
+          });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/plugins/{activate,deactivate}
+    // Body: { pluginId, scopeGranularity?, includeMembers? }
+    const teamPluginMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/plugins\/(activate|deactivate)$/);
+    if (teamPluginMatch) {
+      const teamId = decodeURIComponent(teamPluginMatch[1]);
+      const active = teamPluginMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) { return sendJson(res, 400, { error: `Invalid JSON body: ${err.message}` }); }
+        try {
+          const result = await orchestrator.setTeamPluginActive(teamId, payload?.pluginId, {
+            active,
+            scopeGranularity: payload?.scopeGranularity || null,
+            includeMembers: Array.isArray(payload?.includeMembers) ? payload.includeMembers : [],
+          });
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] setTeamPluginActive error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team|required|not installed|does not honour|unknown scope/i.test(err.message) ? 400
+            : 500;
+          return sendJson(res, status, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/agents/:id/plugins/{activate,deactivate}
+    // Body: { pluginId, scopeGranularity? }
+    const agentPluginMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/plugins\/(activate|deactivate)$/);
+    if (agentPluginMatch) {
+      const agentId = decodeURIComponent(agentPluginMatch[1]);
+      const active = agentPluginMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) { return sendJson(res, 400, { error: `Invalid JSON body: ${err.message}` }); }
+        try {
+          const result = await orchestrator.setAgentPluginActive(agentId, payload?.pluginId, {
+            active,
+            scopeGranularity: payload?.scopeGranularity || null,
+          });
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] setAgentPluginActive error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /is a team|required|not installed|does not honour|unknown scope/i.test(err.message) ? 400
+            : 500;
+          return sendJson(res, status, { error: err.message });
         }
       });
       return;

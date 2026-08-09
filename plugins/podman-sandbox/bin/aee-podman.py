@@ -41,6 +41,11 @@ EXIT_DOMAIN_ERROR = 1
 EXIT_USAGE = 2
 EXIT_BROKER_UNREACHABLE = 3
 
+# Wire path on top of the seeded base endpoint. The broker serves the MCP
+# Streamable-HTTP transport here; /healthz and /internal/teardown-scope are the
+# orchestrator's, not ours.
+MCP_PATH = "/mcp"
+
 # Domain verb → broker MCP tool name. The broker's tool vocabulary is the
 # #1287 podman-mcp surface; the CLI is the only place that vocabulary is
 # exposed, so agents never see it.
@@ -95,10 +100,15 @@ def _call_broker(cfg, tool, arguments):
     BrokerUnreachable (exit 3); a reachable broker returning an error raises
     BrokerDomainError (exit 1).
     """
-    url = cfg.get("endpoint")
+    base = cfg.get("endpoint")
     token = cfg.get("token")
-    if not url:
+    if not base:
         raise BrokerUnreachable("no broker endpoint in config")
+    # The seeded config carries the sidecar's BASE url (plugin-sync.js
+    # sidecarEndpoint) — the platform does not know or care which wire protocol
+    # a given broker speaks. The path is this CLI's business: podman-sandbox's
+    # broker serves MCP Streamable-HTTP at /mcp and 404s anything else.
+    url = base.rstrip("/") + MCP_PATH
 
     session = {"id": None}
 

@@ -72,6 +72,7 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { validatePluginManifest } = require('./plugin-manifest');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -6154,6 +6155,55 @@ async function proxySkillActivation(req, res, active) {
 app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
 app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
+// ── Plugin grant (#1547) ────────────────────────────────────────────────────
+// The plugin sibling of the skill activation above, and routed the same way:
+// the caller names an agent construct, and whether that resolves to the team
+// route or the single-agent route is decided from its role, not by the client.
+// Everything else — granularity grantability, installed-ness, override
+// semantics — is re-enforced by the orchestrator, which owns the grant store.
+async function proxyPluginActivation(req, res, active) {
+  const { agentId, pluginId, scopeGranularity, includeMembers } = req.body || {};
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    return res.status(400).json({ error: 'agentId (agent or team construct) required' });
+  }
+  if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+    return res.status(400).json({ error: 'pluginId required (lowercase slug)' });
+  }
+  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const route = cfg.role === 'team'
+    ? `/internal/teams/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`
+    : `/internal/agents/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`;
+  try {
+    const resp = await fetch(`${orchestratorUrl}${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pluginId,
+        ...(typeof scopeGranularity === 'string' ? { scopeGranularity } : {}),
+        ...(Array.isArray(includeMembers) ? { includeMembers } : {}),
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.post('/api/agents/:id/plugins/activate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, true);
+});
+app.post('/api/agents/:id/plugins/deactivate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, false);
+});
+
 // ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
 // Deliver the current source content to seeded copies through the orchestrator's
 // drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
@@ -7404,6 +7454,135 @@ app.get('/api/process-templates/:id', (req, res) => {
   const b = loadProcessTemplate(PROCESS_TEMPLATES_DIR, req.params.id);
   if (!b) return res.status(404).json({ error: 'Process template not found' });
   res.json(b);
+});
+
+/* ─── Plugin registry (#1547) ────────────────────────────────────────────
+ * Reference plugins ship under plugins/<id>/ and are seeded into the pool
+ * (/pool/plugins/) by `make seed-plugins`. INSTALLING copies one into the
+ * operator registry (/workspace/plugins/<id>/), which is what makes the
+ * orchestrator start its broker sidecar.
+ *
+ * Install is a deliberate, System-Admin-only action rather than something the
+ * seed does implicitly: a plugin's sidecar holds real privilege (plugin #1
+ * mounts the host Podman socket), so a human confirms the declared
+ * capabilities before anything privileged runs. Installing still grants
+ * NOTHING to any agent — that is the separate grant step (§4.4). */
+const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
+const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
+const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+// Read + validate one plugin.json under a base dir. Never throws; an invalid
+// plugin is reported WITH its errors rather than hidden, so an operator can see
+// why something they dropped in isn't installable.
+function readPluginDir(baseDir, id) {
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  const file = path.join(baseDir, id, 'plugin.json');
+  // Containment: id is regex-bounded above (no dots, no slashes), so the join
+  // cannot escape — re-checked here because this path is attacker-adjacent.
+  if (!path.resolve(file).startsWith(path.resolve(baseDir) + path.sep)) {
+    return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  }
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (err) { return { id, ok: false, errors: [`cannot read plugin.json: ${err.message}`], manifest: null }; }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) { return { id, ok: false, errors: [`invalid JSON: ${err.message}`], manifest: null }; }
+  const result = validatePluginManifest(parsed);
+  if (result.ok && result.manifest.id !== id) {
+    return { id, ok: false, errors: [`manifest id "${result.manifest.id}" does not match directory "${id}"`], manifest: null };
+  }
+  return { id, ok: result.ok, errors: result.errors, manifest: result.manifest };
+}
+
+function listPluginDirs(baseDir) {
+  try {
+    return fs.readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort();
+  } catch { return []; }
+}
+
+async function notifyPluginReconcile() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins/reconcile`, { method: 'POST' });
+    return resp.ok ? await resp.json() : { error: `orchestrator returned ${resp.status}` };
+  } catch (err) {
+    // The registry write already succeeded; a down orchestrator just means the
+    // sidecar starts at its next boot reconcile. Surfaced, never fatal.
+    return { error: err.message };
+  }
+}
+
+app.get('/api/plugins', apiLimiter, async (req, res) => {
+  const installedIds = listPluginDirs(REGISTRY_PLUGINS_DIR);
+  const installed = installedIds.map((id) => readPluginDir(REGISTRY_PLUGINS_DIR, id));
+  const available = listPluginDirs(POOL_PLUGINS_DIR)
+    .filter((id) => !installedIds.includes(id))
+    .map((id) => readPluginDir(POOL_PLUGINS_DIR, id));
+
+  // Which sidecars are actually up — an installed plugin whose broker is not
+  // running is a real state an operator needs to see, not an error.
+  let running = {};
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
+    if (resp.ok) {
+      const body = await resp.json();
+      for (const p of body.plugins || []) running[p.id] = !!p.sidecarRunning;
+    }
+  } catch { /* orchestrator unreachable — report unknown rather than false */ }
+
+  res.json({
+    installed: installed.map((p) => ({ ...p, installed: true, sidecarRunning: running[p.id] ?? null })),
+    available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
+    canManage: !!getScope(req).all,
+  });
+});
+
+app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  const entry = readPluginDir(POOL_PLUGINS_DIR, id);
+  if (!entry.ok) {
+    return res.status(entry.errors[0] && /cannot read/.test(entry.errors[0]) ? 404 : 400)
+      .json({ error: `plugin '${id}' is not installable`, errors: entry.errors });
+  }
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (fs.existsSync(dest)) return res.status(409).json({ error: `plugin '${id}' is already installed` });
+  try {
+    fs.mkdirSync(REGISTRY_PLUGINS_DIR, { recursive: true });
+    fs.cpSync(path.join(POOL_PLUGINS_DIR, id), dest, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `install failed: ${err.message}` });
+  }
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: true, manifest: entry.manifest, reconcile });
+});
+
+app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'invalid plugin id' });
+  }
+  if (!fs.existsSync(dest)) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  try {
+    fs.rmSync(dest, { recursive: true, force: true });
+  } catch (err) {
+    return res.status(500).json({ error: `uninstall failed: ${err.message}` });
+  }
+  // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
+  // action on the registry, not a mass revoke. The orchestrator's reconcile
+  // stops the orphaned sidecar, and a grant with no installed manifest seeds
+  // nothing and prompts nothing — so the agent simply stops being told about a
+  // capability whose broker is gone.
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: false, reconcile });
 });
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────

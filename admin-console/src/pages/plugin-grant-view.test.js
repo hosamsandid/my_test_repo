@@ -7,6 +7,8 @@ import {
   quotaCeiling,
   platformMismatch,
   pluginGrantRow,
+  normalizeGrantEntries,
+  effectiveGrantFor,
 } from './plugin-grant-view.js';
 
 const TEAM_ONLY = { id: 'p', name: 'P', scopes: ['team'], platforms: ['any'] };
@@ -66,4 +68,70 @@ test('pluginGrantRow folds granted state, selector, quota and platform into one 
   assert.equal(ungranted.granularity, 'team');
   assert.equal(ungranted.selector.disabled, true);
   assert.equal(ungranted.quota.scopes, 1);
+});
+
+// ── grant normalisation + inheritance (#1547) ────────────────────────────────
+
+test('normalizeGrantEntries accepts the string shorthand as team granularity', () => {
+  assert.deepEqual(normalizeGrantEntries(['podman-sandbox']), [
+    { id: 'podman-sandbox', scopeGranularity: 'team' },
+  ]);
+});
+
+test('normalizeGrantEntries keeps an explicit granularity and drops junk', () => {
+  assert.deepEqual(
+    normalizeGrantEntries([
+      { id: 'a', scopeGranularity: 'agent' },
+      { id: 'b', scopeGranularity: 'nonsense' },
+      { id: '  ' },
+      null,
+      42,
+    ]),
+    [
+      { id: 'a', scopeGranularity: 'agent' },
+      { id: 'b', scopeGranularity: 'team' },
+    ],
+  );
+});
+
+test('normalizeGrantEntries de-duplicates on id, first entry wins', () => {
+  assert.deepEqual(
+    normalizeGrantEntries([{ id: 'a', scopeGranularity: 'agent' }, { id: 'a' }]),
+    [{ id: 'a', scopeGranularity: 'agent' }],
+  );
+});
+
+test('normalizeGrantEntries tolerates a non-array', () => {
+  assert.deepEqual(normalizeGrantEntries(null), []);
+  assert.deepEqual(normalizeGrantEntries(undefined), []);
+  assert.deepEqual(normalizeGrantEntries('podman-sandbox'), []);
+});
+
+test('a member with no override inherits the team grant', () => {
+  const member = { role: 'team-member' };
+  const team = { plugins: [{ id: 'podman-sandbox', scopeGranularity: 'agent' }] };
+  assert.deepEqual(effectiveGrantFor(member, team), [
+    { id: 'podman-sandbox', scopeGranularity: 'agent' },
+  ]);
+});
+
+test('a member override REPLACES the team grant, it does not merge', () => {
+  const member = { role: 'team-member', pluginsOverride: [{ id: 'test-mgmt' }] };
+  const team = { plugins: [{ id: 'podman-sandbox' }] };
+  assert.deepEqual(effectiveGrantFor(member, team), [
+    { id: 'test-mgmt', scopeGranularity: 'team' },
+  ]);
+});
+
+test('an EMPTY member override is still an override — it grants nothing', () => {
+  const member = { role: 'team-member', pluginsOverride: [] };
+  const team = { plugins: [{ id: 'podman-sandbox' }] };
+  assert.deepEqual(effectiveGrantFor(member, team), []);
+});
+
+test('a standalone agent carries its own grant, ignoring any team', () => {
+  const agent = { role: 'agent', plugins: [{ id: 'x' }] };
+  assert.deepEqual(effectiveGrantFor(agent, { plugins: [{ id: 'y' }] }), [
+    { id: 'x', scopeGranularity: 'team' },
+  ]);
 });

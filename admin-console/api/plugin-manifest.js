@@ -13,6 +13,15 @@
 // unit-testable in isolation and shared by the registry/install path and the
 // broker SDK.
 //
+// NOTE: this file exists TWICE — `admin-console/api/plugin-manifest.js` (the
+// install path validates before writing to the registry) and
+// `orchestrator/plugin-manifest.js` (the sidecar/seed path re-validates on
+// read, since a registry directory can also be placed by hand). The two build
+// contexts are disjoint, so neither can require the other — the same constraint
+// that duplicates plugin-scope-token.js into a broker image. The copies are
+// asserted BYTE-IDENTICAL by orchestrator/plugin-manifest-mirror.test.js:
+// change both in one commit.
+//
 // Shape (pluginVersion 1):
 //   {
 //     pluginVersion: 1,

@@ -6772,10 +6772,48 @@ def _maybe_enable_fake_claude() -> None:
           file=sys.stderr)
 
 
+def _setup_plugin_cli_env() -> None:
+    """Make this agent's granted plugin CLIs runnable (#1547).
+
+    Two things every plugin CLI facade needs, neither of which can be baked into
+    the image:
+
+    1. **PATH.** Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are
+       symlinked into /usr/local/bin at image build time. Plugin CLIs cannot be:
+       they are seeded per agent into `.aee/bin/` when a plugin is GRANTED, which
+       is a live file sync with no respawn (concept §4.5). The directory goes on
+       PATH unconditionally, whether or not anything is granted yet — an absent
+       dir on PATH is harmless, and only this makes a later grant usable without
+       restarting the container. It is also what the seeded "Plugin
+       Capabilities" prompt block promises the agent.
+       Appended, not prepended: a plugin must never shadow a built-in CLI.
+
+    2. **AEE_WORKSPACE.** Every CLI facade resolves its own
+       `.aee/plugins/<id>.json` (endpoint + scope token) relative to this
+       variable, falling back to the home directory. Unset, a granted CLI would
+       look in /root and report itself ungranted.
+
+    Both are inherited by the Claude CLI and by every shell command the agent
+    runs, since those are descendants of this process.
+    """
+    agent_id = os.environ.get("AGENT_ID")
+    if not agent_id:
+        return
+    workspace = Path("/workspace/agents") / agent_id
+    os.environ.setdefault("AEE_WORKSPACE", str(workspace))
+
+    plugin_bin = workspace / ".aee" / "bin"
+    current = os.environ.get("PATH", "")
+    if str(plugin_bin) in current.split(os.pathsep):
+        return
+    os.environ["PATH"] = f"{current}{os.pathsep}{plugin_bin}" if current else str(plugin_bin)
+
+
 def main() -> None:
     global _args
 
     _maybe_enable_fake_claude()
+    _setup_plugin_cli_env()
 
     parser = argparse.ArgumentParser(
         description="Agent Execution Environment entrypoint",

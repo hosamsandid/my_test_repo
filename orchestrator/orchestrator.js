@@ -446,6 +446,12 @@ function startAgentProcess(config) {
     ORCHESTRATOR_INTERNAL_URL: process.env.ORCHESTRATOR_INTERNAL_URL || 'http://orchestrator:4002',
     AEE_ORCHESTRATOR_URL: process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002',
   };
+  // The spread above copies THIS container's PATH into the agent container,
+  // where it silently overrides the agent image's own PATH — so anything the
+  // image puts on PATH (the /opt/aee/plugin-bin entry granted plugin CLIs
+  // resolve through, #1547) never takes effect. The orchestrator's PATH has no
+  // business travelling; drop it and let the image's own value stand.
+  delete childEnv.PATH;
 
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave

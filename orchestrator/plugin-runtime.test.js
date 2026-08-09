@@ -159,3 +159,13 @@ test('splitByRunning is case-insensitive and tolerates a missing State', () => {
   assert.deepEqual(running.map((c) => c.Names[0]), ['a']);
   assert.deepEqual(stale.map((c) => c.Names[0]), ['b'], 'a null entry is dropped, not counted as a corpse');
 });
+
+test('the sidecar disables SELinux relabelling via the libpod field, not the docker-compat one', () => {
+  // libpod's create API spells this `selinux_opts`. Passing the docker-compat
+  // `security_opt` is silently ignored, which left the mounted host socket
+  // labelled and every broker call failing "permission denied" as root.
+  const body = sidecarCreateBody(manifest(), OPTS);
+  assert.deepEqual(body.selinux_opts, ['disable']);
+  assert.equal(body.security_opt, undefined, 'the ignored docker-compat field must not be relied on');
+  assert.equal(body.no_new_privileges, true, 'still no privilege escalation');
+});

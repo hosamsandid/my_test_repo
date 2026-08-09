@@ -205,7 +205,13 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
     // enforced as a restriction (no shipped plugin declares it).
     Networks: { [AGENT_NETWORK]: {} },
     labels: sidecarLabels(manifest.id),
-    security_opt: ['label=disable'],
+    // SELinux relabelling must be off for the mounted host socket, exactly as
+    // the orchestrator's own compose service does it (`security_opt:
+    // label=disable`). The libpod create API spells this `selinux_opts`, NOT
+    // the docker-compat `security_opt` — passing the latter is silently
+    // ignored, which left the sidecar labelled and every socket call failing
+    // with a bare "permission denied" despite running as root.
+    selinux_opts: ['disable'],
     no_new_privileges: true,
     restart_policy: 'unless-stopped',
     remove: false,

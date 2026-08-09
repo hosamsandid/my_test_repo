@@ -61,7 +61,18 @@ const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio';
 // Per-plugin audit volume (§4.7): a broker appends one JSONL line per call. It
 // gets its OWN volume rather than a slice of /workspace — a sidecar has no
 // business reading agent workspaces, and the manifest never declared it.
-const AUDIT_VOLUME = `${COMPOSE_PROJECT}_plugin-audit`;
+//
+// ONE VOLUME PER PLUGIN, mounted whole — deliberately not one shared volume
+// with a per-plugin SubPath. libpod resolves a SubPath against content that
+// must already exist, and a freshly-created volume is empty, so the mount fails
+// the container start with a bare "no such file or directory" (the other
+// SubPath mounts in spawn-container.js work only because the orchestrator
+// creates those directories on the shared volume first, and it has no way to
+// write into a volume it does not itself mount). Separate volumes also keep one
+// plugin's audit trail out of another's reach for free.
+function auditVolumeName(pluginId) {
+  return `${COMPOSE_PROJECT}_plugin-audit-${pluginId}`;
+}
 const AUDIT_MOUNT = '/audit';
 
 const TEARDOWN_TIMEOUT_MS = Number(process.env.PLUGIN_TEARDOWN_TIMEOUT_MS) || 10000;
@@ -125,12 +136,14 @@ async function listLiveSidecars() {
   return splitByRunning(await listSidecarContainers()).running;
 }
 
-async function ensureAuditVolume() {
-  const r = await libpodRequest('POST', '/volumes/create', { name: AUDIT_VOLUME });
+async function ensureAuditVolume(pluginId) {
+  const name = auditVolumeName(pluginId);
+  const r = await libpodRequest('POST', '/volumes/create', { name });
   // 201 created, 409 already exists — both fine.
   if (r.status >= 300 && r.status !== 409) {
-    console.warn(`[plugin-runtime] audit volume ${AUDIT_VOLUME}: status=${r.status}`);
+    console.warn(`[plugin-runtime] audit volume ${name}: status=${r.status}`);
   }
+  return name;
 }
 
 // Build the libpod create body for one plugin's broker sidecar. Exported for
@@ -183,7 +196,7 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
     name: sidecarContainerName(manifest.id),
     env,
     mounts,
-    volumes: [{ Name: AUDIT_VOLUME, Dest: AUDIT_MOUNT, SubPath: manifest.id }],
+    volumes: [{ Name: auditVolumeName(manifest.id), Dest: AUDIT_MOUNT }],
     netns: { nsmode: 'bridge' },
     // Created on the compose network so the ORCHESTRATOR can reach it for
     // health/teardown; per-agent networks are connected on top, per grant.
@@ -200,7 +213,7 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
 }
 
 async function startSidecar(manifest, dir = REGISTRY_DIR) {
-  await ensureAuditVolume();
+  await ensureAuditVolume(manifest.id);
   const body = sidecarCreateBody(manifest, { signingSecret: signingSecret(dir) });
   const cr = await libpodRequest('POST', '/containers/create', body);
   if (cr.status >= 300 || !cr.body || !cr.body.Id) {
@@ -390,7 +403,7 @@ async function teardownScope(manifest, scopeId, dir = REGISTRY_DIR) {
 }
 
 module.exports = {
-  AUDIT_VOLUME,
+  auditVolumeName,
   AUDIT_MOUNT,
   PODMAN_HOST_SOCKET,
   signingSecret,

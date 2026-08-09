@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { sidecarCreateBody, AUDIT_MOUNT } = require('./plugin-runtime');
+const { sidecarCreateBody, AUDIT_MOUNT, auditVolumeName } = require('./plugin-runtime');
 
 function manifest(extra = {}) {
   return {
@@ -113,11 +113,17 @@ test('a plugin cannot manufacture "no quota declared" by clearing the variable',
   assert.equal(body.env.AEE_PLUGIN_QUOTA_MAX_OBJECTS, undefined);
 });
 
-test('the audit volume is scoped to this plugin by SubPath', () => {
+test('the audit volume is per plugin and mounted WHOLE, never via SubPath', () => {
+  // A SubPath is resolved against content that must already exist, and a fresh
+  // volume is empty — that combination failed the container start outright with
+  // "no such file or directory" on the first end-to-end run. One volume per
+  // plugin needs no pre-created directory and isolates the trails anyway.
   const body = sidecarCreateBody(manifest(), OPTS);
   assert.equal(body.volumes.length, 1);
   assert.equal(body.volumes[0].Dest, AUDIT_MOUNT);
-  assert.equal(body.volumes[0].SubPath, 'demo-plugin');
+  assert.equal(body.volumes[0].SubPath, undefined);
+  assert.equal(body.volumes[0].Name, auditVolumeName('demo-plugin'));
+  assert.match(body.volumes[0].Name, /plugin-audit-demo-plugin$/);
 });
 
 // ── liveness (#1547, found on the first end-to-end run) ─────────────────────

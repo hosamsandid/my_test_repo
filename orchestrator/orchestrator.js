@@ -432,6 +432,14 @@ function startAgentProcess(config) {
   const childEnv = {
     ...process.env,
     AGENT_ID: id,
+    // #1547: every plugin CLI facade resolves its own
+    // `.aee/plugins/<id>.json` (endpoint + scope token) relative to this,
+    // falling back to the home directory. Set on the CONTAINER rather than
+    // only inside the entrypoint process so it is also there for anyone who
+    // `podman exec`s in to debug — an env the entrypoint mutates is invisible
+    // to a fresh exec, which is exactly how a granted CLI came to report
+    // itself ungranted.
+    AEE_WORKSPACE: `/workspace/agents/${id}`,
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
     MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,

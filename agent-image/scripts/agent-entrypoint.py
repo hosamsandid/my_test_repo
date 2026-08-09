@@ -6772,41 +6772,52 @@ def _maybe_enable_fake_claude() -> None:
           file=sys.stderr)
 
 
+PLUGIN_BIN_LINK = Path("/opt/aee/plugin-bin")
+
+
 def _setup_plugin_cli_env() -> None:
     """Make this agent's granted plugin CLIs runnable (#1547).
 
-    Two things every plugin CLI facade needs, neither of which can be baked into
-    the image:
+    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
+    /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
+    per agent into `<workspace>/.aee/bin` when a plugin is GRANTED, which is a
+    live file sync with no respawn (concept §4.5).
 
-    1. **PATH.** Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are
-       symlinked into /usr/local/bin at image build time. Plugin CLIs cannot be:
-       they are seeded per agent into `.aee/bin/` when a plugin is GRANTED, which
-       is a live file sync with no respawn (concept §4.5). The directory goes on
-       PATH unconditionally, whether or not anything is granted yet — an absent
-       dir on PATH is harmless, and only this makes a later grant usable without
-       restarting the container. It is also what the seeded "Plugin
-       Capabilities" prompt block promises the agent.
-       Appended, not prepended: a plugin must never shadow a built-in CLI.
+    The image therefore puts a fixed directory — /opt/aee/plugin-bin — on PATH,
+    and this points it at the per-agent seed dir with one symlink. The seed dir
+    is created first so the link is never dangling, and because PATH resolves
+    through the link on every lookup, a plugin granted minutes from now is
+    immediately runnable with no respawn.
 
-    2. **AEE_WORKSPACE.** Every CLI facade resolves its own
-       `.aee/plugins/<id>.json` (endpoint + scope token) relative to this
-       variable, falling back to the home directory. Unset, a granted CLI would
-       look in /root and report itself ungranted.
+    Deliberately a symlink rather than mutating os.environ["PATH"]: an env this
+    process changes reaches its children (the Claude CLI and its shell calls)
+    but is invisible to `podman exec`, so an operator debugging a granted plugin
+    would get "command not found" for a CLI that is in fact installed. PATH
+    lives in the image config instead, and this link is all that varies.
 
-    Both are inherited by the Claude CLI and by every shell command the agent
-    runs, since those are descendants of this process.
+    AEE_WORKSPACE — which every CLI reads to find its own
+    `.aee/plugins/<id>.json` — is set on the container by the orchestrator for
+    the same reason; `setdefault` here only covers a hand-run container.
     """
     agent_id = os.environ.get("AGENT_ID")
     if not agent_id:
         return
-    workspace = Path("/workspace/agents") / agent_id
+    workspace = Path(os.environ.get("AEE_WORKSPACE") or (Path("/workspace/agents") / agent_id))
     os.environ.setdefault("AEE_WORKSPACE", str(workspace))
 
     plugin_bin = workspace / ".aee" / "bin"
-    current = os.environ.get("PATH", "")
-    if str(plugin_bin) in current.split(os.pathsep):
-        return
-    os.environ["PATH"] = f"{current}{os.pathsep}{plugin_bin}" if current else str(plugin_bin)
+    try:
+        plugin_bin.mkdir(parents=True, exist_ok=True)
+        if PLUGIN_BIN_LINK.is_symlink() or PLUGIN_BIN_LINK.exists():
+            if PLUGIN_BIN_LINK.is_symlink() and PLUGIN_BIN_LINK.readlink() == plugin_bin:
+                return
+            PLUGIN_BIN_LINK.unlink()
+        PLUGIN_BIN_LINK.parent.mkdir(parents=True, exist_ok=True)
+        PLUGIN_BIN_LINK.symlink_to(plugin_bin, target_is_directory=True)
+    except OSError as exc:
+        # Never fatal: an agent with no plugins granted is unaffected, and one
+        # with a grant fails loudly at the CLI rather than silently at boot.
+        print(f"[agent] plugin CLI PATH link failed: {exc}", file=sys.stderr)
 
 
 def main() -> None:

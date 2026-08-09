@@ -90,11 +90,39 @@ function brokerBaseUrl(manifest) {
 
 // ── sidecar lifecycle ───────────────────────────────────────────────────────
 
-async function listLiveSidecars() {
+// Every container carrying the plugin label, RUNNING OR NOT. The distinction
+// matters — see splitByRunning.
+async function listSidecarContainers() {
   const filters = encodeURIComponent(JSON.stringify({ label: [PLUGIN_ID_LABEL] }));
   const r = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
   if (r.status >= 300 || !Array.isArray(r.body)) return [];
   return r.body;
+}
+
+// A container is only LIVE if it is actually running. Anything else — `created`
+// (a create whose start never happened, e.g. the orchestrator was restarted
+// between the two calls), `exited`, `dead` — is a corpse holding the plugin's
+// deterministic container name.
+//
+// This distinction is the whole repair path: feeding corpses to
+// reconcileSidecars as "live" makes it report nothing to start and no errors,
+// so a plugin stays permanently down while the reconcile claims success. Found
+// exactly that way on the first end-to-end run.
+function splitByRunning(containers) {
+  const running = [];
+  const stale = [];
+  for (const c of containers || []) {
+    if (!c) continue;
+    const state = String(c.State || '').toLowerCase();
+    if (state === 'running') running.push(c);
+    else stale.push(c);
+  }
+  return { running, stale };
+}
+
+// Back-compat name used by the /internal/plugins route: what is actually up.
+async function listLiveSidecars() {
+  return splitByRunning(await listSidecarContainers()).running;
 }
 
 async function ensureAuditVolume() {
@@ -202,12 +230,22 @@ async function stopSidecar(pluginId) {
 async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
   if (!PLUGIN_SIDECARS_SUPPORTED) return { started: [], stopped: [], errors: [], ...UNSUPPORTED };
   const manifests = installedManifests(dir);
-  const live = await listLiveSidecars();
-  const { toStart, toStop } = reconcileSidecars(Object.keys(manifests), live);
+  const { running, stale } = splitByRunning(await listSidecarContainers());
+  const { toStart, toStop } = reconcileSidecars(Object.keys(manifests), running);
 
   const started = [];
   const stopped = [];
+  const reaped = [];
   const errors = [];
+
+  // Clear corpses first so the deterministic container name is free for the
+  // create below. Without this a single failed start wedges the plugin forever.
+  for (const c of stale) {
+    const name = (Array.isArray(c.Names) && c.Names[0]) || c.Id;
+    const r = await libpodRequest('DELETE', `/containers/${name}?force=true`);
+    if (r.status < 300 || r.status === 404) reaped.push(name);
+    else errors.push({ pluginId: c.Labels && c.Labels[PLUGIN_ID_LABEL], phase: 'reap', error: `status=${r.status}` });
+  }
 
   for (const { pluginId } of toStop) {
     try {
@@ -229,7 +267,7 @@ async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
       errors.push({ pluginId, phase: 'start', error: err.message });
     }
   }
-  return { started, stopped, errors };
+  return { started, stopped, reaped, errors };
 }
 
 // ── grant-driven network attachment ─────────────────────────────────────────
@@ -359,6 +397,8 @@ module.exports = {
   mintScopeToken,
   brokerBaseUrl,
   sidecarCreateBody,
+  listSidecarContainers,
+  splitByRunning,
   listLiveSidecars,
   startSidecar,
   stopSidecar,

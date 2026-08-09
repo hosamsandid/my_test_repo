@@ -119,3 +119,37 @@ test('the audit volume is scoped to this plugin by SubPath', () => {
   assert.equal(body.volumes[0].Dest, AUDIT_MOUNT);
   assert.equal(body.volumes[0].SubPath, 'demo-plugin');
 });
+
+// ── liveness (#1547, found on the first end-to-end run) ─────────────────────
+
+const { splitByRunning } = require('./plugin-runtime');
+
+test('only a RUNNING container counts as a live sidecar', () => {
+  const { running, stale } = splitByRunning([
+    { Names: ['aee-plugin-a'], State: 'running' },
+    { Names: ['aee-plugin-b'], State: 'created' },
+    { Names: ['aee-plugin-c'], State: 'exited' },
+    { Names: ['aee-plugin-d'], State: 'dead' },
+  ]);
+  assert.deepEqual(running.map((c) => c.Names[0]), ['aee-plugin-a']);
+  assert.deepEqual(stale.map((c) => c.Names[0]), ['aee-plugin-b', 'aee-plugin-c', 'aee-plugin-d']);
+});
+
+test('a "created" corpse must not be mistaken for a live sidecar', () => {
+  // The exact live-stack failure: a create whose start never ran (orchestrator
+  // restarted between the two calls) left the container in `created`. Counting
+  // it as live made reconcile report nothing to start AND no errors, so the
+  // plugin stayed down while the reconcile looked successful.
+  const { running } = splitByRunning([{ Names: ['aee-plugin-podman-sandbox'], State: 'created' }]);
+  assert.deepEqual(running, [], 'a created-but-never-started container is not live');
+});
+
+test('splitByRunning is case-insensitive and tolerates a missing State', () => {
+  const { running, stale } = splitByRunning([
+    { Names: ['a'], State: 'Running' },
+    { Names: ['b'] },
+    null,
+  ]);
+  assert.deepEqual(running.map((c) => c.Names[0]), ['a']);
+  assert.deepEqual(stale.map((c) => c.Names[0]), ['b'], 'a null entry is dropped, not counted as a corpse');
+});

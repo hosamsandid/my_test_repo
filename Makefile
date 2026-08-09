@@ -29,10 +29,19 @@ SERVICES     = conduwuit orchestrator admin-console stt
 # skill index they reference.
 ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace/skills
 SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
-SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
-ifeq ($(COMPOSE_PROJECT_NAME),)
-SKILL_POOL_VOLUME      = agent-studio_claude-workspace
+
+# The pool volume is named after the compose project. COMPOSE_PROJECT_NAME lives
+# in .env, which podman-compose reads but make does NOT — so taking it straight
+# from the environment silently fell back to the `agent-studio` default on every
+# named stack, and each seed-* target then wrote into (and created) a volume no
+# running container mounts. Read it out of .env here, with the environment
+# taking precedence and the historic default last.
+ENV_FILE ?= .env
+COMPOSE_PROJECT_NAME ?= $(shell sed -n 's/^COMPOSE_PROJECT_NAME=//p' $(ENV_FILE) 2>/dev/null | tail -1)
+ifeq ($(strip $(COMPOSE_PROJECT_NAME)),)
+COMPOSE_PROJECT_NAME = agent-studio
 endif
+SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 
 # Admin Console version footer (#483) — resolved here (not inside the
 # Docker build) since the admin-console build context is admin-console/,

@@ -59,6 +59,7 @@ const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./o
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const promptHistory = require('./prompt-history');
+const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
@@ -5129,7 +5130,7 @@ async function augmentSkillRoles(graph, teamIds) {
 // (team-owned skills, phase 2): is the skill in the team agent's `skills[]`,
 // and which members actually carry it in their workspace? Member state is read
 // from the seeded-skills manifest the orchestrator maintains
-// (/workspace/agents/<id>/.aee/seeded-skills.json) — the grant list alone
+// (/workspace/agents/<id>/.agent-studio/seeded-skills.json) — the grant list alone
 // can't tell whether a running member was seeded before or after a name was
 // added. Also adds ghost nodes for adopted global skills that the lane filter
 // wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
@@ -5149,13 +5150,13 @@ function augmentSkillActivation(graph, parsed) {
   } catch { /* no agents dir */ }
   const manifests = new Map(members.map(m => [
     m.id,
-    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'seeded-skills.json'), {}) || {},
+    readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'seeded-skills.json'), {}) || {},
   ]));
   // #776 §3: per-member auto-reconcile state so a stuck `pending` member surfaces
   // a Retry + the last error/time instead of a silent "Sync now".
   const reconciles = new Map(members.map(m => [
     m.id,
-    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'skill-reconcile.json'), {}) || {},
+    readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'skill-reconcile.json'), {}) || {},
   ]));
 
   // Ghost nodes for active-list skills the lane filter didn't render
@@ -7002,7 +7003,7 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/dismiss', apiLimiter, asyn
 // (#1225, concept §3.3). Runs a card's declared apply path through an existing
 // audited console choke-point *as the acting human* (this endpoint is itself a
 // mutating /api call, so `audit.auditMutations` records it under req.user; for a
-// prompt change the choke-point also stamps `.aee/prompt-history.json`), then
+// prompt change the choke-point also stamps `.agent-studio/prompt-history.json`), then
 // asks the orchestrator to record the applied card (timestamp + config-version
 // reference + baseline snapshot + undo payload) for #1226 to measure.
 //
@@ -8108,7 +8109,7 @@ function gatherSkillCopies(name, scope) {
     if (drel.startsWith('..') || path.isAbsolute(drel)) continue;
     if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
     lazyStampAgentSkill(dir, agentId);
-    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
+    const seededManifest = readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, agentId)), 'seeded-skills.json'), {}) || {};
     const seeded = seededManifest[name];
     const origin = seeded && seeded.tier
       ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
@@ -8156,9 +8157,9 @@ app.get('/api/skills', (req, res) => {
     if (!visibleAgent(scope, cfg)) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
     // A seeded agent copy anchors its drift on the source hash recorded at seed
-    // time in .aee/seeded-skills.json — NOT on the copy's own skill.json origin
+    // time in .agent-studio/seeded-skills.json — NOT on the copy's own skill.json origin
     // (agent-tier dirs are stamped without one). Build a synthetic origin from it.
-    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
+    const seededManifest = readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, agentId)), 'seeded-skills.json'), {}) || {};
     try {
       fs.readdirSync(agentSkillsDir).forEach(name => {
         const skillMd = path.join(agentSkillsDir, name, 'SKILL.md');

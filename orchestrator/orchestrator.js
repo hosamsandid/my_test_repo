@@ -99,6 +99,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } 
 // same additive live file sync, no respawn (#1547).
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
 const { planWorkspaceSync } = require("./plugin-sync");
+const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
@@ -433,7 +434,7 @@ function startAgentProcess(config) {
     ...process.env,
     AGENT_ID: id,
     // #1547: every plugin CLI facade resolves its own
-    // `.aee/plugins/<id>.json` (endpoint + scope token) relative to this,
+    // `.agent-studio/plugins/<id>.json` (endpoint + scope token) relative to this,
     // falling back to the home directory. Set on the CONTAINER rather than
     // only inside the entrypoint process so it is also there for anyone who
     // `podman exec`s in to debug — an env the entrypoint mutates is invisible
@@ -1529,7 +1530,7 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
     })) runs.push(r);
     let promptHistory = null;
     try {
-      promptHistory = JSON.parse(fs.readFileSync(agentStatePath(m.id, ".aee", "prompt-history.json"), "utf8"));
+      promptHistory = JSON.parse(fs.readFileSync(path.join(agentStateDir(m.id), "prompt-history.json"), "utf8"));
     } catch { /* no prompt-history — audit fallback */ }
     configBoundaries[m.id] = hillClimbSweep.configBoundariesForAgent(promptHistory, auditEntries, m.id);
   }
@@ -2043,24 +2044,31 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
 
 // ── Seeded-skills manifest ──────────────────────────────────────────────────
 // Records which skills actually landed in an agent's workspace, with tier and
-// timestamp: /workspace/agents/<id>/.aee/seeded-skills.json →
+// timestamp: /workspace/agents/<id>/.agent-studio/seeded-skills.json →
 //   { "<skillName>": { "tier": "agent"|"team"|"global", "seededAt": "<ISO>" } }
 // This is THE truth for "is this skill active for this member" — the grant
 // list alone can't tell whether a running member was seeded before or after a
 // name was added (docs/knowledge-skill-activation-concept.md §4.1). Written by
 // every seed and by the activation sync; read by the admin console's
-// knowledge-graph activation block.
-const SEEDED_SKILLS_REL = path.join(".aee", "seeded-skills.json");
+// knowledge-graph activation block. `agentStateDir` migrates a legacy `.aee/`
+// to `.agent-studio/` on first touch (#1549).
+const SEEDED_SKILLS_FILE = "seeded-skills.json";
+
+// The migrating state-dir choke-point (#1549): resolves `.agent-studio/`, moving
+// a legacy `.aee/` over exactly once so an upgraded agent keeps all state.
+function agentStateDir(id) {
+  return resolveAgentStateDir(agentDir(id));
+}
 
 function readSeededSkills(id) {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SEEDED_SKILLS_REL), "utf8"));
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SEEDED_SKILLS_FILE), "utf8"));
     return m && typeof m === "object" ? m : {};
   } catch { return {}; }
 }
 
 function writeSeededSkills(id, manifest) {
-  const p = path.join(agentDir(id), SEEDED_SKILLS_REL);
+  const p = path.join(agentStateDir(id), SEEDED_SKILLS_FILE);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
 }
@@ -2069,17 +2077,17 @@ function writeSeededSkills(id, manifest) {
 // the last error + timestamp for a pending skill the auto-reconcile loop is
 // trying to heal. Keyed by skill name. Read by the admin-console graph overlay so
 // a stuck member surfaces a Retry + the reason instead of a silent "pending".
-const SKILL_RECONCILE_REL = path.join(".aee", "skill-reconcile.json");
+const SKILL_RECONCILE_FILE = "skill-reconcile.json";
 
 function readSkillReconcileState(id) {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SKILL_RECONCILE_REL), "utf8"));
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SKILL_RECONCILE_FILE), "utf8"));
     return m && typeof m === "object" ? m : {};
   } catch { return {}; }
 }
 
 function writeSkillReconcileState(id, map) {
-  const p = path.join(agentDir(id), SKILL_RECONCILE_REL);
+  const p = path.join(agentStateDir(id), SKILL_RECONCILE_FILE);
   try {
     const clean = map && typeof map === "object" ? map : {};
     // An empty map means every skill reconciled — drop the file so it leaves no
@@ -6030,7 +6038,7 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
   const marker = `<!-- agent: ${id} -->`;
   let prBody = typeof body.body === "string" ? body.body : "";
   if (!prBody.includes(marker)) prBody = `${prBody.trimEnd()}\n\n${marker}\n`;
-  const tmp = path.join(repo.repoPath, `.aee-pr-body-${Date.now()}.md`);
+  const tmp = path.join(repo.repoPath, `.agent-studio-pr-body-${Date.now()}.md`);
   fs.writeFileSync(tmp, prBody);
 
   try {
@@ -7764,7 +7772,7 @@ class Orchestrator {
   // attempt cap + exponential backoff, so a persistent failure (e.g. a deleted
   // source file) records its error and stops rather than looping hot. Idempotent:
   // a fully-synced team does zero work and writes nothing. The per-target outcome
-  // is folded into each member's `.aee/skill-reconcile.json` so the Rollout tab
+  // is folded into each member's `.agent-studio/skill-reconcile.json` so the Rollout tab
   // can turn a stuck member's action into a Retry with the last error + time.
   async reconcilePendingSkills({ now = new Date().toISOString() } = {}) {
     const teamIds = listAgentIds()
@@ -7953,7 +7961,7 @@ class Orchestrator {
   // The plugin sibling of the skill activation above, and deliberately the same
   // shape: an idempotent grant edit on the agent construct, then an ADDITIVE
   // FILE SYNC into the live workspace — no respawn. A plugin CLI is a static
-  // file read per invocation, exactly like a skill, and `.aee/bin` is on the
+  // file read per invocation, exactly like a skill, and `.agent-studio/bin` is on the
   // agent's PATH from container start, so a grant becomes usable immediately
   // (docs/plugin-system-concept.md §4.5).
   //
@@ -7976,6 +7984,11 @@ class Orchestrator {
     });
 
     const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
+    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are written, so an
+    // upgraded agent's plugin CLIs/grants move with the rename instead of
+    // splitting across two dirs (#1549).
+    resolveAgentStateDir(dir);
     const written = [];
     const removed = [];
     const errors = [];
@@ -8031,7 +8044,7 @@ class Orchestrator {
       console.warn(`[Orchestrator] plugin sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
     }
 
-    await reseedAgent(id, ["CLAUDE.md", ".aee"]);
+    await reseedAgent(id, ["CLAUDE.md", ".agent-studio"]);
     return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
   }
 

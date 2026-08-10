@@ -30,7 +30,7 @@ sidecar** instead of touching the host Podman socket directly. This is PR
 
   Exit codes: `0` ok / `1` broker/domain error / `2` usage / `3` broker
   unreachable (incl. not-granted). It reads its endpoint + per-scope token
-  from `.aee/plugins/podman-sandbox.json` (0600, written by `plugin-sync.js`)
+  from `.agent-studio/plugins/podman-sandbox.json` (0600, written by `plugin-sync.js`)
   and speaks to the broker over the same Streamable-HTTP transport #1287 used.
 
 - **Broker sidecar** (`../../podman-mcp/`) — kept nearly unchanged from #1287:

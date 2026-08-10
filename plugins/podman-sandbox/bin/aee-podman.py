@@ -2,9 +2,9 @@
 """aee-podman — Podman sandbox plugin CLI facade (plugin system Phase 3, #1519).
 
 Dependency-free single file (concept §4.5): stdlib only, no pip installs. It is
-seeded into a granted agent's workspace at `.aee/bin/` and reads its broker
-endpoint + per-scope token from `.aee/plugins/podman-sandbox.json` (0600,
-written at seed time by plugin-sync.js).
+seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
+broker endpoint + per-scope token from `.agent-studio/plugins/podman-sandbox.json`
+(0600, written at seed time by plugin-sync.js).
 
 This CLI is the agent-facing replacement for PR #1287's raw
 `podman-mcp-cli.py <tool> '<json>'` RPC and its stdio proxy: agents no longer
@@ -31,10 +31,25 @@ import sys
 import urllib.error
 import urllib.request
 
-CONFIG_PATH = os.path.join(
-    os.environ.get("AEE_WORKSPACE", os.path.expanduser("~")),
-    ".aee", "plugins", "podman-sandbox.json",
-)
+PLUGIN_ID = "podman-sandbox"
+
+
+def _config_path():
+    """Path to this agent's plugin config, seeded at grant time.
+
+    Resolves the current `.agent-studio/` state dir, falling back to the legacy
+    `.aee/` (renamed in #1549) so a config seeded before the workspace was
+    migrated is still found.
+    """
+    ws = os.environ.get("AEE_WORKSPACE", os.path.expanduser("~"))
+    new = os.path.join(ws, ".agent-studio", "plugins", f"{PLUGIN_ID}.json")
+    legacy = os.path.join(ws, ".aee", "plugins", f"{PLUGIN_ID}.json")
+    if os.path.exists(new) or not os.path.exists(legacy):
+        return new
+    return legacy
+
+
+CONFIG_PATH = _config_path()
 
 EXIT_OK = 0
 EXIT_DOMAIN_ERROR = 1
@@ -65,7 +80,7 @@ _TOOLS = {
 def load_config():
     """Endpoint + scope token written at seed time. Absent until granted."""
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+        with open(_config_path(), "r", encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError:
         return None

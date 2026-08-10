@@ -80,7 +80,7 @@ per-team run ledger keyed by `(agentId, triggerId)` — no new instrumentation i
 | Anomaly recurrence per class per object | **scheduled** anomaly sweeps (new: §3.4 — today the sweep is on-demand-only and unpersisted) |
 | Dropped/throttled/digested events, `noMatchingTrigger` | event-transparency log outcomes |
 | Rework cycles per PR (`revisions-required` round-trips), time-to-merge | event-transparency log label/PR events |
-| Config-version boundaries (which prompt/trigger version produced which runs) | audit trail + `.aee/prompt-history.json` (#990) timestamps |
+| Config-version boundaries (which prompt/trigger version produced which runs) | audit trail + `.agent-studio/prompt-history.json` (#990) timestamps |
 
 The orchestrator mounts the workspace, so it reads every agent's session log directly — this is
 also *why* the analyst cannot be an ordinary team-member agent: workspace isolation (correctly)

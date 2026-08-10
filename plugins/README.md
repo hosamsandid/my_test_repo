@@ -11,7 +11,7 @@ Each `plugins/<id>/` is a reference plugin shipped in the repo:
 ```
 plugins/<id>/
   plugin.json     # the manifest (pluginVersion: 1) — see admin-console/api/plugin-manifest.js
-  bin/            # the CLI script(s), seeded into a granted agent's .aee/bin/
+  bin/            # the CLI script(s), seeded into a granted agent's .agent-studio/bin/
 ```
 
 `make seed-plugins` (chained from `make seed-pool`) copies these into the pool

@@ -6774,14 +6774,40 @@ def _maybe_enable_fake_claude() -> None:
 
 PLUGIN_BIN_LINK = Path("/opt/aee/plugin-bin")
 
+# Per-agent workspace state directory. Renamed from the legacy `.aee` (from the
+# retired "Agent Execution Environment" name) to `.agent-studio` (#1549); a
+# one-time atomic move migrates an existing `.aee/` on first touch.
+STATE_DIR = ".agent-studio"
+LEGACY_STATE_DIR = ".aee"
+
+
+def _migrate_state_dir(workspace: Path) -> None:
+    """Rename a legacy `.aee/` state dir to `.agent-studio/` exactly once.
+
+    Atomic (a single `rename`, so bin/plugins/artifacts/history move together
+    with no data loss) and idempotent: once the new dir exists this is a no-op.
+    If both exist (a partial migration or re-run) the new dir wins and the
+    legacy one is left untouched — deterministic, never losing state. Never
+    fatal: a failure leaves the legacy dir in place for a later touch.
+    """
+    new_dir = workspace / STATE_DIR
+    legacy = workspace / LEGACY_STATE_DIR
+    try:
+        if new_dir.exists():
+            return
+        if legacy.is_dir():
+            legacy.rename(new_dir)
+    except OSError as exc:
+        sys.stderr.write(f"[entrypoint] state-dir migration deferred: {exc}\n")
+
 
 def _setup_plugin_cli_env() -> None:
     """Make this agent's granted plugin CLIs runnable (#1547).
 
     Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
     /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
-    per agent into `<workspace>/.aee/bin` when a plugin is GRANTED, which is a
-    live file sync with no respawn (concept §4.5).
+    per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED, which
+    is a live file sync with no respawn (concept §4.5).
 
     The image therefore puts a fixed directory — /opt/aee/plugin-bin — on PATH,
     and this points it at the per-agent seed dir with one symlink. The seed dir
@@ -6796,8 +6822,9 @@ def _setup_plugin_cli_env() -> None:
     lives in the image config instead, and this link is all that varies.
 
     AEE_WORKSPACE — which every CLI reads to find its own
-    `.aee/plugins/<id>.json` — is set on the container by the orchestrator for
-    the same reason; `setdefault` here only covers a hand-run container.
+    `.agent-studio/plugins/<id>.json` — is set on the container by the
+    orchestrator for the same reason; `setdefault` here only covers a hand-run
+    container.
     """
     agent_id = os.environ.get("AGENT_ID")
     if not agent_id:
@@ -6805,7 +6832,12 @@ def _setup_plugin_cli_env() -> None:
     workspace = Path(os.environ.get("AEE_WORKSPACE") or (Path("/workspace/agents") / agent_id))
     os.environ.setdefault("AEE_WORKSPACE", str(workspace))
 
-    plugin_bin = workspace / ".aee" / "bin"
+    # Migrate the legacy `.aee/` state dir to `.agent-studio/` once, before
+    # anything reads it, so an upgraded agent keeps all its state — plugin
+    # grants/CLIs, artifacts, seeded-skills, prompt-history (#1549).
+    _migrate_state_dir(workspace)
+
+    plugin_bin = workspace / STATE_DIR / "bin"
     try:
         plugin_bin.mkdir(parents=True, exist_ok=True)
         if PLUGIN_BIN_LINK.is_symlink() or PLUGIN_BIN_LINK.exists():

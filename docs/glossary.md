@@ -190,7 +190,7 @@ The five ways two agents can be wired together:
 ### Artifact
 A named work product handed from one agent to another. Matched on its **logical name**,
 not its path — the producer records where it actually landed in a git-committed manifest
-(`.aee/artifacts.jsonl`) and the consumer looks it up by name. This is why a re-runnable
+(`.agent-studio/artifacts.jsonl`) and the consumer looks it up by name. This is why a re-runnable
 agent can write to a different path each run without breaking the hand-off.
 
 ### Stage
@@ -299,10 +299,24 @@ and knowing which is which saves confusion:
 |---|---|---|
 | **Agent Studio** | the **product** | the UI, the browser tab, the login screen, the README |
 | **agent-studio** | the **compose project** (default container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
-| **AEE** / `AEE_*` | the **runtime/env-var namespace** ("Agent Execution Environment") | environment variables, operator docs |
+| **`.agent-studio/`** | the **per-agent workspace state directory** | every agent's file tree (`bin/`, `plugins/`, `seeded-skills.json`, `prompt-history.json`, `artifacts.jsonl`, …) |
+| **AEE** / `AEE_*` | the **internal runtime/env-var namespace** ("Agent Execution Environment") | environment variables, container labels (`aee.*`), the `io.aee.*` wire protocol, operator docs |
 
-When in doubt: what you *use* is Agent Studio; what you *operate* is the `agent-studio`
-compose project (the default `COMPOSE_PROJECT_NAME`); what you *configure* uses `AEE_*` variables.
+**The naming rule (#1549).** The retired abbreviation **"aee"** (from the old
+product name "Agent Execution Environment") is no longer used for anything a user
+sees. The one prominent user-visible instance — the per-agent state directory,
+formerly `.aee/` — is now **`.agent-studio/`** (an upgraded agent is migrated
+automatically, keeping all state). What deliberately **remains** "AEE" is purely
+*internal* and not surfaced in the file tree: the `AEE_*` operator environment
+variables, the `aee.*` container labels, and the `io.aee.*` agent↔console wire
+keys. The `aee-…` command-line tools (`aee-artifact`, `aee-emit`, `aee-podman`,
+`aee-test`, …) keep their names for now; retiring the CLI prefix is tracked
+separately (a plugin-ecosystem convention decision, out of scope for the
+directory rename).
+
+When in doubt: what you *use* is Agent Studio; the folder in an agent's workspace
+is `.agent-studio/`; what you *operate* is the `agent-studio` compose project (the
+default `COMPOSE_PROJECT_NAME`); what you *configure* uses `AEE_*` variables.
 
 ---
 

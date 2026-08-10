@@ -109,9 +109,9 @@ test('the CLI is seeded executable at the path the PATH entry covers', () => {
   });
 
   const bin = plan.write.find((w) => w.copyFrom);
-  assert.equal(bin.path, '.aee/bin/aee-podman');
+  assert.equal(bin.path, '.agent-studio/bin/aee-podman');
   assert.equal(bin.mode, 0o755);
-  // The entrypoint prepends <workspace>/.aee/bin to PATH, so the seeded name
+  // The entrypoint prepends <workspace>/.agent-studio/bin to PATH, so the seeded name
   // must be the bare CLI name the prompt tells the agent to run.
   assert.equal(path.basename(bin.path), manifests['podman-sandbox'].cli.name);
   // And it must resolve to a real file inside the registry.
@@ -191,7 +191,7 @@ test('revoking removes both files and disconnects the network', () => {
     networkNameFor: (id) => `aee-agent-${id}`,
   });
 
-  assert.deepEqual(plan.remove.sort(), ['.aee/bin/aee-podman', '.aee/plugins/podman-sandbox.json']);
+  assert.deepEqual(plan.remove.sort(), ['.agent-studio/bin/aee-podman', '.agent-studio/plugins/podman-sandbox.json']);
   assert.deepEqual(plan.disconnect, [{ pluginId: 'podman-sandbox', network: 'aee-agent-solo' }]);
 });
 

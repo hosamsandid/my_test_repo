@@ -118,7 +118,7 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   `outputs` entry connects to a consumer's `inputs` entry when their **names**
   match. The `hint` is an informational path only — agent instances write to
   paths that vary per run, so the physical location is resolved at runtime from
-  the git-committed **artifact manifest** (`.aee/artifacts.jsonl`, written by the
+  the git-committed **artifact manifest** (`.agent-studio/artifacts.jsonl`, written by the
   producer via `aee-artifact add "<name>" <path>` and read by the consumer via
   `aee-artifact path "<name>"`). A port with only a `path` (BriefingPack
   artifacts, legacy ports) still matches by path exactly.

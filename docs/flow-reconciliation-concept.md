@@ -241,4 +241,4 @@ event-transparency log with the reconciler's attribution.
 Open questions: thresholds *T₁–T₃* per stage vs. global; whether `claim`
 rollback should also fire for `once`/`cron` triggers (probably not — no wake
 label to restore); whether `output-missing` detection needs the artifact
-manifest (`.aee/artifacts.jsonl`) for data-flow edges, not just labels.
+manifest (`.agent-studio/artifacts.jsonl`) for data-flow edges, not just labels.

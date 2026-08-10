@@ -3506,5 +3506,50 @@ class WorkspaceGateTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(gate.busy)
 
 
+class MigrateStateDir(unittest.TestCase):
+    """The one-time `.aee/` → `.agent-studio/` state-dir migration (#1549)."""
+
+    def _ws(self):
+        return Path(tempfile.mkdtemp())
+
+    def test_legacy_dir_is_renamed_preserving_contents(self):
+        ws = self._ws()
+        legacy = ws / ".aee"
+        (legacy / "bin").mkdir(parents=True)
+        (legacy / "seeded-skills.json").write_text('{"x":1}', encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        new = ws / ".agent-studio"
+        self.assertTrue(new.is_dir())
+        self.assertFalse(legacy.exists())
+        self.assertTrue((new / "bin").is_dir())
+        self.assertEqual((new / "seeded-skills.json").read_text(encoding="utf-8"), '{"x":1}')
+
+    def test_fresh_workspace_is_a_noop(self):
+        ws = self._ws()
+        entrypoint._migrate_state_dir(ws)
+        self.assertFalse((ws / ".agent-studio").exists())
+        self.assertFalse((ws / ".aee").exists())
+
+    def test_already_migrated_leaves_a_stray_legacy_untouched(self):
+        ws = self._ws()
+        (ws / ".agent-studio").mkdir()
+        (ws / ".agent-studio" / "keep.txt").write_text("new", encoding="utf-8")
+        # A leftover legacy dir (partial migration / re-run) must NOT clobber the
+        # already-migrated new dir — the new dir wins, deterministically.
+        (ws / ".aee").mkdir()
+        (ws / ".aee" / "old.txt").write_text("old", encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        self.assertEqual((ws / ".agent-studio" / "keep.txt").read_text(encoding="utf-8"), "new")
+        self.assertTrue((ws / ".aee").exists())
+
+    def test_idempotent(self):
+        ws = self._ws()
+        (ws / ".aee").mkdir()
+        (ws / ".aee" / "f.json").write_text("{}", encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        entrypoint._migrate_state_dir(ws)  # second call is a no-op
+        self.assertTrue((ws / ".agent-studio" / "f.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

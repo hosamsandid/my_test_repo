@@ -645,6 +645,14 @@ before it moves from catalog to roadmap.
   a manifest can now declare `["podman","kubernetes"]` or `["kubernetes"]`;
   `any` is unchanged. Both `plugin-manifest.js` copies (admin-console/api + orchestrator)
   updated and two-sided-guard tested.
+- **Kubernetes epic (#1554), Phase 3 — plugin #3 (netzplan)** *(shipped — #1563)*:
+  the first UI-bearing plugin and the first privilege-less plugin (`capabilities: []`,
+  `credentials: []`, `scopes: ["team"]`, `platforms: ["podman","kubernetes"]`).
+  `plugins/netzplan/` (manifest + `aee-plan` CLI facade: `show`/`tick`/`edit` on
+  a 3-rung autonomy ladder) + `netzplan-broker/` (Broker SDK: pure `plan-doc.js`
+  id-keyed document model, `plan-store.js` state-volume adapter, `viewer-headers.js`
+  §4.8 verifier copy, minimal served board). The rich swimlane editor is the
+  completion step (#1564). See `docs/network-plan-plugin-concept.md`.
 
 ## 10. Open questions
 

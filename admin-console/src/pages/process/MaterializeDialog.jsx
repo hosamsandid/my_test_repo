@@ -55,9 +55,16 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   }, [sourceTeamId]);
 
   const selectedEnv = environments.find(e => e.id === environmentId) || null;
-  const selectedRepo = selectedEnv
-    ? ((Array.isArray(selectedEnv.repositories) ? selectedEnv.repositories[0] : selectedEnv.repository) || null)
-    : null;
+  // A working environment carries a `repositories: [...]` array (legacy single
+  // `repository` values are migrated to a one-element array on read by the API).
+  // Show every repo so the operator can confirm all of them will be cloned —
+  // not just the first (#1551).
+  const selectedRepos = selectedEnv
+    ? (Array.isArray(selectedEnv.repositories)
+        ? selectedEnv.repositories
+        : (selectedEnv.repository ? [selectedEnv.repository] : [])
+      ).filter(r => r && r.url)
+    : [];
   const noEnvs = envsLoaded && environments.length === 0;
 
   function goCreateEnv() {
@@ -95,7 +102,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
         Creates a team and one member per agent in
         <strong> {bundle?.name}</strong> ({bundle?.roles?.length || 0} agents) on the selected
         working environment. Each agent keeps its prompt and triggers;
-        <code>{'{{vars}}'}</code> and the environment's repository are applied per member.
+        <code>{'{{vars}}'}</code> and the environment's repositories are applied per member.
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
         <Field label="Team name">
@@ -173,13 +180,23 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
           </Field>
         )}
 
-        {selectedRepo && (
-          <div style={infoBox}>
-            <div style={{ wordBreak: 'break-all' }}><strong>Repository:</strong> {selectedRepo.url}</div>
-            <div><strong>Branch:</strong> {selectedRepo.branch || 'main'}</div>
+        {selectedRepos.length > 0 && (
+          <div style={{ ...infoBox, maxHeight: 220, overflowY: 'auto' }}>
+            {selectedRepos.map((repo, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex', flexDirection: 'column', gap: 2,
+                  ...(i > 0 ? { marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)' } : {}),
+                }}
+              >
+                <div style={{ wordBreak: 'break-all' }}><strong>Repository:</strong> {repo.url}</div>
+                <div><strong>Branch:</strong> {repo.branch || 'main'}</div>
+              </div>
+            ))}
           </div>
         )}
-        {selectedEnv && !selectedRepo && (
+        {selectedEnv && selectedRepos.length === 0 && (
           <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning, var(--eb-status-error))' }}>
             This environment has no repository configured — members will have nothing to clone.
           </span>

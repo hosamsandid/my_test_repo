@@ -9,6 +9,7 @@ const {
   reconcileSidecars,
   reconcileAttachments,
   capabilityAttachments,
+  brokerEnvContract,
 } = require('./plugin-sidecar');
 const { PLUGIN_ID_LABEL } = require('./plugin-scope');
 
@@ -70,4 +71,50 @@ test('capabilityAttachments maps the closed enum + surfaces host mounts', () => 
   assert.deepEqual(capabilityAttachments(['egress', 'host-mount:/srv/data']), { socket: false, egress: true, hostMounts: ['/srv/data'] });
   assert.deepEqual(capabilityAttachments([]), { socket: false, egress: false, hostMounts: [] });
   assert.deepEqual(capabilityAttachments(undefined), { socket: false, egress: false, hostMounts: [] });
+});
+
+// brokerEnvContract is the ONE source of the AEE_PLUGIN_* variables both
+// container runtimes set, so its invariants are asserted here directly (the
+// Podman create body is additionally asserted in plugin-runtime.test.js).
+function envManifest(extra = {}) {
+  return {
+    id: 'demo-plugin',
+    sidecar: { image: 'x', internalPort: 4004, capabilities: [] },
+    ...extra,
+  };
+}
+const ENV_OPTS = { signingSecret: 's3cret', auditDir: '/audit', stateDir: '/state' };
+
+test('brokerEnvContract sets the platform env contract', () => {
+  const env = brokerEnvContract(envManifest(), ENV_OPTS);
+  assert.equal(env.AEE_PLUGIN_ID, 'demo-plugin');
+  assert.equal(env.AEE_PLUGIN_PORT, '4004');
+  assert.equal(env.AEE_PLUGIN_SIGNING_SECRET, 's3cret');
+  assert.equal(env.AEE_PLUGIN_AUDIT_DIR, '/audit');
+  assert.equal(env.AEE_PLUGIN_STATE_DIR, '/state');
+  assert.equal(env.AEE_PLUGIN_QUOTA_MAX_OBJECTS, undefined, 'no quota declared → no cap variable');
+  assert.equal(env.AEE_PLUGIN_QUOTA_TTL_SECONDS, undefined);
+});
+
+test('brokerEnvContract lets plugin extras through but the platform always wins', () => {
+  const m = envManifest({
+    sidecar: {
+      image: 'x', internalPort: 4004, capabilities: [],
+      env: {
+        CUSTOM_THING: 'ok',
+        AEE_PLUGIN_SIGNING_SECRET: 'attacker',
+        AEE_PLUGIN_STATE_DIR: '/audit',
+        AEE_PLUGIN_QUOTA_MAX_OBJECTS: '9999',
+        AEE_PLUGIN_ID: 'someone-else',
+      },
+    },
+    quota: { maxObjects: 8, ttlSeconds: 86400 },
+  });
+  const env = brokerEnvContract(m, ENV_OPTS);
+  assert.equal(env.CUSTOM_THING, 'ok');
+  assert.equal(env.AEE_PLUGIN_SIGNING_SECRET, 's3cret');
+  assert.equal(env.AEE_PLUGIN_STATE_DIR, '/state', 'a manifest cannot repoint the state dir');
+  assert.equal(env.AEE_PLUGIN_ID, 'demo-plugin');
+  assert.equal(env.AEE_PLUGIN_QUOTA_MAX_OBJECTS, '8', 'declared quota, not the pre-seeded 9999');
+  assert.equal(env.AEE_PLUGIN_QUOTA_TTL_SECONDS, '86400');
 });

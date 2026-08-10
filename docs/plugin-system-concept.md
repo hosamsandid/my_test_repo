@@ -614,7 +614,7 @@ before it moves from catalog to roadmap.
   the UI-extension surface's decidable core (`admin-console/api/plugin-ui-proxy
   .js`: scope discovery derived from the grant, `ui.routes` `minRole`
   enforcement, signed viewer headers) — reserved now; the live iframe proxy +
-  nav wire when the product decision (§4.8) calls for an embedded QE UI. The
+  nav were wired by the Network Plan epic (#1554 Phase 2, #1562). The
   orchestrator live-stack (token mint, scope-registry push, sidecar lifecycle,
   DM approval round-trip) is the completion step, same "pure core now, live
   stack next" split as Phases 1–3.

@@ -10,6 +10,7 @@ This CLI is the agent-facing replacement for PR #1287's raw
 `podman-mcp-cli.py <tool> '<json>'` RPC and its stdio proxy: agents no longer
 speak MCP tool names + JSON blobs, they speak domain verbs —
 
+    aee-podman run docker.io/library/hello-world
     aee-podman compose up -f compose.yml
     aee-podman ps
     aee-podman logs my-service --tail 50
@@ -66,6 +67,11 @@ MCP_PATH = "/mcp"
 # exposed, so agents never see it.
 _TOOLS = {
     "compose_up": "compose_up",
+    # `run` is pure CLI sugar: it synthesises a one-service compose document and
+    # sends it through compose_up, inheriting validation / network isolation /
+    # resource ceilings / owner labels / project scoping / quota for free. It is
+    # NOT a distinct broker tool — the broker's TOOLS list is unchanged.
+    "run": "compose_up",
     "compose_down": "compose_down",
     "compose_logs": "compose_logs",
     "ps": "container_list",
@@ -195,7 +201,7 @@ def _unwrap_text(result):
     return json.dumps(result)
 
 
-def _run(cfg, tool, arguments, as_json):
+def _run(cfg, tool, arguments, as_json, extra=None):
     try:
         text = _call_broker(cfg, tool, arguments)
     except BrokerUnreachable as e:
@@ -204,8 +210,77 @@ def _run(cfg, tool, arguments, as_json):
     except BrokerDomainError as e:
         emit({"ok": False, "error": "broker-error", "message": str(e)}, as_json)
         return EXIT_DOMAIN_ERROR
-    emit({"ok": True, "result": text, "scopeId": cfg.get("scopeId")}, as_json)
+    payload = {"ok": True, "result": text, "scopeId": cfg.get("scopeId")}
+    if extra:
+        payload.update(extra)
+    emit(payload, as_json)
     return EXIT_OK
+
+
+def _default_run_name(image):
+    """Derive a stable, compose-valid service/container name from an image ref
+    when the caller gives no `--name`.
+
+    `docker.io/library/hello-world:latest` -> `hello-world`. Strips the registry
+    path (everything up to the last `/`), then a `@digest` / `:tag` (a
+    registry-port colon lives in an earlier `/`-segment, already removed, so the
+    split is unambiguous), lower-cases, maps anything outside the compose name
+    grammar to `-`, and falls back to `app`.
+    """
+    ref = image.rsplit("/", 1)[-1]
+    ref = ref.split("@", 1)[0].split(":", 1)[0]
+    cleaned = "".join(ch if (ch.isalnum() or ch in "_.-") else "-" for ch in ref.lower())
+    name = cleaned.strip("-._")
+    return name or "app"
+
+
+def _parse_env(pairs):
+    """`--env K=V` list -> a `{K: V}` map for the compose `environment:` block.
+
+    Split on the FIRST `=` so a value may itself contain `=` (`K=a=b` -> `a=b`).
+    Returns `(env_map, error_message_or_None)`.
+    """
+    env = {}
+    for item in pairs or []:
+        if "=" not in item:
+            return None, "env must be KEY=VALUE (got %r)" % item
+        key, value = item.split("=", 1)
+        if not key:
+            return None, "env key is empty in %r" % item
+        env[key] = value
+    return env, None
+
+
+def _build_run_compose(image, name, env_map, command):
+    """Synthesise the one-service compose document for `run`.
+
+    Emitted as JSON — which is valid YAML, and which the broker parses with
+    `YAML.parse` — so the CLI stays dependency-free (no PyYAML) AND every value
+    (an image tag, a command token with spaces, an env value containing `:`) is
+    quoted by `json.dumps` and can never reshape the document. `container_name`
+    is pinned so the caller gets a deterministic name back for `logs`/`rm`.
+    """
+    service = {"image": image, "container_name": name}
+    if env_map:
+        service["environment"] = env_map
+    if command:
+        service["command"] = command
+    return json.dumps({"services": {name: service}})
+
+
+def _split_run_command(argv):
+    """Split a `run` invocation's args at the first standalone `--`.
+
+    Everything after it is the container command; everything before is parsed by
+    argparse (image + flags in any order). Returns `(head, command_or_None)` —
+    `None` when there is no `--`, an empty list for a bare trailing `--`. Done
+    before argparse because `argparse.REMAINDER` would otherwise greedily
+    swallow `--name`/`--env` flags that follow the image positional.
+    """
+    if "--" in argv:
+        i = argv.index("--")
+        return argv[:i], argv[i + 1:]
+    return argv, None
 
 
 def build_parser():
@@ -220,6 +295,42 @@ def build_parser():
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("whoami", parents=[common], help="print the resolved scope identity")
+
+    p_run = sub.add_parser(
+        "run", parents=[common],
+        help="run a single container (sugar over `compose up`)",
+        description=(
+            "Start ONE container without hand-writing a compose file. `run` "
+            "synthesises a one-service compose document CLI-side and sends it "
+            "through the same `compose up` path, so it inherits validation, "
+            "network isolation, resource ceilings, owner labels, project "
+            "scoping, quota and teardown identically: ps / logs / stop / rm / "
+            "`compose down` all work on the result unchanged. Append "
+            "`-- <command> [args...]` to override the image's default command."
+        ),
+        epilog=(
+            "Synthesised document (JSON — which is valid YAML):\n"
+            "  {\"services\": {\"<name>\": {\"image\": \"<image>\", "
+            "\"container_name\": \"<name>\",\n"
+            "                              \"environment\": {..}, \"command\": [..]}}}\n"
+            "<name> is --name, else derived from the image "
+            "(docker.io/library/hello-world -> hello-world).\n"
+            "\n"
+            "Network: the broker forces every sandbox network internal:true, so a\n"
+            "container started with `run` has NO outbound network. Image pulls still\n"
+            "work (they happen host-side), but anything expecting egress at runtime\n"
+            "will not.\n"
+            "\n"
+            "Need more than one service, a build, ports or volumes? Write a\n"
+            "compose.yml and use `aee-podman compose up -f compose.yml` instead."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_run.add_argument("image", help="image reference, e.g. docker.io/library/hello-world")
+    p_run.add_argument("--name", help="container name (default: derived from the image)")
+    p_run.add_argument("-e", "--env", action="append", metavar="K=V",
+                       help="set an environment variable (repeatable)")
+    p_run.add_argument("-p", "--project", help="optional project name (scoped regardless)")
 
     p_compose = sub.add_parser("compose", help="manage a compose stack scoped to you")
     csub = p_compose.add_subparsers(dest="subcmd")
@@ -255,6 +366,14 @@ def build_parser():
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    # For `run`, peel off the trailing `-- <command>` before argparse sees it so
+    # flags after the image still parse (argparse.REMAINDER would swallow them).
+    run_command = None
+    if argv and argv[0] == "run":
+        argv, run_command = _split_run_command(argv)
+
     parser = build_parser()
     args = parser.parse_args(argv)
     as_json = getattr(args, "json", False)
@@ -279,6 +398,22 @@ def main(argv=None):
     if args.cmd == "whoami":
         emit({"ok": True, "scopeId": cfg.get("scopeId"), "endpoint": cfg.get("endpoint")}, as_json)
         return EXIT_OK
+
+    if args.cmd == "run":
+        env_map, err = _parse_env(args.env)
+        if err is not None:
+            emit({"ok": False, "error": "usage", "message": err}, as_json)
+            return EXIT_USAGE
+        name = args.name or _default_run_name(args.image)
+        # A bare trailing `--` (run_command == []) means "no command override".
+        command = run_command if run_command else None
+        compose_file = _build_run_compose(args.image, name, env_map, command)
+        payload = {"composeFile": compose_file}
+        if args.project:
+            payload["projectName"] = args.project
+        # Surface the pinned container name so the caller knows what to pass to
+        # `logs`/`rm` — especially when it was derived rather than given.
+        return _run(cfg, _TOOLS["run"], payload, as_json, extra={"container": name})
 
     if args.cmd == "compose":
         if args.subcmd == "up":

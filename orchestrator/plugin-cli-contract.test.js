@@ -181,6 +181,144 @@ test('aee-podman: compose up with an unreadable file → exit 2 (usage), never a
   assert.equal(obj.error, 'usage');
 });
 
+// ── plugin #1: the `run` verb (CLI sugar over compose_up, #1550) ─────────────
+// `run` is pure CLI-side sugar: it synthesises a one-service compose document
+// and sends it through the existing compose_up tool, so it adds no broker tool
+// (AC5). These cases pin the §4.5 contract (help/usage/exit codes) broker-free,
+// plus one capturing-broker case that proves the synthesised document's shape —
+// the issue's core guarantee that a value can never reshape the document.
+
+test('aee-podman: run --help → 0 and documents the single-service doc + no-egress', () => {
+  const r = runPod(['run', '--help'], grantedPodWorkspace());
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /compose up/);     // points at compose for >1 service
+  assert.match(r.stdout, /internal:true|no outbound|egress/i);  // network constraint
+});
+
+test('aee-podman: run --env without = → exit 2 (usage), never a broker call', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--env', 'NOEQ', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-podman: run ungranted → exit 3 with not-granted error', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-podman: run against an unreachable broker → exit 3 (synthesis then network)', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+// A minimal MCP-over-HTTP stub that captures the compose_up arguments so the
+// synthesised document can be asserted. Speaks just enough: 202 for the
+// initialized notification, an SSE `data:` frame for initialize and tools/call.
+// `Connection: close` so no keep-alive socket lingers past `server.close()`.
+function captureBroker() {
+  const http = require('node:http');
+  const state = { lastTool: null, lastArgs: null };
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let msg = {};
+      try { msg = JSON.parse(body); } catch { /* ignore */ }
+      res.setHeader('Connection', 'close');
+      if (msg.method === 'notifications/initialized') { res.statusCode = 202; res.end(); return; }
+      if (msg.method === 'tools/call') {
+        state.lastTool = msg.params && msg.params.name;
+        state.lastArgs = msg.params && msg.params.arguments;
+        const result = { jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'project scope-t1-default up' }] } };
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.end(`data: ${JSON.stringify(result)}\n\n`);
+        return;
+      }
+      // initialize (or anything else): a minimal result frame; the CLI ignores it.
+      const result = { jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: {} } };
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Mcp-Session-Id', 'stub-session');
+      res.end(`data: ${JSON.stringify(result)}\n\n`);
+    });
+  });
+  return { server, state };
+}
+
+// The capturing-broker tests must NOT use spawnSync: it blocks the event loop,
+// so the in-process stub server could never answer and the CLI would time out.
+// Spawn asynchronously so the loop stays free to serve the broker calls.
+function runPodAsync(args, workspace) {
+  const { spawn } = require('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn('python3', [POD_CLI, ...args], {
+      env: { ...process.env, AEE_WORKSPACE: workspace },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+test('aee-podman: run synthesises a single-service compose doc through compose_up', async () => {
+  const { server, state } = captureBroker();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const ws = grantedPodWorkspace(`http://127.0.0.1:${port}`);
+    const r = await runPodAsync(
+      ['run', 'docker.io/library/hello-world', '--name', 'greeter',
+       '-e', 'GREETING=hi there', '-e', 'URL=http://x:8080',
+       '-p', 'demo', '--json', '--', 'sh', '-c', 'echo hi && sleep 1'],
+      ws,
+    );
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.ok, true);
+    assert.equal(obj.container, 'greeter');   // pinned name returned for logs/rm
+
+    // It reached compose_up (no new broker tool) with a well-formed document.
+    assert.equal(state.lastTool, 'compose_up');
+    assert.equal(state.lastArgs.projectName, 'demo');
+    const doc = JSON.parse(state.lastArgs.composeFile);   // JSON ⊂ YAML
+    assert.deepEqual(Object.keys(doc.services), ['greeter']);   // exactly one service
+    const svc = doc.services.greeter;
+    assert.equal(svc.image, 'docker.io/library/hello-world');
+    assert.equal(svc.container_name, 'greeter');
+    assert.deepEqual(svc.environment, { GREETING: 'hi there', URL: 'http://x:8080' });
+    assert.deepEqual(svc.command, ['sh', '-c', 'echo hi && sleep 1']);   // exec-form list, not reshaped
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-podman: run derives the container name from the image when --name is absent', async () => {
+  const { server, state } = captureBroker();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const ws = grantedPodWorkspace(`http://127.0.0.1:${port}`);
+    const r = await runPodAsync(['run', 'docker.io/library/hello-world:latest', '--json'], ws);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.container, 'hello-world');
+    const doc = JSON.parse(state.lastArgs.composeFile);
+    assert.deepEqual(Object.keys(doc.services), ['hello-world']);
+    assert.equal(doc.services['hello-world'].image, 'docker.io/library/hello-world:latest');
+    // No env / no command override → neither key present.
+    assert.equal('environment' in doc.services['hello-world'], false);
+    assert.equal('command' in doc.services['hello-world'], false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 // ─── plugin #2: aee-test (Phase 5, #1521) ────────────────────────────────────
 // The same §4.5 contract against the real `aee-test` CLI. Broker-free: `whoami`
 // reads only the seeded config; every broker-touching verb points at an

@@ -21,12 +21,21 @@ sidecar** instead of touching the host Podman socket directly. This is PR
   the stdio proxy with domain verbs:
 
   ```
+  aee-podman run docker.io/library/hello-world  # one container, no compose file
   aee-podman compose up -f compose.yml     # bring up a stack, scoped to you
   aee-podman ps                            # containers you own
   aee-podman logs my-service --tail 50
   aee-podman compose down
   aee-podman whoami                        # resolved scope identity
   ```
+
+  `run <image> [--name n] [--env K=V]… [--project p] [-- command…]` is pure CLI
+  sugar: it synthesises a one-service compose document and sends it through the
+  same `compose up` path, so it inherits validation, network isolation, resource
+  ceilings, owner labels, project scoping, quota and teardown for free (no new
+  broker tool). Because every sandbox network is forced `internal: true`, a
+  `run` container has no outbound network (image pulls still happen host-side).
+  For more than one service, ports or volumes, write a `compose.yml` instead.
 
   Exit codes: `0` ok / `1` broker/domain error / `2` usage / `3` broker
   unreachable (incl. not-granted). It reads its endpoint + per-scope token

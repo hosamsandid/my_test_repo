@@ -1,6 +1,8 @@
 # Network Plan — an editable planning board as a UI-bearing plugin
 
-> Status: concept — epic #1554.
+> Status: concept — epic #1554, phases #1561 (manifest contract), #1562 (§4.8 live
+> UI-extension stack), #1563 (the plugin — usable on Podman), #1564 (remaining panel
+> primitives), #1565 (Kubernetes plugin sidecars), #1566 (content migration).
 > Decision 2026-08-10: team planning boards (streams, milestones, owners,
 > dependency lines) become an **installable, team-grantable plugin** whose UI is
 > served from its sidecar and proxied by the console — the shape
@@ -328,12 +330,12 @@ Ordered so the board is usable before the Kubernetes work lands.
 
 | Phase | Content | Ends with |
 |---|---|---|
-| 1 | `PLATFORMS` gains `kubernetes`; two-sided guard green | manifest can express the plugin |
-| 2 | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume | `test-mgmt`'s three routes serve and refuse correctly |
-| 3 | The plugin: manifest, broker on the SDK, document store, `swimlane` primitive at parity | **board usable on Podman** |
-| 4 | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder | full editability |
-| 5 | Kubernetes: Deployment + Service + PVC, RBAC, flag flip | board reachable on GKE |
-| 6 | Content migration: export the existing plan, round-trip import | today's board reproduced |
+| 1 (#1561) | `PLATFORMS` gains `kubernetes`; two-sided guard green | manifest can express the plugin |
+| 2 (#1562) | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume | `test-mgmt`'s three routes serve and refuse correctly |
+| 3 (#1563) | The plugin: manifest, broker on the SDK, document store, `swimlane` primitive at parity | **board usable on Podman** |
+| 4 (#1564) | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder | full editability |
+| 5 (#1565) | Kubernetes: Deployment + Service + PVC, RBAC, flag flip | board reachable on GKE |
+| 6 (#1566) | Content migration: export the existing plan, round-trip import | today's board reproduced |
 
 Phase 3 is the first point where anything is worth showing, and Phase 5 is the
 first point where the hosted stack can show it. Phase 4 can slip past Phase 5

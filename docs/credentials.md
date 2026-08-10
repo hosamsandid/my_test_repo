@@ -1,5 +1,19 @@
 # SSH Keys and GitHub Tokens
 
+## Credential ownership tiers
+
+Every SSH key and GitHub token carries an **ownership tier** on its index entry (`normalizeCredential` in `admin-console/api/scope.js` is the authoritative contract):
+
+| Tier | Stored as | Who may create it | Who can see / manage it |
+|---|---|---|---|
+| `team` | `scope: "team"`, one `teamId` | Team Admin of that team (or a System Admin) | Team Admins of that team; System Admins |
+| `system` | `scope: "system"`, `assignedTeamIds[]` | System Admin only | System Admins; Team Admins of any assigned team |
+| `personal` | `scope: "personal"`, `userId` (the owner) | **Any** authenticated human, owned by themselves | **Only the owner** — no other human, *including a System Admin* |
+
+**Personal tier (epic #1558).** A `personal` credential belongs to exactly one human, identified by the `userId` owner field on its index entry, and is **strictly private** to that person. There is deliberately **no `scope.all` override**: neither a System Admin nor the env single-admin can list, read metadata for, or manage anyone else's personal credential. The owner is always the authenticated caller — a create body may not name a different owner, and a personal credential's ownership is immutable (it cannot be reassigned into or out of a `team`/`system` tier; create a fresh credential instead). Legacy entries without a `scope` field continue to normalize to a `team`/`default` credential, unchanged.
+
+> This tier is the data-model & RBAC foundation only (Phase 1). The self-service UI, the runtime resolution order (`personal → team → system`), rotation→respawn propagation and offboarding land in later phases of epic #1558.
+
 ## SSH Keys
 
 SSH keys are used by agents to clone and push to private Git repositories.

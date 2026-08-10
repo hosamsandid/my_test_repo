@@ -579,8 +579,27 @@ function resolveOwnerTeamId(teamId) {
 // (#798). A `system` scope carries an `assignedTeamIds` set (0..n existing
 // teams); any other value is a `team` scope owned by exactly one team. Throws a
 // 400-tagged error for an unknown team. Returns the canonical persisted shape.
-function resolveCredentialOwnership(body) {
+//
+// Personal tier (#1567/epic #1558): a `personal` credential is owned by exactly
+// one human. The owner is ALWAYS the authenticated caller (`actingUserId`) — a
+// body that omits it is filled in, a body that names a DIFFERENT owner is
+// rejected 403 (an agent/human may never register a credential under a foreign
+// identity, edge case + AC2). The owner is validated against a known user record.
+function resolveCredentialOwnership(body, actingUserId) {
   const b = body || {};
+  if (b.scope === 'personal') {
+    if (!actingUserId) {
+      const err = new Error('A personal credential requires an authenticated user'); err.status = 403; throw err;
+    }
+    if (b.userId != null && String(b.userId) !== String(actingUserId)) {
+      const err = new Error('A personal credential can only be owned by yourself'); err.status = 403; throw err;
+    }
+    const users = readJsonFile(USERS_INDEX, []);
+    if (!Array.isArray(users) || !users.some(u => u.id === actingUserId)) {
+      const err = new Error(`Owner '${actingUserId}' is not a known user`); err.status = 400; throw err;
+    }
+    return { scope: 'personal', userId: String(actingUserId), teamId: null, assignedTeamIds: [] };
+  }
   const reqScope = b.scope === 'system' ? 'system' : 'team';
   if (reqScope === 'system') {
     const raw = Array.isArray(b.assignedTeamIds) ? b.assignedTeamIds : [];
@@ -610,6 +629,19 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
   const b = body || {};
   const cur = normalizeCredential(cred);
   const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
+
+  // Personal-tier ownership is immutable (#1567 edge case / AC6): a personal
+  // credential cannot be reassigned into a team/system tier (and vice versa) —
+  // that would move a private secret out of one human's sole control. Renaming a
+  // personal credential is still allowed (`name`-only patch → not `reassigning`);
+  // to change ownership, create a new credential instead.
+  if (reassigning && (cur.scope === 'personal' || b.scope === 'personal')) {
+    res.status(400).json({
+      error: `A personal ${label} cannot be reassigned to or from a team/system tier; create a new credential instead.`,
+      code: 'personal-reassign-unsupported',
+    });
+    return null;
+  }
 
   let next = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
   if (reassigning) {
@@ -13140,7 +13172,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -13179,6 +13211,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -13195,7 +13228,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -13230,6 +13263,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -13294,7 +13328,7 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -13331,6 +13365,7 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),

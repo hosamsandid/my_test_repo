@@ -331,6 +331,63 @@ test('canReassignCredential: System Admins only (AC7)', () => {
   assert.equal(canReassignCredential(sys), true);
 });
 
+// ── Personal ownership tier (#1567 / epic #1558) ───────────────────────────
+// A `personal` credential is owned by exactly one human (`userId`) and is
+// strictly private to them: visible/manageable ONLY by its owner, with NO
+// `scope.all` override — not even a System Admin or the env single-admin.
+
+test('normalizeCredential: personal entry round-trips its owner, drops team/assignments (AC1)', () => {
+  const n = normalizeCredential({ id: 'k', scope: 'personal', userId: 'u-a' });
+  assert.deepEqual(n, { id: 'k', scope: 'personal', userId: 'u-a', teamId: null, assignedTeamIds: [] });
+  // A personal entry with no owner normalizes to userId:null (matches nobody).
+  assert.equal(normalizeCredential({ id: 'k', scope: 'personal' }).userId, null);
+  // Team/system/legacy entries are unchanged by the personal addition.
+  assert.deepEqual(normalizeCredential({ id: 'k', teamId: 'payments' }),
+                   { id: 'k', scope: 'team', teamId: 'payments', assignedTeamIds: [] });
+  assert.equal(normalizeCredential({ id: 'k', scope: 'system', assignedTeamIds: ['risk'] }).scope, 'system');
+});
+
+test('visibleCredential: a personal credential is visible ONLY to its owner (AC5 / D2)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const aliceCred = { scope: 'personal', userId: 'u-a' };
+  assert.equal(visibleCredential(alice, aliceCred), true);   // owner
+  assert.equal(visibleCredential(bob, aliceCred), false);    // another member
+  assert.equal(visibleCredential(sys, aliceCred), false);    // System Admin — NO scope.all bypass
+  assert.equal(visibleCredential(env, aliceCred), false);    // env single-admin — NO scope.all bypass
+  // An owner-less personal credential is visible to nobody (fail-closed).
+  assert.equal(visibleCredential(alice, { scope: 'personal' }), false);
+});
+
+test('canManageCredential: only the owner manages a personal credential; scope.all denied (AC4)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const aliceCred = { scope: 'personal', userId: 'u-a' };
+  assert.equal(canManageCredential(alice, aliceCred), true);
+  assert.equal(canManageCredential(bob, aliceCred), false);
+  assert.equal(canManageCredential(sys, aliceCred), false);  // System Admin cannot manage a foreign personal cred
+  assert.equal(canManageCredential(env, aliceCred), false);
+});
+
+test('canCreateCredential: any authenticated human creates a personal credential owned by self (AC3)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships }); // team-admin
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });      // team-member
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });      // System Admin
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });             // env single-admin
+  assert.equal(canCreateCredential(alice, { scope: 'personal', userId: 'u-a' }), true);
+  assert.equal(canCreateCredential(bob, { scope: 'personal', userId: 'u-b' }), true);   // plain member CAN (unlike team/system)
+  assert.equal(canCreateCredential(sys, { scope: 'personal', userId: 'u-sys' }), true); // as self, not via scope.all
+  // Owning someone else's identity is refused even for a System Admin.
+  assert.equal(canCreateCredential(sys, { scope: 'personal', userId: 'u-a' }), false);
+  assert.equal(canCreateCredential(bob, { scope: 'personal', userId: 'u-a' }), false);
+  // The env single-admin has no user record (userId null) → cannot own a personal credential.
+  assert.equal(canCreateCredential(env, { scope: 'personal', userId: 'u-a' }), false);
+});
+
 test('credentialVisibleToTeam: used for the reassignment-orphan guard', () => {
   assert.equal(credentialVisibleToTeam({ scope: 'team', teamId: 'payments' }, 'payments'), true);
   assert.equal(credentialVisibleToTeam({ scope: 'team', teamId: 'payments' }, 'risk'), false);

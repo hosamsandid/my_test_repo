@@ -54,6 +54,10 @@ const knowledgeDecay = require("./knowledge-decay");
 const knowledgeEmbeddings = require("./knowledge-embeddings");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
+// #1511: three-way team-member prompt modes. Byte-identical twin of
+// admin-console/api/prompt-modes.js — the team-prompt propagation path
+// (updateTeamPrompt) re-composes inheriting AND additional members through it.
+const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prompt-modes");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const gitPanelOps = require("./git-panel-ops");
@@ -7561,9 +7565,17 @@ class Orchestrator {
     for (const id of listAgentIds()) {
       const cfg = loadAgentConfig(id);
       if (!cfg || cfg.role !== "team-member" || cfg.parentTeamId !== teamId) continue;
-      // Skip members with their own prompt override.
-      if (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) continue;
-      saveAgentPrompt(id, teamCfg.systemPromptTemplate, "team-member", env);
+      // #1511 (AC5): re-compose inheriting AND additional members; an EXCLUSIVE
+      // member (its own full override) is never re-composed. An additional member
+      // stores ONLY its addition in cfg.systemPrompt — composeMemberPrompt re-applies
+      // the team template on top at read time here, so its stored config is untouched
+      // (saveAgentPrompt writes only AGENT-PROMPT.md/CLAUDE.md, never config.systemPrompt),
+      // and a later re-compose can't double the team text.
+      const mode = resolvePromptMode(cfg);
+      if (mode === PROMPT_MODES.EXCLUSIVE) continue;
+      const ownText = typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '';
+      const composed = composeMemberPrompt(mode, teamCfg.systemPromptTemplate, ownText);
+      saveAgentPrompt(id, composed, "team-member", env);
       reseeded.push(id);
       propagated++;
     }
@@ -7579,7 +7591,7 @@ class Orchestrator {
         reseedAgent(id, ['AGENT-PROMPT.md', 'CLAUDE.md'])));
     }
     console.log(
-      `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
+      `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting/additional member(s)`
     );
     return { teamId, propagated };
   }

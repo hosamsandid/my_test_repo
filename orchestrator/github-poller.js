@@ -91,6 +91,35 @@ const BURST_CAP = 3;
 const PER_PAGE = 100;
 const MAX_PAGES = 10;
 
+// Poller-wedge fix: hard wall-clock deadline per HTTP request, and the no-progress window
+// after which a stranded tick guard is forced open. Both exist because the
+// `timeout` option on http.request is NOT a request deadline — it is a
+// socket-inactivity timer that is only armed once a socket has been assigned.
+// A DNS lookup that never returns therefore never trips it, and a response that
+// dies mid-body emits on `res` (which we now listen to) rather than firing
+// `end`. Either way the fetch promise used to stay pending forever, which
+// stranded `_tick`'s re-entrancy guard at `true` and killed the poller silently
+// until the next orchestrator restart — it did not recover when the network did.
+//
+// The deadline sits above the 15s socket timeout so the socket timer normally
+// wins and produces the more specific 'timeout' message; the deadline is only
+// the backstop for the phases that timer cannot see.
+// Overridable via AEE_GITHUB_REQUEST_DEADLINE_MS, same shape as
+// POLL_INTERVAL_MS above: the regression tests need a deadline they can hit in
+// milliseconds, and an operator on a genuinely slow link may want more headroom.
+const REQUEST_DEADLINE_MS = (() => {
+  const raw = Number(process.env.AEE_GITHUB_REQUEST_DEADLINE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
+
+// Deliberately measured against *progress*, not against tick start: a legitimate
+// tick is slow-but-alive (repos × (1 + MAX_PAGES) requests, sequentially — tens
+// of minutes in the worst case), so any fixed cap on total duration would
+// force the guard open mid-poll and cause the exact overlap the guard prevents.
+// With every request now deadline-bounded, a gap this long with nothing settling
+// is unambiguous evidence of a stuck await rather than of slowness.
+const TICK_STALL_MS = 5 * 60_000;
+
 // #496: the GitHub Events API's PullRequestEvent/PullRequestReviewEvent
 // payload carries a *reduced* `pull_request` object — `id`/`number`/`url`/
 // `base`/`head`, but (unlike the full webhook payload the docs describe and
@@ -375,6 +404,47 @@ function planBurstHandoffs(deliverables, cap) {
   });
 }
 
+// Poller-wedge fix: run an HTTP request under a guarantee that its promise settles exactly
+// once, no matter which phase stalls. `makeRequest` receives the single-settle
+// `resolve`/`reject` and must return the ClientRequest so the deadline can
+// destroy it (releasing the socket, if one was ever assigned).
+//
+// Callers still wire their own `req.on('error')` / socket `timeout` — those give
+// better messages and settle sooner. This wrapper only guarantees that *some*
+// settle always happens, which is the property the tick guard depends on.
+function requestWithDeadline(makeRequest, { deadlineMs = REQUEST_DEADLINE_MS } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let req = null;
+    const timer = setTimeout(() => {
+      // Destroy first so a stuck socket is released, then settle. The settle is
+      // independent of destroy() emitting anything — that is the whole point.
+      try { if (req) req.destroy(new Error('deadline exceeded')); } catch { /* already gone */ }
+      finish(reject, new Error(`request deadline exceeded after ${deadlineMs}ms`));
+    }, deadlineMs);
+    // Never let a pending poll deadline hold the process open on shutdown.
+    if (typeof timer.unref === 'function') timer.unref();
+
+    function finish(settle, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle(value);
+    }
+
+    try {
+      req = makeRequest({
+        resolve: v => finish(resolve, v),
+        reject: e => finish(reject, e),
+      });
+    } catch (err) {
+      // A synchronous throw while building the request (bad URL, bad option)
+      // must reject rather than escape into the caller's stack.
+      finish(reject, err);
+    }
+  });
+}
+
 class GitHubPoller {
   constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr } = {}) {
     this.loadEnvironment = loadEnvironment;
@@ -397,6 +467,9 @@ class GitHubPoller {
     this.throttleBuckets = this._loadThrottleState();
     this.timer = null;
     this.running = false;
+    // Stall-watchdog bookkeeping for the `running` guard above.
+    this.tickProgressAt = 0;
+    this.tickGeneration = 0;
     // Rolling retention (#469) only needs to run about once a day; tracking
     // the last day it ran avoids a readdir/stat pass every 30s tick.
     this._lastEventLogCleanupDay = null;
@@ -415,9 +488,35 @@ class GitHubPoller {
     this.timer = null;
   }
 
+  // Called whenever anything inside a tick settles. The stall watchdog
+  // measures against this, so "slow but advancing" is never mistaken for stuck.
+  _markTickProgress() {
+    this.tickProgressAt = Date.now();
+  }
+
   async _tick() {
-    if (this.running) return;
+    // The guard keeps two polls from overlapping (they would race on the
+    // per-repo seen-set and could double-deliver). It used to be a plain
+    // boolean, which made it a single point of silent failure: one await that
+    // never settled stranded it at `true`, every later tick returned here, and
+    // the poller stayed dead — no log line, no recovery when the network came
+    // back — until the orchestrator was restarted. Per-request deadlines are the
+    // primary fix; this watchdog bounds the damage of any *future* stuck await.
+    if (this.running) {
+      const stalledMs = Date.now() - (this.tickProgressAt || 0);
+      if (stalledMs < TICK_STALL_MS) return;
+      console.error(
+        `[GH-Poller] Previous tick made no progress for ${Math.round(stalledMs / 1000)}s ` +
+        '— forcing the poll guard open and starting a fresh tick. ' +
+        'This means a request never settled; if it repeats, that is a bug worth chasing.',
+      );
+      // Fall through. The stranded tick is abandoned, not cancelled: should it
+      // ever settle, the generation check below stops it from clearing the new
+      // tick's guard (which would permit the overlap the guard exists to avoid).
+    }
     this.running = true;
+    this._markTickProgress();
+    const generation = ++this.tickGeneration;
     try {
       const today = new Date().toISOString().slice(0, 10);
       if (this._lastEventLogCleanupDay !== today) {
@@ -428,11 +527,15 @@ class GitHubPoller {
       if (plan.size === 0) return;
       for (const [repoFullName, entry] of plan) {
         await this._pollRepo(repoFullName, entry);
+        this._markTickProgress();
       }
     } catch (err) {
       console.error(`[GH-Poller] Tick error: ${err.message}`);
     } finally {
-      this.running = false;
+      // Only the newest tick may release the guard.
+      if (this.tickGeneration === generation) {
+        this.running = false;
+      }
     }
   }
 
@@ -893,7 +996,7 @@ class GitHubPoller {
   // the PR title the Events API omits — see prApiUrlToHtmlUrl above). Kept
   // separate from _fetchEvents (which is list-shaped and ETag-aware).
   _fetchJson(url, token) {
-    return new Promise((resolve, reject) => {
+    return requestWithDeadline(({ resolve, reject }) => {
       let u;
       try {
         u = new URL(url);
@@ -920,6 +1023,9 @@ class GitHubPoller {
       }, (res) => {
         const chunks = [];
         res.on('data', c => chunks.push(c));
+        // See _fetchEvents — same two handlers, same reason.
+        res.on('aborted', () => reject(new Error('response aborted before end')));
+        res.on('error', reject);
         res.on('end', () => {
           if (res.statusCode !== 200) {
             reject(new Error(`HTTP ${res.statusCode}`));
@@ -935,6 +1041,7 @@ class GitHubPoller {
       req.on('error', reject);
       req.on('timeout', () => { req.destroy(new Error('timeout')); });
       req.end();
+      return req;
     });
   }
 
@@ -975,7 +1082,7 @@ class GitHubPoller {
   }
 
   _fetchEvents(repoFullName, token, etag, page = 1) {
-    return new Promise((resolve, reject) => {
+    return requestWithDeadline(({ resolve, reject }) => {
       const [owner, repo] = repoFullName.split('/');
       const headers = {
         'User-Agent': 'agent-studio-poller',
@@ -1000,6 +1107,11 @@ class GitHubPoller {
       }, (res) => {
         const chunks = [];
         res.on('data', c => chunks.push(c));
+        // A response killed mid-body emits here, never 'end'. Without these two
+        // the promise hung forever — and an unhandled 'error' on a
+        // stream would take the whole orchestrator down.
+        res.on('aborted', () => reject(new Error('response aborted before end')));
+        res.on('error', reject);
         res.on('end', () => {
           if (res.statusCode === 304) {
             resolve({ status: 304, etag: res.headers.etag || etag, events: [] });
@@ -1025,6 +1137,7 @@ class GitHubPoller {
       req.on('error', reject);
       req.on('timeout', () => { req.destroy(new Error('timeout')); });
       req.end();
+      return req;
     });
   }
 

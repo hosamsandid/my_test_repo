@@ -651,8 +651,23 @@ before it moves from catalog to roadmap.
   `plugins/netzplan/` (manifest + `aee-plan` CLI facade: `show`/`tick`/`edit` on
   a 3-rung autonomy ladder) + `netzplan-broker/` (Broker SDK: pure `plan-doc.js`
   id-keyed document model, `plan-store.js` state-volume adapter, `viewer-headers.js`
-  §4.8 verifier copy, minimal served board). The rich swimlane editor is the
-  completion step (#1564). See `docs/network-plan-plugin-concept.md`.
+  §4.8 verifier copy, minimal served board). Completed by Phase 4 (#1564) — see
+  below. See `docs/network-plan-plugin-concept.md`.
+- **Kubernetes epic (#1554), Phase 4 — netzplan full editability** *(shipped — #1564)*:
+  all three remaining §5 primitives — **`graph`** (typed nodes in horizontal bands +
+  typed dependency edges; `graphNeighbors` pure hover-highlight helper), **`bipartite`**
+  (left/right entries + typed, muteable edges), **`blocks`** (cover / KPI-tiles /
+  callout / cards as flexible typed blocks) — added to `plan-doc.js` alongside the
+  existing `swimlane`, each with id-keyed normalize/mutate/referential repair. Panel
+  composition ops (`add-panel` / `delete-panel` / `reorder-panels` / `set-panel-title`)
+  complete the §5 document shape. Every new mutation is structural → `requiredAutonomy`
+  2, gated by the one existing `plan-store.js` path (no primitive gets its own
+  authorisation path). The served board renders all four primitives and, in **Edit**
+  mode, adds/edits/reorders/removes panels and their contents through a new human-write
+  `/api/mutate` route (role-gated by viewer headers, **not** autonomy-gated — autonomy
+  governs the agent path; `set-autonomy` stays the `/admin`-only `/api/settings`
+  route). The direct-manipulation polish (drag reorder, colour pickers,
+  requirement-target-by-click, undo/redo) is a UI refinement over these same mutations.
 
 ## 10. Open questions
 

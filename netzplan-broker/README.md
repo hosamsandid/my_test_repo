@@ -17,7 +17,7 @@ plus wiring.
 | `plan-store.js` | The thin fs adapter over `plan-doc.js`: one board per scope on the `AEE_PLUGIN_STATE_DIR` state volume (§4.8), atomic writes, autonomy-gated mutate, teardown. Unit-tested. |
 | `viewer-headers.js` | A copy of the §4.8 signed-viewer-header scheme (`admin-console/api/plugin-ui-proxy.js`) so the broker verifies the console-signed identity + role on the UI path. |
 | `server.js` | Wiring: the MCP tool surface for `aee-plan`, the served board UI, and the SDK health / teardown routes. Lazy-requires the MCP SDK so the pure modules test with no deps. |
-| `ui/` | The served board (`index.html` + `app.js` — view + tick) and `/admin` (`admin.html` + `admin.js` — the autonomy ladder). |
+| `ui/` | The served board (`index.html` + `app.js`) — renders all four §5 primitives and, in **Edit** mode, adds / edits / reorders / removes panels and their contents through `/api/mutate`; plus `/admin` (`admin.html` + `admin.js` — the autonomy ladder). |
 
 ## Two request surfaces
 
@@ -52,11 +52,17 @@ is not exercised in CI (needs the MCP SDK + a live sidecar), same as
 
 ## Deferred to the Phase-3 completion step
 
-`server.js`/`ui/` ship a **minimal** served board — read the board and tick
-milestones, plus the `/admin` autonomy setting — so the board is usable on Podman
-end-to-end. The rich **swimlane editor** the concept describes (direct
-manipulation, a selection inspector à la `ProcessCanvas` `NodeInspector`, colour
-pickers, reorder, requirement-target-by-click, bounded undo/redo) builds on the
-same `plan-doc.js` mutations and is the completion step (see the PR). The `graph`
-/ `bipartite` / `blocks` primitives and panel add/remove/reorder are Phase 4
-(#1564).
+**Phase 4 (#1564) — done.** All four §5 primitives (`swimlane` from #1563, plus
+`graph` / `bipartite` / `blocks`) are in `plan-doc.js` with full id-keyed
+normalize / mutate / referential repair, and `panels[]` is composed (`add-panel`
+/ `delete-panel` / `reorder-panels` / `set-panel-title`). The served board renders
+every primitive and its **Edit** mode adds / edits / reorders / removes panels and
+their contents. `graph` hover-highlight is computed from the pure `graphNeighbors`
+helper; the `bipartite` muted flag survives edits; a `blocks` panel expresses the
+cover / KPI-tiles / callout / cards originals as flexible typed blocks.
+
+The controls are compact (inline buttons + `prompt()` entry) — the *capability*
+is complete; the **direct-manipulation polish** the concept sketches (drag
+reorder, colour pickers, click-a-milestone to set a requirement target, bounded
+undo/redo — undo/redo is just a stack of the immutable documents `applyMutation`
+returns) is a UI refinement over these same mutations. See the PR.

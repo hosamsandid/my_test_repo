@@ -331,7 +331,7 @@ Ordered so the board is usable before the Kubernetes work lands.
 | Phase | Content | Ends with |
 |---|---|---|
 | 1 (#1561) | `PLATFORMS` gains `kubernetes`; two-sided guard green | manifest can express the plugin |
-| 2 (#1562) | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume | `test-mgmt`'s three routes serve and refuse correctly |
+| 2 (#1562) | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume *(shipped — #1562)* | `test-mgmt`'s three routes serve and refuse correctly |
 | 3 (#1563) | The plugin: manifest, broker on the SDK, document store, `swimlane` primitive at parity | **board usable on Podman** |
 | 4 (#1564) | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder | full editability |
 | 5 (#1565) | Kubernetes: Deployment + Service + PVC, RBAC, flag flip | board reachable on GKE |

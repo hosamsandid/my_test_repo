@@ -7,7 +7,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { sidecarCreateBody, AUDIT_MOUNT, auditVolumeName } = require('./plugin-runtime');
+const {
+  sidecarCreateBody, AUDIT_MOUNT, auditVolumeName, STATE_MOUNT, stateVolumeName,
+} = require('./plugin-runtime');
 
 function manifest(extra = {}) {
   return {
@@ -60,8 +62,24 @@ test('the env contract is plugin-neutral and carries the signing secret', () => 
   assert.equal(body.env.AEE_PLUGIN_PORT, '4004');
   assert.equal(body.env.AEE_PLUGIN_SIGNING_SECRET, 's3cret');
   assert.equal(body.env.AEE_PLUGIN_AUDIT_DIR, AUDIT_MOUNT);
+  assert.equal(body.env.AEE_PLUGIN_STATE_DIR, STATE_MOUNT);
   // No plugin-specific variable names may leak out of the generic orchestrator.
   assert.ok(!Object.keys(body.env).some((k) => k.startsWith('PODMAN_MCP_')));
+});
+
+test('a manifest cannot override the platform state dir via sidecar.env (§4.8)', () => {
+  const m = manifest({
+    sidecar: {
+      image: 'i',
+      capabilities: [],
+      internalPort: 4004,
+      env: { AEE_PLUGIN_STATE_DIR: '/audit' },
+    },
+  });
+  // Letting a plugin repoint its state dir at the audit mount (or anywhere else)
+  // is the same class of escape as raising its own quota — the platform sets it.
+  const body = sidecarCreateBody(m, OPTS);
+  assert.equal(body.env.AEE_PLUGIN_STATE_DIR, STATE_MOUNT);
 });
 
 test('a declared quota reaches the broker; an absent one sets no variable', () => {
@@ -119,11 +137,23 @@ test('the audit volume is per plugin and mounted WHOLE, never via SubPath', () =
   // "no such file or directory" on the first end-to-end run. One volume per
   // plugin needs no pre-created directory and isolates the trails anyway.
   const body = sidecarCreateBody(manifest(), OPTS);
-  assert.equal(body.volumes.length, 1);
-  assert.equal(body.volumes[0].Dest, AUDIT_MOUNT);
-  assert.equal(body.volumes[0].SubPath, undefined);
-  assert.equal(body.volumes[0].Name, auditVolumeName('demo-plugin'));
-  assert.match(body.volumes[0].Name, /plugin-audit-demo-plugin$/);
+  const audit = body.volumes.find((v) => v.Dest === AUDIT_MOUNT);
+  assert.ok(audit, 'the audit volume is mounted');
+  assert.equal(audit.SubPath, undefined);
+  assert.equal(audit.Name, auditVolumeName('demo-plugin'));
+  assert.match(audit.Name, /plugin-audit-demo-plugin$/);
+});
+
+test('a second per-plugin STATE volume is mounted at /state (§4.8)', () => {
+  const body = sidecarCreateBody(manifest(), OPTS);
+  assert.equal(body.volumes.length, 2, 'audit + state, both whole volumes');
+  const state = body.volumes.find((v) => v.Dest === STATE_MOUNT);
+  assert.ok(state, 'the state volume is mounted at /state');
+  assert.equal(state.SubPath, undefined);
+  assert.equal(state.Name, stateVolumeName('demo-plugin'));
+  assert.match(state.Name, /plugin-state-demo-plugin$/);
+  // Distinct volumes so document state never lands in the audit trail's mount.
+  assert.notEqual(state.Name, auditVolumeName('demo-plugin'));
 });
 
 // ── liveness (#1547, found on the first end-to-end run) ─────────────────────

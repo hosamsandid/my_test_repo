@@ -73,6 +73,8 @@ const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { validatePluginManifest } = require('./plugin-manifest');
+const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
+const { resolveViewerRole, uiSubPath, visibleScopes } = require('./plugin-ui-viewer');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -7584,6 +7586,170 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   const reconcile = await notifyPluginReconcile();
   res.json({ id, installed: false, reconcile });
 });
+
+/* ─── §4.8 live UI-extension stack (Network Plan Phase 2, #1562) ─────────
+ * The console makes the pure primitives in plugin-ui-proxy.js live: it proxies
+ * a UI-bearing plugin's own iframe UI from its sidecar, enforcing ui.routes[]
+ * minRole at the proxy (the plugin re-enforcing it is the SECOND defense line,
+ * §4.8), forwarding the authenticated user + effective role as SIGNED headers,
+ * and exposing the scopes a plugin was granted to. Sidecar truth (address,
+ * running) comes from the orchestrator — the admin-console image copies only
+ * api/*.js and never learns the container-naming rule. */
+
+// The shared plugin scope-token signing secret, written by the orchestrator at
+// /workspace/plugins/_secret (0600). The console only READS it — it must never
+// create one, or the two sides would diverge and every signature would fail to
+// verify at the broker. null when the orchestrator has not booted yet.
+function readPluginSigningSecret() {
+  try {
+    const raw = fs.readFileSync(path.join(REGISTRY_PLUGINS_DIR, '_secret'), 'utf8');
+    const secret = String(raw).trim();
+    return secret || null;
+  } catch { return null; }
+}
+
+async function orchestratorGetJson(pathname) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const resp = await fetch(`${orchestratorUrl}${pathname}`);
+  const body = await resp.json().catch(() => null);
+  return { status: resp.status, ok: resp.ok, body };
+}
+
+// GET /api/plugins/:id/scopes — the scopes the plugin was granted to, derived
+// (in plugin-ui-proxy.deriveScopeList) ONLY from grants that already exist and
+// then narrowed to the scopes the caller can see. Discovery is not a new read
+// privilege, and must not become a cross-team one either.
+app.get('/api/plugins/:id/scopes', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  let granted;
+  try {
+    granted = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/granted-agents`);
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  if (granted.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
+  const all = deriveScopeList(granted.body.grantedAgents, granted.body.directory);
+  res.json({ pluginId: id, scopes: visibleScopes(getScope(req), all) });
+});
+
+// ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
+// the session gate is applied explicitly (a session-less request is refused
+// here, before anything plugin-specific runs). Streamed rather than buffered so
+// document PUTs and future uploads work.
+function pluginUiProxy(req, res) {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+
+  // Installed + UI-bearing, or there is nothing to serve (an uninstalled or
+  // non-UI plugin 404s — AC).
+  const entry = readPluginDir(REGISTRY_PLUGINS_DIR, id);
+  if (!entry.ok || !entry.manifest || !entry.manifest.ui || !Array.isArray(entry.manifest.ui.routes)) {
+    return res.status(404).json({ error: `plugin '${id}' has no UI` });
+  }
+
+  (async () => {
+    // Resolve the grant so the proxy stops serving the moment the last grant is
+    // revoked (AC), and so the viewer's effective role is judged only against
+    // teams the plugin is actually granted to.
+    let granted;
+    try {
+      granted = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/granted-agents`);
+    } catch (err) {
+      return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+    }
+    if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
+    const grantedAgents = granted.body.grantedAgents || [];
+    if (!grantedAgents.length) {
+      return res.status(403).json({ error: `plugin '${id}' is not granted to any agent` });
+    }
+    const grantedTeamIds = [...new Set(grantedAgents.map((g) => g.teamId).filter(Boolean))];
+
+    const scope = getScope(req);
+    const viewerRole = resolveViewerRole(scope, grantedTeamIds);
+    if (!viewerRole) return res.status(403).json({ error: 'you do not have access to this plugin' });
+
+    const subPath = uiSubPath(req.originalUrl || req.url, id);
+    const decision = enforceUiRoute(entry.manifest, subPath, viewerRole);
+    if (!decision.allowed) {
+      // The refusal comes from the CONSOLE proxy, not the sidecar (§4.8 — the
+      // sidecar enforcing it again is the second line, not the first).
+      return res.status(403).json({ error: `refused: ${decision.reason}`, minRole: decision.minRole });
+    }
+
+    // Sidecar address + liveness from the orchestrator.
+    let ep;
+    try {
+      ep = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/ui-endpoint`);
+    } catch (err) {
+      return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+    }
+    if (ep.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+    if (!ep.ok || !ep.body || !ep.body.endpoint) return res.status(502).json({ error: 'no sidecar endpoint' });
+    if (!ep.body.running) return res.status(503).json({ error: `plugin '${id}' broker is not running` });
+
+    const secret = readPluginSigningSecret();
+    if (!secret) return res.status(503).json({ error: 'plugin signing secret unavailable' });
+    const viewer = {
+      sub: (req.user && req.user.username) || '',
+      role: viewerRole,
+      teamIds: scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t)),
+    };
+    const signed = signViewerHeaders(viewer, secret);
+
+    // Stream-proxy to the sidecar's UI mount. The broker serves its UI under
+    // /ui, so the console-relative sub-path maps onto <endpoint>/ui<subPath>.
+    let target;
+    try { target = new URL(`${ep.body.endpoint}/ui${subPath === '/' ? '' : subPath}`); }
+    catch { return res.status(502).json({ error: 'bad sidecar endpoint' }); }
+    // Carry the original query string through unchanged.
+    const qs = (req.originalUrl || req.url).split('?')[1];
+    if (qs) target.search = qs;
+
+    const lib = target.protocol === 'https:' ? require('https') : require('http');
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers || {})) {
+      const lk = k.toLowerCase();
+      // Never forward the console session cookie, and strip any inbound signed
+      // identity header so a client cannot inject its own before we sign.
+      if (lk === 'cookie' || lk === 'content-length' || lk.startsWith('x-aee-plugin-')) continue;
+      headers[k] = v;
+    }
+    Object.assign(headers, signed, { host: target.host });
+
+    // express.json() already consumed a JSON body upstream (it is mounted
+    // globally, before any route). Re-serialise it so a document PUT still
+    // reaches the sidecar; any other content type was left untouched and is
+    // streamed straight through.
+    const parsedBody = req._body === true;
+    let payload = null;
+    if (parsedBody) {
+      payload = Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body == null ? {} : req.body));
+      headers['content-length'] = String(payload.length);
+    }
+
+    const upstream = lib.request(
+      { hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers },
+      (up) => {
+        res.status(up.statusCode || 502);
+        for (const [k, v] of Object.entries(up.headers || {})) {
+          if (k.toLowerCase() === 'transfer-encoding') continue;
+          res.setHeader(k, v);
+        }
+        up.pipe(res);
+      },
+    );
+    upstream.on('error', (err) => {
+      if (!res.headersSent) res.status(502).json({ error: `sidecar proxy failed: ${err.message}` });
+    });
+    if (parsedBody) { upstream.end(payload); }
+    else { req.pipe(upstream); }
+  })();
+}
+
+app.all('/plugins/:id/ui', spaLimiter, auth.requireAuth, pluginUiProxy);
+app.all('/plugins/:id/ui/*', spaLimiter, auth.requireAuth, pluginUiProxy);
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
  * A draft is an editable process-template bundle that exists before any team

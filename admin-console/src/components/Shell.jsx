@@ -111,6 +111,8 @@ function breadcrumbFor(pathname) {
     const id = pathname.slice('/chats/'.length);
     return `Agent Chat / ${id}`;
   }
+  const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
+  if (pluginView) return `Plugins / ${pluginView[1]}`;
   return pathname;
 }
 
@@ -167,6 +169,46 @@ export default function Shell({ children }) {
       }),
     }))
     .filter(section => section.items.length > 0);
+
+  // Dynamic nav entries for UI-bearing plugins that are BOTH installed and
+  // granted to a scope the caller can see (Network Plan epic #1554, Phase 2).
+  // Unlike the admin-only Plugins registry entry, these are visible to any team
+  // member holding the grant — the console proxy + server re-enforce access.
+  // Refetched on navigation so a revoked grant drops its entry (AC).
+  const [uiPlugins, setUiPlugins] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch('/api/plugins');
+        if (!r.ok) return;
+        const body = await r.json();
+        const withUi = (body.installed || []).filter(
+          p => p && p.ok && p.manifest && p.manifest.ui && Array.isArray(p.manifest.ui.routes),
+        );
+        const out = [];
+        for (const p of withUi) {
+          try {
+            const sr = await fetch(`/api/plugins/${encodeURIComponent(p.id)}/scopes`);
+            if (!sr.ok) continue;
+            const sb = await sr.json();
+            if (Array.isArray(sb.scopes) && sb.scopes.length) {
+              out.push({ id: p.id, title: p.manifest.ui.title || p.manifest.name || p.id });
+            }
+          } catch { /* skip a plugin we cannot resolve scopes for */ }
+        }
+        if (!cancelled) setUiPlugins(out);
+      } catch { /* orchestrator/plugins unavailable — no dynamic entries */ }
+    })();
+    return () => { cancelled = true; };
+  }, [location.pathname]);
+
+  const navSections = uiPlugins.length
+    ? [...nav, {
+        section: 'PLUGINS',
+        items: uiPlugins.map(p => ({ path: `/plugins/${p.id}/view`, label: p.title, Icon: Puzzle })),
+      }]
+    : nav;
 
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
@@ -237,7 +279,7 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {nav.map((section, sectionIndex) => (
+          {navSections.map((section, sectionIndex) => (
             <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
               {!collapsed && section.section && (
                 <div style={{

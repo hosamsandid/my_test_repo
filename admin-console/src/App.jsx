@@ -63,6 +63,7 @@ const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
 const Plugins             = lazy(() => import('./pages/Plugins'));
+const PluginUiPage        = lazy(() => import('./pages/PluginUiPage'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
@@ -145,6 +146,10 @@ export default function App() {
           <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/plugins"      element={<AdminRoute><Plugins /></AdminRoute>} />
+          {/* A granted UI plugin is viewable by any team member with the grant —
+              NOT AdminRoute-gated (the registry page is). The console proxy at
+              /plugins/:id/ui and the server both re-enforce access. */}
+          <Route path="/plugins/:id/view" element={<PluginUiPage />} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />

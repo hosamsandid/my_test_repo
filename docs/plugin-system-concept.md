@@ -142,8 +142,10 @@ the sidecar image.
   `egress`). Install-time review means a System Admin sees exactly what the
   plugin gets; a plugin cannot request arbitrary mounts.
 - `platforms` declares runtime requirements (`podman` = local/compose only,
-  like context mounts); the console shows an honest "not available on this
-  stack" instead of a broken toggle.
+  like context mounts; `kubernetes` = k8s plugin sidecar, the positive mirror
+  of `podman` — a manifest may combine them e.g. `["podman","kubernetes"]`);
+  `any` imposes no special stack requirement. The console shows an honest "not
+  available on this stack" instead of a broken toggle.
 - `scopes` declares which **scope granularities** the broker actually
   implements (§4.6). A broker that cannot separate its resources per agent
   lists `["team"]` and the console offers no agent-level toggle — the
@@ -631,6 +633,12 @@ before it moves from catalog to roadmap.
   merged and failing open. Plugin #1's broker also gained the audit obligation
   it never had. **Podman-only** — see the Deliberate differences block in
   `orchestrator/spawn-kubernetes-pod.js`.
+
+- **Kubernetes epic (#1554), Phase 1 — manifest `platforms` widening** *(shipped — #1573)*:
+  `kubernetes` added to the `PLATFORMS` enum as the positive mirror of `podman` —
+  a manifest can now declare `["podman","kubernetes"]` or `["kubernetes"]`;
+  `any` is unchanged. Both `plugin-manifest.js` copies (admin-console/api + orchestrator)
+  updated and two-sided-guard tested.
 
 ## 10. Open questions
 

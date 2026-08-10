@@ -316,3 +316,24 @@ test('the shipped test-mgmt manifest (plugins/test-mgmt) is valid', () => {
   const adminRoute = manifest.ui.routes.find((r) => r.path === '/admin');
   assert.equal(adminRoute && adminRoute.minRole, 'team-admin');
 });
+
+// ── ACCEPTANCE: the shipped plugin #3 manifest validates end to end ──────────
+test('the shipped netzplan manifest (plugins/netzplan) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'netzplan', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // netzplan is the first privilege-less plugin — capabilities and credentials are empty:
+  assert.deepEqual(manifest.sidecar.capabilities, []);
+  assert.deepEqual(manifest.credentials, []);
+  // team scope only → team is the §10 per-manifest default granularity:
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(defaultGranularity(manifest), 'team');
+  assert.equal(manifest.cli.name, 'aee-plan');
+  // two ui.routes wired to the right minRole:
+  const board = manifest.ui.routes.find((r) => r.path === '/');
+  assert.equal(board && board.minRole, 'team-member');
+  const admin = manifest.ui.routes.find((r) => r.path === '/admin');
+  assert.equal(admin && admin.minRole, 'team-admin');
+});

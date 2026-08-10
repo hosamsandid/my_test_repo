@@ -67,3 +67,21 @@ not just isolation (manifest `policy`: create-case is restricted to the
 flow-final agent whose cross-checks passed) and the first real
 `requiresApproval` flow (destructive `data-delete` waits for human confirm). See
 `test-mgmt/README.md`.
+
+## `netzplan` (plugin #3)
+
+Network Plan (epic #1554, Phase 3, #1563): an editable team **planning board** —
+zones, lanes, milestones, owners and requirement lines — served from its own
+sidecar and iframed into the console through the §4.8 UI-extension stack (#1562).
+The first **UI-bearing** plugin and the first that holds no privilege at all
+(`capabilities: []`, `credentials: []`, `scopes: ["team"]`). Its broker
+(`../netzplan-broker/`) is built on the Broker SDK and keeps one board **document
+per team** on the generic state volume (`AEE_PLUGIN_STATE_DIR`), so state is
+server-side (two browser profiles see the same board; it survives a sidecar
+restart) rather than in a viewer's `localStorage`. The load-bearing model
+decision (concept §4): statuses and requirement targets key on **milestone ids,
+never array indices**, so inserting or reordering a milestone shifts nothing
+else. Agent write access is an explicit ladder off by default
+(`settings.agentAutonomy` 0/1/2, §8): agents read with `aee-plan show` at level 0,
+tick milestones at 1, edit structure at 2 — enforced broker-side and audited
+under the calling agent's id. See `netzplan/../netzplan-broker/README.md`.

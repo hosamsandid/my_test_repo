@@ -21,7 +21,7 @@ Only **authored** prompts (human-written), never derived copies:
 | Construct | Field / file | Edit choke-point (server-side) |
 |---|---|---|
 | Standalone `agent` | `AGENT-PROMPT.md` | `PUT /api/agents/:id/prompt` (`api.js:2913`) |
-| `team-member` (override) | `config.systemPrompt` + `AGENT-PROMPT.md` | `PUT /api/agents/:id` body `systemPrompt` (`api.js:1879-1967`) |
+| `team-member` (override) | `config.systemPrompt` + `AGENT-PROMPT.md` | `PUT /api/agents/:id` body `systemPrompt` (+ `promptMode`, #1511) (`api.js:1879-1967`) |
 | `team` (template) | `config.systemPromptTemplate` | `PUT /api/agents/:id` body `systemPromptTemplate` → proxy to `updateTeamPrompt` (`orchestrator.js:6108`) |
 
 **Verified:** every human edit surface funnels into exactly these three
@@ -111,7 +111,13 @@ choke-point:
   `cfg.systemPrompt` (or resolved inherited template); stamp, then
   `writeJsonAtomic` + `AGENT-PROMPT.md`. Switching to **inherit**
   (`systemPrompt: null`) is captured as `action:'inherited'` with empty new
-  content — the prior override stays revertable.
+  content — the prior override stays revertable. **System-prompt mode (#1511):**
+  the versioned field is the authored text — the addition in *Additional input*,
+  the full override in *Exclusive overriding input*. A capture fires on an
+  authored-text change **or** a mode switch (`prevMode !== nextMode`, noted as
+  `prompt mode <a> → <b>`), so switching between the three modes is recorded
+  consistently with inherit/edit (AC12); revert preserves the member's current
+  mode when restoring its text.
 - **Choke-point 3** (`api.js:1661`, team template): `oldContent` =
   `cfg.systemPromptTemplate` (already read into `cfg`). **Stamp console-side,
   then** proxy to `updateTeamPrompt`. No `by` forwarding into the orchestrator.

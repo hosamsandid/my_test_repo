@@ -9,6 +9,12 @@ import {
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { inferMissingRoles } from './missing-roles-view.js';
+import {
+  PROMPT_MODES,
+  PROMPT_MODE_LABELS,
+  resolvePromptMode,
+  composeMemberPrompt,
+} from './prompt-mode-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -1624,8 +1630,11 @@ function ContextMountControl({ agent }) {
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
   // `agent.skillsOverride` absent === inheriting from the parent team.
-  const initialInheritPrompt = agent.role === 'team-member'
-    && !(typeof agent.systemPrompt === 'string' && agent.systemPrompt.length > 0);
+  // System-prompt mode (#1511): resolve the three-way mode from the config
+  // (explicit `promptMode`, else legacy systemPrompt-presence inference — AC7).
+  const initialPromptMode = agent.role === 'team-member'
+    ? resolvePromptMode(agent)
+    : PROMPT_MODES.INHERIT;
   const initialInheritSkills = agent.role === 'team-member'
     && !Array.isArray(agent.skillsOverride);
   const initialInheritMcp = agent.role === 'team-member'
@@ -1646,8 +1655,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     skills: Array.isArray(agent.skills) ? agent.skills : [],
     // team-only field
     systemPromptTemplate: agent.systemPromptTemplate || '',
-    // team-member override fields
-    inheritPrompt: initialInheritPrompt,
+    // team-member override fields. `promptMode` is one of inherit/additional/
+    // exclusive (#1511); `promptOverride` holds the agent-specific text — the
+    // addition (additional mode) or the full override (exclusive). One shared
+    // text field so switching between additional/exclusive keeps typed text.
+    promptMode: initialPromptMode,
     promptOverride: agent.systemPrompt || '',
     inheritSkills: initialInheritSkills,
     skillsOverride: Array.isArray(agent.skillsOverride)
@@ -1703,8 +1715,13 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       submit.systemPromptTemplate = form.systemPromptTemplate;
     }
     if (agent.role === 'team-member') {
-      // null = clear override (= switch to inherit). The API knows the convention.
-      submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
+      // System-prompt mode (#1511). `promptMode` selects one of the three modes;
+      // `systemPrompt` carries the agent-specific text (null = inherit → clear
+      // the override). The API composes the effective prompt from the two.
+      submit.promptMode = form.promptMode;
+      submit.systemPrompt = form.promptMode === PROMPT_MODES.INHERIT
+        ? null
+        : form.promptOverride;
       submit.skillsOverride = form.inheritSkills
         ? null
         : form.skillsOverride;
@@ -1837,15 +1854,12 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             </div>
           </div>
 
-          <InheritOrCustom
-            label="System Prompt"
-            inherit={form.inheritPrompt}
-            onToggle={v => update('inheritPrompt', v)}
-            inheritedPreview={parentTeamPrompt}
-            inheritedLabel="Inherited from team"
-            customValue={form.promptOverride}
-            onCustomChange={v => update('promptOverride', v)}
-            customMultiline
+          <PromptModeControl
+            mode={form.promptMode}
+            onModeChange={v => update('promptMode', v)}
+            teamPrompt={parentTeamPrompt}
+            text={form.promptOverride}
+            onTextChange={v => update('promptOverride', v)}
           />
           <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Prompt changes take effect from this agent's next session.
@@ -1918,6 +1932,80 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 // Reusable inherit/override widget for team-member fields. Single source
 // of truth for the toggle styling so the prompt and skills sections look
 // identical.
+// Three-mode system-prompt selector for team-members (#1511): Inherit from team
+// / Additional input / Exclusive overriding input. Skills and MCP keep the
+// two-way InheritOrCustom widget below (unchanged, AC10).
+//
+//   - inherit    → the team prompt only; shown read-only (AC2).
+//   - additional → an agent-specific addition appended AFTER the team prompt in a
+//                  clearly delimited section; the box previews the COMBINED
+//                  effective prompt (team + addition), not the addition alone
+//                  (AC9).
+//   - exclusive  → the agent-specific text fully replaces the team prompt (AC6).
+//
+// One shared text field backs both additional and exclusive, so switching
+// between them keeps whatever the user typed (edge case: no silent text loss).
+const readonlyPromptBoxStyle = {
+  ...inputStyle,
+  background: 'var(--eb-bg-app)',
+  color: 'var(--eb-text-muted)',
+  fontFamily: 'var(--eb-font-mono)',
+  fontSize: 'var(--eb-text-sm)',
+  minHeight: 100,
+  whiteSpace: 'pre-wrap',
+  maxHeight: 260,
+  overflow: 'auto',
+};
+
+function PromptModeControl({ mode, onModeChange, teamPrompt, text, onTextChange }) {
+  const modes = [PROMPT_MODES.INHERIT, PROMPT_MODES.ADDITIONAL, PROMPT_MODES.EXCLUSIVE];
+  return (
+    <div>
+      <div style={labelStyle}>System Prompt</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
+        {modes.map(m => (
+          <label key={m} style={radioLabelStyle}>
+            <input type="radio" checked={mode === m} onChange={() => onModeChange(m)} />
+            {' '}{PROMPT_MODE_LABELS[m]}
+          </label>
+        ))}
+      </div>
+
+      {mode === PROMPT_MODES.INHERIT && (
+        <div style={readonlyPromptBoxStyle}>
+          {teamPrompt ? teamPrompt : <em>(inheriting the team prompt)</em>}
+        </div>
+      )}
+
+      {mode === PROMPT_MODES.ADDITIONAL && (
+        <>
+          <textarea
+            value={text}
+            onChange={e => onTextChange(e.target.value)}
+            placeholder="Agent-specific instructions to append after the team prompt…"
+            style={{ ...inputStyle, minHeight: 120, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+          />
+          <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Effective prompt preview (team prompt + your addition):
+          </div>
+          <div style={readonlyPromptBoxStyle}>
+            {composeMemberPrompt(PROMPT_MODES.ADDITIONAL, teamPrompt, text) || <em>(the team prompt is empty)</em>}
+          </div>
+        </>
+      )}
+
+      {mode === PROMPT_MODES.EXCLUSIVE && (
+        <textarea
+          value={text}
+          onChange={e => onTextChange(e.target.value)}
+          placeholder="Full system prompt that replaces the team prompt…"
+          style={{ ...inputStyle, minHeight: 140, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+        />
+      )}
+    </div>
+  );
+}
+
 function InheritOrCustom({
   label, inherit, onToggle,
   inheritedPreview, inheritedLabel,

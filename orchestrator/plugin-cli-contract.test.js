@@ -266,3 +266,102 @@ test('aee-test: trigger without --plan/--suite → exit 2 (usage), never a broke
 test('aee-test: data with no subcommand → exit 2 (usage)', () => {
   assert.equal(runTest(['data'], grantedTestWorkspace()).status, 2);
 });
+
+// ─── plugin #3: aee-plan (epic #1554, Phase 3, #1563) ────────────────────────
+// The same §4.5 contract against the real `aee-plan` CLI (entrypoint `bin/aee-plan`,
+// no .py suffix). Broker-free: `whoami` reads only the seeded config; every
+// broker-touching verb points at an unroutable endpoint so a call attempt
+// deterministically returns exit 3 rather than depending on a live sidecar. The
+// autonomy ladder (show=0, tick>=1, edit>=2) is enforced broker-side
+// (plan-doc.js `requiredAutonomy` + broker-sdk/authz.js); the CLI's early
+// refusal reads the level via a `show`, so against an unreachable broker a write
+// surfaces exit 3 (unreachable) before it can reach the level check.
+const PLAN_CLI = path.join(__dirname, '..', 'plugins', 'netzplan', 'bin', 'aee-plan');
+
+function runPlan(args, workspace) {
+  return spawnSync('python3', [PLAN_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedPlanWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-plan-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'netzplan', scopeId: 'team-x',
+    endpoint: endpoint || 'http://127.0.0.1:59373/',   // reserved, unroutable
+    token: 'netzplan.team-x.SIG', cliName: 'aee-plan',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'netzplan.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-plan is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(PLAN_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-plan: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runPlan([], grantedPlanWorkspace()).status, 2);
+  const help = runPlan(['--help'], grantedPlanWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /show/);
+  assert.match(help.stdout, /tick/);
+});
+
+test('aee-plan: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runPlan(['frobnicate'], grantedPlanWorkspace()).status, 2);
+});
+
+test('aee-plan: whoami --json resolves the seeded (team) scope (no broker needed)', () => {
+  const r = runPlan(['whoami', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 'team-x');
+});
+
+test('aee-plan: ungranted → exit 3 with not-granted error', () => {
+  const r = runPlan(['show', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-plan: show against an unreachable broker → exit 3', () => {
+  const r = runPlan(['show', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-plan: tick against an unreachable broker → exit 3 (early level read is a show)', () => {
+  const r = runPlan(['tick', 'lane1-m2', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-plan: edit with invalid JSON → exit 2 (usage), never a broker call', () => {
+  const r = runPlan(['edit', 'not-json', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-plan: edit with an op missing a type → exit 2 (usage), never a broker call', () => {
+  const r = runPlan(['edit', '{"foo":1}', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});

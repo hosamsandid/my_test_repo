@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
-  Boxes, Key, MessageCircle, Github, Layers, GitBranch,
+  Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
@@ -50,6 +50,9 @@ const NAV = [
   { items: [
     { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
     { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
+    // Self-service personal credentials (#1568) — visible to every authenticated
+    // human (no credAdmin gate); the personal tier is strictly owner-only.
+    { path: '/my-credentials', label: 'My Credentials',       Icon: KeyRound },
   ]},
   { section: 'AGENT SETUP', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
@@ -89,6 +92,7 @@ const BREADCRUMBS = {
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
+  '/my-credentials': 'My Credentials',
   '/skills':       'Skills Registry',
   '/role-templates': 'Agent Templates',
   '/jobs':         'Triggers',

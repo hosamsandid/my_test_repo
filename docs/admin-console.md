@@ -10,8 +10,9 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 | **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, import, clone, and save as template agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
-| **SSH Keys** | `/ssh-keys` | Register SSH key pairs for private repository access |
-| **GitHub Tokens** | `/github-tokens` | Register GitHub PATs for the GitHub event poller and HTTPS repository access |
+| **My Credentials** | `/my-credentials` | Self-service surface (any authenticated human, no `credAdmin` gate) to create/rotate/rename/delete your own **personal** SSH key and GitHub token; private to you (epic #1558) |
+| **SSH Keys** | `/ssh-keys` | Register team/system SSH key pairs for private repository access (personal keys live on My Credentials) |
+| **GitHub Tokens** | `/github-tokens` | Register team/system GitHub PATs for the GitHub event poller and HTTPS repository access (personal tokens live on My Credentials) |
 | **Skills Registry** | `/skills` | Browse available skills; click to view skill content |
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |

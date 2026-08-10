@@ -13476,6 +13476,63 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// Rotate a PERSONAL SSH key in place (#1568 AC4): replace the stored private key
+// — pasted or server-generated — while keeping the same credential id, name and
+// owner. Personal-tier ONLY: a team/system key is deliberately rotated by
+// creating a new credential and repointing the environment (see the admin page
+// copy), so an in-place secret swap that silently changes what many agents use
+// is refused here. Owner-gated via canManageCredential — the personal tier has
+// no scope.all bypass, so not even a System Admin can rotate someone else's key.
+app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const scope = getScope(req);
+  const keys = listSshKeys();
+  const cred = keys.find(k => k.id === id);
+  if (!cred) return res.status(404).json({ error: 'SSH key not found' });
+  if (normalizeCredential(cred).scope !== 'personal') {
+    return res.status(400).json({
+      error: 'Only a personal SSH key can be rotated in place; rotate a team/system key by creating a new one and repointing the environment.',
+      code: 'rotate-personal-only',
+    });
+  }
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+
+  const { privateKey, generate, comment } = req.body || {};
+  // Re-assert the strict id allowlist directly before the fs sink so CodeQL
+  // recognises the path-injection sanitizer (same pattern as the create routes).
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const keyPath = path.join(SSH_KEYS_DIR, path.basename(id));
+
+  let fingerprint, publicKey;
+  if (generate) {
+    const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
+    const { privateKey: privText, publicKey: pubText, pubBlob } = generateOpensshEd25519Keypair(safeComment);
+    fs.writeFileSync(keyPath, privText, { mode: 0o600 });
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+    fingerprint = sshFingerprintFromPubBlob(pubBlob);
+    publicKey = pubText;
+  } else {
+    if (!privateKey || typeof privateKey !== 'string') {
+      return res.status(400).json({ error: 'privateKey (string) is required, or set generate:true' });
+    }
+    const trimmed = privateKey.trim();
+    if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
+      return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
+    }
+    fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+    fingerprint = sshKeyFingerprint(trimmed);
+  }
+
+  const updated = { ...cred, fingerprint, rotatedAt: new Date().toISOString() };
+  saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
+  const body = normalizeCredential(updated);
+  res.status(200).json(publicKey ? { ...body, publicKey } : body);
+});
+
 /* ─── GitHub Tokens ─────────────────────────────────────────────────── */
 
 app.get('/api/github-tokens', (req, res) => {
@@ -13574,6 +13631,47 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   try { fs.unlinkSync(path.join(GH_TOKENS_DIR, path.basename(id))); } catch { /* ignore */ }
   saveGithubTokensIndex(tokens.filter(t => t.id !== id));
   res.status(204).end();
+});
+
+// Rotate a PERSONAL GitHub token in place (#1568 AC4) — same model as the SSH
+// rotate above: replace the stored secret, recompute preview + fingerprint, keep
+// the id/name/owner. Personal-tier ONLY and owner-gated (no scope.all bypass).
+app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
+  const tokens = listGithubTokens();
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
+  if (normalizeCredential(cred).scope !== 'personal') {
+    return res.status(400).json({
+      error: 'Only a personal GitHub token can be rotated in place; rotate a team/system token by creating a new one and repointing the environment.',
+      code: 'rotate-personal-only',
+    });
+  }
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const { token } = req.body || {};
+  if (!token || typeof token !== 'string') return res.status(400).json({ error: 'token (string) is required' });
+  const trimmed = token.trim();
+  if (!/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)[A-Za-z0-9_]{20,}$/.test(trimmed)) {
+    return res.status(400).json({
+      error: "token does not look like a GitHub token (expected prefix github_pat_, ghp_, gho_, ghs_, ghu_ or ghr_)",
+    });
+  }
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const tokenPath = path.join(GH_TOKENS_DIR, path.basename(id));
+  fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
+  try { fs.chmodSync(tokenPath, 0o600); } catch { /* best effort */ }
+  const updated = {
+    ...cred,
+    preview: githubTokenPreview(trimmed),
+    fingerprint: githubTokenFingerprint(trimmed),
+    rotatedAt: new Date().toISOString(),
+  };
+  saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  res.status(200).json(normalizeCredential(updated));
 });
 
 /* ─── GitHub repo probe — wizard helper ───────────────────────────────

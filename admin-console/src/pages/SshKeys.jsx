@@ -15,6 +15,7 @@ import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
+import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
 
 const inputStyle = {
@@ -430,6 +431,11 @@ export default function SshKeys() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
+  // This page manages team/system (admin-managed) credentials only. Personal
+  // credentials (#1568) — which the caller may also see in this list, since the
+  // API returns their own personal entries — are managed on the self-service
+  // "My Credentials" page and filtered out here so the two tiers stay distinct.
+  const adminKeys = adminManagedCredentials(keys ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
@@ -603,7 +609,7 @@ export default function SshKeys() {
 
       <DataTable
         columns={COLUMNS}
-        data={keys ?? []}
+        data={adminKeys}
         emptyText="No SSH keys stored yet. Click 'New Key' to add one."
       />
 

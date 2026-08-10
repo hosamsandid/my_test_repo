@@ -16,6 +16,7 @@ import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
+import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
 
 const inputStyle = {
@@ -293,6 +294,9 @@ export default function GithubTokens() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
+  // Admin-managed (team/system) tokens only; personal tokens (#1568) are managed
+  // on the self-service "My Credentials" page and filtered out here.
+  const adminTokens = adminManagedCredentials(tokens ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
@@ -447,7 +451,7 @@ export default function GithubTokens() {
 
       <DataTable
         columns={COLUMNS}
-        data={tokens ?? []}
+        data={adminTokens}
         emptyText="No GitHub tokens stored yet. Click 'New Token' to add one."
       />
 

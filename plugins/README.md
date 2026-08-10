@@ -50,10 +50,12 @@ real broker (Phase 3) exists. Its CLI echoes its arguments back.
 
 The first real broker (Phase 3, #1519): a governed container sandbox — PR
 #1287's `podman-mcp` broker reworked onto the plugin machinery. Agents drive
-their own compose stacks with the `aee-podman` CLI (`aee-podman compose up -f
-compose.yml`); the broker holds the libpod socket and scopes every container to
-the caller. Declares `defaultScopeGranularity: "agent"` (the §10 decision) and a
-per-scope `quota`. See `podman-sandbox/README.md`.
+containers with the `aee-podman` CLI: `aee-podman run <image>` for a single
+container (no compose file; pure CLI sugar over `compose up`, inheriting all
+broker guarantees; #1550), or `aee-podman compose up -f compose.yml` for
+multi-service stacks. The broker holds the libpod socket and scopes every
+container to the caller. Declares `defaultScopeGranularity: "agent"` (the §10
+decision) and a per-scope `quota`. See `podman-sandbox/README.md`.
 
 ## `test-mgmt` (plugin #2)
 

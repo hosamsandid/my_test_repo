@@ -26,12 +26,17 @@
 //   2. `/ui/*` — the board UI + its data API, proxied by the console. Every
 //      request carries signed viewer headers; the broker verifies them and
 //      re-enforces the ui.routes minRole (team-member for the board, team-admin
-//      for /admin) so a bypassed proxy cannot open /admin as a member.
+//      for /admin) so a bypassed proxy cannot open /admin as a member. The board
+//      renders all four §5 primitives and, in Edit mode, drives every mutation
+//      through the human-write `/api/mutate` endpoint (role-gated, NOT autonomy-
+//      gated — autonomy governs the agent path); `set-autonomy` stays the
+//      Team-Admin-only `/api/settings` route.
 //
-// The rich swimlane editor (direct-manipulation, selection inspector, colour
-// pickers, reorder, requirement-target-by-click, undo/redo) is the Phase-3
-// completion step; this ships the served board (view + tick) + the /admin
-// autonomy setting so the board is usable on Podman end-to-end. See README.
+// #1564 completes the board's edit surface: the three remaining primitives
+// (graph / bipartite / blocks) plus panel add/remove/reorder over the existing
+// swimlane editing, all on the pure plan-doc.js mutations. The direct-
+// manipulation polish (drag reorder, colour pickers, requirement-target-by-click,
+// undo/redo) is a refinement over these same ops — see README / the PR.
 
 const http = require('http');
 const fs = require('fs');
@@ -211,6 +216,21 @@ async function handleUi(req, res, uiPath) {
     // /admin only (requiredRoleForPath('/api/settings') === team-admin above)
     const body = parseJson(await readBody(req));
     const r = store.mutate(scopeId, { type: 'set-autonomy', level: Number(body.agentAutonomy) }, { enforceAutonomy: false });
+    return sendJson(res, r.ok ? 200 : 400, r.ok ? r.doc : { error: r.reason });
+  }
+  // The board editor's write path (#1564): apply one plan-doc mutation op. A human
+  // console write is role-gated by the proxy + the viewer-header role check above,
+  // NOT autonomy-gated (autonomy governs the AGENT path, not the person editing
+  // their own board). `set-autonomy` stays the Team-Admin-only /api/settings route,
+  // so a Team Member editing the board can never raise the ladder here.
+  if (uiPath === '/api/mutate' && req.method === 'POST') {
+    const body = parseJson(await readBody(req));
+    const op = body && body.op;
+    if (!op || typeof op !== 'object') return sendJson(res, 400, { error: 'op required' });
+    if (op.type === 'set-autonomy') {
+      return sendJson(res, 403, { error: 'autonomy is set on the /admin page, not the board' });
+    }
+    const r = store.mutate(scopeId, op, { enforceAutonomy: false });
     return sendJson(res, r.ok ? 200 : 400, r.ok ? r.doc : { error: r.reason });
   }
 

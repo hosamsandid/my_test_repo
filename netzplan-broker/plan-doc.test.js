@@ -20,6 +20,7 @@ const {
   requiredAutonomy,
   laneReachedMilestone,
   zoneSatisfiedAt,
+  graphNeighbors,
 } = require('./plan-doc');
 
 const NOW = 1_700_000_000_000;
@@ -203,4 +204,182 @@ test('migrate re-normalizes and stamps the current version', () => {
   const doc = migratePlanDoc({ teamId: 't', version: 0, owners: [], panels: [] }, { now: NOW });
   assert.equal(doc.version, VERSION);
   assert.deepEqual(validatePlanDoc(doc), { ok: true, errors: [] });
+});
+
+// ─── #1564: the remaining panel primitives + panel composition ────────────────
+
+// Add a panel of `kind` to a fresh board and return { doc, pid }.
+function boardWithPanel(kind) {
+  let doc = newPlanDoc({ id: 'b', teamId: 't', now: NOW });
+  doc = applyMutation(doc, { type: 'add-panel', kind, id: `p-${kind}`, title: kind }, { now: NOW });
+  return { doc, pid: `p-${kind}` };
+}
+
+test('panel composition: add each primitive, reorder, delete — panels[] is an ordered list', () => {
+  let doc = newPlanDoc({ id: 'b', teamId: 't', now: NOW });
+  const first = doc.panels[0].id; // the seeded swimlane
+  doc = applyMutation(doc, { type: 'add-panel', kind: 'graph', id: 'g1' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-panel', kind: 'bipartite', id: 'bp1' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-panel', kind: 'blocks', id: 'bl1' }, { now: NOW });
+  assert.deepEqual(doc.panels.map((p) => p.kind), ['swimlane', 'graph', 'bipartite', 'blocks']);
+
+  // reorder — persists as array order (no `order` field stamped on panels)
+  doc = applyMutation(doc, { type: 'reorder-panels', order: ['bl1', 'g1', 'bp1', first] }, { now: NOW });
+  assert.deepEqual(doc.panels.map((p) => p.id), ['bl1', 'g1', 'bp1', first]);
+  assert.ok(!('order' in doc.panels[0]), 'panels carry no order field');
+
+  // a panel's title is editable kind-agnostically
+  doc = applyMutation(doc, { type: 'set-panel-title', id: 'g1', title: 'Waves' }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === 'g1').title, 'Waves');
+
+  // remove
+  doc = applyMutation(doc, { type: 'delete-panel', id: 'g1' }, { now: NOW });
+  assert.deepEqual(doc.panels.map((p) => p.id), ['bl1', 'bp1', first]);
+  assert.throws(() => applyMutation(doc, { type: 'delete-panel', id: 'ghost' }), /unknown panel/);
+  // an unknown kind falls back to swimlane rather than corrupting the board
+  doc = applyMutation(doc, { type: 'add-panel', kind: 'nonsense', id: 'x' }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === 'x').kind, 'swimlane');
+});
+
+test('graph: nodes and typed dependency edges are fully editable; delete-node drops its edges', () => {
+  let { doc, pid } = boardWithPanel('graph');
+  doc = applyMutation(doc, { type: 'add-owner', id: 'o1', name: 'Team' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-band', panelId: pid, id: 'wave1', name: 'Wave 1' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-node', panelId: pid, id: 'n1', label: 'A', nodeType: 'service', bandId: 'wave1', ownerId: 'o1', status: 'active' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-node', panelId: pid, id: 'n2', label: 'B', nodeType: 'batch', bandId: 'wave1' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-edge', panelId: pid, id: 'e1', from: 'n1', to: 'n2', edgeType: 'blocks' }, { now: NOW });
+
+  const g = doc.panels.find((p) => p.id === pid);
+  assert.equal(g.nodes.find((n) => n.id === 'n1').type, 'service', 'node type from nodeType');
+  assert.equal(g.nodes.find((n) => n.id === 'n1').bandId, 'wave1');
+  assert.equal(g.nodes.find((n) => n.id === 'n1').ownerId, 'o1');
+  assert.equal(g.edges[0].type, 'blocks', 'edge is typed');
+
+  // update a node (nodeType round-trips as `type`) and an edge type
+  doc = applyMutation(doc, { type: 'update-node', panelId: pid, id: 'n1', nodeType: 'gateway', status: 'done' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'update-edge', panelId: pid, id: 'e1', edgeType: 'depends' }, { now: NOW });
+  const g2 = doc.panels.find((p) => p.id === pid);
+  assert.equal(g2.nodes.find((n) => n.id === 'n1').type, 'gateway');
+  assert.equal(g2.edges[0].type, 'depends');
+
+  // no self-loop, no dangling endpoint
+  assert.throws(() => applyMutation(doc, { type: 'add-edge', panelId: pid, from: 'n1', to: 'n1' }), /itself/);
+  assert.throws(() => applyMutation(doc, { type: 'add-edge', panelId: pid, from: 'n1', to: 'ghost' }), /existing nodes/);
+
+  // deleting a node drops every edge touching it (edges keyed on node id)
+  doc = applyMutation(doc, { type: 'delete-node', panelId: pid, id: 'n2' }, { now: NOW });
+  const g3 = doc.panels.find((p) => p.id === pid);
+  assert.deepEqual(g3.nodes.map((n) => n.id), ['n1']);
+  assert.equal(g3.edges.length, 0, 'edge to the deleted node dropped');
+});
+
+test('graph: hover highlight — graphNeighbors returns the node + its adjacencies, both directions', () => {
+  let { doc, pid } = boardWithPanel('graph');
+  for (const id of ['a', 'b', 'c', 'd']) doc = applyMutation(doc, { type: 'add-node', panelId: pid, id, label: id }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-edge', panelId: pid, from: 'a', to: 'b' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-edge', panelId: pid, from: 'c', to: 'a' }, { now: NOW });
+  const panel = doc.panels.find((p) => p.id === pid);
+  assert.deepEqual([...graphNeighbors(panel, 'a')].sort(), ['a', 'b', 'c'], 'a + downstream b + upstream c');
+  assert.deepEqual([...graphNeighbors(panel, 'd')], ['d'], 'isolated node only itself');
+  assert.equal(graphNeighbors(panel, 'ghost').size, 0, 'unknown node → empty set');
+});
+
+test('graph: delete-band unbands its nodes (never deletes them); delete-owner clears node owners too', () => {
+  let { doc, pid } = boardWithPanel('graph');
+  doc = applyMutation(doc, { type: 'add-owner', id: 'o1', name: 'X' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-band', panelId: pid, id: 'band1', name: 'B' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-node', panelId: pid, id: 'n1', label: 'A', bandId: 'band1', ownerId: 'o1' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'delete-band', panelId: pid, id: 'band1' }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === pid).nodes.find((n) => n.id === 'n1').bandId, null);
+  doc = applyMutation(doc, { type: 'delete-owner', id: 'o1' }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === pid).nodes.find((n) => n.id === 'n1').ownerId, null);
+});
+
+test('bipartite: entries + edges on both sides; the muted style survives an update', () => {
+  let { doc, pid } = boardWithPanel('bipartite');
+  doc = applyMutation(doc, { type: 'add-bip-entry', panelId: pid, side: 'left', id: 'streamA', label: 'Stream A' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-bip-entry', panelId: pid, side: 'right', id: 'labelX', label: 'ready' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-bip-edge', panelId: pid, id: 'be1', from: 'streamA', to: 'labelX', edgeType: 'maps', muted: true }, { now: NOW });
+  let bp = doc.panels.find((p) => p.id === pid);
+  assert.equal(bp.left[0].label, 'Stream A');
+  assert.equal(bp.right[0].label, 'ready');
+  assert.equal(bp.edges[0].muted, true, 'muted set');
+  assert.equal(bp.edges[0].type, 'maps');
+
+  // a from that isn't a LEFT id / a to that isn't a RIGHT id is rejected
+  assert.throws(() => applyMutation(doc, { type: 'add-bip-edge', panelId: pid, from: 'labelX', to: 'streamA' }), /unknown left entry/);
+
+  // updating the edge keeps muted unless explicitly changed; then flips it
+  doc = applyMutation(doc, { type: 'update-bip-edge', panelId: pid, id: 'be1', edgeType: 'routes' }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === pid).edges[0].muted, true, 'muted survives an unrelated update');
+  doc = applyMutation(doc, { type: 'update-bip-edge', panelId: pid, id: 'be1', muted: false }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === pid).edges[0].muted, false);
+
+  // deleting an entry drops its edges
+  doc = applyMutation(doc, { type: 'delete-bip-entry', panelId: pid, side: 'left', id: 'streamA' }, { now: NOW });
+  bp = doc.panels.find((p) => p.id === pid);
+  assert.equal(bp.left.length, 0);
+  assert.equal(bp.edges.length, 0, 'edge referencing the deleted left entry dropped');
+});
+
+test('blocks: cover, KPI tiles, callout and card columns are all expressible', () => {
+  let { doc, pid } = boardWithPanel('blocks');
+  doc = applyMutation(doc, { type: 'add-block', panelId: pid, id: 'cover', blockType: 'cover', heading: 'Q3 Plan', subtitle: 'Draft', body: 'The plan.' }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-block', panelId: pid, id: 'kpi', blockType: 'kpi', tiles: [{ id: 't1', label: 'Velocity', value: '42', sub: 'pts/wk' }, { id: 't2', label: 'Open', value: '7' }] }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-block', panelId: pid, id: 'call', blockType: 'callout', heading: 'Risk', body: 'Dependency slip.', chips: ['high', 'infra'] }, { now: NOW });
+  doc = applyMutation(doc, { type: 'add-block', panelId: pid, id: 'cards', blockType: 'cards', tiles: [{ id: 'c1', label: 'Card 1', value: 'body 1' }] }, { now: NOW });
+
+  const bl = doc.panels.find((p) => p.id === pid);
+  assert.deepEqual(bl.blocks.map((b) => b.type), ['cover', 'kpi', 'callout', 'cards']);
+  assert.equal(bl.blocks.find((b) => b.id === 'cover').heading, 'Q3 Plan');
+  assert.equal(bl.blocks.find((b) => b.id === 'kpi').tiles.length, 2);
+  assert.deepEqual(bl.blocks.find((b) => b.id === 'call').chips, ['high', 'infra']);
+
+  // update replaces tiles wholesale, reorder keeps ids
+  doc = applyMutation(doc, { type: 'update-block', panelId: pid, id: 'kpi', tiles: [{ id: 't1', label: 'Velocity', value: '50' }] }, { now: NOW });
+  assert.equal(doc.panels.find((p) => p.id === pid).blocks.find((b) => b.id === 'kpi').tiles[0].value, '50');
+  doc = applyMutation(doc, { type: 'reorder-blocks', panelId: pid, order: ['cards', 'cover', 'kpi', 'call'] }, { now: NOW });
+  assert.deepEqual(doc.panels.find((p) => p.id === pid).blocks.map((b) => b.id), ['cards', 'cover', 'kpi', 'call']);
+});
+
+test('AC7: every new-primitive structural op needs autonomy 2 — no primitive has its own path', () => {
+  for (const t of ['add-panel', 'delete-panel', 'reorder-panels', 'set-panel-title',
+    'add-band', 'add-node', 'update-node', 'delete-node', 'add-edge', 'reorder-nodes',
+    'add-bip-entry', 'add-bip-edge', 'update-bip-edge', 'delete-bip-entry',
+    'add-block', 'update-block', 'delete-block', 'reorder-blocks']) {
+    assert.equal(requiredAutonomy(t), 2, `${t} must gate at level 2`);
+  }
+  // the level-1 progress ops are unchanged (swimlane unaffected — AC6)
+  assert.equal(requiredAutonomy('tick-milestone'), 1);
+  assert.equal(requiredAutonomy('update-milestone'), 1);
+});
+
+test('AC6: swimlane is unaffected — a kind-scoped op refuses the wrong primitive', () => {
+  const { doc, pid } = boardWithPanel('graph');
+  // add-lane targets a swimlane; running it against a graph panel is refused cleanly
+  assert.throws(() => applyMutation(doc, { type: 'add-lane', panelId: pid, title: 'X' }), /is a graph, not a swimlane/);
+  // and add-node against the seeded swimlane is refused too
+  const swimId = doc.panels[0].id;
+  assert.throws(() => applyMutation(doc, { type: 'add-node', panelId: swimId, label: 'X' }), /is a swimlane, not a graph/);
+});
+
+test('graph/bipartite normalize repair dangling edges on load', () => {
+  const raw = {
+    version: 1, teamId: 't', settings: { agentAutonomy: 0 }, owners: [],
+    panels: [
+      { id: 'g', kind: 'graph', bands: [{ id: 'b1' }],
+        nodes: [{ id: 'n1', bandId: 'bGHOST', ownerId: 'oGHOST' }],
+        edges: [{ id: 'e1', from: 'n1', to: 'nGHOST' }, { id: 'e2', from: 'n1', to: 'n1' }] },
+      { id: 'bp', kind: 'bipartite',
+        left: [{ id: 'l1' }], right: [{ id: 'r1' }],
+        edges: [{ id: 'be1', from: 'l1', to: 'rGHOST' }, { id: 'be2', from: 'l1', to: 'r1' }] },
+    ],
+  };
+  const doc = normalizePlanDoc(raw, { now: NOW });
+  const g = doc.panels.find((p) => p.id === 'g');
+  assert.equal(g.nodes[0].bandId, null, 'ghost band dropped');
+  assert.equal(g.nodes[0].ownerId, null, 'ghost owner dropped');
+  assert.equal(g.edges.length, 0, 'dangling + self-loop edges dropped');
+  const bp = doc.panels.find((p) => p.id === 'bp');
+  assert.deepEqual(bp.edges.map((e) => e.id), ['be2'], 'only the referentially-sound bipartite edge kept');
 });

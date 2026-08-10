@@ -39,11 +39,11 @@ orchestrator.js (control-plane container, no Matrix presence)
 
 ### Teams (human collaboration & visibility scope)
 
-A **Team** (the *human* grouping) is the tenant/scope resources and human users are assigned to. **Do not confuse it with the `role: "team"` agent construct**, always called an **Agent Team** (an agent squad working a repo); they only share a word. Data model: three JSON collections under `/workspace` (`teams/`, `users/`, `memberships/index.json`); roles: **System Admin** (global, `user.systemAdmin`), **Team Admin**, **Team Member** (per-team). Every agent construct, env, and credential carries a `teamId` (default `default`).
+A **Team** (the *human* grouping) is the tenant/scope resources and human users are assigned to. **Do not confuse it with the `role: "team"` agent construct**, always called an **Agent Team** (an agent squad working a repo); they only share a word. Data model: three JSON collections under `/workspace` (`teams/`, `users/`, `memberships/index.json`); roles: **System Admin** (global, `user.systemAdmin`), **Team Admin**, **Team Member** (per-team). Every agent construct, env, and credential carries a `teamId` (default `default`). **Exception — personal credentials (#1567/epic #1558, Phase 1):** the new `personal` ownership tier carries a `userId` (the owner) and `teamId: null`; it is not team-owned.
 
 Source of truth: `orchestrator/teams-store.js` (pure factory). The orchestrator bootstraps the default team + an optional System Admin (`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT`) and backfills `teamId` at startup. CRUD at `/internal/admin/{teams,users,memberships}` (proxied `/api/admin/...`) — **distinct** from `/internal/teams/*` and `POST /api/teams`, which manage Agent Teams. Driven by the **Teams** page (`/teams`, `Teams.jsx`).
 
-**Resource scoping.** List endpoints are filtered by the caller's team membership via `admin-console/api/scope.js`. The env admin + any System Admin get full visibility (`all: true`); others see only resources whose `teamId` is one of their memberships (global/pool skills always visible). Full spec: `docs/teams-data-model.md`.
+**Resource scoping.** List endpoints are filtered by the caller's team membership via `admin-console/api/scope.js`. The env admin + any System Admin get full visibility (`all: true`); others see only resources whose `teamId` is one of their memberships (global/pool skills always visible). **Exception — personal credentials (#1567):** the personal tier is checked *before* `scope.all`; only the credential's owner (by `userId`) can see or manage it — not a System Admin, not the env single-admin. Full spec: `docs/teams-data-model.md`.
 
 ### Working Environments
 

@@ -161,6 +161,20 @@ test('rejects unknown platforms', () => {
   assert.ok(validatePluginManifest({ ...base(), platforms: ['k8s'] }).errors.some((e) => /platforms has unknown/.test(e)));
 });
 
+test('accepts kubernetes alone', () => {
+  const { ok, errors, manifest } = validatePluginManifest({ ...base(), platforms: ['kubernetes'] });
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.platforms, ['kubernetes']);
+});
+
+test('accepts podman + kubernetes combined', () => {
+  const { ok, errors, manifest } = validatePluginManifest({ ...base(), platforms: ['podman', 'kubernetes'] });
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.platforms, ['podman', 'kubernetes']);
+});
+
 // ── defaultScopeGranularity (§4.4/§10 decision: per-manifest default) ─────────
 test('accepts a defaultScopeGranularity within scopes and normalizes it', () => {
   const { ok, manifest } = validatePluginManifest({ ...base(), defaultScopeGranularity: 'agent' });

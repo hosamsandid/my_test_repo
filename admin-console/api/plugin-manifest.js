@@ -29,7 +29,7 @@
 //     sidecar: { image, env?, capabilities?, internalPort },
 //     cli: { name, entrypoint, runtime },
 //     credentials?: [ { key, description?, required? } ],
-//     platforms?: [ "podman" | "any" ],
+//     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
 //     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
 //     quota?: { maxObjects, ttlSeconds? },      // per-scope resource cap (§4.6)
@@ -52,8 +52,10 @@ const HOST_MOUNT_PREFIX = 'host-mount:';
 const CLI_RUNTIMES = Object.freeze(['python3', 'node', 'bash']);
 
 // Runtime requirements a plugin can declare (§4.1). `podman` = local/compose
-// only (like context mounts); `any` = no special stack requirement.
-const PLATFORMS = Object.freeze(['podman', 'any']);
+// only (like context mounts); `kubernetes` = runs as a k8s plugin sidecar (the
+// positive mirror of `podman`); `any` = no special stack requirement. A
+// manifest may combine the positive declarations (e.g. ["podman","kubernetes"]).
+const PLATFORMS = Object.freeze(['podman', 'kubernetes', 'any']);
 
 // Scope granularities the broker can implement (§4.6). A grant may only choose
 // a granularity the manifest's `scopes` declares.

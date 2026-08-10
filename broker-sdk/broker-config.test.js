@@ -14,6 +14,7 @@ test('the standard AEE_PLUGIN_* contract is read in full', () => {
       AEE_PLUGIN_QUOTA_MAX_OBJECTS: '8',
       AEE_PLUGIN_QUOTA_TTL_SECONDS: '86400',
       AEE_PLUGIN_AUDIT_DIR: '/audit',
+      AEE_PLUGIN_STATE_DIR: '/state',
     },
   });
   assert.deepEqual(cfg, {
@@ -22,6 +23,7 @@ test('the standard AEE_PLUGIN_* contract is read in full', () => {
     signingSecret: 's3cret',
     quota: { maxObjects: 8, ttlSeconds: 86400 },
     auditDir: '/audit',
+    stateDir: '/state',
   });
 });
 
@@ -31,6 +33,12 @@ test('an empty env yields safe defaults — no cap, no secret', () => {
   assert.equal(cfg.signingSecret, '');
   assert.deepEqual(cfg.quota, { maxObjects: null, ttlSeconds: null });
   assert.equal(cfg.auditDir, null);
+  assert.equal(cfg.stateDir, null);
+});
+
+test('the state volume is read from AEE_PLUGIN_STATE_DIR', () => {
+  const cfg = brokerConfig({ env: { AEE_PLUGIN_STATE_DIR: '/plugin-state' } });
+  assert.equal(cfg.stateDir, '/plugin-state');
 });
 
 test('legacy variable names are honoured only as a fallback', () => {

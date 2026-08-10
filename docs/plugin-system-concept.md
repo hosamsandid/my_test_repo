@@ -354,9 +354,15 @@ grant-derived scope list — a plugin can only enumerate scopes it was granted
 to), `enforceUiRoute` (the console's `minRole` refusal, `ui.routes` longest-
 prefix match), and `signViewerHeaders`/`verifyViewerHeaders` (the signed viewer
 identity + effective role). The live Express proxy, iframe mount and nav entry
-wire when the product decision (Florian's #1367 verdict) calls for an embedded
-QE UI; test-mgmt's manifest already declares three routes to exercise the
-role contract.
+were wired by the Network Plan epic (#1554, Phase 2 / #1562), which needed an
+embedded plugin UI: the console serves `ALL /plugins/:id/ui/*` behind the
+session gate (`enforceUiRoute` on the sub-path, `signViewerHeaders` forwarding
+the authenticated user + effective role), `GET /api/plugins/:id/scopes` returns
+the derived scope list, and dynamic nav entries appear for installed + granted
+UI plugins. The sidecar address comes from the orchestrator
+(`GET /internal/plugins/:id/ui-endpoint`), and each sidecar gets a generic
+`AEE_PLUGIN_STATE_DIR` volume beside its audit volume. test-mgmt's manifest
+declares three routes at two roles to exercise the contract end-to-end.
 
 ### 4.9 Broker SDK
 
@@ -608,7 +614,7 @@ before it moves from catalog to roadmap.
   the UI-extension surface's decidable core (`admin-console/api/plugin-ui-proxy
   .js`: scope discovery derived from the grant, `ui.routes` `minRole`
   enforcement, signed viewer headers) — reserved now; the live iframe proxy +
-  nav wire when the product decision (§4.8) calls for an embedded QE UI. The
+  nav were wired by the Network Plan epic (#1554 Phase 2, #1562). The
   orchestrator live-stack (token mint, scope-registry push, sidecar lifecycle,
   DM approval round-trip) is the completion step, same "pure core now, live
   stack next" split as Phases 1–3.

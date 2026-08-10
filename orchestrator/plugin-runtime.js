@@ -75,6 +75,19 @@ function auditVolumeName(pluginId) {
 }
 const AUDIT_MOUNT = '/audit';
 
+// Per-plugin STATE volume (§4.8): a generic persistent mount beside the audit
+// volume, where a UI-bearing plugin keeps its documents. It gets its own volume
+// for the same reasons the audit trail does — a sidecar has no business reading
+// agent workspaces, and separate volumes keep one plugin's state out of
+// another's reach — but distinct from audit because that mount carries its own
+// retention semantics; using it for documents would be an abuse of it. The
+// mount path is exposed to the broker as AEE_PLUGIN_STATE_DIR, platform-set and
+// never overridable from the manifest's own sidecar.env.
+function stateVolumeName(pluginId) {
+  return `${COMPOSE_PROJECT}_plugin-state-${pluginId}`;
+}
+const STATE_MOUNT = '/state';
+
 const TEARDOWN_TIMEOUT_MS = Number(process.env.PLUGIN_TEARDOWN_TIMEOUT_MS) || 10000;
 
 let secretCache = null;
@@ -146,6 +159,16 @@ async function ensureAuditVolume(pluginId) {
   return name;
 }
 
+async function ensureStateVolume(pluginId) {
+  const name = stateVolumeName(pluginId);
+  const r = await libpodRequest('POST', '/volumes/create', { name });
+  // 201 created, 409 already exists — both fine.
+  if (r.status >= 300 && r.status !== 409) {
+    console.warn(`[plugin-runtime] state volume ${name}: status=${r.status}`);
+  }
+  return name;
+}
+
 // Build the libpod create body for one plugin's broker sidecar. Exported for
 // unit testing: this is where a capability turns into an actual privilege, so
 // it is the one impure-module function worth asserting on directly.
@@ -167,6 +190,7 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
     AEE_PLUGIN_PORT: String(manifest.sidecar.internalPort),
     AEE_PLUGIN_SIGNING_SECRET: secret,
     AEE_PLUGIN_AUDIT_DIR: AUDIT_MOUNT,
+    AEE_PLUGIN_STATE_DIR: STATE_MOUNT,
   };
   // Quota is deleted rather than left as an author-supplied value: absent means
   // "no cap declared", and a plugin must not be able to manufacture that state.
@@ -196,7 +220,13 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
     name: sidecarContainerName(manifest.id),
     env,
     mounts,
-    volumes: [{ Name: auditVolumeName(manifest.id), Dest: AUDIT_MOUNT }],
+    // Two per-plugin volumes: the audit trail (§4.7) and the generic state
+    // volume (§4.8). Both mounted WHOLE, never via SubPath — a fresh volume is
+    // empty and a SubPath resolves against content that must already exist.
+    volumes: [
+      { Name: auditVolumeName(manifest.id), Dest: AUDIT_MOUNT },
+      { Name: stateVolumeName(manifest.id), Dest: STATE_MOUNT },
+    ],
     netns: { nsmode: 'bridge' },
     // Created on the compose network so the ORCHESTRATOR can reach it for
     // health/teardown; per-agent networks are connected on top, per grant.
@@ -220,6 +250,7 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
 
 async function startSidecar(manifest, dir = REGISTRY_DIR) {
   await ensureAuditVolume(manifest.id);
+  await ensureStateVolume(manifest.id);
   const body = sidecarCreateBody(manifest, { signingSecret: signingSecret(dir) });
   const cr = await libpodRequest('POST', '/containers/create', body);
   if (cr.status >= 300 || !cr.body || !cr.body.Id) {
@@ -411,6 +442,8 @@ async function teardownScope(manifest, scopeId, dir = REGISTRY_DIR) {
 module.exports = {
   auditVolumeName,
   AUDIT_MOUNT,
+  stateVolumeName,
+  STATE_MOUNT,
   PODMAN_HOST_SOCKET,
   signingSecret,
   mintScopeToken,

@@ -15,6 +15,11 @@
 //   AEE_PLUGIN_QUOTA_MAX_OBJECTS   manifest quota.maxObjects, per SCOPE (§4.6)
 //   AEE_PLUGIN_QUOTA_TTL_SECONDS   manifest quota.ttlSeconds (optional)
 //   AEE_PLUGIN_AUDIT_DIR           where auditWriter() should append
+//   AEE_PLUGIN_STATE_DIR           the generic per-plugin state volume (§4.8),
+//                                  beside the audit volume — where a UI plugin
+//                                  keeps its documents. Platform-set and never
+//                                  overridable from a manifest's own sidecar.env
+//                                  (same discipline as the signing secret/quota).
 //
 // Quota is deliberately parsed as "absent → no cap" rather than "absent → 0":
 // a plugin whose manifest declares no quota is uncapped by design, and a
@@ -29,6 +34,7 @@ const DEFAULTS = Object.freeze({
   signingSecret: '',
   quota: Object.freeze({ maxObjects: null, ttlSeconds: null }),
   auditDir: null,
+  stateDir: null,
 });
 
 function firstDefined(env, names) {
@@ -65,6 +71,7 @@ function brokerConfig({ env = process.env, fallbacks = {} } = {}) {
     signingSecret: pick('signingSecret', 'AEE_PLUGIN_SIGNING_SECRET') || DEFAULTS.signingSecret,
     quota: { maxObjects, ttlSeconds },
     auditDir: pick('auditDir', 'AEE_PLUGIN_AUDIT_DIR') || DEFAULTS.auditDir,
+    stateDir: pick('stateDir', 'AEE_PLUGIN_STATE_DIR') || DEFAULTS.stateDir,
   };
 }
 

@@ -13512,6 +13512,89 @@ async function main() {
       return;
     }
 
+    // GET /internal/plugins/:id/ui-endpoint — the sidecar's base URL for the
+    // console's §4.8 UI proxy. The orchestrator owns sidecar truth because it
+    // starts them; on Kubernetes the address is a Service name rather than a
+    // container name, so a lookup is the only form that survives that phase, and
+    // the admin-console image (which copies only api/*.js) never learns the
+    // naming rule. 404 when the plugin is not installed / its manifest is
+    // invalid; `running` tells the caller whether a broker is actually up.
+    const uiEndpointMatch = req.method === 'GET' &&
+      req.url.split('?')[0].match(/^\/internal\/plugins\/([^/]+)\/ui-endpoint$/);
+    if (uiEndpointMatch) {
+      (async () => {
+        try {
+          const pluginId = decodeURIComponent(uiEndpointMatch[1]);
+          const entry = pluginRegistry.readPluginManifest(pluginId);
+          if (!entry.ok || !entry.manifest) {
+            return sendJson(res, 404, { error: `Plugin '${pluginId}' is not installed or its manifest is invalid` });
+          }
+          let running = false;
+          try {
+            const live = await pluginRuntime.listLiveSidecars();
+            running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean)).has(pluginId);
+          } catch { /* runtime down: report not running */ }
+          return sendJson(res, 200, {
+            pluginId,
+            endpoint: pluginRuntime.brokerBaseUrl(entry.manifest),
+            hasUi: !!(entry.manifest.ui && Array.isArray(entry.manifest.ui.routes)),
+            running,
+          });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/plugins/:id/granted-agents — the resolved grant enumeration
+    // the console feeds to plugin-ui-proxy.deriveScopeList: every materialised
+    // agent whose effective grant includes this plugin, shaped
+    // { agentId, parentTeamId?, scopeGranularity }, plus a display-name
+    // directory. Discovery is not a new read privilege — the list is derived
+    // ONLY from grants that already exist.
+    const grantedAgentsMatch = req.method === 'GET' &&
+      req.url.split('?')[0].match(/^\/internal\/plugins\/([^/]+)\/granted-agents$/);
+    if (grantedAgentsMatch) {
+      (async () => {
+        try {
+          const pluginId = decodeURIComponent(grantedAgentsMatch[1]);
+          const entry = pluginRegistry.readPluginManifest(pluginId);
+          if (!entry.ok || !entry.manifest) {
+            return sendJson(res, 404, { error: `Plugin '${pluginId}' is not installed or its manifest is invalid` });
+          }
+          const configs = listAgentIds().map((id) => loadAgentConfig(id)).filter(Boolean);
+          const teams = {};
+          const agents = {};
+          for (const c of configs) {
+            const name = c.displayName || c.name || c.id;
+            agents[c.id] = name;
+            if (c.role === 'team') teams[c.id] = name;
+          }
+          const grantedAgents = [];
+          for (const c of configs) {
+            if (!c.token) continue; // a stub has no running surface
+            let grant = null;
+            try { grant = pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
+            catch { grant = null; }
+            if (!grant) continue;
+            grantedAgents.push({
+              agentId: c.id,
+              parentTeamId: c.parentTeamId || null,
+              teamId: c.role === 'team' ? c.id : (c.parentTeamId || null),
+              scopeGranularity: grant.scopeGranularity === 'agent' ? 'agent' : 'team',
+              agentName: agents[c.id],
+              teamName: teams[c.parentTeamId] || (c.role === 'team' ? teams[c.id] : undefined),
+            });
+          }
+          return sendJson(res, 200, { pluginId, grantedAgents, directory: { teams, agents } });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
     // POST /internal/teams/:teamId/plugins/{activate,deactivate}
     // Body: { pluginId, scopeGranularity?, includeMembers? }
     const teamPluginMatch = req.method === 'POST' &&

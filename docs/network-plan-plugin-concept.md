@@ -333,7 +333,7 @@ Ordered so the board is usable before the Kubernetes work lands.
 | 1 (#1561) | `PLATFORMS` gains `kubernetes`; two-sided guard green | manifest can express the plugin |
 | 2 (#1562) | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume *(shipped — #1562)* | `test-mgmt`'s three routes serve and refuse correctly |
 | 3 (#1563) | The plugin: manifest, broker on the SDK, document store, `swimlane` primitive at parity *(shipped — #1563; the id-keyed document model, `aee-plan` CLI + autonomy ladder, the on-SDK broker with a state-volume store, and a minimal served board (view + tick + `/admin`) — the rich swimlane editor is the completion step)* | **board usable on Podman** |
-| 4 (#1564) | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder | full editability |
+| 4 (#1564) | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder *(shipped — #1564; all three primitives in the id-keyed `plan-doc.js` model with referential repair, `add-panel`/`delete-panel`/`reorder-panels`/`set-panel-title` composition, a shared level-2 authorisation path, `graphNeighbors` hover helper, and a served board whose Edit mode adds/edits/reorders/removes every primitive; the direct-manipulation polish is a UI refinement over the same mutations)* | full editability |
 | 5 (#1565) | Kubernetes: Deployment + Service + PVC, RBAC, flag flip | board reachable on GKE |
 | 6 (#1566) | Content migration: export the existing plan, round-trip import | today's board reproduced |
 

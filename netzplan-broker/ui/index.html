@@ -8,9 +8,25 @@
     :root { color-scheme: light dark; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     body { margin: 0; padding: 16px; }
     h1 { font-size: 18px; margin: 0 0 4px; }
-    .sub { color: #6b7280; font-size: 13px; margin: 0 0 16px; }
-    .zone { border: 1px solid #e5e7eb; border-radius: 8px; margin: 12px 0; overflow: hidden; }
-    .zone > header { padding: 6px 10px; font-weight: 600; font-size: 13px; background: rgba(100,116,139,.08); }
+    .sub { color: #6b7280; font-size: 13px; margin: 0 0 12px; }
+    .err { color: #b91c1c; font-size: 13px; min-height: 16px; }
+    button { font: inherit; cursor: pointer; }
+    .btn { border: 1px solid #d1d5db; background: transparent; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .btn:hover { background: rgba(100,116,139,.1); }
+    .btn.mini { padding: 0 6px; font-size: 12px; line-height: 18px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; }
+    .toolbar .spacer { flex: 1; }
+
+    /* panel wrapper */
+    .panel { border: 1px solid #e5e7eb; border-radius: 10px; margin: 14px 0; overflow: hidden; }
+    .panel > header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: rgba(100,116,139,.08); }
+    .panel > header .ptitle { font-weight: 600; font-size: 13px; flex: 1; }
+    .panel > header .kind { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+    .panel > .body { padding: 10px; }
+
+    /* swimlane */
+    .zone { border: 1px solid #e5e7eb; border-radius: 8px; margin: 8px 0; overflow: hidden; }
+    .zone > header { padding: 6px 10px; font-weight: 600; font-size: 13px; background: rgba(100,116,139,.06); }
     .zone.or > header::after { content: " · OR zone (any lane satisfies)"; color: #6b7280; font-weight: 400; }
     .lane { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-top: 1px solid #f1f5f9; }
     .lane .title { min-width: 160px; }
@@ -18,13 +34,59 @@
     .ms { display: flex; gap: 6px; flex-wrap: wrap; }
     .ms label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 6px; border: 1px solid #e5e7eb; border-radius: 999px; }
     .ms label.done { background: rgba(16,185,129,.12); border-color: rgba(16,185,129,.4); }
-    .empty { color: #6b7280; font-style: italic; padding: 24px; text-align: center; }
-    .err { color: #b91c1c; font-size: 13px; }
+
+    /* graph */
+    .band { border: 1px solid #e5e7eb; border-radius: 8px; margin: 8px 0; }
+    .band > header { padding: 4px 10px; font-size: 12px; font-weight: 600; border-left: 4px solid #64748b; }
+    .nodes { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+    .gnode { border: 1px solid #d1d5db; border-radius: 8px; padding: 6px 8px; min-width: 120px; font-size: 12px; background: rgba(148,163,184,.06); }
+    .gnode .nlabel { font-weight: 600; }
+    .gnode .nmeta { color: #6b7280; font-size: 11px; }
+    .gnode.dim { opacity: .25; }
+    .gnode.neighbour { outline: 2px solid rgba(59,130,246,.6); }
+    .edges { font-size: 12px; color: #6b7280; padding: 4px 10px; }
+    .edges .edge { display: inline-flex; align-items: center; gap: 4px; margin: 0 8px 4px 0; padding: 1px 6px; border: 1px dashed #cbd5e1; border-radius: 6px; }
+
+    /* bipartite */
+    .bip { display: flex; gap: 16px; }
+    .bip .col { flex: 1; }
+    .bip .col h4 { margin: 0 0 6px; font-size: 12px; color: #6b7280; }
+    .bip .entry { border: 1px solid #e5e7eb; border-radius: 6px; padding: 4px 8px; margin: 4px 0; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+    .bip .entry .sub { color: #6b7280; font-size: 11px; }
+    .bipedges .edge.muted { opacity: .4; }
+
+    /* blocks */
+    .block { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin: 8px 0; }
+    .block .bhead { font-weight: 600; font-size: 14px; }
+    .block .bsubtitle { color: #6b7280; font-size: 12px; }
+    .block .bbody { font-size: 13px; margin: 6px 0; white-space: pre-wrap; }
+    .block .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .block .chip { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: rgba(100,116,139,.12); }
+    .block .tiles { display: flex; gap: 10px; flex-wrap: wrap; }
+    .block .tile { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 12px; min-width: 100px; }
+    .block .tile .value { font-size: 20px; font-weight: 700; }
+    .block .tile .tlabel { font-size: 11px; color: #6b7280; }
+    .block .tile .tsub { font-size: 11px; color: #6b7280; }
+    .block .bmeta { font-size: 11px; color: #9ca3af; margin-top: 6px; }
+
+    .empty { color: #6b7280; font-style: italic; padding: 20px; text-align: center; }
+    .row-actions { display: inline-flex; gap: 4px; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
   <h1 id="name">Network Plan</h1>
   <p class="sub" id="sub"></p>
+  <div class="toolbar">
+    <label style="font-size:13px;"><input type="checkbox" id="editToggle" /> Edit</label>
+    <span class="editonly hidden" id="addPanelWrap">
+      <button class="btn" data-add="swimlane">+ Swimlane</button>
+      <button class="btn" data-add="graph">+ Graph</button>
+      <button class="btn" data-add="bipartite">+ Bipartite</button>
+      <button class="btn" data-add="blocks">+ Blocks</button>
+    </span>
+    <span class="spacer"></span>
+  </div>
   <div id="board"></div>
   <p class="err" id="err"></p>
   <script src="app.js"></script>

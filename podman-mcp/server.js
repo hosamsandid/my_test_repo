@@ -34,6 +34,8 @@ const {
   maskSecretsOrDefault,
   healthEndpoint,
   teardownScopeEndpoint,
+  brokerConfig,
+  quotaExceeded,
 } = require('../broker-sdk');
 const { validateComposeFile } = require('./compose-validate');
 const { enforceNetworkIsolation, injectResourceDefaults } = require('./compose-harden');
@@ -42,8 +44,18 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
-const PORT = Number(process.env.PODMAN_MCP_PORT) || 4004;
-const SIGNING_SECRET = process.env.PODMAN_MCP_SIGNING_SECRET || '';
+// Runtime config comes from the orchestrator through the SDK's plugin-neutral
+// AEE_PLUGIN_* env contract (#1547). The pre-plugin-system PODMAN_MCP_* names
+// stay honoured as fallbacks so a hand-run broker keeps working.
+const CONFIG = brokerConfig({
+  fallbacks: {
+    port: ['PODMAN_MCP_PORT'],
+    signingSecret: ['PODMAN_MCP_SIGNING_SECRET'],
+  },
+});
+
+const PORT = CONFIG.port;
+const SIGNING_SECRET = CONFIG.signingSecret;
 const SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
 // --- podman CLI against the mounted socket -------------------------------
@@ -72,61 +84,21 @@ function sanitizeToken(s) {
   return String(s == null ? '' : s).replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-// --- global container cap (Settings page, cross-service read) -----------
-// podman-mcp deliberately has no /workspace mount and no admin-console
-// credential (least privilege — it holds only the Podman socket + signing
-// secret), so it cannot read platform-settings/state.json directly, nor call
-// the session-gated browser endpoint. Instead it reads the small,
-// unauthenticated-but-network-scoped internal mirror admin-console exposes
-// at /internal/platform-settings (reachable only from other containers on
-// the private compose network — never a published host port), matching the
-// service/container naming other cross-service calls in this branch use.
-const ADMIN_CONSOLE_URL = process.env.ADMIN_CONSOLE_URL
-  || `http://${process.env.COMPOSE_PROJECT_NAME || 'agent-studio'}-admin-console:4000`;
-const CONTAINER_CAP_CACHE_TTL_MS = 5000;
-let containerCapCache = { value: null, fetchedAt: 0 };
-
-function fetchContainerCap() {
-  const now = Date.now();
-  if (now - containerCapCache.fetchedAt < CONTAINER_CAP_CACHE_TTL_MS) {
-    return Promise.resolve(containerCapCache.value);
-  }
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      containerCapCache = { value, fetchedAt: Date.now() };
-      resolve(value);
-    };
-    try {
-      const req = http.get(`${ADMIN_CONSOLE_URL}/internal/platform-settings`, { timeout: 2000 }, (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          // Fail OPEN (no cap enforced) — an unreachable/misbehaving config
-          // service must never brick container creation. See module doc.
-          finish(null);
-          return;
-        }
-        let body = '';
-        res.on('data', (chunk) => { body += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(body);
-            const cap = parsed && parsed.containerCap;
-            finish(Number.isInteger(cap) && cap > 0 ? cap : null);
-          } catch {
-            finish(null);
-          }
-        });
-      });
-      req.on('timeout', () => { req.destroy(); finish(null); });
-      req.on('error', () => finish(null));
-    } catch {
-      finish(null);
-    }
-  });
-}
+// --- per-scope quota (manifest `quota`, §4.6) ----------------------------
+// #1287 shipped a GLOBAL container cap read over HTTP from the admin console's
+// /internal/platform-settings. That endpoint was never merged, so the fetch
+// always failed and — by design — failed open: no cap was ever enforced.
+//
+// The plugin system replaced that model (#1519): the cap is declared in the
+// plugin manifest as `quota: { maxObjects, ttlSeconds? }` and enforced PER
+// SCOPE, which is the unit that actually matters. A runaway loop-triggered
+// agent should hit its own ceiling without being able to starve every other
+// scope, and n members at agent granularity are n independent budgets — the
+// grant UI states that ceiling before the toggle. The orchestrator passes the
+// manifest's values in as AEE_PLUGIN_QUOTA_* at sidecar start; no cross-service
+// call is involved, so there is nothing left to fail open.
+const QUOTA = CONFIG.quota;
+const TTL_SWEEP_INTERVAL_MS = Number(process.env.PLUGIN_TTL_SWEEP_MS) || 60000;
 
 // --- scope-enforcing operations -----------------------------------------
 
@@ -142,19 +114,47 @@ function listOwned(scopeId) {
   return filterOwned(arr, scopeId);
 }
 
-// Count every container any scope currently owns (key-only label filter —
-// `label=<key>` with no `=value` matches the label being present at all,
-// regardless of which scopeId it carries). Used for the GLOBAL container
-// cap, which is deliberately a platform-wide total across every caller, not
-// a per-scope limit — a single scope maxing out its own containers is
-// already unrestricted by design; this is purely a runaway-resource-usage
-// safety net.
-function countAllOwned() {
+// Every container owned by ANY scope (key-only label filter — `label=<key>`
+// with no `=value` matches the label being present at all). Not a quota input
+// any more: quotas are per scope. This backs the TTL sweep, which must see
+// every scope's containers because no single caller's request is what expires
+// them.
+function listAllOwned() {
   const r = podman(['ps', '-a', '--filter', `label=${OWNER_LABEL_KEY}`, '--format', 'json']);
   if (r.code !== 0) throw new Error(r.stderr.trim() || 'podman ps failed');
   let arr = [];
   try { arr = JSON.parse(r.stdout || '[]'); } catch { arr = []; }
-  return Array.isArray(arr) ? arr.length : 0;
+  return Array.isArray(arr) ? arr : [];
+}
+
+// Reap containers older than the manifest's `quota.ttlSeconds`, across all
+// scopes. This is the backstop that makes a granularity flip safe (§4.6):
+// resources left under a previous scopeId keep their owner label and are never
+// migrated, so without a TTL they would linger until the scope is torn down.
+// Best-effort and silent on individual failures — a sweep that throws would
+// take the broker's timer down with it.
+function sweepExpired() {
+  const ttl = QUOTA.ttlSeconds;
+  if (!ttl) return { reaped: [] };
+  let containers;
+  try { containers = listAllOwned(); } catch { return { reaped: [] }; }
+  const cutoff = Date.now() - ttl * 1000;
+  const reaped = [];
+  for (const c of containers) {
+    // podman ps --format json reports Created as a unix timestamp (seconds).
+    const createdMs = typeof c.Created === 'number'
+      ? c.Created * 1000
+      : Date.parse(c.Created || '');
+    if (!Number.isFinite(createdMs) || createdMs > cutoff) continue;
+    const id = c.Id || (Array.isArray(c.Names) ? c.Names[0] : null);
+    if (!id) continue;
+    const r = podman(['rm', '-f', id]);
+    if (r.code === 0) reaped.push(id);
+  }
+  if (reaped.length) {
+    process.stdout.write(`[podman-mcp] TTL sweep reaped ${reaped.length} expired container(s)\n`);
+  }
+  return { reaped };
 }
 
 // Resolve a container the caller named, enforcing ownership. Returns the
@@ -293,8 +293,8 @@ function teardownScope(scopeId) {
 
 // Only compose_up ever CREATES new containers — every other tool
 // (container_exec/stop/rm/etc.) operates on containers that already exist —
-// so the global cap is enforced here only, before podman-compose is ever
-// invoked for a call that would push the platform-wide total over it.
+// so the quota is enforced here only, before podman-compose is ever invoked
+// for a call that would push THIS SCOPE over its ceiling.
 async function toolComposeUp(scopeId, { composeFile, projectName } = {}) {
   if (!composeFile || typeof composeFile !== 'string') {
     throw new Error('composeFile is required');
@@ -311,16 +311,17 @@ async function toolComposeUp(scopeId, { composeFile, projectName } = {}) {
   }
 
   const newServiceCount = Object.keys(doc.services || {}).length;
-  const cap = await fetchContainerCap();
-  if (cap !== null) {
-    const current = countAllOwned();
-    if (current + newServiceCount > cap) {
-      return {
-        ok: false,
-        error: `container cap reached (${current}/${cap} already running, this call would add ${newServiceCount} more)`,
-      };
-    }
+  // Per-scope, counted with the same ownership filter every other tool uses —
+  // so what a caller is charged for is exactly what `container_list` shows it.
+  const quotaError = quotaExceeded(QUOTA, listOwned(scopeId).length, { adding: newServiceCount });
+  if (quotaError) {
+    return {
+      ok: false,
+      error: `${quotaError} — this call would add ${newServiceCount} more. `
+        + 'Remove containers you no longer need with `aee-podman compose down` or `aee-podman rm <name>`.',
+    };
   }
+
   const dir = scopeComposeDir(scopeId, projectName);
   const stamped = injectOwnerLabels(composeFile, scopeId);
   fs.writeFileSync(path.join(dir, 'docker-compose.yml'), stamped);
@@ -534,18 +535,56 @@ function buildMcpServer(scopeId) {
     const { name, arguments: args } = request.params || {};
     const tool = findTool(name);
     if (!tool) {
+      recordCall(scopeId, name || 'unknown', 'usage-error');
       return { content: [{ type: 'text', text: `unknown tool: ${name}` }], isError: true };
     }
     try {
       const result = await tool.handler(scopeId, args || {});
+      // A tool that returns `{ ok: false }` refused on policy/quota grounds —
+      // that is a denial, not a crash, and the audit line has to say so.
+      const denied = result && typeof result === 'object' && result.ok === false;
+      recordCall(scopeId, name, denied ? 'denied' : 'ok');
       const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
       return { content: [{ type: 'text', text }] };
     } catch (err) {
+      recordCall(scopeId, name, 'domain-error');
       return { content: [{ type: 'text', text: `Error: ${(err && err.message) || err}` }], isError: true };
     }
   });
 
   return server;
+}
+
+// --- audit (§4.7) ------------------------------------------------------------
+// One JSONL line per broker call, appended to the per-plugin audit volume the
+// orchestrator mounts at AEE_PLUGIN_AUDIT_DIR. Inert (no writer, no throw) when
+// the variable is unset, so a hand-run broker still works.
+//
+// `agentId` records the SCOPE, not the individual member. At agent granularity
+// the two coincide by construction (plugin-audit.js). At team granularity the
+// broker genuinely cannot know which member called: the scope token is
+// granularity-opaque by design (§4.9) and a client-asserted agent id would be
+// unauthenticated — a plausible-looking but forgeable value is worse in an
+// audit log than an honest one.
+const auditLog = CONFIG.auditDir
+  ? require('../broker-sdk').auditWriter(CONFIG.auditDir, { retentionMs: 7 * 24 * 60 * 60 * 1000 })
+  : null;
+
+function recordCall(scopeId, subcommand, outcome) {
+  if (!auditLog) return;
+  try {
+    auditLog.write({
+      ts: new Date().toISOString(),
+      pluginId: CONFIG.id || 'podman-sandbox',
+      scopeId,
+      agentId: scopeId,
+      subcommand,
+      outcome,
+    });
+  } catch (err) {
+    // Audit is an obligation, not a gate: losing a line must not fail the call.
+    process.stderr.write(`[podman-mcp] audit write failed: ${err.message}\n`);
+  }
 }
 
 // --- auth ------------------------------------------------------------------
@@ -621,20 +660,35 @@ async function handleRequest(req, res) {
 }
 
 httpServer.listen(PORT, () => {
-  process.stdout.write(`[podman-mcp] listening on :${PORT}\n`);
+  const cap = QUOTA.maxObjects === null ? 'uncapped' : `${QUOTA.maxObjects}/scope`;
+  const ttl = QUOTA.ttlSeconds ? `${QUOTA.ttlSeconds}s TTL` : 'no TTL';
+  process.stdout.write(`[podman-mcp] listening on :${PORT} (quota: ${cap}, ${ttl})\n`);
 });
+
+// TTL sweep (§4.6). Only armed when the manifest declares one; unref'd so it
+// never holds the process open by itself.
+if (QUOTA.ttlSeconds) {
+  const timer = setInterval(() => {
+    try { sweepExpired(); } catch (err) {
+      process.stderr.write(`[podman-mcp] TTL sweep failed: ${err.message}\n`);
+    }
+  }, TTL_SWEEP_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+}
 
 module.exports = {
   podman,
   podmanCompose,
   listOwned,
-  countAllOwned,
+  listAllOwned,
+  sweepExpired,
   resolveOwned,
   injectOwnerLabels,
   projectFor,
   scopeFromAuth,
   teardownScope,
-  fetchContainerCap,
+  recordCall,
   maskEnvValues,
+  QUOTA,
   TOOLS,
 };

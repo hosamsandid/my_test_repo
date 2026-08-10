@@ -7,6 +7,11 @@
 #   make restart   # down + up
 #   make build     # rebuild orchestrator + admin-console images
 #   make agent-image # build the per-agent container image (as-agent:latest)
+#   make plugin-images # build the plugin broker sidecar images (#1547).
+#                    # Included in `make build`, but NOT in `make up` — these
+#                    # are heavy images and a stack with no plugins installed
+#                    # never needs them. Run it before installing a plugin on
+#                    # the Plugins page, or the broker has no image to start.
 #   make update    # git pull + down + up (pulls latest, restarts with rebuild)
 #   make ps        # show container status
 #   make logs      # follow logs of all stack containers
@@ -24,10 +29,19 @@ SERVICES     = conduwuit orchestrator admin-console stt
 # skill index they reference.
 ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace/skills
 SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
-SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
-ifeq ($(COMPOSE_PROJECT_NAME),)
-SKILL_POOL_VOLUME      = agent-studio_claude-workspace
+
+# The pool volume is named after the compose project. COMPOSE_PROJECT_NAME lives
+# in .env, which podman-compose reads but make does NOT — so taking it straight
+# from the environment silently fell back to the `agent-studio` default on every
+# named stack, and each seed-* target then wrote into (and created) a volume no
+# running container mounts. Read it out of .env here, with the environment
+# taking precedence and the historic default last.
+ENV_FILE ?= .env
+COMPOSE_PROJECT_NAME ?= $(shell sed -n 's/^COMPOSE_PROJECT_NAME=//p' $(ENV_FILE) 2>/dev/null | tail -1)
+ifeq ($(strip $(COMPOSE_PROJECT_NAME)),)
+COMPOSE_PROJECT_NAME = agent-studio
 endif
+SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 
 # Admin Console version footer (#483) — resolved here (not inside the
 # Docker build) since the admin-console build context is admin-console/,
@@ -41,7 +55,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
+.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -62,8 +76,22 @@ down:
 
 restart: down up
 
-build:
+build: plugin-images
 	$(COMPOSE) -f $(COMPOSE_FILE) build orchestrator admin-console stt
+
+# Plugin broker sidecar images (#1547). Like the agent image, these are NOT
+# compose services — the orchestrator creates them over libpod when a plugin is
+# installed, pulling from the local image store — so `compose build` never
+# touches them. Each broker's build context is the REPO ROOT, because its
+# Dockerfile vendors broker-sdk/ into the image (a build context cannot reach a
+# sibling directory). Image tags must match the `sidecar.image` in the
+# corresponding plugins/<id>/plugin.json.
+plugin-images:
+	@echo "Building plugin broker images..."
+	podman build -t localhost/aee-plugin-podman-sandbox:latest -f podman-mcp/Dockerfile .
+	podman build -t localhost/aee-plugin-test-mgmt:latest -f test-mgmt-broker/Dockerfile .
+	@echo "Done. Plugin broker images:"
+	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}'
 
 agent-image:
 	@n=0; max=3; \
@@ -281,4 +309,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"
+	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

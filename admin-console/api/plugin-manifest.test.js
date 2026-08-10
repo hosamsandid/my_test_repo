@@ -12,6 +12,12 @@ const {
   isValidCapability,
 } = require('./plugin-manifest');
 
+test('two-sided guard: admin-console canonical is byte-identical to orchestrator copy', () => {
+  const here = fs.readFileSync(path.join(__dirname, 'plugin-manifest.js'));
+  const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'plugin-manifest.js'));
+  assert.ok(here.equals(there), 'admin-console/api/plugin-manifest.js and orchestrator/plugin-manifest.js must be identical');
+});
+
 // A minimal valid manifest we clone-and-mutate per case.
 function base() {
   return {

@@ -15,6 +15,8 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
+import PluginGrantPicker from '../components/PluginGrantPicker';
+import { effectiveGrantFor } from './plugin-grant-view.js';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
@@ -1362,6 +1364,100 @@ function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel })
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 // Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
+// Plugin grant (#1547). Like ContextMountControl below — and unlike the rest of
+// the edit form, which batches into one PUT on Save — this saves IMMEDIATELY
+// through its own endpoint. A plugin grant is not just a config field: it seeds
+// the CLI + a scope token into the live workspace and reconnects the broker's
+// network, all without a respawn. Batching it into the form's PUT would make
+// "Save" mean two very different things.
+function PluginGrantSection({ agent, parentTeam }) {
+  const { data, refetch } = useApi('/api/plugins');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const [notice, setNotice] = React.useState('');
+
+  // Optimistic local grant so the row reflects the click before the refetch;
+  // reset from props whenever the server view changes.
+  const serverGrant = React.useMemo(
+    () => effectiveGrantFor(agent, parentTeam),
+    [agent, parentTeam],
+  );
+  const [grant, setGrant] = React.useState(serverGrant);
+  React.useEffect(() => { setGrant(serverGrant); }, [serverGrant]);
+
+  const installed = (data && data.installed) || [];
+
+  // The quota ceiling for "per agent" granularity is only honest if it counts
+  // the members that would actually carry the grant, so a team's members are
+  // counted for real rather than assumed to be one.
+  const { data: allAgents } = useApi(agent.role === 'team' ? '/api/agents' : null);
+  const memberCount = React.useMemo(() => {
+    if (agent.role !== 'team') return 1;
+    const list = Array.isArray(allAgents) ? allAgents : (allAgents && allAgents.agents) || [];
+    const n = list.filter(a => a && a.parentTeamId === agent.id).length;
+    return n > 0 ? n : 1;
+  }, [agent.role, agent.id, allAgents]);
+
+  async function apply(pluginId, active, scopeGranularity) {
+    setBusy(true); setErr(''); setNotice('');
+    const verb = active ? 'activate' : 'deactivate';
+    try {
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/plugins/${verb}`, {
+        pluginId, scopeGranularity,
+      });
+      setNotice(active
+        ? `${pluginId} activated — its CLI is available to the agent now, no restart needed.`
+        : `${pluginId} deactivated.`);
+      await refetch();
+    } catch (e) {
+      setErr(e.message || `Could not ${verb} ${pluginId}`);
+      setGrant(serverGrant); // roll the optimistic toggle back
+    } finally { setBusy(false); }
+  }
+
+  function onToggle(pluginId, active, granularity) {
+    setGrant(active
+      ? [...grant.filter(g => g.id !== pluginId), { id: pluginId, scopeGranularity: granularity }]
+      : grant.filter(g => g.id !== pluginId));
+    apply(pluginId, active, granularity);
+  }
+
+  function onGranularity(pluginId, granularity) {
+    setGrant(grant.map(g => (g.id === pluginId ? { ...g, scopeGranularity: granularity } : g)));
+    // A granularity flip is re-activation at the new scope: the server re-mints
+    // the token and rewrites the config, additively.
+    apply(pluginId, true, granularity);
+  }
+
+  if (installed.length === 0) return null;
+
+  return (
+    <div>
+      <div style={labelStyle}>Plugins</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        Governed capabilities beyond the container, reached through a broker that holds the
+        privilege so the agent never does. Changes apply immediately — no save, no restart.
+        {agent.role === 'team' && ' For a team agent this is the whole squad\'s grant; members inherit it.'}
+        {agent.role === 'team-member' && ' Changing this here creates a per-member override that replaces the team\'s set.'}
+      </div>
+      {err && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)' }}>{err}</div>
+      )}
+      {notice && !err && (
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)' }}>{notice}</div>
+      )}
+      <PluginGrantPicker
+        plugins={installed}
+        grants={grant}
+        onToggle={onToggle}
+        onGranularity={onGranularity}
+        memberCount={memberCount}
+        disabled={busy}
+      />
+    </div>
+  );
+}
+
 // control: unlike the rest of the edit form (one PUT on Save), a mount change is
 // baked at container spawn time and re-provisions the agent, so it saves
 // immediately via its own PATCH endpoint and reports the respawn outcome. Each
@@ -1676,6 +1772,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
           />
         </div>
       )}
+
+      <PluginGrantSection agent={agent} parentTeam={parentTeam} />
 
       {agent.role === 'orchestrator' && (
         <MissionDirectoryField

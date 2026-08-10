@@ -62,6 +62,7 @@ const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
+const Plugins             = lazy(() => import('./pages/Plugins'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
@@ -143,6 +144,7 @@ export default function App() {
           <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
           <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
+          <Route path="/plugins"      element={<AdminRoute><Plugins /></AdminRoute>} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />

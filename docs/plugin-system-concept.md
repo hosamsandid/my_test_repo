@@ -616,6 +616,21 @@ before it moves from catalog to roadmap.
   contract conventions (no mechanism change). Documented in
   [`cli-contract.md`](cli-contract.md); conformance-tested in
   `agent-image/scripts/test_cli_contract.py`.
+- **Phase 7 — live-stack completion** *(shipped — #1547)*: the half every phase
+  above deferred, collected into one vertical slice and proven on plugin #1.
+  Registry reader + System-Admin install (`/plugins` page, capability review
+  before the confirm), the shared signing secret, sidecar lifecycle over libpod
+  (`orchestrator/plugin-runtime.js`), grant → workspace sync with no respawn,
+  `.aee/bin` on the agent PATH, the Plugin Capabilities prompt block actually
+  wired, scope teardown before token invalidation, and the grant UI on the
+  Agents page. Fixed three wiring gaps found while tracing the path end to end:
+  the CLI posted to the sidecar's base URL while the broker only served `/mcp`;
+  `AEE_WORKSPACE` (which every CLI reads to find its config) was set nowhere
+  outside tests; and the per-scope `quota` was unimplemented, with #1287's
+  global cap fetching a `/internal/platform-settings` endpoint that was never
+  merged and failing open. Plugin #1's broker also gained the audit obligation
+  it never had. **Podman-only** — see the Deliberate differences block in
+  `orchestrator/spawn-kubernetes-pod.js`.
 
 ## 10. Open questions
 

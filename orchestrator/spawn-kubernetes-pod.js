@@ -36,6 +36,16 @@
 //     AEE_K8S_CONTEXT_HOSTPATH=1, never on hosted GKE.
 //   - SIGUSR1/SIGUSR2: k8s cannot forward per-process signals through the pod
 //     API — see the kill() handler for the mapping.
+//   - plugin broker sidecars (#1547): NOT implemented — PLUGIN_SIDECARS_SUPPORTED
+//     is false and plugin-runtime.js short-circuits every entry point. On Podman
+//     a broker is a sibling container plus per-agent network attachments; the
+//     k8s equivalent is a Deployment + Service + NetworkPolicy per plugin, and
+//     the grant-driven reachability that per-agent networks give for free has to
+//     become policy objects. That is a different mechanism, not a port, so it
+//     belongs to the k8s-at-scale concept. Consequence on a hosted stack: a
+//     plugin can be installed and granted (workspace seeding is runtime-agnostic
+//     and still happens), but no broker answers, so its CLI exits 3
+//     (broker unreachable). The Plugins page states this via `platforms`.
 //
 // RBAC needed by the orchestrator's ServiceAccount (namespaced Role):
 //   pods [get, list, create, delete] + pods/log [get] + pods/exec [create]
@@ -583,6 +593,12 @@ module.exports = {
   // k8s-runtime-internal extra (NOT part of the five-function seam): pod-exec.js
   // resolves an agent's running pod through the same instance-scoped selector.
   listAgentPods,
+  // Plugin sidecars (#1547) — see the Deliberate differences block above.
+  // perAgentNetworkName has no k8s counterpart (agent pods share the cluster
+  // network), so it returns null and the flag keeps plugin-runtime.js inert.
+  PLUGIN_SIDECARS_SUPPORTED: false,
+  perAgentNetworkName: () => null,
+  AGENT_NETWORK: null,
   // Pure helpers exposed for unit tests only — not part of the runtime seam.
   _internal: {
     safeName,

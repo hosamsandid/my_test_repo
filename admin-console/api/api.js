@@ -48,7 +48,6 @@ const { listProcessTemplates, loadProcessTemplate } = require('./process-templat
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
-const agentToTemplate = require('./agent-to-template');
 const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
@@ -72,6 +71,7 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { validatePluginManifest } = require('./plugin-manifest');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -6154,6 +6154,55 @@ async function proxySkillActivation(req, res, active) {
 app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
 app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
+// ── Plugin grant (#1547) ────────────────────────────────────────────────────
+// The plugin sibling of the skill activation above, and routed the same way:
+// the caller names an agent construct, and whether that resolves to the team
+// route or the single-agent route is decided from its role, not by the client.
+// Everything else — granularity grantability, installed-ness, override
+// semantics — is re-enforced by the orchestrator, which owns the grant store.
+async function proxyPluginActivation(req, res, active) {
+  const { agentId, pluginId, scopeGranularity, includeMembers } = req.body || {};
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    return res.status(400).json({ error: 'agentId (agent or team construct) required' });
+  }
+  if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+    return res.status(400).json({ error: 'pluginId required (lowercase slug)' });
+  }
+  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const route = cfg.role === 'team'
+    ? `/internal/teams/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`
+    : `/internal/agents/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`;
+  try {
+    const resp = await fetch(`${orchestratorUrl}${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pluginId,
+        ...(typeof scopeGranularity === 'string' ? { scopeGranularity } : {}),
+        ...(Array.isArray(includeMembers) ? { includeMembers } : {}),
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.post('/api/agents/:id/plugins/activate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, true);
+});
+app.post('/api/agents/:id/plugins/deactivate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, false);
+});
+
 // ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
 // Deliver the current source content to seeded copies through the orchestrator's
 // drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
@@ -7404,6 +7453,135 @@ app.get('/api/process-templates/:id', (req, res) => {
   const b = loadProcessTemplate(PROCESS_TEMPLATES_DIR, req.params.id);
   if (!b) return res.status(404).json({ error: 'Process template not found' });
   res.json(b);
+});
+
+/* ─── Plugin registry (#1547) ────────────────────────────────────────────
+ * Reference plugins ship under plugins/<id>/ and are seeded into the pool
+ * (/pool/plugins/) by `make seed-plugins`. INSTALLING copies one into the
+ * operator registry (/workspace/plugins/<id>/), which is what makes the
+ * orchestrator start its broker sidecar.
+ *
+ * Install is a deliberate, System-Admin-only action rather than something the
+ * seed does implicitly: a plugin's sidecar holds real privilege (plugin #1
+ * mounts the host Podman socket), so a human confirms the declared
+ * capabilities before anything privileged runs. Installing still grants
+ * NOTHING to any agent — that is the separate grant step (§4.4). */
+const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
+const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
+const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+// Read + validate one plugin.json under a base dir. Never throws; an invalid
+// plugin is reported WITH its errors rather than hidden, so an operator can see
+// why something they dropped in isn't installable.
+function readPluginDir(baseDir, id) {
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  const file = path.join(baseDir, id, 'plugin.json');
+  // Containment: id is regex-bounded above (no dots, no slashes), so the join
+  // cannot escape — re-checked here because this path is attacker-adjacent.
+  if (!path.resolve(file).startsWith(path.resolve(baseDir) + path.sep)) {
+    return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  }
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (err) { return { id, ok: false, errors: [`cannot read plugin.json: ${err.message}`], manifest: null }; }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) { return { id, ok: false, errors: [`invalid JSON: ${err.message}`], manifest: null }; }
+  const result = validatePluginManifest(parsed);
+  if (result.ok && result.manifest.id !== id) {
+    return { id, ok: false, errors: [`manifest id "${result.manifest.id}" does not match directory "${id}"`], manifest: null };
+  }
+  return { id, ok: result.ok, errors: result.errors, manifest: result.manifest };
+}
+
+function listPluginDirs(baseDir) {
+  try {
+    return fs.readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort();
+  } catch { return []; }
+}
+
+async function notifyPluginReconcile() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins/reconcile`, { method: 'POST' });
+    return resp.ok ? await resp.json() : { error: `orchestrator returned ${resp.status}` };
+  } catch (err) {
+    // The registry write already succeeded; a down orchestrator just means the
+    // sidecar starts at its next boot reconcile. Surfaced, never fatal.
+    return { error: err.message };
+  }
+}
+
+app.get('/api/plugins', apiLimiter, async (req, res) => {
+  const installedIds = listPluginDirs(REGISTRY_PLUGINS_DIR);
+  const installed = installedIds.map((id) => readPluginDir(REGISTRY_PLUGINS_DIR, id));
+  const available = listPluginDirs(POOL_PLUGINS_DIR)
+    .filter((id) => !installedIds.includes(id))
+    .map((id) => readPluginDir(POOL_PLUGINS_DIR, id));
+
+  // Which sidecars are actually up — an installed plugin whose broker is not
+  // running is a real state an operator needs to see, not an error.
+  let running = {};
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
+    if (resp.ok) {
+      const body = await resp.json();
+      for (const p of body.plugins || []) running[p.id] = !!p.sidecarRunning;
+    }
+  } catch { /* orchestrator unreachable — report unknown rather than false */ }
+
+  res.json({
+    installed: installed.map((p) => ({ ...p, installed: true, sidecarRunning: running[p.id] ?? null })),
+    available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
+    canManage: !!getScope(req).all,
+  });
+});
+
+app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  const entry = readPluginDir(POOL_PLUGINS_DIR, id);
+  if (!entry.ok) {
+    return res.status(entry.errors[0] && /cannot read/.test(entry.errors[0]) ? 404 : 400)
+      .json({ error: `plugin '${id}' is not installable`, errors: entry.errors });
+  }
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (fs.existsSync(dest)) return res.status(409).json({ error: `plugin '${id}' is already installed` });
+  try {
+    fs.mkdirSync(REGISTRY_PLUGINS_DIR, { recursive: true });
+    fs.cpSync(path.join(POOL_PLUGINS_DIR, id), dest, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `install failed: ${err.message}` });
+  }
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: true, manifest: entry.manifest, reconcile });
+});
+
+app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'invalid plugin id' });
+  }
+  if (!fs.existsSync(dest)) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  try {
+    fs.rmSync(dest, { recursive: true, force: true });
+  } catch (err) {
+    return res.status(500).json({ error: `uninstall failed: ${err.message}` });
+  }
+  // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
+  // action on the registry, not a mass revoke. The orchestrator's reconcile
+  // stops the orphaned sidecar, and a grant with no installed manifest seeds
+  // nothing and prompts nothing — so the agent simply stops being told about a
+  // capability whose broker is gone.
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: false, reconcile });
 });
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
@@ -11448,152 +11626,6 @@ app.delete('/api/agent-templates/:id', (req, res) => {
     return res.status(500).json({ error: `Failed to delete template: ${err.message}` });
   }
   res.json({ deleted: id, revertedToDefault: hasDefault });
-});
-
-// ─── Save a live agent as an Agent Template (#1509) ──────────────────────────
-// Promote a proven, running agent's configuration into a reusable, team-neutral
-// user-tier Agent Template — the inverse of team materialisation. Eligible
-// sources are standalone chat agents and individual team members (AC1); the
-// whole-team / orchestrator constructs are rejected. The extracted template
-// captures the agent's EFFECTIVE system prompt, skills and sessionPolicy, and
-// (opt-in) its triggers, then persists through the same validation + user-store
-// create path as the "New template" form. See agent-to-template.js.
-
-// Resolve a source agent's config + the derived template inputs (effective
-// prompt / skills / sessionPolicy / triggers), or an { error, status } shape.
-// The effective prompt mirrors the orchestrator's resolution: a team member's
-// own `systemPrompt` override, else the parent team's `systemPromptTemplate`;
-// a standalone agent's own prompt. Skills mirror `effectiveSkills` (override →
-// own grant → inherited team grant).
-function resolveTemplateExtractionSource(id) {
-  // Containment: build the source dir with the CodeQL-recognised resolve+relative
-  // barrier (AGENT_ID_RE alone isn't followed through the query).
-  const baseDir = path.resolve(AGENTS_DIR);
-  const srcDir = path.resolve(baseDir, id);
-  const rel = path.relative(baseDir, srcDir);
-  if (rel.startsWith('..') || path.isAbsolute(rel) || !rel) {
-    return { error: 'Invalid agent id', status: 400 };
-  }
-  const cfg = readJsonFile(path.join(srcDir, 'config.json'), null);
-  if (!cfg) return { error: 'Agent not found', status: 404 };
-
-  const role = cfg.role || 'agent';
-  if (role !== 'agent' && role !== 'team-member') {
-    return {
-      error: 'Only standalone agents and individual team members can be saved as a template.',
-      status: 400,
-    };
-  }
-
-  // Parent team config (members inherit prompt/skills from it).
-  let teamCfg = null;
-  if (role === 'team-member' && typeof cfg.parentTeamId === 'string' && AGENT_ID_RE.test(cfg.parentTeamId)) {
-    const teamDir = path.resolve(baseDir, cfg.parentTeamId);
-    const teamRel = path.relative(baseDir, teamDir);
-    if (!teamRel.startsWith('..') && !path.isAbsolute(teamRel) && teamRel) {
-      teamCfg = readJsonFile(path.join(teamDir, 'config.json'), null);
-    }
-  }
-
-  let effectivePrompt;
-  if (role === 'team-member') {
-    effectivePrompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0)
-      ? cfg.systemPrompt
-      : (teamCfg && typeof teamCfg.systemPromptTemplate === 'string' ? teamCfg.systemPromptTemplate : '');
-  } else {
-    effectivePrompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0)
-      ? cfg.systemPrompt
-      : (typeof cfg.systemPromptTemplate === 'string' ? cfg.systemPromptTemplate : '');
-  }
-
-  const skills = Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
-    : Array.isArray(cfg.skills) ? cfg.skills
-    : (teamCfg && Array.isArray(teamCfg.skills) ? teamCfg.skills : []);
-
-  const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-
-  return {
-    cfg,
-    effectivePrompt,
-    skills,
-    sessionPolicy: agentToTemplate.resolveSessionPolicy(cfg),
-    triggers: Array.isArray(triggers) ? triggers : [],
-  };
-}
-
-// Suggestion for the extract-template dialog (AC2): a unique id (across both
-// template tiers), the agent's display name, and an inferred category /
-// patternRole — all editable by the operator before confirming.
-app.get('/api/agents/:id/extract-template', (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const src = resolveTemplateExtractionSource(id);
-  if (src.error) return res.status(src.status).json({ error: src.error });
-  // Admin gating: creating a template from an agent requires management rights
-  // over the source agent's owning team (mirrors the clone route, #989).
-  if (!canManageAgent(getScope(req), agentMetaForScope(src.cfg))) {
-    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  }
-  const takenIds = new Set(listAgentTemplateIds());
-  res.json({
-    id: agentToTemplate.suggestTemplateId(id, takenIds),
-    displayName: src.cfg.displayName || id,
-    description: '',
-    category: agentToTemplate.inferCategory(src.cfg),
-    patternRole: agentToTemplate.inferPatternRole(src.cfg),
-  });
-});
-
-// Create a user-tier template from the source agent's live config (AC4-AC10).
-// The source agent is only ever READ — never mutated (AC10).
-app.post('/api/agents/:id/extract-template', (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const src = resolveTemplateExtractionSource(id);
-  if (src.error) return res.status(src.status).json({ error: src.error });
-  if (!canManageAgent(getScope(req), agentMetaForScope(src.cfg))) {
-    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  }
-
-  const body = req.body || {};
-  const template = agentToTemplate.buildTemplateFromAgent({
-    id: typeof body.id === 'string' ? body.id.trim() : '',
-    displayName: typeof body.displayName === 'string' && body.displayName.trim()
-      ? body.displayName.trim()
-      : (src.cfg.displayName || id),
-    description: body.description,
-    category: body.category,
-    patternRole: body.patternRole,
-    cfg: src.cfg,
-    effectivePrompt: src.effectivePrompt,
-    skills: src.skills,
-    sessionPolicy: src.sessionPolicy,
-    triggers: src.triggers,
-    includeTriggers: body.includeTriggers === true,
-  });
-
-  // Validate through the shared template validator (same gate as New template).
-  const { valid, errors, value } = agentTemplateStore.validateTemplate(template, { requireId: true });
-  if (!valid) return res.status(400).json({ error: errors[0], errors });
-
-  // Collision across BOTH tiers — never silently overwrite (AC9).
-  if (readTemplateFile(AGENT_TEMPLATES_DIR, value.id) || readTemplateFile(USER_AGENT_TEMPLATES_DIR, value.id)) {
-    return res.status(409).json({
-      error: `A template with id '${value.id}' already exists — choose a different id.`,
-      code: 'id-conflict',
-      id: value.id,
-    });
-  }
-
-  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, value.id);
-  if (!file) return res.status(400).json({ error: 'Invalid template id' });
-  try {
-    fs.mkdirSync(USER_AGENT_TEMPLATES_DIR, { recursive: true });
-    writeJsonAtomic(file, value);
-  } catch (err) {
-    return res.status(500).json({ error: `Failed to save template: ${err.message}` });
-  }
-  res.status(201).json({ id: value.id, origin: 'user' });
 });
 
 // Generic, role-agnostic team prompt. Each member can override this with

@@ -37,6 +37,7 @@ const {
 const { healthEndpoint, teardownScopeEndpoint } = require('./endpoints');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
 const { authorizeAction, isActionPermitted } = require('./authz');
+const { brokerConfig, quotaExceeded, positiveInt } = require('./broker-config');
 
 module.exports = {
   // token verification (§4.6)
@@ -72,4 +73,9 @@ module.exports = {
   // per-scope action authorization (§4.6 — first used by plugin #2, #1521)
   authorizeAction,
   isActionPermitted,
+  // sidecar runtime config + per-scope quota (§4.6 — the orchestrator's env
+  // contract for every broker it starts, #1547)
+  brokerConfig,
+  quotaExceeded,
+  positiveInt,
 };

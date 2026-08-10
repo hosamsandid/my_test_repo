@@ -239,8 +239,8 @@ Copy should make the tier and its identity consequence explicit (a personal cred
 
 ### Follow-up implementation issues (derivable from this concept)
 
-1. **Data model** — add `scope: 'personal'` + `userId` to credential entries; extend `normalizeCredential` (personal passthrough; legacy untouched) and `resolveCredentialOwnership`.
-2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials.
+1. **Data model** — add `scope: 'personal'` + `userId` to credential entries; extend `normalizeCredential` (personal passthrough; legacy untouched) and `resolveCredentialOwnership`. *(shipped — #1576)*
+2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials. *(shipped — #1576)*
 3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5).
 4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3).
 5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6).

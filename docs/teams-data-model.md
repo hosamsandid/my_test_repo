@@ -17,7 +17,7 @@ In scope:
 - A persistent store for **Teams**, **human users**, and **memberships**
   (user ↔ team ↔ role).
 - A `teamId` ownership field on every agent construct, Working Environment, and
-  credential — each is owned by exactly one Team.
+  credential — each is owned by exactly one Team. *(The `personal` credential tier, epic #1558, is the exception: it carries `userId` and `teamId: null`, owned by one human rather than a team.)*
 - Startup bootstrap of a default team + optional System Admin, and a one-time
   backfill that stamps pre-existing resources with the default team.
 
@@ -61,16 +61,16 @@ The single source of truth for this model is
 
 ## Ownership
 
-Every agent construct, Working Environment, and credential carries a `teamId`:
+Every agent construct, Working Environment, and credential carries a `teamId` *(personal-tier credentials are the exception — they carry `userId` and `teamId: null`; see epic #1558)*:
 
 | Resource | Stamped at | Default |
 |---|---|---|
 | Agent / Agent Team / team-member / orchestrator / bp-instance | orchestrator `createAgent` / `addTeamMember` | `default` (team-members inherit their parent Agent Team's `teamId`) |
 | Working Environment (`environment.json`) | admin-console `POST/PUT /api/environments` | `default` |
-| SSH key, GitHub token, MCP credential, LLM endpoint (index entries) | admin-console credential `POST` handlers | `default` |
+| SSH key, GitHub token, MCP credential, LLM endpoint — `team`/`system` scope | admin-console credential `POST` handlers | `default` |
+| SSH key, GitHub token — `personal` scope (#1567) | same handlers, but forced `scope: 'personal'` | `userId` = the authenticated caller; `teamId: null` |
 
-Creation paths accept an optional `teamId`; when supplied it must reference an
-existing team, otherwise the request is rejected (400). Absent = default team.
+Creation paths for `team`/`system` scopes accept an optional `teamId`; when supplied it must reference an existing team, otherwise the request is rejected (400). Absent = default team. Personal credentials always carry the caller's `userId` as owner; a body naming a different owner is rejected 403.
 
 ### Resolving an agent's tenant
 

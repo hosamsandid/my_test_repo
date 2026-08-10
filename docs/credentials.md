@@ -12,7 +12,22 @@ Every SSH key and GitHub token carries an **ownership tier** on its index entry 
 
 **Personal tier (epic #1558).** A `personal` credential belongs to exactly one human, identified by the `userId` owner field on its index entry, and is **strictly private** to that person. There is deliberately **no `scope.all` override**: neither a System Admin nor the env single-admin can list, read metadata for, or manage anyone else's personal credential. The owner is always the authenticated caller — a create body may not name a different owner, and a personal credential's ownership is immutable (it cannot be reassigned into or out of a `team`/`system` tier; create a fresh credential instead). Legacy entries without a `scope` field continue to normalize to a `team`/`default` credential, unchanged.
 
-> This tier is the data-model & RBAC foundation only (Phase 1). The self-service UI, the runtime resolution order (`personal → team → system`), rotation→respawn propagation and offboarding land in later phases of epic #1558.
+> Phase 1 landed the data-model & RBAC foundation; Phase 2 (below) adds the self-service UI. The runtime resolution order (`personal → team → system`), rotation→respawn propagation and offboarding land in later phases of epic #1558.
+
+## My Credentials (self-service)
+
+Every authenticated human manages their **own** personal SSH key and GitHub token from the **My Credentials** page (`/my-credentials`) — a top-level nav entry with **no `credAdmin` gate**, so a plain Team Member reaches it just like a Team Admin or System Admin (epic #1558 Phase 2). The page consumes the same `/api/ssh-keys` and `/api/github-tokens` endpoints, which already return the caller only their own personal entries plus any team/system credentials they may manage; the page filters to `scope: "personal"` owned by the caller (`personalCredentials` in `admin-console/src/pages/my-credentials-view.js`).
+
+From this surface a human can, for their own personal credentials only:
+
+- **Create** an SSH key — paste an existing private key or have the server generate a fresh ed25519 keypair (the public key is shown exactly once, matching the admin generate flow) — and register a GitHub token. The owner is always forced to the caller server-side (`resolveCredentialOwnership`); the create form never sends a `userId`.
+- **List** metadata only — name, fingerprint / masked preview, createdAt. Raw secrets are never returned after creation.
+- **Rename** (a name-only `PATCH`, allowed on the personal tier) and **rotate** the secret in place via `POST /api/{ssh-keys,github-tokens}/:id/rotate` (personal-tier only, owner-gated — a team/system credential is still rotated the create-new-and-repoint way described below). Rotation replaces the stored secret while keeping the same credential id/name/owner; propagating a rotation to *already-running* agents by respawn is Phase 4 (#1570), so the rotate panel tells the owner to rotate at a quiet moment.
+- **Delete** their own credential.
+
+Personal SSH keys are **account-wide** (one key covers all the owner's repositories); per-repo personal deploy keys are deferred (D8). The page shows a clear empty state when a human has none, and — because the personal tier is keyed on a real `userId` — an explanatory note to the **environment single-admin** (which has no user record, so cannot own personal credentials).
+
+The admin **SSH Keys** / **GitHub Tokens** pages (below) filter personal credentials out of their tables (`adminManagedCredentials`), so the two tiers stay visually and navigationally distinct: shared team/system credentials there, personal ones on My Credentials.
 
 ## SSH Keys
 

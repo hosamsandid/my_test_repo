@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeCredential,
+  isPersonalCredential,
   teamsById,
   credentialScopeLabel,
   creatableScopes,
@@ -33,6 +34,21 @@ test('normalizeCredential: system entry keeps assignedTeamIds, drops teamId', ()
   assert.deepEqual(n.assignedTeamIds, ['payments', 'risk']); // de-duped
 });
 
+test('normalizeCredential: personal entry keeps userId, drops team/system fields', () => {
+  const n = normalizeCredential({ id: 'k', scope: 'personal', userId: 'u-7', teamId: 'ignored' });
+  assert.equal(n.scope, 'personal');
+  assert.equal(n.userId, 'u-7');
+  assert.equal(n.teamId, null);
+  assert.deepEqual(n.assignedTeamIds, []);
+});
+
+test('isPersonalCredential: true only for the personal tier', () => {
+  assert.equal(isPersonalCredential({ scope: 'personal', userId: 'u-1' }), true);
+  assert.equal(isPersonalCredential({ scope: 'team', teamId: 'x' }), false);
+  assert.equal(isPersonalCredential({ scope: 'system', assignedTeamIds: [] }), false);
+  assert.equal(isPersonalCredential({ teamId: 'legacy' }), false);
+});
+
 test('teamsById maps id → name', () => {
   assert.deepEqual(teamsById([{ id: 'a', name: 'Alpha' }, { id: 'b' }]), { a: 'Alpha', b: 'b' });
 });
@@ -54,6 +70,14 @@ test('credentialScopeLabel: system assigned to teams', () => {
 test('credentialScopeLabel: system assigned to zero teams → Unassigned', () => {
   const l = credentialScopeLabel({ scope: 'system', assignedTeamIds: [] }, names);
   assert.equal(l.detail, 'Unassigned');
+  assert.deepEqual(l.teams, []);
+});
+
+test('credentialScopeLabel: personal → Personal / Private to you', () => {
+  const l = credentialScopeLabel({ scope: 'personal', userId: 'u-1' }, names);
+  assert.equal(l.scope, 'personal');
+  assert.equal(l.label, 'Personal');
+  assert.equal(l.detail, 'Private to you');
   assert.deepEqual(l.teams, []);
 });
 
@@ -87,6 +111,17 @@ test('canManageCredentialClient: team admin manages only own team-scoped creds',
   assert.equal(canManageCredentialClient({ scope: 'team', teamId: 'risk' }, caller), false);
   // never a system cred, even one assigned to their team
   assert.equal(canManageCredentialClient({ scope: 'system', assignedTeamIds: ['payments'] }, caller), false);
+});
+
+test('canManageCredentialClient: personal — only the owner, no sysadmin bypass', () => {
+  const cred = { scope: 'personal', userId: 'u-1' };
+  // owner manages it
+  assert.equal(canManageCredentialClient(cred, { userId: 'u-1' }), true);
+  // a different user (even a sys admin) may not — no scope.all bypass (D2)
+  assert.equal(canManageCredentialClient(cred, { isSysAdmin: true, userId: 'u-2' }), false);
+  assert.equal(canManageCredentialClient(cred, { isSysAdmin: true, adminTeamIds: [], userId: null }), false);
+  // an unowned personal credential matches nobody
+  assert.equal(canManageCredentialClient({ scope: 'personal' }, { userId: 'u-1' }), false);
 });
 
 test('canReassignCredentialClient: sysadmin only', () => {

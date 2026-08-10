@@ -109,6 +109,14 @@ button.
   and the **present member role-ids** (recovered from each member id `<teamId>-<roleId>`).
   When nothing clearly matches, nothing is shown — the hint is purely additive, so
   unrelated or fully-covered teams sprout no buttons.
+- **Which roles are missing** is decided once the template is known, by a template-
+  aware, display-name-aware fulfilment check (`fulfilledRoleIds`, #1556) so a role a
+  member visibly provides is never offered: a template role whose id ends in a digit
+  (`developer-2`) is recognised as its own role and not collapsed onto the base
+  (`developer`); a genuine second instance (`<teamId>-<roleId>-<n>` where only the base
+  is a template role) still counts the base present; and a member whose id does not
+  encode the template role id (a clone, a doubled `agent-` prefix) is matched to its
+  role by display name.
 - **One-click add.** The button reuses the existing member-create endpoint via its
   process-template branch — `POST /api/agents/:teamId/members { processTemplateId, roleId }`
   — which mirrors the Team-Setup wizard's per-role materialisation (systemPrompt +

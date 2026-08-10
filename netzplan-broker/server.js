@@ -52,6 +52,7 @@ const {
 } = require('../broker-sdk');
 const { PlanStore } = require('./plan-store');
 const { requiredAutonomy } = require('./plan-doc');
+const { exportPlanDoc } = require('./plan-import');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
 
 const PLUGIN_ID = 'netzplan';
@@ -203,6 +204,33 @@ async function handleUi(req, res, uiPath) {
   // data API
   if (uiPath === '/api/board' && req.method === 'GET') {
     return sendJson(res, 200, store.load(scopeId));
+  }
+  // Content migration (#1566). Export downloads the board as a portable PlanDoc
+  // (any team member); import replaces the board from an uploaded one (Team-Admin
+  // only — see requiredRoleForPath). Together they make migration a repeatable
+  // operation rather than a script anyone keeps, and `export → import → export` is
+  // byte-identical (PlanStore.import preserves timestamps; normalize is idempotent).
+  if (uiPath === '/api/export' && req.method === 'GET') {
+    const doc = exportPlanDoc(store.load(scopeId));
+    const fname = `network-plan-${String(scopeId).replace(/[^A-Za-z0-9._-]/g, '_')}.json`;
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${fname}"`,
+    });
+    return res.end(JSON.stringify(doc, null, 2));
+  }
+  if (uiPath === '/api/import' && req.method === 'POST') {
+    // Team-Admin only (requiredRoleForPath('/api/import') === 'team-admin' above).
+    const body = parseJson(await readBody(req));
+    const incoming = body && (body.doc || body.document || body);
+    if (!incoming || typeof incoming !== 'object') return sendJson(res, 400, { error: 'a PlanDoc is required' });
+    let doc;
+    try {
+      doc = store.import(scopeId, incoming);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err && err.message) || 'could not import document' });
+    }
+    return sendJson(res, 200, doc);
   }
   if (uiPath === '/api/tick' && req.method === 'POST') {
     const body = parseJson(await readBody(req));

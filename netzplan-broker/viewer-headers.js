@@ -70,7 +70,12 @@ const ROLE_RANK = Object.freeze({ 'team-member': 1, 'team-admin': 2, 'system-adm
 
 function requiredRoleForPath(uiPath) {
   const p = String(uiPath || '/');
-  if (p === '/admin' || p.startsWith('/admin/') || p === '/api/settings') return 'team-admin';
+  // `/api/settings` (autonomy) and `/api/import` (a wholesale board replace that
+  // is the content-migration entry point, #1566) are Team-Admin like /admin.
+  // Import is admin-gated for the same reason set-autonomy is: it can carry the
+  // autonomy field and it discards the current board, so it is not a Team-Member
+  // board edit. Export (`/api/export`) is a read and stays team-member.
+  if (p === '/admin' || p.startsWith('/admin/') || p === '/api/settings' || p === '/api/import') return 'team-admin';
   return 'team-member';
 }
 

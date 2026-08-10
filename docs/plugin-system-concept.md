@@ -668,6 +668,21 @@ before it moves from catalog to roadmap.
   governs the agent path; `set-autonomy` stays the `/admin`-only `/api/settings`
   route). The direct-manipulation polish (drag reorder, colour pickers,
   requirement-target-by-click, undo/redo) is a UI refinement over these same mutations.
+- **Kubernetes epic (#1554), Phase 6 — netzplan content migration** *(shipped — #1566)*:
+  the machinery to bring an existing plan in, not the plan itself — **no engagement
+  content is committed** (§12). Pure `netzplan-broker/plan-import.js`: `legacyBoardToPlanDoc`
+  is the **positional → id** converter (the source keys statuses and requirement targets
+  by array index; the model keys them by milestone id — concept §4), the single place that
+  alignment happens and it fails **loud** on any misalignment (done-array length ≠ milestone
+  count, out-of-range target index, unknown zone/owner) rather than mapping the wrong
+  milestone silently — the two "index shifted by +1" lanes are covered explicitly in
+  `plan-import.test.js`. `exportPlanDoc`/`importPlanDoc` wrap the idempotent normalize, and
+  `PlanStore.import` preserves timestamps + the board's current autonomy, so **export →
+  import → export is byte-identical**. Surfaced as a board **Export** button (team-member
+  read) + a Team-Admin `/admin` **Import a plan** control (`/api/import` refused below
+  team-admin). The one-off conversion of a specific plan runs off-repo; the restored
+  non-swimlane panels are the four §5 primitives (a normalisation, not a pixel-identical
+  restoration — §5/§12). See `docs/network-plan-plugin-concept.md` §11/§12.
 
 ## 10. Open questions
 

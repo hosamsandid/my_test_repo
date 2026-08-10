@@ -359,7 +359,26 @@
     doc.panels.forEach(function (p) { board.appendChild(renderPanel(p)); });
   }
 
+  // ── export (content migration, #1566) ────────────────────────────────────────
+  // Download the board as a portable PlanDoc. A read, so any team member may; the
+  // matching import lives on the Team-Admin /admin page (a wholesale replace).
+  // Fetch as a blob (not req(), which parses JSON) so the browser saves a file.
+  function exportBoard() {
+    setErr('');
+    fetch(api('export'), { headers: { Accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = el('a', { href: url, download: (doc && doc.name ? doc.name.replace(/[^A-Za-z0-9._-]+/g, '-') : 'network-plan') + '.json' });
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+      })
+      .catch(function (e) { setErr('Could not export: ' + e.message); });
+  }
+
   // ── wiring ──────────────────────────────────────────────────────────────────
+  var exportBtn = document.getElementById('exportBtn');
+  if (exportBtn) exportBtn.addEventListener('click', exportBoard);
   var toggle = document.getElementById('editToggle');
   if (toggle) toggle.addEventListener('change', function () { editMode = toggle.checked; hover = { panelId: null, nodeId: null }; render(); });
   document.querySelectorAll('[data-add]').forEach(function (b) {

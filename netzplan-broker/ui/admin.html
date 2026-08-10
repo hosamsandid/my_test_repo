@@ -29,6 +29,26 @@
     <p class="ok" id="ok"></p>
     <p class="err" id="err"></p>
   </fieldset>
+
+  <fieldset>
+    <legend>Import a plan</legend>
+    <p class="hint">
+      Replace this board with an imported <code>PlanDoc</code> (content migration).
+      Choose a <code>.json</code> file exported from any board, or paste one below,
+      then <b>Import</b>. This <b>overwrites</b> the current board; the autonomy level
+      above is governance and is kept unchanged. Team-Admin only.
+    </p>
+    <label class="row">
+      <input type="file" id="importFile" accept="application/json,.json" />
+    </label>
+    <label class="row">
+      <textarea id="importText" rows="6" style="width:100%; box-sizing:border-box; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;" placeholder="…or paste a PlanDoc JSON here"></textarea>
+    </label>
+    <button class="btn" id="importBtn" style="border:1px solid #d1d5db; background:transparent; border-radius:6px; padding:4px 12px; font-size:13px;">Import (replace board)</button>
+    <p class="ok" id="importOk"></p>
+    <p class="err" id="importErr"></p>
+  </fieldset>
+
   <script src="admin.js"></script>
 </body>
 </html>

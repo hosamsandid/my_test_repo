@@ -45,7 +45,7 @@ Validated by `admin-console/api/plugin-manifest.js`:
 ## CLI facade (`bin/aee-test.py`)
 
 Dependency-free single file (contract §4.5). Reads its endpoint + per-scope
-token from `.aee/plugins/test-mgmt.json` (0600, written by `plugin-sync.js`) and
+token from `.agent-studio/plugins/test-mgmt.json` (0600, written by `plugin-sync.js`) and
 speaks to the broker over the same Streamable-HTTP transport plugin #1 uses.
 
 ```

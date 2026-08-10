@@ -8,7 +8,7 @@
 // the agent-readable docs. Phase 2 is where that contract is *enforced*, so we
 // drive the reference plugin's actual CLI (plugins/dummy-echo) through it —
 // python3 is present in the agent image and the test host — reading its config
-// from the exact `.aee/plugins/<id>.json` shape plugin-sync.js plans.
+// from the exact `.agent-studio/plugins/<id>.json` shape plugin-sync.js plans.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -31,12 +31,12 @@ function run(args, workspace) {
 // A granted workspace: the 0600 config plugin-sync would have written.
 function grantedWorkspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-cli-'));
-  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
   const cfg = pluginConfigFile({
     pluginId: 'dummy-echo', scopeId: 't1', endpoint: 'http://aee-plugin-dummy-echo:8080',
     token: 'dummy-echo.t1.SIG', cliName: 'aee-echo',
   });
-  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'dummy-echo.json'), JSON.stringify(cfg), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'dummy-echo.json'), JSON.stringify(cfg), { mode: 0o600 });
   return dir;
 }
 
@@ -117,13 +117,13 @@ function runPod(args, workspace) {
 
 function grantedPodWorkspace(endpoint) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-pod-'));
-  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
   const cfg = pluginConfigFile({
     pluginId: 'podman-sandbox', scopeId: 't1',
     endpoint: endpoint || 'http://127.0.0.1:59371/',   // reserved, unroutable
     token: 'podman-sandbox.t1.SIG', cliName: 'aee-podman',
   });
-  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'podman-sandbox.json'), JSON.stringify(cfg), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'podman-sandbox.json'), JSON.stringify(cfg), { mode: 0o600 });
   return dir;
 }
 
@@ -199,13 +199,13 @@ function runTest(args, workspace) {
 
 function grantedTestWorkspace(endpoint) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-test-'));
-  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
   const cfg = pluginConfigFile({
     pluginId: 'test-mgmt', scopeId: 't1',
     endpoint: endpoint || 'http://127.0.0.1:59372/',   // reserved, unroutable
     token: 'test-mgmt.t1.SIG', cliName: 'aee-test',
   });
-  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'test-mgmt.json'), JSON.stringify(cfg), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'test-mgmt.json'), JSON.stringify(cfg), { mode: 0o600 });
   return dir;
 }
 

@@ -83,8 +83,8 @@ stderr.
 
 ## Relationship to plugin CLIs
 
-Plugin CLIs (seeded into `.aee/bin/`, see `plugin-system-concept.md` §4.5)
+Plugin CLIs (seeded into `.agent-studio/bin/`, see `plugin-system-concept.md` §4.5)
 follow the **same** four rules, plus two that only apply to them: submit→poll
 for long-running operations, and a `0600` config/identity file at
-`.aee/plugins/<id>.json`. An agent therefore learns the calling convention
+`.agent-studio/plugins/<id>.json`. An agent therefore learns the calling convention
 once and it holds for every CLI on its `PATH`, built-in or plugin-provided.

@@ -122,7 +122,7 @@ Agent-tier dirs are stamped lazily on first read (agents own those dirs).
 
 ### 2.3 Seeded copies join the model
 
-`.aee/seeded-skills.json` entries grow from `{tier, seededAt}` to:
+`.agent-studio/seeded-skills.json` entries grow from `{tier, seededAt}` to:
 
 ```jsonc
 "<name>": { "tier": "team", "seededAt": "…", "contentHash": "0f9e8d7c6b5a", "sourceVersion": 3 }

@@ -64,7 +64,7 @@ COPY e2e/ /opt/ace/e2e/
 RUN chmod +x /opt/ace/e2e/claude
 
 # `aee-artifact` — register/resolve mission artifacts by logical name via the
-# git-committed manifest (.aee/artifacts.jsonl). On PATH so agents call it
+# git-committed manifest (.agent-studio/artifacts.jsonl). On PATH so agents call it
 # directly to record what they produced and to resolve an upstream's outputs
 # whose physical path varies per run.
 RUN chmod +x /opt/ace/scripts/aee-artifact \
@@ -108,8 +108,8 @@ RUN chmod +x /opt/ace/scripts/usage \
 
 # Plugin CLI facades (#1547). Built-in CLIs above are symlinked into
 # /usr/local/bin at build time; plugin CLIs cannot be, because they are seeded
-# per agent into `<workspace>/.aee/bin` when a plugin is GRANTED — a live file
-# sync with no respawn. So the image puts a STABLE directory on PATH and the
+# per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED — a live
+# file sync with no respawn. So the image puts a STABLE directory on PATH and the
 # entrypoint points it at this agent's seed dir with a single symlink.
 #
 # Why not append the per-agent path to PATH in the container env instead:

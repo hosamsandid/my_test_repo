@@ -229,7 +229,7 @@ built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
 1. **Dependency-free single file** against the runtimes present in the agent
    image (`python3`, `node`, `curl`) — no compiled binaries (arch
    portability), no pip/npm installs.
-2. **Seeded, not baked**: plugin CLIs land in `/workspace/agents/<id>/.aee/bin/`
+2. **Seeded, not baked**: plugin CLIs land in `/workspace/agents/<id>/.agent-studio/bin/`
    (on `PATH` via the entrypoint), synced additively on grant change.
 3. **Discovery**: `--help` carries complete agent-readable documentation;
    CLAUDE.md carries only the gated `promptLine` (lazy context, no tool
@@ -239,7 +239,7 @@ built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
 5. **Long-running operations** use submit → poll (`run --async` → `status
    <id>`), never a blocking call beyond a bounded timeout.
 6. **Config/identity**: endpoint URL + per-agent token in a 0600 file at
-   `.aee/plugins/<id>.json`, written at seed time — file-based, so rotation
+   `.agent-studio/plugins/<id>.json`, written at seed time — file-based, so rotation
    is also a live sync, and the workspace stays the transparent source of
    truth (workspace-transparency principle).
 
@@ -621,7 +621,7 @@ before it moves from catalog to roadmap.
   Registry reader + System-Admin install (`/plugins` page, capability review
   before the confirm), the shared signing secret, sidecar lifecycle over libpod
   (`orchestrator/plugin-runtime.js`), grant → workspace sync with no respawn,
-  `.aee/bin` on the agent PATH, the Plugin Capabilities prompt block actually
+  `.agent-studio/bin` on the agent PATH, the Plugin Capabilities prompt block actually
   wired, scope teardown before token invalidation, and the grant UI on the
   Agents page. Fixed three wiring gaps found while tracing the path end to end:
   the CLI posted to the sidecar's base URL while the broker only served `/mcp`;

@@ -5,7 +5,7 @@
 // The orchestrator does the actual I/O — read each team member's session JSONL
 // (`sessions/*.jsonl` + rotated archives), the per-agent usage spool
 // (`usage-spool.jsonl`), the team's `anomaly-history.jsonl` (#1221), the GitHub
-// event-transparency log, and the audit / `.aee/prompt-history.json` version
+// event-transparency log, and the audit / `.agent-studio/prompt-history.json` version
 // boundaries. The bug-prone part is turning that raw JSON/JSONL into the pure
 // metrics module's input contract, so that translation lives here — pure and
 // fs-free — exactly as `flow-anomaly-sweep.js` sits in front of
@@ -119,7 +119,7 @@ function usageByCorrelation(spoolRecords) {
 
 // ── config-version boundaries ────────────────────────────────────────────────
 //
-// From an agent's `.aee/prompt-history.json` (newest-first `history[]`), the
+// From an agent's `.agent-studio/prompt-history.json` (newest-first `history[]`), the
 // authoritative per-agent version markers. Each entry already carries a monotonic
 // `version` and the change timestamp `at` — exactly the boundary the metrics
 // module attributes runs against.

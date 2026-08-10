@@ -1,9 +1,9 @@
 # Plugin CLI contract (§4.5)
 
 Every platform plugin (`docs/plugin-system-concept.md`) ships a **dependency-free
-CLI facade** that is seeded into a granted agent's workspace at `.aee/bin/<cli.name>`
+CLI facade** that is seeded into a granted agent's workspace at `.agent-studio/bin/<cli.name>`
 (on `PATH` via the entrypoint) and reads its endpoint + per-agent scope token
-from `.aee/plugins/<pluginId>.json` (mode `0600`, written at seed time). The CLI
+from `.agent-studio/plugins/<pluginId>.json` (mode `0600`, written at seed time). The CLI
 is the *only* surface the agent touches; all privilege and all backend
 credentials live server-side in the broker sidecar the CLI talks to.
 
@@ -34,7 +34,7 @@ A plugin's CLI **must** obey this contract — it is enforced, not advisory
    handle; a `status`/`poll` subcommand reports progress) rather than blocking —
    the broker owns the work, the CLI is a thin client.
 
-## Config file (`.aee/plugins/<pluginId>.json`)
+## Config file (`.agent-studio/plugins/<pluginId>.json`)
 
 Written at seed time by the orchestrator (`orchestrator/plugin-sync.js`), read
 by the CLI at startup:

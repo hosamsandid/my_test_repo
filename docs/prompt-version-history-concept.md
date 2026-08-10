@@ -39,10 +39,10 @@ Because all three choke-points live in the **admin-console** process — where
 only**. No orchestrator duplication, no actor-forwarding into internal
 endpoints.
 
-## 3. Data model — sidecar `/workspace/agents/<id>/.aee/prompt-history.json`
+## 3. Data model — sidecar `/workspace/agents/<id>/.agent-studio/prompt-history.json`
 
 A per-agent sidecar (not a `config.json` field), consistent with
-`.aee/seeded-skills.json` and the `skill.json` manifest. Avoids contention
+`.agent-studio/seeded-skills.json` and the `skill.json` manifest. Avoids contention
 between the two `config.json` writers (orchestrator non-atomic `saveAgentConfig`
 vs. console atomic `writeJsonAtomic`).
 

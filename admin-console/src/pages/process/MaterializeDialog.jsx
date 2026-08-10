@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { Loader2, RefreshCw } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
+import { describeMaterializeError } from './materialize-error.js';
 
 // Materialise an imported process-template bundle into a real team (#334).
 // Reuses the Team-Setup pipeline (POST /api/teams) via its `processTemplate`
@@ -16,6 +17,13 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   const [environmentId, setEnvironmentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Optional secondary line (e.g. the raw "HTTP 502") kept for support/debugging
+  // when the primary message is a generated, human-readable explanation (#1552).
+  const [errorDetail, setErrorDetail] = useState(null);
+
+  // Validation failures are plain, already-actionable strings — set them
+  // directly and clear any leftover secondary detail.
+  function setValidationError(msg) { setError(msg); setErrorDetail(null); }
 
   // A draft opened from a live team (#348) remembers its origin so we can default
   // to extending it rather than creating a colliding new team.
@@ -48,7 +56,10 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
         const preferred = (sourceTeamId && list.find(e => e.id === sourceTeamId)) || list[0];
         if (preferred) setEnvironmentId(preferred.id);
       } catch (e) {
-        if (alive) { setError(e.message); setEnvsLoaded(true); }
+        if (alive) {
+          const { message, detail } = describeMaterializeError(e, { action: 'load the working environments' });
+          setError(message); setErrorDetail(detail); setEnvsLoaded(true);
+        }
       }
     })();
     return () => { alive = false; };
@@ -73,11 +84,11 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
   }
 
   async function submit() {
-    if (!/^[a-z0-9-]{1,40}$/.test(teamId)) { setError('teamId must be a lowercase slug [a-z0-9-], 1–40 chars.'); return; }
-    if (!teamName.trim()) { setError('Team name required.'); return; }
-    if (!environmentId) { setError('Pick a working environment.'); return; }
-    if (labelSuffix && !/^[a-z0-9]{1,8}$/.test(labelSuffix)) { setError('Label suffix must be 1–8 lowercase base36 chars [a-z0-9].'); return; }
-    setSaving(true); setError(null); setSuffixWarnings([]);
+    if (!/^[a-z0-9-]{1,40}$/.test(teamId)) { setValidationError('teamId must be a lowercase slug [a-z0-9-], 1–40 chars.'); return; }
+    if (!teamName.trim()) { setValidationError('Team name required.'); return; }
+    if (!environmentId) { setValidationError('Pick a working environment.'); return; }
+    if (labelSuffix && !/^[a-z0-9]{1,8}$/.test(labelSuffix)) { setValidationError('Label suffix must be 1–8 lowercase base36 chars [a-z0-9].'); return; }
+    setSaving(true); setError(null); setErrorDetail(null); setSuffixWarnings([]);
     try {
       const result = await apiCall('POST', '/api/teams', {
         teamId, teamName,
@@ -91,7 +102,13 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
       onDone?.();
       navigate(`/process/${encodeURIComponent(teamId)}`);
     } catch (e) {
-      setError(e.message);
+      // A failed materialization must read as a human-readable, actionable
+      // message — not a bare "HTTP 502" — and leave the dialog re-submittable
+      // (AC1–AC5, #1552).
+      const { message, detail } = describeMaterializeError(e, {
+        action: extend ? 'extend the team' : 'create the team',
+      });
+      setError(message); setErrorDetail(detail);
       setSaving(false);
     }
   }
@@ -221,7 +238,14 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
           </span>
         </label>
 
-        {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
+        {error && (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+            {error}
+            {errorDetail && (
+              <span style={{ marginLeft: 6, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>({errorDetail})</span>
+            )}
+          </div>
+        )}
         {suffixWarnings.length > 0 && (
           <div style={{ background: 'var(--eb-bg-app)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
             <strong style={{ color: 'var(--eb-text-primary)' }}>Label suffix warnings</strong>

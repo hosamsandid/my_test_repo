@@ -60,12 +60,22 @@ export async function apiCall(method, url, body) {
   });
   if (!res.ok) {
     notifyIfUnauthorized(res.status);
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    const err = await res.json().catch(() => ({}));
     // 400 assist-model-not-selected / 403 assist-endpoint-not-permitted nudge
     // the header picker open (and clear+refetch on 403) — see assist-transport.
     if (err && err.code) notifyAssistError(err.code);
-    const e = new Error(err.error || `HTTP ${res.status}`);
+    // A structured body carries a human message under `error` (or `message`);
+    // when the body is missing or non-JSON we fall back to the bare status.
+    // `serverMessage` records whether the message came from the server so
+    // callers can tell a real error apart from the "HTTP <status>" fallback
+    // (see describeMaterializeError, #1552) — existing callers read `.message`
+    // and `.status` exactly as before.
+    const serverMessage = err && typeof (err.error || err.message) === 'string'
+      ? (err.error || err.message)
+      : null;
+    const e = new Error(serverMessage || `HTTP ${res.status}`);
     e.status = res.status;
+    if (serverMessage) e.serverMessage = serverMessage;
     if (err && err.code) e.code = err.code;
     throw e;
   }

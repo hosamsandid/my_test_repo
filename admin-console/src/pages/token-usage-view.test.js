@@ -151,6 +151,32 @@ test('workItemAverages returns rounded total/input/output means over the attribu
   assert.equal(avg.output, 90);  // (40+120+110)/3
 });
 
+test('workItemAverages returns rounded cache-write/cache-read means over the attributed work-item count (#1626)', () => {
+  const data = {
+    workItems: [
+      { tokens: { total: 500, input: 60, output: 40, cacheCreationInput: 200, cacheReadInput: 200 } },
+      { tokens: { total: 900, input: 180, output: 120, cacheCreationInput: 300, cacheReadInput: 300 } },
+      { tokens: { total: 700, input: 90, output: 110, cacheCreationInput: 250, cacheReadInput: 250 } },
+    ],
+  };
+  const avg = workItemAverages(data);
+  assert.equal(avg.cacheCreationInput, 250);  // (200+300+250)/3
+  assert.equal(avg.cacheReadInput, 250);      // (200+300+250)/3
+  // AC4: the four class averages reconcile with Ø total (per-tile integer rounding).
+  assert.equal(avg.input + avg.output + avg.cacheCreationInput + avg.cacheReadInput, avg.total);
+});
+
+test('workItemAverages rounds the cache averages to the nearest integer (#1626)', () => {
+  const avg = workItemAverages({
+    workItems: [
+      { tokens: { cacheCreationInput: 10, cacheReadInput: 10 } },
+      { tokens: { cacheCreationInput: 11, cacheReadInput: 0 } },
+    ],
+  });
+  assert.equal(avg.cacheCreationInput, 11);  // 21/2 = 10.5 → 11
+  assert.equal(avg.cacheReadInput, 5);       // 10/2 = 5
+});
+
 test('workItemAverages rounds to the nearest integer (never a fraction)', () => {
   const avg = workItemAverages({
     workItems: [
@@ -183,6 +209,8 @@ test('workItemAverages yields null averages (no NaN/Infinity) for zero work item
     assert.equal(avg.total, null);
     assert.equal(avg.input, null);
     assert.equal(avg.output, null);
+    assert.equal(avg.cacheCreationInput, null);
+    assert.equal(avg.cacheReadInput, null);
   }
 });
 
@@ -200,15 +228,16 @@ test('workItemAverages tolerates missing/partial token fields', () => {
 });
 
 /* ── Work-items tile help copy (#832) ──────────────────────────────── */
-// The eight ids the Work-items summary row wires into StatCard.help, in the
+// The ten ids the Work-items summary row wires into StatCard.help, in the
 // on-screen order. Keeping this list in the test guards against a tile losing
 // its help affordance (AC1/AC2) when the row is edited.
 const WORK_ITEM_TILE_IDS = [
   'attributed', 'attributedTokens', 'unattributedTokens', 'unattributedRuns',
   'totalRuns', 'avgTotal', 'avgInput', 'avgOutput',
+  'avgCacheCreationInput', 'avgCacheReadInput',
 ];
 
-test('WORK_ITEM_TILE_HELP carries help for all eight Work-items tiles (AC1/AC2)', () => {
+test('WORK_ITEM_TILE_HELP carries help for all ten Work-items tiles (AC1/AC2)', () => {
   assert.deepEqual(Object.keys(WORK_ITEM_TILE_HELP).sort(), [...WORK_ITEM_TILE_IDS].sort());
   for (const id of WORK_ITEM_TILE_IDS) {
     const text = WORK_ITEM_TILE_HELP[id];
@@ -229,10 +258,16 @@ test('attributed/unattributed help defines a work item as an issue↔PR chain (A
 });
 
 test('Ø …/work item help states per attributed work item, excluding unattributed (AC5)', () => {
-  for (const id of ['avgTotal', 'avgInput', 'avgOutput']) {
+  for (const id of ['avgTotal', 'avgInput', 'avgOutput', 'avgCacheCreationInput', 'avgCacheReadInput']) {
     assert.match(WORK_ITEM_TILE_HELP[id], /attributed work item/i, `${id} must say "attributed work item"`);
     assert.match(WORK_ITEM_TILE_HELP[id], /excluded/i, `${id} must state unattributed tokens are excluded`);
   }
+});
+
+test('avgTotal help no longer claims the total is "(input + output)" only (#1626 AC6)', () => {
+  assert.doesNotMatch(WORK_ITEM_TILE_HELP.avgTotal, /\(input \+ output\)/);
+  // It reflects that the total includes input, output and both cache classes.
+  assert.match(WORK_ITEM_TILE_HELP.avgTotal, /cache/i);
 });
 
 

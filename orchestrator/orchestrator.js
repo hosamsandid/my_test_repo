@@ -9178,6 +9178,45 @@ class Orchestrator {
     return { envId, respawned, skipped };
   }
 
+  // Re-inject a rotated/newly-set PERSONAL credential into its owner's running
+  // agents (#1570, epic #1558 Phase 4). Fired by the admin-console after a human
+  // sets or rotates their personal SSH key or GitHub token. Owner-scoped sibling
+  // of respawnAgentsForEnvironment: instead of matching an environment id, it
+  // matches each agent's RESOLVED human owner (credential-resolution's
+  // resolveAgentOwnerId — the exact Phase-3 rule, so a team-member is respawned
+  // via its parent team's owner). Personal credentials are unique per (owner,
+  // kind), so every one of that human's running agents is exactly the set whose
+  // resolved credential is the one that changed — including an agent that only
+  // uses it for attributed writes (edge case). Same skip rules as the env path:
+  // disabled / not-running / tokenless agents are left for their next enable.
+  // Other humans' agents and unrelated environments are never touched (AC1/AC2/
+  // AC6). Best-effort and idempotent.
+  async respawnAgentsForOwner(ownerId, { reason } = {}) {
+    const target = ownerId != null && String(ownerId) !== '' ? String(ownerId) : null;
+    if (!target) return { ownerId: null, respawned: [], skipped: [] };
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owned = credentialResolution.selectAgentIdsForOwner(agents, target, loadAgentConfig);
+    const respawned = [];
+    const skipped = [];
+    for (const id of owned) {
+      const cfg = loadAgentConfig(id); // fresh read — canonical on-disk config
+      if (!cfg || cfg.enabled === false || !cfg.token) { skipped.push(id); continue; }
+      if (!agentProcesses.has(id)) { skipped.push(id); continue; }
+      try {
+        this.agentConfigs.set(id, { config: cfg });
+        startAgentProcess(cfg); // stops old container, recreates with fresh env
+        respawned.push(id);
+      } catch (err) {
+        console.error(`[Orchestrator] respawn for owner ${target} failed for ${id}: ${err.message}`);
+        skipped.push(id);
+      }
+    }
+    if (respawned.length) {
+      console.log(`[Orchestrator] owner ${target} personal-credential change (${reason || 'update'}) → respawned ${respawned.length} agent(s): ${respawned.join(', ')}`);
+    }
+    return { ownerId: target, respawned, skipped };
+  }
+
   // Recreate a single running agent's container so a spawn-time change (e.g. a
   // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
   // left untouched — it picks up the new binding on its next enable. Fresh-reads
@@ -11856,6 +11895,34 @@ async function main() {
             res.end(JSON.stringify(result));
           } catch (err) {
             console.error(`[Orchestrator] respawnAgentsForEnvironment error for ${envId}: ${err.message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
+      return;
+    }
+
+    // ── Re-inject a human's personal credential into their running agents ──
+    // Fired by the admin-console after a person SETS or ROTATES their personal
+    // SSH key / GitHub token (#1570), so already-running containers pick up the
+    // new secret by being recreated. Owner-scoped (only that human's agents).
+    // Best-effort on the caller's side.
+    const respawnOwnerMatch = req.method === 'POST' && req.url.match(/^\/internal\/owners\/([^/]+)\/respawn-agents$/);
+    if (respawnOwnerMatch) {
+      const ownerId = decodeURIComponent(respawnOwnerMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.respawnAgentsForOwner(ownerId, { reason: parsed.reason });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] respawnAgentsForOwner error for ${ownerId}: ${err.message}`);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
           }

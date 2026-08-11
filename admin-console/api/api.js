@@ -1683,6 +1683,24 @@ function notifyEnvCredentialChange(envId, reason) {
   }).catch(() => {});
 }
 
+// Best-effort: after a human SETS or ROTATES their personal credential (#1570,
+// epic #1558 Phase 4), ask the orchestrator to respawn that person's running
+// agents so the new secret takes effect — the personal-tier counterpart of
+// notifyEnvCredentialChange, scoped to the owner instead of an environment. A
+// personal secret is baked into each of the owner's containers at spawn, so
+// without this a rotated key/token would only reach them on a manual
+// disable/enable. `ownerId` is the credential's `userId`; a falsy owner (an
+// env/team/system credential, or the env single-admin) is a no-op.
+function notifyOwnerCredentialChange(ownerId, reason) {
+  if (!ownerId) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/owners/${encodeURIComponent(ownerId)}/respawn-agents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  }).catch(() => {});
+}
+
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -13437,6 +13455,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
   res.status(201).json(normalizeCredential(entry));
 });
 
@@ -13489,6 +13510,9 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
   res.status(201).json({ ...normalizeCredential(entry), publicKey: pubText });
 });
 
@@ -13584,6 +13608,8 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
 
   const updated = { ...cred, fingerprint, rotatedAt: new Date().toISOString() };
   saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
+  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
+  notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
   const body = normalizeCredential(updated);
   res.status(200).json(publicKey ? { ...body, publicKey } : body);
 });
@@ -13649,6 +13675,9 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     createdAt: new Date().toISOString(),
   };
   saveGithubTokensIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-github-token-set');
   res.status(201).json(normalizeCredential(entry));
 });
 
@@ -13726,6 +13755,8 @@ app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
     rotatedAt: new Date().toISOString(),
   };
   saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
+  notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
   res.status(200).json(normalizeCredential(updated));
 });
 

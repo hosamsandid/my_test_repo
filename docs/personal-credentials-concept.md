@@ -148,6 +148,8 @@ Setting or rotating a person's personal credential **propagates by respawn**, re
 - Disabled/idle agents pick up the fresh credential on their next enable/spawn, as today.
 - Scoping the respawn to the owner's agents means one person rotating their token never disturbs another person's — or the team's shared — agents.
 
+*Implemented (#1570, Phase 4):* the admin-console `notifyOwnerCredentialChange(userId)` (fired on personal SSH-key/GitHub-token **set** and **rotate**) calls `POST /internal/owners/:ownerId/respawn-agents` → `orchestrator.respawnAgentsForOwner`, the owner-scoped sibling of `respawnAgentsForEnvironment`. Owner matching is the pure `credential-resolution.selectAgentIdsForOwner` (over `resolveAgentOwnerId`, so a team-member resolves via its parent team's owner); disabled/not-running/tokenless agents are skipped exactly like the env path. This also closes the prior gap where a personal **SSH-key** change triggered no respawn at all.
+
 ---
 
 ## 8 — Offboarding and lifecycle
@@ -242,7 +244,7 @@ Copy should make the tier and its identity consequence explicit (a personal cred
 1. **Data model** — add `scope: 'personal'` + `userId` to credential entries; extend `normalizeCredential` (personal passthrough; legacy untouched) and `resolveCredentialOwnership`. *(shipped — #1576)*
 2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials. *(shipped — #1576)*
 3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step)*
-4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3).
+4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3). *(shipped — #1570)*
 5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6).
 6. **UI** — the self-service personal-credential surface on `/ssh-keys` and `/github-tokens` (§11).
 

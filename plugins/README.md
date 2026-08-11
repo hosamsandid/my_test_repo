@@ -73,6 +73,23 @@ flow-final agent whose cross-checks passed) and the first real
 `requiresApproval` flow (destructive `data-delete` waits for human confirm). See
 `test-mgmt/README.md`.
 
+## `patterns-catalog`
+
+A read-only reference catalog of engineering patterns, browsable in the console.
+It covers an SDLC delivery-workflow view and a Mainframe Modernization pattern
+catalog (COBOL, JCL, DB2, IMS, re-engineering, strangler-fig, microservice
+extraction, and more). It is off until an operator turns it on: install it, then
+grant it to a team to make its catalog pages available in that team's sidebar.
+Once installed its nav entry is also visible to every authenticated user without
+a per-team grant (opt-in `ui.global: true` in the manifest — a human-UI
+convenience; agent CLI access still requires a team grant). It holds no
+credentials and reaches nothing outside itself (`capabilities: []`,
+`credentials: []`, `scopes: ["team"]`). Its broker (`../patterns-catalog-broker/`)
+is a minimal static-file server: `server.js` serves the catalog pages behind
+`verifyViewerHeaders` and exposes no MCP tools and keeps no state; teardown is a
+no-op. Agents list the available catalogs with the dependency-free `aee-patterns`
+CLI (e.g. `aee-patterns list`).
+
 ## `netzplan` (plugin #3)
 
 Network Plan (epic #1554, Phase 3, #1563): an editable team **planning board** —

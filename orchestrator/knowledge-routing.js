@@ -280,12 +280,82 @@ function applyBatchClassification(text, unrouted, domains) {
   return { amendments, stillUnrouted };
 }
 
+// ---------------------------------------------------------------------------
+// New-domain proposal singleton (FIX-A)
+// ---------------------------------------------------------------------------
+
+// The stable, per-team id of the single "unrouted mass may warrant a new domain"
+// card. Historically the id hashed the exact unrouted-canonicalId set, so every pass
+// the set shifted minted a brand-new card and the store filled with hundreds of
+// near-identical proposals. One canonical id, upserted in place, fixes that.
+function domainProposalId(teamSegment) {
+  const seg = typeof teamSegment === 'string' && teamSegment.trim() ? teamSegment.trim() : 'team';
+  return `dp-${seg}`;
+}
+
+/**
+ * Reconcile the new-domain proposal card in a team's candidate rows so that AT MOST
+ * ONE open `domain-proposal` row survives. Pure — returns a NEW rows array; the input
+ * is not mutated. Non-proposal rows pass through untouched.
+ *
+ *  - A dismissed singleton is respected: nothing new is raised while it stands, and
+ *    the rest of the proposal pile is dropped.
+ *  - Given a fresh `proposal` (and no dismissal), the singleton is UPSERTED: fields
+ *    refreshed, `raisedAt` bumped so hygiene measures quiet time from the latest
+ *    evidence, prior fields preserved.
+ *  - With no proposal this pass, any lingering open `dp-*` rows collapse to the
+ *    newest one — so a store still holding the historical hashed pile self-heals on
+ *    the first pass after deploy.
+ *
+ * @param {object[]} rows current candidate store rows
+ * @param {object} opts
+ *   - proposal: null | { unrouted: [{ canonicalId, entryIds }], budgetBlocked, reason }
+ *   - teamId, teamSegment, now
+ */
+function reconcileDomainProposal(rows, { proposal, teamId, teamSegment, now } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const stableId = domainProposalId(teamSegment);
+  const proposals = list.filter((r) => r && r.source === 'domain-proposal');
+  const nonProposals = list.filter((r) => !(r && r.source === 'domain-proposal'));
+
+  const dismissed = proposals.find((r) => r.id === stableId && r.status === 'dismissed');
+  if (dismissed) return [...nonProposals, dismissed];
+
+  if (proposal && Array.isArray(proposal.unrouted) && proposal.unrouted.length) {
+    const prior = proposals.find((r) => r.id === stableId) || {};
+    const ids = proposal.unrouted.map((c) => c && c.canonicalId).filter(Boolean).sort();
+    const singleton = {
+      ...(prior && typeof prior === 'object' ? prior : {}),
+      id: stableId,
+      teamId: typeof teamId === 'string' ? teamId : (prior.teamId || null),
+      source: 'domain-proposal',
+      status: 'open',
+      budgetBlocked: !!proposal.budgetBlocked,
+      reason: proposal.reason,
+      entryIds: proposal.unrouted.flatMap((c) => (c && c.entryIds) || []),
+      unroutedIds: ids,
+      text: `${proposal.unrouted.length} unrouted lesson(s) may warrant a new domain`,
+      raisedAt: typeof now === 'string' && now.trim() ? now.trim() : new Date().toISOString(),
+    };
+    return [...nonProposals, singleton];
+  }
+
+  const open = proposals.filter((r) => r.status === 'open');
+  const nonOpen = proposals.filter((r) => r.status !== 'open');
+  if (open.length <= 1) return [...nonProposals, ...proposals];
+  open.sort((a, b) => String(b.raisedAt || '').localeCompare(String(a.raisedAt || ''))
+    || String(a.id).localeCompare(String(b.id)));
+  return [...nonProposals, ...nonOpen, open[0]];
+}
+
 module.exports = {
   domainVocabulary,
   scoreCandidateToDomain,
   classifyCandidateToDomain,
   newDomainQualifies,
   planDomainRouting,
+  domainProposalId,
+  reconcileDomainProposal,
   buildBatchClassificationRequest,
   applyBatchClassification,
 };

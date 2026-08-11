@@ -50,7 +50,10 @@ const NAV = [
   { items: [
     { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
     { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
-    { path: '/plugin-system',   label: 'Plugin System',       Icon: Puzzle },
+    // The Plugin System help page (#1620) has no standalone sidebar entry (#1638):
+    // it is reached via the "Learn about plugins" link on the Plugins page. The
+    // route (App.jsx) + its BREADCRUMBS entry below stay, so direct links /
+    // breadcrumbs keep working.
     // Self-service personal credentials (#1568) — visible to every authenticated
     // human (no credAdmin gate); the personal tier is strictly owner-only.
     { path: '/my-credentials', label: 'My Credentials',       Icon: KeyRound },

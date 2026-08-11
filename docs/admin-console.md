@@ -8,7 +8,7 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
 | **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
-| **Plugin System** | `/plugin-system` | Persistent concept/help page explaining the Plugin System in plain language — what a plugin is, what activating one does, how permissions relate to teams and agents, and how to develop one; ungated (any authenticated user), linked from the Plugins management page header |
+| **Plugin System** | `/plugin-system` | Persistent, self-contained concept/help page — what a plugin is, how it works technically, typical use cases, and how to build one; ungated (any authenticated user); **no sidebar nav entry** — reached via the "Learn about plugins" link on the Plugins page (#1638); direct links and bookmarks still work |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, import, clone, and save as template agents |
 | **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
 | **My Credentials** | `/my-credentials` | Self-service surface (any authenticated human, no `credAdmin` gate) to create/rotate/rename/delete your own **personal** SSH key and GitHub token; private to you (epic #1558) |

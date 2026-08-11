@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Folder, FolderOpen, ChevronRight, ChevronLeft, Check } from 'lucide-react';
+import { Folder, ChevronRight, ChevronLeft, Check } from 'lucide-react';
 
 /**
  * DirectoryPicker — modal for navigating and selecting a directory

@@ -714,6 +714,13 @@ before it moves from catalog to roadmap.
   `capabilities: ["podman-socket"]` has no k8s equivalent, so
   `plugins/podman-sandbox/` is permanently `platforms: ["podman"]`. See
   `docs/network-plan-plugin-concept.md` §9.
+- **Opt-in global UI visibility** *(shipped — #1599)*: `ui.global: true` in a
+  plugin manifest (off by default) makes the plugin's nav entry and general UI
+  routes visible to every authenticated user once the plugin is installed,
+  without requiring a team grant — decoupling the human-facing reference UI from
+  agent-capability activation. Elevated routes (`minRole > team-member`) still
+  refuse a purely-global viewer. Agent CLI access is unaffected (the grant path
+  never reads `ui.global`). Patterns Catalog is the first plugin to opt in.
 
 ## 10. Open questions
 

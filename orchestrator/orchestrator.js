@@ -4851,6 +4851,15 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     }
   }
 
+  // FIX-D step 1: the theme (related-aggregation) path historically ran over the
+  // UNFILTERED eligibleClusters, so a cluster already claimed by domain routing
+  // re-entered as a brand-new lesson-slug theme micro-skill — the main reason the team
+  // accumulated dozens of skills over its ~12 budget. Exclude domain-routed clusters
+  // from the theme inputs so that knowledge stays owned by its domain amendment card.
+  const themeClusters = domainRoutedCanonicalIds.size > 0
+    ? eligibleClusters.filter((c) => c && !domainRoutedCanonicalIds.has(c.canonicalId))
+    : eligibleClusters;
+
   if (level >= 3) {
     // #779: the per-pass cap is shared across auto-extend + convergence promotions +
     // theme promotions. Auto-extend runs FIRST and claims its matched clusters so
@@ -4911,7 +4920,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
       console.warn(`[Orchestrator] theme domain resolver for '${teamId}' failed: ${err.message}`);
     }
     try {
-      const n = autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), {
+      const n = autoPromoteThemesStep(teamId, env, themeClusters, readKnowledgeCandidates(teamId), {
         relatedThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed, resolveDomain: resolveThemeDomain,
       });
       capUsed += (n || 0);
@@ -4923,7 +4932,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     // skill needs judgment. raiseRelatedSuggestions raises only the remainder
     // (planRelatedSuggestions excludes the clusters just auto-promoted above).
     try {
-      raiseRelatedSuggestions(teamId, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+      raiseRelatedSuggestions(teamId, themeClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
     } catch (err) {
       console.warn(`[Orchestrator] related-theme suggestions for '${teamId}' failed: ${err.message}`);
     }
@@ -4938,8 +4947,8 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     try {
       // Themes first: a lesson bundled into a raised theme card must not also
       // raise its own single-lesson convergence card (one decision, not two).
-      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, curCandidates, { relatedThreshold, now });
-      const covered = knowledgeConvergence.clustersCoveredByThemes(eligibleClusters, afterThemes);
+      const afterThemes = raiseRelatedSuggestions(teamId, themeClusters, curCandidates, { relatedThreshold, now });
+      const covered = knowledgeConvergence.clustersCoveredByThemes(themeClusters, afterThemes);
       // #779: single-cluster candidates are raised only for digest-routed
       // candidateClusters (digest-only clusters excluded), minus theme-covered ones.
       const singles = covered.size === 0
@@ -4967,18 +4976,44 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // existing backlog keeps healing even after the dial is lowered.
   try {
     const staleWeeks = Math.max(1, Number(process.env.KNOWLEDGE_SUGGESTION_STALE_WEEKS) || 4);
+    const maxOpen = Math.max(1, Number(process.env.KNOWLEDGE_MAX_OPEN_SUGGESTIONS) || knowledgeHygiene.DEFAULT_MAX_OPEN_SUGGESTIONS);
     const observedIds = new Set(
       (Array.isArray(proj.clusters) ? proj.clusters : []).map((c) => knowledgeConvergence.stableSuggestionId(c)),
     );
-    const plan = knowledgeHygiene.planStaleTransitions(readKnowledgeCandidates(teamId), {
-      now, maxWeeks: staleWeeks, observedIds,
-    });
-    if (plan.changed) {
-      writeKnowledgeCandidates(teamId, plan.next);
-      const evts = [
-        ...plan.stale.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })),
-        ...plan.revive.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: true })),
-      ];
+    let store = readKnowledgeCandidates(teamId);
+    const evts = [];
+    let changed = false;
+
+    // 1) quiet-decay open→stale (+ stale→open revive on fresh evidence).
+    const stalePlan = knowledgeHygiene.planStaleTransitions(store, { now, maxWeeks: staleWeeks, observedIds });
+    if (stalePlan.changed) {
+      store = stalePlan.next;
+      changed = true;
+      evts.push(...stalePlan.stale.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+      evts.push(...stalePlan.revive.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: true })));
+    }
+
+    // 2) FIX-B: retire grown-cluster duplicates immediately (a card whose lesson set is
+    // a strict subset of a larger open card of the same kind+source → `superseded`),
+    // instead of waiting out the multi-week stale window.
+    const supPlan = knowledgeHygiene.planSupersessions(store, { now });
+    if (supPlan.changed) {
+      store = supPlan.next;
+      changed = true;
+      evts.push(...supPlan.superseded.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+    }
+
+    // 3) FIX-C: hard backstop — if still over the open-card cap, evict the
+    // lowest-evidence cards to `stale` (never the domain-proposal singleton/amendments).
+    const capPlan = knowledgeHygiene.planOpenCap(store, { now, maxOpen });
+    if (capPlan.changed) {
+      store = capPlan.next;
+      changed = true;
+      evts.push(...capPlan.evicted.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+    }
+
+    if (changed) {
+      writeKnowledgeCandidates(teamId, store);
       if (evts.length) appendKnowledgeEvents(evts);
     }
   } catch (err) {
@@ -5533,26 +5568,17 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
     // new-domain proposal; keyed by the same stable id so a grown set re-evaluates.
     byId.set(c.id, { ...c, status: 'unrouted', routedAt: now });
   }
-  if (plan.newDomainProposal) {
-    const ids = plan.newDomainProposal.unrouted.map((c) => c.canonicalId).filter(Boolean).sort();
-    const propId = `dp-${crypto.createHash('sha1').update(ids.join(',')).digest('hex').slice(0, 12)}`;
-    if (!tracked(propId)) {
-      byId.set(propId, {
-        id: propId,
-        teamId,
-        source: 'domain-proposal',
-        status: 'open',
-        budgetBlocked: plan.newDomainProposal.budgetBlocked,
-        reason: plan.newDomainProposal.reason,
-        entryIds: plan.newDomainProposal.unrouted.flatMap((c) => c.entryIds || []),
-        unroutedIds: ids,
-        text: `${plan.newDomainProposal.unrouted.length} unrouted lesson(s) may warrant a new domain`,
-        raisedAt: now,
-      });
-    }
-  }
+  // FIX-A: keep at most ONE open new-domain proposal card (a singleton per team,
+  // upserted; operator dismissal respected; legacy dp-<hash> pile collapsed). The
+  // decision is a pure, unit-tested helper in knowledge-routing.
+  const reconciledRows = knowledgeRouting.reconcileDomainProposal([...byId.values()], {
+    proposal: plan.newDomainProposal,
+    teamId,
+    teamSegment: knowledgeFeed.safeTeamSegment(teamId),
+    now,
+  });
 
-  writeKnowledgeCandidates(teamId, [...byId.values()]);
+  writeKnowledgeCandidates(teamId, reconciledRows);
   if (plan.batch) appendKnowledgeEvents([plan.batch]);
   return claimed;
 }

@@ -88,10 +88,10 @@ build: plugin-images
 # corresponding plugins/<id>/plugin.json.
 plugin-images:
 	@echo "Building plugin broker images..."
-	podman build -t localhost/aee-plugin-podman-sandbox:latest -f podman-mcp/Dockerfile .
-	podman build -t localhost/aee-plugin-test-mgmt:latest -f test-mgmt-broker/Dockerfile .
-	podman build -t localhost/aee-plugin-netzplan:latest -f netzplan-broker/Dockerfile .
-	podman build -t localhost/aee-plugin-patterns-catalog:latest -f patterns-catalog-broker/Dockerfile .
+	podman build -t localhost/aee-plugin-podman-sandbox:latest -f plugins/podman-sandbox/broker/Dockerfile .
+	podman build -t localhost/aee-plugin-test-mgmt:latest -f plugins/test-mgmt/broker/Dockerfile .
+	podman build -t localhost/aee-plugin-netzplan:latest -f plugins/netzplan/broker/Dockerfile .
+	podman build -t localhost/aee-plugin-patterns-catalog:latest -f plugins/patterns-catalog/broker/Dockerfile .
 	podman build -t localhost/aee-plugin-github-issues:latest -f github-issues-broker/Dockerfile .
 	@echo "Done. Plugin broker images:"
 	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}'

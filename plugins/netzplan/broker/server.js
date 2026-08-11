@@ -49,7 +49,7 @@ const {
   teardownScopeEndpoint,
   brokerConfig,
   quotaExceeded,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const { PlanStore } = require('./plan-store');
 const { requiredAutonomy } = require('./plan-doc');
 const { exportPlanDoc } = require('./plan-import');

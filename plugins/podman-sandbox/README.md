@@ -42,12 +42,12 @@ sidecar** instead of touching the host Podman socket directly. This is PR
   from `.agent-studio/plugins/podman-sandbox.json` (0600, written by `plugin-sync.js`)
   and speaks to the broker over the same Streamable-HTTP transport #1287 used.
 
-- **Broker sidecar** (`../../podman-mcp/`) — kept nearly unchanged from #1287:
-  every container it creates is stamped with the caller's `aee.plugin.owner=<scopeId>`
-  label, so two scopes sharing one broker never see or operate on each other's
-  containers. Built into the sidecar image the manifest names
-  (`localhost/aee-plugin-podman-sandbox:latest`) from `podman-mcp/Dockerfile`
-  (build context = repo root).
+- **Broker sidecar** (`./broker/`, historically `podman-mcp/`) — kept nearly
+  unchanged from #1287: every container it creates is stamped with the caller's
+  `aee.plugin.owner=<scopeId>` label, so two scopes sharing one broker never see
+  or operate on each other's containers. Built into the sidecar image the
+  manifest names (`localhost/aee-plugin-podman-sandbox:latest`) from
+  `broker/Dockerfile` (build context = repo root).
 
 ## What lands in this PR vs. the live stack
 

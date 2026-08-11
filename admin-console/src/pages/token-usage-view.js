@@ -111,7 +111,9 @@ export function buildDaySeries(summary) {
 export function workItemAverages(data) {
   const items = data && Array.isArray(data.workItems) ? data.workItems : [];
   const count = items.length;
-  if (count === 0) return { count: 0, total: null, input: null, output: null };
+  if (count === 0) {
+    return { count: 0, total: null, input: null, output: null, cacheCreationInput: null, cacheReadInput: null };
+  }
   const sum = (key) => items.reduce((acc, w) => {
     const v = w && w.tokens && Number.isFinite(w.tokens[key]) ? w.tokens[key] : 0;
     return acc + v;
@@ -121,10 +123,12 @@ export function workItemAverages(data) {
     total: Math.round(sum('total') / count),
     input: Math.round(sum('input') / count),
     output: Math.round(sum('output') / count),
+    cacheCreationInput: Math.round(sum('cacheCreationInput') / count),
+    cacheReadInput: Math.round(sum('cacheReadInput') / count),
   };
 }
 
-// Help copy for the eight Work-items summary tiles (#832). Kept here — pure,
+// Help copy for the ten Work-items summary tiles (#832, #1626). Kept here — pure,
 // React-free — so the wording is unit-testable and so the tiles stay a thin
 // presentational shell. Keyed by a stable tile id; the value is the plain
 // English explanation shown on hover / focus / tap (see StatCard + InfoTip).
@@ -144,11 +148,15 @@ export const WORK_ITEM_TILE_HELP = {
   totalRuns:
     'All agent runs in this period (attributed plus unattributed).',
   avgTotal:
-    'Average total tokens (input + output) per attributed work item. Unattributed tokens are excluded, so this reflects the typical cost of resolving one issue ↔ PR chain.',
+    'Average total tokens (input, output, cache write and cache read) per attributed work item. Unattributed tokens are excluded, so this reflects the typical cost of resolving one issue ↔ PR chain.',
   avgInput:
     'Average input (prompt) tokens per attributed work item. Unattributed tokens are excluded.',
   avgOutput:
     'Average output (generated) tokens per attributed work item. Unattributed tokens are excluded.',
+  avgCacheCreationInput:
+    'Average cache write tokens (input tokens written into the provider prompt cache) per attributed work item. Unattributed tokens are excluded.',
+  avgCacheReadInput:
+    'Average cache read tokens (input tokens served from the provider prompt cache) per attributed work item. Unattributed tokens are excluded.',
 };
 
 // Plain-language help for the Statistics-tab summary tiles (#1151). The tiles

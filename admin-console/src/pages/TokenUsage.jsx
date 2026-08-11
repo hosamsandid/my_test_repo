@@ -486,6 +486,8 @@ function WorkItemsTab({ team }) {
         <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} help={WORK_ITEM_TILE_HELP.avgTotal} />
         <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} help={WORK_ITEM_TILE_HELP.avgInput} />
         <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} help={WORK_ITEM_TILE_HELP.avgOutput} />
+        <StatCard label="Ø cache write / work item" value={fmtAvg(avg.cacheCreationInput)} accent={CLASS_COLOR.cacheCreationInput} help={WORK_ITEM_TILE_HELP.avgCacheCreationInput} />
+        <StatCard label="Ø cache read / work item" value={fmtAvg(avg.cacheReadInput)} accent={CLASS_COLOR.cacheReadInput} help={WORK_ITEM_TILE_HELP.avgCacheReadInput} />
       </div>
 
       {loading ? (

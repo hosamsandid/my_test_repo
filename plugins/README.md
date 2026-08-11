@@ -170,3 +170,20 @@ re-activated per install by install + team grant. Its broker
 it serves the catalog pages behind the §4.8 signed viewer headers, with no MCP
 tool surface and no state store. The dependency-free `aee-patterns` CLI lists
 the catalogs.
+
+## `github-issues`
+
+The first plugin that both **holds a credential** and **bears a UI** (issue
+#1633). It brings the everyday, read-mostly GitHub issue actions into the console
+so releasing work (e.g. a BA applying a `ready` gate) no longer means switching
+to GitHub: pick a team you are on → one of its Working Environment's repositories
+→ **list** that repo's issues, **read** one, and **add / remove a label** (the
+flow's gate labels suggested one click away, or any label you type). It reuses
+the single GitHub token already bound to the team's Working Environment — the
+broker (`../github-issues-broker/`) holds it and makes every call server-side, so
+the token never reaches the browser or an agent. Standard **team-grant gating**
+(no `ui.global`): it appears only for the teams it is granted to, and any member
+of such a team may use it. Agents can also browse issues read-only with the
+dependency-free `aee-issues` CLI (`aee-issues repos`, `aee-issues list --repo
+owner/name`, `aee-issues show --repo owner/name --number N`). Pull requests are
+deferred to a later iteration. See `github-issues-broker/README.md`.

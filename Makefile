@@ -92,6 +92,7 @@ plugin-images:
 	podman build -t localhost/aee-plugin-test-mgmt:latest -f plugins/test-mgmt/broker/Dockerfile .
 	podman build -t localhost/aee-plugin-netzplan:latest -f plugins/netzplan/broker/Dockerfile .
 	podman build -t localhost/aee-plugin-patterns-catalog:latest -f plugins/patterns-catalog/broker/Dockerfile .
+	podman build -t localhost/aee-plugin-github-issues:latest -f github-issues-broker/Dockerfile .
 	@echo "Done. Plugin broker images:"
 	@podman images --filter reference='localhost/aee-plugin-*' --format '  {{.Repository}}:{{.Tag}}'
 

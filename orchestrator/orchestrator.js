@@ -108,6 +108,7 @@ const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
+const { resolveScopeGithubCredentials } = require("./plugin-github-creds");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -1992,7 +1993,64 @@ async function reconcilePluginsAndAttachments() {
       console.warn(`[Orchestrator] plugin network reconcile failed: ${err.message}`);
     }
   }
+  // github-issues (#1633): hand each granted team's env GitHub token + repo list
+  // to its broker (best-effort — the token never reaches a browser or an agent).
+  try { await pushGithubIssueScopeCredentials(); } catch (err) {
+    console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+  }
   return { sidecars, networks };
+}
+
+// Resolve, per team the github-issues plugin is granted to, that team's Working-
+// Environment GitHub token + repository list, and push the map to the plugin's
+// broker (orchestrator/plugin-github-creds.js + plugin-runtime.pushScopeCredentials).
+// A no-op when the plugin isn't installed. Best-effort; never throws into a
+// reconcile. This is the plugin's live-wiring completion step (the resolver +
+// broker map handling are the unit-tested pure cores).
+async function pushGithubIssueScopeCredentials() {
+  const PLUGIN = "github-issues";
+  let entry;
+  try { entry = pluginRegistry.readPluginManifest(PLUGIN); } catch { return; }
+  if (!entry || !entry.ok || !entry.manifest) return; // not installed / invalid
+
+  // Which team scopes the plugin is granted to (team granularity → scopeId is the
+  // team id, matching the broker's viewer/agent scope key).
+  const scopeIds = new Set();
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg || !cfg.token) continue; // a stub has no running surface
+    let grant = null;
+    try { grant = pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), PLUGIN); } catch { grant = null; }
+    if (!grant) continue;
+    const scopeId = resolveScopeId(cfg, grant.scopeGranularity);
+    if (scopeId) scopeIds.add(scopeId);
+  }
+
+  // Even a fully-revoked plugin gets an (empty) push so the broker clears any
+  // stale team it still holds.
+  const allowNonGithubHost = String(process.env.AEE_ALLOW_NON_GITHUB_REPO_HOST || "") === "1";
+  const envForScope = (sid) => {
+    const teamCfg = loadAgentConfig(sid);
+    return teamCfg && teamCfg.environmentId ? loadEnvironment(teamCfg.environmentId) : null;
+  };
+  const readToken = (tokenId) => {
+    try { return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8"); } catch { return null; }
+  };
+  const scopes = resolveScopeGithubCredentials([...scopeIds], {
+    envForScope,
+    readToken,
+    parseRepoFullName: (url) => ghParseRepoFullName(url, { allowNonGithubHost }),
+  });
+  // Enrich each entry with the team's display name (for the UI's team selector);
+  // flow-label suggestions are left to the broker's repo-label fetch for the MVP.
+  for (const sid of Object.keys(scopes)) {
+    const teamCfg = loadAgentConfig(sid);
+    scopes[sid].teamName = (teamCfg && (teamCfg.displayName || teamCfg.name)) || sid;
+    scopes[sid].flowLabels = [];
+  }
+  await pluginRuntime.pushScopeCredentials(entry.manifest, scopes);
 }
 
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the
@@ -8170,6 +8228,13 @@ class Orchestrator {
         })
         .map((c) => c.id);
       results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
+    }
+    // A github-issues grant/revoke changes which teams the broker must hold a
+    // token for — re-push its per-scope credential map (best-effort, #1633).
+    if (new Set(pluginIds).has("github-issues")) {
+      try { await pushGithubIssueScopeCredentials(); } catch (err) {
+        console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+      }
     }
     return results;
   }

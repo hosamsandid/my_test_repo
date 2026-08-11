@@ -1,0 +1,162 @@
+'use strict';
+
+// ─── github-issues broker: per-scope state (plugin, issue #1633) ─────────────
+//
+// Two kinds of server-side state, both keyed on the opaque scopeId (a team):
+//
+//   1. Credentials + repository list — held ONLY in memory, pushed per-scope by
+//      the orchestrator (PUT /internal/scope-credentials) from the team's bound
+//      Working Environment: `{ token, repos: [{ fullName, defaultBranch }] }`.
+//      The token never touches disk here and is never returned to a caller —
+//      the broker selects it internally when calling GitHub. `tokenForRepo`
+//      doubles as the authorization guard: a repo not in the scope's env yields
+//      no token, so a viewer cannot act on a repository outside their team's
+//      scope (the issue's "authorization mismatch" edge case).
+//
+//   2. Last-used selection per (scope, user) — persisted on the plugin state
+//      volume (AEE_PLUGIN_STATE_DIR) so the operator's team/repo choice is
+//      remembered across sessions and browsers (AC5). One tiny JSON per pair;
+//      atomic temp-file+rename writes, filename components sanitised. Mirrors
+//      netzplan-broker/plan-store.js.
+
+const fs = require('fs');
+const path = require('path');
+
+// Filename-safe token for a scopeId / user sub. Anything outside the set is
+// collapsed so a crafted id can never escape the prefs directory.
+const SAFE_RE = /[^A-Za-z0-9._-]+/g;
+function safeName(s) {
+  return String(s == null ? '' : s).replace(SAFE_RE, '_').slice(0, 200) || '_';
+}
+
+// Normalise one pushed repo entry to { fullName, defaultBranch }.
+function normRepo(r) {
+  if (!r) return null;
+  const fullName = typeof r === 'string' ? r : String(r.fullName || r.full_name || '');
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(fullName)) return null;
+  const defaultBranch = r && r.defaultBranch ? String(r.defaultBranch) : (r && r.branch ? String(r.branch) : null);
+  return { fullName, defaultBranch };
+}
+
+class ScopeStore {
+  constructor({ stateDir } = {}) {
+    this.stateDir = stateDir || null;
+    // scopeId -> { token, repos: [{fullName, defaultBranch}], updatedAt }
+    this.creds = new Map();
+  }
+
+  prefsDir() {
+    return this.stateDir ? path.join(this.stateDir, 'prefs') : null;
+  }
+
+  // Replace the whole credential map from a pushed `{ scopeId: {token, repos} }`.
+  // Absent/blank token or empty repo list is still stored (the UI shows the
+  // "no token" / "no repos" empty states from it) — an entry simply has no
+  // usable token then.
+  setCredentials(scopesObj) {
+    const next = new Map();
+    const src = scopesObj && typeof scopesObj === 'object' ? scopesObj : {};
+    for (const [scopeId, entry] of Object.entries(src)) {
+      if (!scopeId || !entry || typeof entry !== 'object') continue;
+      const repos = Array.isArray(entry.repos) ? entry.repos.map(normRepo).filter(Boolean) : [];
+      next.set(String(scopeId), {
+        token: typeof entry.token === 'string' ? entry.token : '',
+        repos,
+        updatedAt: entry.updatedAt || null,
+      });
+    }
+    this.creds = next;
+    return this.creds.size;
+  }
+
+  credsFor(scopeId) {
+    return this.creds.get(String(scopeId)) || null;
+  }
+
+  // Repositories visible to a scope, WITHOUT the token. `hasToken` tells the UI
+  // whether a GitHub token is bound (drives the "configure a token" message).
+  reposFor(scopeId) {
+    const entry = this.credsFor(scopeId);
+    if (!entry) return { repos: [], hasToken: false, known: false };
+    return {
+      repos: entry.repos.map((r) => ({ fullName: r.fullName, defaultBranch: r.defaultBranch })),
+      hasToken: !!entry.token,
+      known: true,
+    };
+  }
+
+  // The token to use for one repo in a scope — or null if the repo is not in the
+  // scope's environment (authorization guard) or no token is bound.
+  tokenForRepo(scopeId, repoFullName) {
+    const entry = this.credsFor(scopeId);
+    if (!entry || !entry.token) return null;
+    return entry.repos.some((r) => r.fullName === repoFullName) ? entry.token : null;
+  }
+
+  // ── last-used selection (persisted per scope+user) ─────────────────────────
+  prefPath(scopeId, userSub) {
+    const dir = this.prefsDir();
+    if (!dir) return null;
+    return path.join(dir, `${safeName(scopeId)}__${safeName(userSub)}.json`);
+  }
+
+  loadPref(scopeId, userSub) {
+    const p = this.prefPath(scopeId, userSub);
+    if (!p) return null;
+    try {
+      const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+      return raw && typeof raw === 'object' ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  savePref(scopeId, userSub, pref) {
+    const p = this.prefPath(scopeId, userSub);
+    if (!p) return null;
+    const dir = path.dirname(p);
+    fs.mkdirSync(dir, { recursive: true });
+    const doc = {
+      repo: pref && pref.repo ? String(pref.repo) : null,
+      state: pref && pref.state ? String(pref.state) : null,
+      updatedAt: pref && pref.updatedAt ? pref.updatedAt : null,
+    };
+    const tmp = `${p}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
+    fs.renameSync(tmp, p);
+    return doc;
+  }
+
+  // Count persisted pref objects for a scope (quota accounting on the UI path).
+  count(scopeId) {
+    const dir = this.prefsDir();
+    if (!dir) return 0;
+    const prefix = `${safeName(scopeId)}__`;
+    try {
+      return fs.readdirSync(dir).filter((f) => f.startsWith(prefix) && f.endsWith('.json')).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  // Reap everything owned by a scope: drop its in-memory creds and delete its
+  // persisted prefs. Called by the teardown endpoint on team/agent deletion.
+  teardown(scopeId) {
+    let removed = 0;
+    this.creds.delete(String(scopeId));
+    const dir = this.prefsDir();
+    if (dir) {
+      const prefix = `${safeName(scopeId)}__`;
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (f.startsWith(prefix) && f.endsWith('.json')) {
+            try { fs.unlinkSync(path.join(dir, f)); removed += 1; } catch { /* best-effort */ }
+          }
+        }
+      } catch { /* nothing to reap */ }
+    }
+    return removed;
+  }
+}
+
+module.exports = { ScopeStore, safeName, normRepo };

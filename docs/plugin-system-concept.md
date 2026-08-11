@@ -721,6 +721,19 @@ before it moves from catalog to roadmap.
   agent-capability activation. Elevated routes (`minRole > team-member`) still
   refuse a purely-global viewer. Agent CLI access is unaffected (the grant path
   never reads `ui.global`). Patterns Catalog is the first plugin to opt in.
+- **GitHub Issues plugin** *(shipped — #1637)*: the first plugin that is both
+  UI-bearing **and** credential-holding. `plugins/github-issues/` +
+  `github-issues-broker/` — list a repo's issues, read one, and add/remove a
+  label in the console so releasing work (e.g. applying a `ready` gate) no
+  longer means switching to GitHub. Manifest: `capabilities: ["egress"]`,
+  `credentials: []`, `scopes: ["team"]`, one `ui.route` `/` @ `team-member`,
+  **not** `ui.global`. Credential delivery is **pushed, not baked in**: the
+  orchestrator resolves each granted team's `environment → { token, repos }`
+  (`orchestrator/plugin-github-creds.js`, pure + unit-tested) and pushes a
+  per-scope map to the broker's `PUT /internal/scope-credentials` via
+  `plugin-runtime.pushScopeCredentials`; the raw token stays in the broker's
+  memory and never reaches the browser or an agent (AC10). Read-only `aee-issues`
+  CLI (`repos`/`list`/`show`); label writes are the human console action.
 
 ## 10. Open questions
 

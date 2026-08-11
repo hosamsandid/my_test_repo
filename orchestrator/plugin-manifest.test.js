@@ -397,3 +397,24 @@ test('the shipped dummy-echo manifest (plugins/dummy-echo) is valid', () => {
   assert.deepEqual(manifest.scopes, ['team', 'agent']);
   assert.equal(manifest.cli.name, 'aee-echo');
 });
+
+// ── ACCEPTANCE: the shipped github-issues manifest validates end to end ───────
+test('the shipped github-issues manifest (plugins/github-issues) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'github-issues', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // A credential-holding, egress broker whose GitHub token is the team's env
+  // token (reused, not a plugin-grant secret) → declared credentials stay empty:
+  assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
+  assert.deepEqual(manifest.credentials, []);
+  // Standard team-grant gating (issue #1633): team scope only, NOT ui.global (#1599):
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(defaultGranularity(manifest), 'team');
+  assert.notEqual(manifest.ui.global, true);
+  assert.equal(manifest.cli.name, 'aee-issues');
+  // A single team-member UI route — any team member may list/read/label (no admin gate):
+  const board = manifest.ui.routes.find((r) => r.path === '/');
+  assert.equal(board && board.minRole, 'team-member');
+});

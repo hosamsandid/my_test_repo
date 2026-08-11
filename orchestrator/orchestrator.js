@@ -10278,12 +10278,28 @@ async function main() {
               res.end(JSON.stringify({ ok: true, branch }));
               return;
             }
+            // `git ls-remote --exit-code` returns 2 when the connection
+            // succeeded but no refs matched — i.e. an empty repository (no
+            // commits/branches/HEAD yet). That is reachable-and-authorized, not
+            // a failure, so report it as OK-but-empty rather than surfacing the
+            // benign SSH known-hosts warning as an error (fatal errors use 128).
+            if (err.code === 2) {
+              res.end(JSON.stringify({ ok: true, branch: null, empty: true }));
+              return;
+            }
             const detail = (stderr || err.message || '').toString().trim();
             // Strip any Authorization header line that may have leaked into the
             // error output before returning it to the caller. Match to end-of-line
             // so the full "Basic <base64>" value is covered, not just the first word.
             const sanitized = detail.replace(/Authorization:[^\r\n]*/gi, 'Authorization: [redacted]');
-            const firstLine = sanitized.split('\n').find(l => l.trim()) || 'git ls-remote failed';
+            // Skip benign SSH notices (first-connection known-hosts warnings)
+            // so the real failure — "Permission denied", "Repository not found",
+            // a timeout — surfaces instead of being masked by the warning line.
+            const isNoise = (l) =>
+              /^Warning:\s/i.test(l) || /Permanently added/i.test(l);
+            const lines = sanitized.split('\n').map(l => l.trim()).filter(Boolean);
+            const firstLine =
+              lines.find(l => !isNoise(l)) || lines[0] || 'git ls-remote failed';
             res.end(JSON.stringify({ ok: false, error: firstLine.slice(0, 300) }));
           },
         );

@@ -49,6 +49,10 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -uo pipefail
+          # TEMPORARILY DISABLED: the heavy screenshot/diff job is too slow and
+          # resource-hungry for now. Remove this early short-circuit to re-enable.
+          echo "visual evidence temporarily disabled — skipping"
+          echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           if printf '%s' "$LABELS" | grep -q '"ui"'; then
             echo "opt-in: 'ui' label present"
             echo "run=true" >> "$GITHUB_OUTPUT"; exit 0

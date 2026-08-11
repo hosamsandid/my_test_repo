@@ -7,7 +7,7 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 | Field | Purpose |
 |---|---|
 | **Skills** | Names of skills (from the central pool) to copy into the agent workspace at creation |
-| **Repositories** | Zero or more Git repos to clone, each with an optional SSH key binding; an empty array is valid for LLM-only agents with no code context |
+| **Repositories** | Zero or more Git repos to clone, each with an optional SSH key binding — see [Repository-less environments](#repository-less-environments) |
 | **GitHub Token** | PAT used by the GitHub poller for event-driven triggers; also authenticates HTTPS GitHub repository cloning and the real-time repo-check probe |
 | **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
@@ -22,6 +22,19 @@ When a new agent is created with a Working Environment, the orchestrator:
 4. Assembles a merged `CLAUDE.md` from the base template, the environment section, and the agent's own prompt
 
 This means all agents in the same Working Environment share the same starting skill set and repository access — but each gets an independent workspace and memory that evolves separately from that point on.
+
+## Repository-less environments
+
+A Working Environment may have **no repository** at all. Materializing a team onto
+a repo-less environment creates the team and its agents normally — nothing is
+cloned, and the agents run with their own workspace as the working directory
+rather than a `/repo` checkout. This suits teams whose work is not tied to a
+codebase (research, drafting, analysis).
+
+The one trade-off: GitHub hand-off channels (PR / issue triggers and outcomes)
+have no repository to act on, so they are unavailable for a repo-less team. Add a
+repository to the environment if the team needs them. The Materialize dialog
+shows an inline note when the selected environment has no repository.
 
 ## Editing a Working Environment
 

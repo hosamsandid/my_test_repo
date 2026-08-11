@@ -214,9 +214,11 @@ export default function MaterializeDialog({ bundle, onClose, onDone }) {
           </div>
         )}
         {selectedEnv && selectedRepos.length === 0 && (
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning, var(--eb-status-error))' }}>
-            This environment has no repository configured — members will have nothing to clone.
-          </span>
+          <div style={{ ...infoBox, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
+            This environment has no repository — the team will run without one. Its
+            agents can still chat and use their skills, but GitHub hand-offs (PR /
+            issue channels) won't be available.
+          </div>
         )}
         {!noEnvs && (
           <button type="button" onClick={goCreateEnv} style={{ ...linkBtn, alignSelf: 'flex-start' }}>

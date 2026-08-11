@@ -14,6 +14,7 @@ const {
   findPersonalCredential,
   resolveCredential,
   selectAgentIdsForOwner,
+  selectPersonalCredentialIds,
 } = require("./credential-resolution");
 
 // ── owner resolution (AC3, AC4) ─────────────────────────────────────────────
@@ -205,4 +206,37 @@ test("selectAgentIdsForOwner: null/empty owner or a corrupt config selects nothi
   assert.deepEqual(selectAgentIdsForOwner(agents, null), []);
   assert.deepEqual(selectAgentIdsForOwner(agents, ""), []);
   assert.deepEqual(selectAgentIdsForOwner(agents, "u-alice"), ["a1"]);
+});
+
+// ── offboarding credential selection (#1571 Phase 5, AC1/AC3) ────────────────
+
+test("selectPersonalCredentialIds: only the owner's PERSONAL entries (AC1)", () => {
+  assert.deepEqual(selectPersonalCredentialIds(index, "u-alice"), ["pers-alice"]);
+  assert.deepEqual(selectPersonalCredentialIds(index, "u-bob"), ["pers-bob"]);
+  assert.deepEqual(selectPersonalCredentialIds(index, "u-carol"), []); // owns nothing
+});
+
+test("selectPersonalCredentialIds: a team/system entry is never selected even if userId coincides (AC3)", () => {
+  const mixed = [
+    { id: "sys-1", scope: "system", userId: "u-alice" },     // shared — never deleted
+    { id: "team-1", scope: "team", userId: "u-alice" },      // shared — never deleted
+    { id: "pers-a", scope: "personal", userId: "u-alice" },  // the only one offboarding deletes
+  ];
+  assert.deepEqual(selectPersonalCredentialIds(mixed, "u-alice"), ["pers-a"]);
+});
+
+test("selectPersonalCredentialIds: multiple personal creds of one owner all selected", () => {
+  const many = [
+    { id: "p1", scope: "personal", userId: "u-alice" },
+    { id: "p2", scope: "personal", userId: "u-alice" },
+    { id: "p3", scope: "personal", userId: "u-bob" },
+  ];
+  assert.deepEqual(selectPersonalCredentialIds(many, "u-alice"), ["p1", "p2"]);
+});
+
+test("selectPersonalCredentialIds: null/empty owner, non-array, or entry without id → []", () => {
+  assert.deepEqual(selectPersonalCredentialIds(index, null), []);
+  assert.deepEqual(selectPersonalCredentialIds(index, ""), []);
+  assert.deepEqual(selectPersonalCredentialIds(null, "u-alice"), []);
+  assert.deepEqual(selectPersonalCredentialIds([{ scope: "personal", userId: "u-alice" }], "u-alice"), []);
 });

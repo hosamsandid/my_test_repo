@@ -12,7 +12,18 @@ Every SSH key and GitHub token carries an **ownership tier** on its index entry 
 
 **Personal tier (epic #1558).** A `personal` credential belongs to exactly one human, identified by the `userId` owner field on its index entry, and is **strictly private** to that person. There is deliberately **no `scope.all` override**: neither a System Admin nor the env single-admin can list, read metadata for, or manage anyone else's personal credential. The owner is always the authenticated caller — a create body may not name a different owner, and a personal credential's ownership is immutable (it cannot be reassigned into or out of a `team`/`system` tier; create a fresh credential instead). Legacy entries without a `scope` field continue to normalize to a `team`/`default` credential, unchanged.
 
-> Phase 1 landed the data-model & RBAC foundation; Phase 2 (below) adds the self-service UI; Phase 3 (below) adds the runtime resolution order. Rotation→respawn propagation and offboarding land in later phases of epic #1558.
+> Phase 1 landed the data-model & RBAC foundation; Phase 2 (below) adds the self-service UI; Phase 3 (below) adds the runtime resolution order; Phase 4 adds rotation→respawn propagation; Phase 5 (below) adds offboarding auto-delete + pause.
+
+### Offboarding (auto-delete + pause)
+
+*(epic #1558 Phase 5, #1571; concept `personal-credentials-concept.md` §8, decision D6)*
+
+When a human is deactivated or removed (`DELETE /internal/admin/users/:id`, proxied from the Teams page), their personal credentials must not linger and their agents must not keep acting under a departed identity. The orchestrator runs `offboardOwner(userId)` **before** removing the user record, so a partial failure leaves the user recoverable:
+
+1. **Pause** — every agent whose resolved identity was that person's personal credential (matched by `credential-resolution.selectAgentIdsForOwner`, so a team-member is matched via its parent team's owner) is **drained** — disabled in place, **not wiped**. In-flight work stops; the agent does not auto-resume, and re-enabling it is an explicit human decision.
+2. **Auto-delete** — all of that person's **personal** SSH keys and GitHub tokens are removed: the `_keys`/`_tokens` index entries **and** the 0600 secret files, leaving no residual copy. The person's **team/system** credentials are shared infrastructure and are **never** touched (even one whose `userId` happens to coincide).
+
+Pausing happens first, so any in-flight attributed write that outlives the pause **refuses** (refuse-on-missing, above) rather than acting under a now-deleted identity — it never silently drops to a shared credential. Consistent with the strict-privacy guarantee, there is **no administrator break-glass** into a departed person's secrets before deletion: they are simply removed, not read or transferred. To continue the work, an operator re-owns the affected agents to a present human who supplies their **own** personal credential.
 
 ### Runtime credential resolution (`personal → team → system`)
 

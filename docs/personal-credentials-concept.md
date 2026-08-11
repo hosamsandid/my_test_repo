@@ -163,6 +163,8 @@ Setting or rotating a person's personal credential **propagates by respawn**, re
 
 **No break-glass (D6, consistent with D2).** There is deliberately **no** admin path into a departed person's secrets — not to read them, not to transfer them, not to keep their agents running under the old identity. If the work must continue, an operator re-owns the affected agents to a present human, who supplies their **own** personal credential. This is the lifecycle consequence of the strictly-private guarantee in §4: a secret no one but the owner can ever see is also a secret no one can inherit.
 
+*Implemented (#1571, Phase 5):* `DELETE /internal/admin/users/:id` now calls `orchestrator.offboardOwner(userId)` **before** `teamsStore.deleteUser`, so a partial failure leaves the user recoverable rather than deleted-with-lingering-secrets (AC5). `offboardOwner` (1) **pauses** the person's agents — `credential-resolution.selectAgentIdsForOwner` (over `resolveAgentOwnerId`, so a team-member is matched via its parent team's owner) selects them, each drained in place via `disableAgent(id, { mode: 'drain' })` (disabled, never wiped — AC2); then (2) **deletes** the person's personal credentials — `credential-resolution.selectPersonalCredentialIds` picks only `scope: 'personal'` entries owned by that `userId` (a team/system entry is never matched even if its `userId` coincides — AC3), and `_deletePersonalCredentials` unlinks each 0600 secret file and rewrites the `_keys`/`_tokens` index without them (AC1/AC4). Pausing first means any in-flight attributed write that outlives the pause **refuses** (Phase 3 refuse-on-missing) rather than acting under a now-deleted identity, and a drained agent does not auto-resume — re-enabling it is an explicit human decision (edge case). Best-effort per item; a summary is returned on the delete response and logged.
+
 ---
 
 ## 9 — Event polling stays shared
@@ -245,7 +247,7 @@ Copy should make the tier and its identity consequence explicit (a personal cred
 2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials. *(shipped — #1576)*
 3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step)*
 4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3). *(shipped — #1570)*
-5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6).
+5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6). *(shipped — #1571)*
 6. **UI** — the self-service personal-credential surface on `/ssh-keys` and `/github-tokens` (§11).
 
 Depends on #1456 (trustworthy `req.user`) landing first.

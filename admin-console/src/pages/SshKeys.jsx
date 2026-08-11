@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, Terminal, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';

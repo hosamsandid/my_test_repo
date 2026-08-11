@@ -44,6 +44,8 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+// Team-member system-prompt modes (#1511): inherit / additional / exclusive.
+const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
@@ -1586,8 +1588,13 @@ async function reconcileTeamOutcomes(teamId) {
   for (const { id, cfg } of members) {
     const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
 
-    const hasOwnPrompt = typeof cfg.systemPrompt === 'string';
-    const base = hasOwnPrompt ? cfg.systemPrompt : teamTemplate;
+    // Mode-aware base prompt (#1511): 'exclusive' → the member's own text;
+    // 'additional' → team template + the member's addition (a member in this
+    // mode stores ONLY the addition in cfg.systemPrompt); 'inherit' → the team
+    // template. The derived Outcomes/GitHub blocks are then applied on top.
+    const promptMode = resolvePromptMode(cfg);
+    const ownText = typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '';
+    const base = composeMemberPrompt(promptMode, teamTemplate, ownText);
     const wiring = outcomesWiringContext(id, {
       roles: members,
       humans: (teamCfg && Array.isArray(teamCfg.humans)) ? teamCfg.humans : [],
@@ -1597,11 +1604,14 @@ async function reconcileTeamOutcomes(teamId) {
       github: cfg.github, outcomes: cfg.outcomes, ...(wiring ? { wiring } : {}),
     });
 
-    // Persist the re-rendered block onto an override member's stored prompt so
+    // Persist the re-rendered block onto an EXCLUSIVE member's stored prompt so
     // export (buildProcessTemplate strips it back out) and a later prompt-toggle
-    // stay consistent with what the agent reads. Inheriting members carry no
-    // override — only their AGENT-PROMPT.md is refreshed.
-    if (hasOwnPrompt && cfg.systemPrompt !== nextPrompt) {
+    // stay consistent with what the agent reads. For 'additional' the stored
+    // systemPrompt is only the addition (team + addition is re-composed on every
+    // team-prompt edit), so it must NEVER be overwritten with the composed +
+    // derived output. 'inherit' members carry no override — only their
+    // AGENT-PROMPT.md is refreshed.
+    if (promptMode === PROMPT_MODES.EXCLUSIVE && cfg.systemPrompt !== nextPrompt) {
       cfg.systemPrompt = nextPrompt;
       try { writeJsonAtomic(cfgPath, cfg); } catch { /* best-effort */ }
     }
@@ -1686,7 +1696,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -2075,11 +2085,36 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (delete the field); a string / array means "set the override".
   let promptOverrideChanged = false;
   if (fresh.role === 'team-member') {
-    if (systemPrompt === null) {
-      delete fresh.systemPrompt;
-      promptOverrideChanged = true;
-    } else if (typeof systemPrompt === 'string') {
-      fresh.systemPrompt = systemPrompt;
+    // System-prompt mode (#1511). An explicit `promptMode` selects one of the
+    // three modes; an older client that sends only `systemPrompt` is mapped the
+    // legacy way (null → inherit, string → exclusive) so nothing regresses (AC7).
+    const modeGiven = promptMode === PROMPT_MODES.INHERIT
+      || promptMode === PROMPT_MODES.ADDITIONAL
+      || promptMode === PROMPT_MODES.EXCLUSIVE;
+    if (modeGiven || systemPrompt !== undefined) {
+      let mode;
+      if (modeGiven) mode = promptMode;
+      else if (systemPrompt === null) mode = PROMPT_MODES.INHERIT;
+      else mode = PROMPT_MODES.EXCLUSIVE;
+
+      if (mode === PROMPT_MODES.INHERIT) {
+        delete fresh.systemPrompt;
+        delete fresh.promptMode;
+      } else if (mode === PROMPT_MODES.ADDITIONAL) {
+        // The agent-specific addition; empty is allowed (composes to the team
+        // template alone, AC8). `promptMode` is persisted because this state
+        // cannot be inferred from systemPrompt presence.
+        fresh.systemPrompt = typeof systemPrompt === 'string' ? systemPrompt : '';
+        fresh.promptMode = PROMPT_MODES.ADDITIONAL;
+      } else {
+        // Exclusive (the renamed "Custom"). Keep the legacy shape — no
+        // `promptMode` field — so an existing custom member stays byte-identical
+        // (AC6/AC7).
+        fresh.systemPrompt = typeof systemPrompt === 'string'
+          ? systemPrompt
+          : (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '');
+        delete fresh.promptMode;
+      }
       promptOverrideChanged = true;
     }
     if (skillsOverride === null) {
@@ -2150,21 +2185,28 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     // override here (fresh was written above; cfg was read before that).
     const prevOverride = (typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
     const nextOverride = (typeof fresh.systemPrompt === 'string') ? fresh.systemPrompt : '';
-    if (prevOverride !== nextOverride) {
+    // #1511: version on an authored-text change OR a mode switch, so switching
+    // between the three modes is recorded consistently with inherit/edit (AC12).
+    const prevMode = resolvePromptMode(cfg);
+    const nextMode = resolvePromptMode(fresh);
+    if (prevOverride !== nextOverride || prevMode !== nextMode) {
       captureAuthoredPromptEdit(id, {
         field: 'systemPrompt', oldContent: prevOverride, newContent: nextOverride, req,
-        action: typeof fresh.systemPrompt === 'string' ? 'edited' : 'inherited',
+        action: nextMode === PROMPT_MODES.INHERIT ? 'inherited' : 'edited',
+        ...(prevMode !== nextMode ? { note: `prompt mode ${prevMode} → ${nextMode}` } : {}),
       });
     }
-    let resolvedPrompt = '';
-    if (typeof fresh.systemPrompt === 'string') {
-      resolvedPrompt = fresh.systemPrompt;
-    } else if (fresh.parentTeamId) {
+    // Compose the effective prompt from the resolved mode (#1511): inherit → the
+    // team template; additional → team template + delimited addition; exclusive
+    // → the member's own text verbatim.
+    let teamTemplate = '';
+    if (fresh.parentTeamId) {
       const teamCfg = readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null);
       if (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') {
-        resolvedPrompt = teamCfg.systemPromptTemplate;
+        teamTemplate = teamCfg.systemPromptTemplate;
       }
     }
+    const resolvedPrompt = composeMemberPrompt(nextMode, teamTemplate, nextOverride);
     const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
     try {
       const tmp = promptPath + '.tmp';
@@ -3716,13 +3758,26 @@ app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (re
       const fresh = readJsonFile(cfgPath, cfg);
       const prev = resolveAuthoredPrompt(id, cfg);
       captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
-      let resolvedPrompt = targetContent;
+      // #1511: the version-history field is the authored override text. Preserve
+      // the member's current mode when restoring it — an 'additional' member's
+      // restored text is its addition (re-composed with the team template), not a
+      // full override. An empty target always means inherit.
+      const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
+      const teamTemplate = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
+      const curMode = resolvePromptMode(cfg);
+      let resolvedPrompt;
       if (targetContent.length === 0) {
         delete fresh.systemPrompt; // inherit
-        const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
-        resolvedPrompt = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
-      } else {
+        delete fresh.promptMode;
+        resolvedPrompt = teamTemplate;
+      } else if (curMode === PROMPT_MODES.ADDITIONAL) {
         fresh.systemPrompt = targetContent;
+        fresh.promptMode = PROMPT_MODES.ADDITIONAL;
+        resolvedPrompt = composeMemberPrompt(PROMPT_MODES.ADDITIONAL, teamTemplate, targetContent);
+      } else {
+        fresh.systemPrompt = targetContent; // exclusive
+        delete fresh.promptMode;
+        resolvedPrompt = targetContent;
       }
       writeJsonAtomic(cfgPath, fresh);
       const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');

@@ -35,6 +35,18 @@ const {
   PLUGIN_SIDECARS_SUPPORTED,
 } = require('./container-runtime');
 
+// On Kubernetes a plugin broker is a Deployment + Service + PVC, a different
+// mechanism from the Podman sibling container (concept §9, #1565). The k8s
+// implementation lives in spawn-kubernetes-plugin.js; this module delegates the
+// three runtime-divergent entry points to it when the stack runs on k8s. The
+// rest of the surface — mintScopeToken, brokerBaseUrl, teardownScope — is
+// runtime-agnostic (HMAC over the shared secret, an in-namespace HTTP call to a
+// Service named identically to the Podman container), so it stays here and
+// serves both. Detected the same way orchestrator.js / container-runtime.js do.
+const AEE_RUNTIME = String(process.env.AEE_CONTAINER_RUNTIME || 'podman').toLowerCase();
+const IS_K8S = AEE_RUNTIME === 'kubernetes' || AEE_RUNTIME === 'k8s';
+const k8sPlugin = IS_K8S ? require('./spawn-kubernetes-plugin') : null;
+
 const UNSUPPORTED = { supported: false, reason: 'plugin sidecars require the podman runtime' };
 
 const {
@@ -43,6 +55,7 @@ const {
   reconcileSidecars,
   reconcileAttachments,
   capabilityAttachments,
+  brokerEnvContract,
 } = require('./plugin-sidecar');
 
 const { PLUGIN_ID_LABEL } = require('./plugin-scope');
@@ -146,6 +159,7 @@ function splitByRunning(containers) {
 
 // Back-compat name used by the /internal/plugins route: what is actually up.
 async function listLiveSidecars() {
+  if (IS_K8S) return k8sPlugin.listLiveSidecars();
   return splitByRunning(await listSidecarContainers()).running;
 }
 
@@ -174,30 +188,16 @@ async function ensureStateVolume(pluginId) {
 // it is the one impure-module function worth asserting on directly.
 function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMAN_HOST_SOCKET } = {}) {
   const caps = capabilityAttachments(manifest.sidecar.capabilities);
-  const quota = manifest.quota || {};
 
-  const env = {
-    // Plugin-authored extras go in FIRST so the platform contract below always
-    // wins. `sidecar.env` is written by the plugin author; letting it set
-    // AEE_PLUGIN_QUOTA_MAX_OBJECTS would let a plugin lift its own declared cap,
-    // and AEE_PLUGIN_SIGNING_SECRET would take its broker off the platform's
-    // token authority. The manifest declares intent; the platform sets truth.
-    ...(manifest.sidecar.env || {}),
-    // The plugin-neutral env contract every broker reads through the SDK's
-    // brokerConfig(). The orchestrator is generic — it must not know that this
-    // particular broker once read PODMAN_MCP_SIGNING_SECRET.
-    AEE_PLUGIN_ID: manifest.id,
-    AEE_PLUGIN_PORT: String(manifest.sidecar.internalPort),
-    AEE_PLUGIN_SIGNING_SECRET: secret,
-    AEE_PLUGIN_AUDIT_DIR: AUDIT_MOUNT,
-    AEE_PLUGIN_STATE_DIR: STATE_MOUNT,
-  };
-  // Quota is deleted rather than left as an author-supplied value: absent means
-  // "no cap declared", and a plugin must not be able to manufacture that state.
-  delete env.AEE_PLUGIN_QUOTA_MAX_OBJECTS;
-  delete env.AEE_PLUGIN_QUOTA_TTL_SECONDS;
-  if (Number.isInteger(quota.maxObjects)) env.AEE_PLUGIN_QUOTA_MAX_OBJECTS = String(quota.maxObjects);
-  if (Number.isInteger(quota.ttlSeconds)) env.AEE_PLUGIN_QUOTA_TTL_SECONDS = String(quota.ttlSeconds);
+  // The plugin-neutral env contract every broker reads through the SDK's
+  // brokerConfig(), derived by the shared pure builder so this Podman create
+  // body and the k8s Deployment (spawn-kubernetes-plugin.js) can never drift on
+  // which AEE_PLUGIN_* variables the platform sets or how it defends them.
+  const env = brokerEnvContract(manifest, {
+    signingSecret: secret,
+    auditDir: AUDIT_MOUNT,
+    stateDir: STATE_MOUNT,
+  });
 
   const mounts = [];
   if (caps.socket) {
@@ -278,6 +278,7 @@ async function stopSidecar(pluginId) {
 // Start sidecars for installed plugins, stop orphans of uninstalled ones.
 // Best-effort per plugin: one broken image must not stop the others.
 async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
+  if (IS_K8S) return k8sPlugin.reconcilePluginSidecars(dir);
   if (!PLUGIN_SIDECARS_SUPPORTED) return { started: [], stopped: [], errors: [], ...UNSUPPORTED };
   const manifests = installedManifests(dir);
   const { running, stale } = splitByRunning(await listSidecarContainers());
@@ -361,6 +362,7 @@ async function disconnectSidecar(pluginId, network) {
 // Make network truth match grant truth for one plugin.
 //   grantedAgentIds : ids of the agents whose resolved grant includes this plugin
 async function reconcilePluginAttachments(pluginId, grantedAgentIds) {
+  if (IS_K8S) return k8sPlugin.reconcilePluginAttachments(pluginId, grantedAgentIds);
   if (!PLUGIN_SIDECARS_SUPPORTED) return { connected: [], disconnected: [], errors: [], ...UNSUPPORTED };
   let attached;
   try {

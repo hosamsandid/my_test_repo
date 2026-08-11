@@ -668,21 +668,25 @@ before it moves from catalog to roadmap.
   governs the agent path; `set-autonomy` stays the `/admin`-only `/api/settings`
   route). The direct-manipulation polish (drag reorder, colour pickers,
   requirement-target-by-click, undo/redo) is a UI refinement over these same mutations.
-- **Kubernetes epic (#1554), Phase 6 — netzplan content migration** *(shipped — #1566)*:
-  the machinery to bring an existing plan in, not the plan itself — **no engagement
-  content is committed** (§12). Pure `netzplan-broker/plan-import.js`: `legacyBoardToPlanDoc`
-  is the **positional → id** converter (the source keys statuses and requirement targets
-  by array index; the model keys them by milestone id — concept §4), the single place that
-  alignment happens and it fails **loud** on any misalignment (done-array length ≠ milestone
-  count, out-of-range target index, unknown zone/owner) rather than mapping the wrong
-  milestone silently — the two "index shifted by +1" lanes are covered explicitly in
-  `plan-import.test.js`. `exportPlanDoc`/`importPlanDoc` wrap the idempotent normalize, and
-  `PlanStore.import` preserves timestamps + the board's current autonomy, so **export →
-  import → export is byte-identical**. Surfaced as a board **Export** button (team-member
-  read) + a Team-Admin `/admin` **Import a plan** control (`/api/import` refused below
-  team-admin). The one-off conversion of a specific plan runs off-repo; the restored
-  non-swimlane panels are the four §5 primitives (a normalisation, not a pixel-identical
-  restoration — §5/§12). See `docs/network-plan-plugin-concept.md` §11/§12.
+- **Kubernetes epic (#1554), Phase 5 — plugin sidecars on Kubernetes** *(shipped — #1565)*:
+  flips `PLUGIN_SIDECARS_SUPPORTED` for **UI-bearing** plugins.
+  `orchestrator/spawn-kubernetes-plugin.js` — a sibling behind the
+  `container-runtime.js` seam, same raw-HTTPS `k8sRequest` style as
+  `spawn-kubernetes-pod.js` — creates a **Deployment + Service + state PVC** per
+  installed plugin; `plugin-runtime.js` delegates `reconcilePluginSidecars` /
+  `reconcilePluginAttachments` / `listLiveSidecars` to it on k8s (the rest of the
+  surface is runtime-agnostic — the Service is named identically to the Podman
+  container, so `brokerBaseUrl` resolves on both). State is a **PVC not
+  `emptyDir`** (audit stays an `emptyDir` — a per-plugin audit PVC is a separable
+  follow-up); RBAC (`deploy/k8s/base/core/10-rbac.yaml`) gains namespaced
+  `apps/deployments` + `services` + `persistentvolumeclaims` + `networkpolicies`.
+  The grant-driven per-agent-network reachability a **broker** plugin needs
+  becomes per-grant `NetworkPolicy` objects — a larger, separable mechanism split
+  out of this phase: a UI-only plugin needs none, so `reconcilePluginAttachments`
+  is a no-op on k8s and a broker plugin's CLI stays at exit 3 there.
+  `capabilities: ["podman-socket"]` has no k8s equivalent, so
+  `plugins/podman-sandbox/` is permanently `platforms: ["podman"]`. See
+  `docs/network-plan-plugin-concept.md` §9.
 
 ## 10. Open questions
 

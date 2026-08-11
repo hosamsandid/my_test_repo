@@ -194,7 +194,7 @@ API: `GET /api/agents/:id/export` → streams `agent-<id>-export.zip`.
 **Import** — click **Import Agent** at the top-right of `/agents` and select a ZIP produced by export. An import dialog opens with two optional choices:
 
 - **New Agent ID** — import the agent under a different id. Leave blank to keep the exported id. If that id is already taken the dialog surfaces the conflict and pre-fills a non-colliding suggestion, so you can re-id and retry without re-selecting the file.
-- **Assign to Team** — graft the imported agent into an existing team as a `team-member`. It inherits the team's working environment but keeps its own imported system prompt as a per-member override (so a later team-prompt edit won't overwrite it). Leave as *Standalone* to import it as an independent `agent`.
+- **Assign to Team** — graft the imported agent into an existing team as a `team-member`. It inherits the team's working environment but keeps its own imported system prompt as a per-member override — the **Exclusive overriding input** prompt mode (so a later team-prompt edit won't overwrite it; a member can instead be switched to **Inherit from team** or **Additional input** in its edit form, #1511). Leave as *Standalone* to import it as an independent `agent`.
 
 The imported workspace (memory, skills, repo clone, prompt files) is preserved 1:1 — nothing the agent learned is re-seeded away. A **fresh Matrix identity** is provisioned on import (the exported credentials belong to the source homeserver and are dropped), and the agent is started immediately — open it in Agent Chat.
 

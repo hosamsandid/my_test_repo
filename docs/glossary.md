@@ -43,7 +43,7 @@ What kind of agent this is. Five values:
 |---|---|
 | `agent` | A standalone agent. Answers your direct messages; with triggers it can also act on its own. |
 | `team` | Not an agent you chat with — a **template + shared settings** for a squad. It holds the shared system prompt and the team's skill grant. |
-| `team-member` | One actual agent spawned from a `team`. Inherits the team's prompt and skills unless it overrides them. |
+| `team-member` | One actual agent spawned from a `team`. Inherits the team's prompt and skills unless it overrides them. The system prompt has three modes: **Inherit from team**, **Additional input** (team prompt + an agent-specific addition), and **Exclusive overriding input** (a full replacement, formerly "Custom"). |
 | `orchestrator` | Watches a Briefing-Pack directory and creates one `bp-instance` stub per pack. |
 | `bp-instance` | One agent per Briefing Pack. Exists as an inert stub until it is claimed or activated. |
 

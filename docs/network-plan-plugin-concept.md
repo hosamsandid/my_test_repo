@@ -274,10 +274,21 @@ verb is needed.
 
 ## 9. Kubernetes plugin sidecars
 
-Plugin sidecars are Podman-only today: `spawn-kubernetes-pod.js` sets
+*Shipped — #1565.* `orchestrator/spawn-kubernetes-plugin.js` is a sibling behind
+the `container-runtime.js` seam; `plugin-runtime.js` delegates
+`reconcilePluginSidecars` / `reconcilePluginAttachments` / `listLiveSidecars` to
+it when `AEE_CONTAINER_RUNTIME=kubernetes`. Each installed UI-bearing plugin
+becomes a **Deployment + Service + state PVC**; the state volume is a **PVC, not
+`emptyDir`** (audit is an `emptyDir` here — a per-plugin audit PVC on k8s is a
+separable follow-up). RBAC gained namespaced `apps/deployments` + `services` +
+`persistentvolumeclaims` (+ `networkpolicies`, reserved). The broker-plugin
+per-grant `NetworkPolicy` reachability is split out (see below):
+`reconcilePluginAttachments` is a no-op on k8s. The design that got there:
+
+Plugin sidecars were Podman-only: `spawn-kubernetes-pod.js` set
 `PLUGIN_SIDECARS_SUPPORTED: false` and every entry point in `plugin-runtime.js`
-short-circuits. Workspace seeding still happens, so on a hosted stack a plugin
-can be installed and granted but no broker answers and its CLI exits `3`.
+short-circuited. Workspace seeding still happened, so on a hosted stack a plugin
+could be installed and granted but no broker answered and its CLI exited `3`.
 
 For this concept that is decisive rather than cosmetic: a plugin-hosted board
 would not open on the GKE console at all. So the port is in scope, and
@@ -334,8 +345,8 @@ Ordered so the board is usable before the Kubernetes work lands.
 | 2 (#1562) | §4.8 live stack: proxy, `minRole`, scope discovery, nav + iframe, endpoint lookup, state volume *(shipped — #1562)* | `test-mgmt`'s three routes serve and refuse correctly |
 | 3 (#1563) | The plugin: manifest, broker on the SDK, document store, `swimlane` primitive at parity *(shipped — #1563; the id-keyed document model, `aee-plan` CLI + autonomy ladder, the on-SDK broker with a state-volume store, and a minimal served board (view + tick + `/admin`) — the rich swimlane editor is the completion step)* | **board usable on Podman** |
 | 4 (#1564) | `graph`, `bipartite`, `blocks` primitives + panel add/remove/reorder *(shipped — #1564; all three primitives in the id-keyed `plan-doc.js` model with referential repair, `add-panel`/`delete-panel`/`reorder-panels`/`set-panel-title` composition, a shared level-2 authorisation path, `graphNeighbors` hover helper, and a served board whose Edit mode adds/edits/reorders/removes every primitive; the direct-manipulation polish is a UI refinement over the same mutations)* | full editability |
-| 5 (#1565) | Kubernetes: Deployment + Service + PVC, RBAC, flag flip | board reachable on GKE |
-| 6 (#1566) | Content migration: export the existing plan, round-trip import *(shipped — #1566; the pure `plan-import.js` positional→id converter (`legacyBoardToPlanDoc`, loud on any index misalignment incl. the two shifted-index lanes) + `export`/`import` round-trip (idempotent normalize, timestamp- and autonomy-preserving `PlanStore.import`), a board **Export** button + a Team-Admin `/admin` **Import a plan** control; the one-off plan conversion runs off-repo — no engagement content committed, §12)* | today's board reproduced |
+| 5 (#1565) | Kubernetes: Deployment + Service + PVC, RBAC, flag flip *(shipped — #1565; `spawn-kubernetes-plugin.js` behind the `container-runtime.js` seam, state PVC (audit emptyDir), RBAC + flag flipped, UI-only reachability needs no NetworkPolicy — the broker-plugin per-grant NetworkPolicy is split out)* | board reachable on GKE |
+| 6 (#1566) | Content migration: export the existing plan, round-trip import | today's board reproduced |
 
 Phase 3 is the first point where anything is worth showing, and Phase 5 is the
 first point where the hosted stack can show it. Phase 4 can slip past Phase 5

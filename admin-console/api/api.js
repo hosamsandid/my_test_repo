@@ -74,6 +74,7 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
@@ -2852,18 +2853,18 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
   const envId = teamCfg.environmentId;
   const env = envId ? loadEnvironment(envId) : null;
   if (!env) return { error: `Team '${teamId}' has no Working Environment` };
-  const repos = Array.isArray(env.repositories)
-    ? env.repositories
-    : (env.repository ? [env.repository] : []);
-  const primary = repos[0];
-  if (!primary?.url) return { error: `Team '${teamId}' environment has no repository configured` };
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(primary.url);
-  } catch (err) {
-    return { error: `Team repository URL is not parseable: ${err.message}` };
+  const primary = reposFromEnv(env)[0];
+  // A repo-less team (#1623) resolves empty repo vars rather than erroring, so
+  // roles can still be added to it after materialization.
+  let parsed = null;
+  if (primary?.url) {
+    try {
+      parsed = deriveRepoIdentity(primary.url);
+    } catch (err) {
+      return { error: `Team repository URL is not parseable: ${err.message}` };
+    }
   }
-  const branch = typeof primary.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(primary.branch)
+  const branch = primary?.url && typeof primary.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(primary.branch)
     ? primary.branch
     : 'main';
   const readyLabel = typeof overrides.readyLabel === 'string' && overrides.readyLabel.trim()
@@ -2874,10 +2875,7 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
     vars: {
       teamName: teamCfg.displayName || teamId,
       teamId,
-      repoFullName: `${parsed.org}/${parsed.repo}`,
-      repoOwner: parsed.org,
-      repoName: parsed.repo,
-      repoUrl: primary.url,
+      ...repoVars(parsed, primary?.url),
       branch,
       readyLabel,
       dispatchLabel,
@@ -11916,12 +11914,19 @@ app.delete('/api/agent-templates/:id', (req, res) => {
 // its role-specific prompt; members that don't override inherit this text
 // and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
 function defaultTeamPrompt(vars) {
-  return [
-    `You are a member of the team **${vars.teamName}**, which collaborates on the repository \`${vars.repoFullName}\`.`,
+  // A repo-less team (#1623) has no repository to collaborate on and no GitHub
+  // hand-off surface, so drop the repo sentence and the gh-as-agent line.
+  const lines = [
+    vars.repoFullName
+      ? `You are a member of the team **${vars.teamName}**, which collaborates on the repository \`${vars.repoFullName}\`.`
+      : `You are a member of the team **${vars.teamName}**.`,
     ``,
     `Other team members may have different responsibilities (requirements gathering, implementation, reviews, documentation). Stay in your own role and do not overlap with the others.`,
-    `When you create PRs, issues or comments on GitHub, use \`gh-as-agent\` so your identity is stamped cleanly.`,
-  ].join('\n');
+  ];
+  if (vars.repoFullName) {
+    lines.push(`When you create PRs, issues or comments on GitHub, use \`gh-as-agent\` so your identity is stamped cleanly.`);
+  }
+  return lines.join('\n');
 }
 
 // GitHub label names accept basically anything except they must be 1–50
@@ -12135,43 +12140,51 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // Resolve a reused Working Environment (if any) into the repository +
   // credential inputs the rest of the pipeline expects. The env was validated
   // when it was created, so we trust its stored repo/token here.
+  // A reused env may legitimately carry ZERO repositories (#1623): the team and
+  // its members are then created repo-less — nothing is cloned and GitHub
+  // hand-off channels are unavailable. Only the reused-env path supports this;
+  // the legacy auto-create path still needs a repo to build the env from.
+  let repoLess = false;
   if (environmentId) {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return res.status(400).json({ error: `Working environment '${environmentId}' not found` });
     }
-    const repos = Array.isArray(reusedEnv.repositories)
-      ? reusedEnv.repositories
-      : (reusedEnv.repository ? [reusedEnv.repository] : []);
-    const primary = repos[0];
-    if (!primary?.url) {
-      return res.status(400).json({ error: `Working environment '${environmentId}' has no repository configured` });
+    const primary = reposFromEnv(reusedEnv)[0];
+    if (primary?.url) {
+      repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    } else {
+      repoLess = true;
+      repository = null;
     }
-    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
     githubTokenId = reusedEnv.githubTokenId || null;
   }
 
-  if (!repository?.url) {
-    return res.status(400).json({ error: 'repository.url required' });
+  if (!repoLess) {
+    if (!repository?.url) {
+      return res.status(400).json({ error: 'repository.url required' });
+    }
+    // The legacy path (no environmentId) auto-creates an env from an SSH deploy
+    // key, so sshKeyId stays mandatory there. A reused env may clone over HTTPS
+    // with just a PAT, so sshKeyId is optional in that path.
+    if (!environmentId && !repository.sshKeyId) {
+      return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
+    }
   }
-  // The legacy path (no environmentId) auto-creates an env from an SSH deploy
-  // key, so sshKeyId stays mandatory there. A reused env may clone over HTTPS
-  // with just a PAT, so sshKeyId is optional in that path.
-  if (!environmentId && !repository.sshKeyId) {
-    return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
+  let parsed = null;
+  if (!repoLess) {
+    try {
+      parsed = deriveRepoIdentity(repository.url);
+    } catch (err) {
+      return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
+    }
   }
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(repository.url);
-  } catch (err) {
-    return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
-  }
-  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+  const branch = !repoLess && typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
     ? repository.branch
     : 'main';
 
   // ── 2. Credentials must already exist (Pre-Flight) ────────────────
-  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
   }
   // The auto-created env path requires a GitHub PAT. A reused env may legitimately
@@ -12406,10 +12419,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const vars = {
     teamName,
     teamId,
-    repoFullName: `${parsed.org}/${parsed.repo}`,
-    repoOwner: parsed.org,
-    repoName: parsed.repo,
-    repoUrl: repository.url,
+    ...repoVars(parsed, repository?.url),
     branch,
     readyLabel,
     dispatchLabel: effectiveDispatchLabel,
@@ -12485,7 +12495,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
@@ -12757,39 +12767,45 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
 
   // Reuse an existing Working Environment when environmentId is supplied.
+  // A reused env may carry ZERO repositories (#1623) — the team is then created
+  // repo-less (nothing cloned, no GitHub hand-offs). Mirrors POST /api/teams.
+  let repoLess = false;
   if (environmentId) {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return fail(400, `Working environment '${environmentId}' not found`);
     }
-    const repos = Array.isArray(reusedEnv.repositories)
-      ? reusedEnv.repositories
-      : (reusedEnv.repository ? [reusedEnv.repository] : []);
-    const primary = repos[0];
-    if (!primary?.url) {
-      return fail(400, `Working environment '${environmentId}' has no repository configured`);
+    const primary = reposFromEnv(reusedEnv)[0];
+    if (primary?.url) {
+      repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    } else {
+      repoLess = true;
+      repository = null;
     }
-    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
     githubTokenId = reusedEnv.githubTokenId || null;
   }
 
-  if (!repository?.url) {
-    return fail(400, 'repository.url required');
+  if (!repoLess) {
+    if (!repository?.url) {
+      return fail(400, 'repository.url required');
+    }
+    if (!environmentId && !repository.sshKeyId) {
+      return fail(400, 'repository.url and repository.sshKeyId required');
+    }
   }
-  if (!environmentId && !repository.sshKeyId) {
-    return fail(400, 'repository.url and repository.sshKeyId required');
+  let parsed = null;
+  if (!repoLess) {
+    try {
+      parsed = deriveRepoIdentity(repository.url);
+    } catch (err) {
+      return fail(400, `Invalid repository URL: ${err.message}`);
+    }
   }
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(repository.url);
-  } catch (err) {
-    return fail(400, `Invalid repository URL: ${err.message}`);
-  }
-  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+  const branch = !repoLess && typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
     ? repository.branch
     : 'main';
 
-  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
   }
   if (!environmentId) {
@@ -12989,9 +13005,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const effectiveDispatchLabel = hasDispatcher ? dispatchLabel : readyLabel;
   const vars = {
     teamName, teamId,
-    repoFullName: `${parsed.org}/${parsed.repo}`,
-    repoOwner: parsed.org, repoName: parsed.repo,
-    repoUrl: repository.url,
+    ...repoVars(parsed, repository?.url),
     branch, readyLabel,
     dispatchLabel: effectiveDispatchLabel,
     maxParallel,
@@ -13106,7 +13120,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),

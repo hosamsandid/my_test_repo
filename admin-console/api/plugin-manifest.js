@@ -35,7 +35,7 @@
 //     quota?: { maxObjects, ttlSeconds? },      // per-scope resource cap (§4.6)
 //     requiresApproval?: [ "<subcommand>" ],
 //     policy?: { "<subcommand>": { scopes?: ["team"|"agent"], requiresFlowFinal?: bool } },
-//     ui?: { title?, routes?: [ { path, minRole } ] },
+//     ui?: { title?, global?, routes?: [ { path, minRole } ] },
 //     companionSkill?, promptLine?, version?,
 //   }
 
@@ -344,6 +344,16 @@ function validatePluginManifest(input) {
       if (input.ui.title !== undefined) {
         if (!isNonEmptyString(input.ui.title)) errors.push('ui.title must be a non-empty string');
         else ui.title = input.ui.title.trim();
+      }
+      // Opt-in global UI visibility (#1599): when true, an INSTALLED plugin's UI
+      // nav entry is shown to every authenticated user and its ordinary-user
+      // routes are reachable without a team grant. Purely a human-UI concern —
+      // it never widens an agent's capability grant. Off by default; only a
+      // `true` value is persisted so a manifest without it normalizes
+      // byte-identically to today (no regression for existing plugins).
+      if (input.ui.global !== undefined) {
+        if (typeof input.ui.global !== 'boolean') errors.push('ui.global must be a boolean');
+        else if (input.ui.global) ui.global = true;
       }
       if (input.ui.routes !== undefined) {
         if (!Array.isArray(input.ui.routes)) {

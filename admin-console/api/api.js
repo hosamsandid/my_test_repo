@@ -76,7 +76,7 @@ const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = requ
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
-const { resolveViewerRole, uiSubPath, visibleScopes } = require('./plugin-ui-viewer');
+const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -7754,6 +7754,11 @@ function pluginUiProxy(req, res) {
     return res.status(404).json({ error: `plugin '${id}' has no UI` });
   }
 
+  // A globally-visible plugin's general UI is reachable by every authenticated
+  // user without a team grant (#1599). It never bypasses INSTALL (readPluginDir
+  // above already 404s an uninstalled plugin) and never widens agent capability.
+  const globalVisible = isGloballyVisibleUi(entry.manifest);
+
   (async () => {
     // Resolve the grant so the proxy stops serving the moment the last grant is
     // revoked (AC), and so the viewer's effective role is judged only against
@@ -7766,13 +7771,18 @@ function pluginUiProxy(req, res) {
     }
     if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
     const grantedAgents = granted.body.grantedAgents || [];
-    if (!grantedAgents.length) {
+    // Without a grant, a non-global plugin has nothing to serve; a global one is
+    // served to every authenticated user (still install-gated, above).
+    if (!grantedAgents.length && !globalVisible) {
       return res.status(403).json({ error: `plugin '${id}' is not granted to any agent` });
     }
     const grantedTeamIds = [...new Set(grantedAgents.map((g) => g.teamId).filter(Boolean))];
 
     const scope = getScope(req);
-    const viewerRole = resolveViewerRole(scope, grantedTeamIds);
+    // Grant-derived role first (so a team-admin/system-admin keeps elevated
+    // access); a purely-global viewer falls back to an ordinary team-member of
+    // the general routes, so an elevated route stays refused by enforceUiRoute.
+    const viewerRole = effectiveViewerRole(scope, grantedTeamIds, { globalVisible });
     if (!viewerRole) return res.status(403).json({ error: 'you do not have access to this plugin' });
 
     const subPath = uiSubPath(req.originalUrl || req.url, id);

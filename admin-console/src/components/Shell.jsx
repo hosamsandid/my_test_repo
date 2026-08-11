@@ -170,11 +170,12 @@ export default function Shell({ children }) {
     }))
     .filter(section => section.items.length > 0);
 
-  // Dynamic nav entries for UI-bearing plugins that are BOTH installed and
-  // granted to a scope the caller can see (Network Plan epic #1554, Phase 2).
-  // Unlike the admin-only Plugins registry entry, these are visible to any team
-  // member holding the grant — the console proxy + server re-enforce access.
-  // Refetched on navigation so a revoked grant drops its entry (AC).
+  // Dynamic nav entries for UI-bearing plugins that are installed AND either
+  // granted to a scope the caller can see (Network Plan epic #1554, Phase 2) or
+  // declared globally visible (#1599 — `ui.global`, shown to every authenticated
+  // user regardless of any grant). Unlike the admin-only Plugins registry entry,
+  // these are visible to ordinary users; the console proxy + server re-enforce
+  // access. Refetched on navigation so a revoked grant drops its entry (AC).
   const [uiPlugins, setUiPlugins] = useState([]);
   useEffect(() => {
     let cancelled = false;
@@ -188,12 +189,20 @@ export default function Shell({ children }) {
         );
         const out = [];
         for (const p of withUi) {
+          const title = p.manifest.ui.title || p.manifest.name || p.id;
+          // Globally-visible plugins show unconditionally for every user; one
+          // entry per plugin id, so a global + team-granted plugin never renders
+          // twice (AC5).
+          if (p.manifest.ui.global === true) {
+            out.push({ id: p.id, title });
+            continue;
+          }
           try {
             const sr = await fetch(`/api/plugins/${encodeURIComponent(p.id)}/scopes`);
             if (!sr.ok) continue;
             const sb = await sr.json();
             if (Array.isArray(sb.scopes) && sb.scopes.length) {
-              out.push({ id: p.id, title: p.manifest.ui.title || p.manifest.name || p.id });
+              out.push({ id: p.id, title });
             }
           } catch { /* skip a plugin we cannot resolve scopes for */ }
         }

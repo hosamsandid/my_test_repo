@@ -74,6 +74,7 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
@@ -11699,6 +11700,76 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     agent: { id: agentId, displayName },
     seed: agentResp,
     ...(llmWarning ? { llmWarning } : {}),
+  });
+});
+
+// One-shot: create a repo-less Working Environment bound to a chosen Model
+// Provider plus one standalone chat agent — no GitHub URL, SSH key, or token
+// (#1624). The credential-free sibling of POST /api/quickstart; it deliberately
+// leaves that repo-first flow untouched. Pure validation + id derivation live in
+// quickstart-llm.js; this handler resolves the live registry and writes the
+// env / agent.
+app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
+  const { displayName, llmEndpointId } = req.body || {};
+
+  // Resolve the provider against the live registry, then validate purely. An
+  // empty llmEndpointId yields { llmEndpointId: null } (no error), which the
+  // validator rejects as "select a provider".
+  const binding = resolveLlmBinding(llmEndpointId, undefined);
+  const validated = validateQuickstartLlmInput({
+    displayName,
+    binding,
+    endpointCount: listLlmEndpoints().length,
+  });
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error, ...(validated.code ? { code: validated.code } : {}) });
+  }
+  const { name } = validated;
+
+  // One repo-less environment per agent (isolation, matching the repo-first flow).
+  const envId = llmEnvId(name, id => !!loadEnvironment(id));
+  const env = {
+    id: envId,
+    name,
+    description: `LLM-only environment for ${name}`,
+    repositories: [],
+    githubTokenId: null,
+    llmEndpointId: validated.llmEndpointId,
+    defaultModelId: validated.defaultModelId,
+    additionalContext: '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(envId, env);
+
+  const agentId = llmAgentId(name, id => fs.existsSync(path.join(AGENTS_DIR, id)));
+  const systemPrompt = quickstartLlmSystemPrompt(name);
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  let agentResp;
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: agentId,
+        displayName: name,
+        role: 'agent',
+        systemPrompt,
+        environmentId: envId,
+      }),
+    });
+    agentResp = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(agentResp);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+
+  res.status(201).json({
+    reused: false,
+    mode: 'llm',
+    environment: { id: envId, name: env.name, reused: false },
+    agent: { id: agentId, displayName: name },
+    seed: agentResp,
   });
 });
 

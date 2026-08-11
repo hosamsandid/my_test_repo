@@ -147,5 +147,10 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
     installed: !!(entry && entry.installed),
     status: sidecarStatus(entry),
     action: installAction(entry, { canManage, stackRuntime }),
+    // #1599: a UI-bearing plugin that opted into global visibility. Surfaced so
+    // an operator understands why an installed plugin appears for all users
+    // (its UI entry is visible to every authenticated user, independent of any
+    // team activation). Only meaningful for a plugin that actually ships a UI.
+    globalUi: !!(manifest && manifest.ui && Array.isArray(manifest.ui.routes) && manifest.ui.global === true),
   };
 }

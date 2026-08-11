@@ -655,12 +655,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     return 90;
   }
 
-  function getArtifactNodeHeight(path) {
-    const el = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
-    if (el) return el.offsetHeight;
-    return ARTIFACT_H;
-  }
-
   function layout() {
     const visible = getVisibleNodes();
     if (visible.length === 0) return;

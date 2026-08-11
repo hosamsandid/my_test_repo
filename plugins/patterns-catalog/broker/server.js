@@ -31,7 +31,7 @@ const {
   healthEndpoint,
   teardownScopeEndpoint,
   brokerConfig,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
 
 const PLUGIN_ID = 'patterns-catalog';

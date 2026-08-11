@@ -16,14 +16,15 @@ RUN apt-get update \
 RUN mkdir -p /etc/containers \
  && printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' > /etc/containers/storage.conf
 
-WORKDIR /opt/podman-mcp
-COPY podman-mcp/package.json ./package.json
+WORKDIR /opt/plugins/podman-sandbox/broker
+COPY plugins/podman-sandbox/broker/package.json ./package.json
 RUN npm install --omit=dev
-COPY podman-mcp/ ./
+COPY plugins/podman-sandbox/broker/ ./
 # Broker SDK (plugin system Phase 4, #1520): the shared broker obligations
-# module. This build's context is the repo root (see the podman-mcp/ COPYs
-# above), so the sibling broker-sdk/ is available; copy it to /opt/broker-sdk
-# so server.js resolves it as ../broker-sdk both here and in the source tree.
+# module. This build's context is the repo root (see the broker COPYs above),
+# so broker-sdk/ is available; copy it to /opt/broker-sdk so server.js resolves
+# it as ../../../broker-sdk both here and in the source tree (WORKDIR
+# /opt/plugins/podman-sandbox/broker → ../../../broker-sdk = /opt/broker-sdk).
 COPY broker-sdk/ /opt/broker-sdk/
 
 ENV PODMAN_MCP_PORT=4004

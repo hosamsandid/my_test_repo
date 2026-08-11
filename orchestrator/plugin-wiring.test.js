@@ -136,7 +136,7 @@ test('the seeded endpoint plus the CLI wire path equals the route the broker ser
   assert.equal(base.replace(/\/$/, '') + m[1], 'http://aee-plugin-podman-sandbox:4004/mcp');
 
   // And that is the only non-/healthz, non-teardown route the broker answers.
-  const brokerSource = fs.readFileSync(path.join(__dirname, '..', 'podman-mcp', 'server.js'), 'utf8');
+  const brokerSource = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'podman-sandbox', 'broker', 'server.js'), 'utf8');
   assert.ok(brokerSource.includes("req.url !== '/mcp'"), 'the broker still gates on /mcp');
 });
 

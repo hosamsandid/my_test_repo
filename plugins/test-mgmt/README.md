@@ -63,7 +63,7 @@ error — the broker is reachable and answered) / `2` usage / `3` broker
 unreachable (incl. not-granted). It is a **privilege-less client**: all security
 lives in the broker.
 
-## Broker sidecar (`../../test-mgmt-broker/`)
+## Broker sidecar (`./broker/`)
 
 A thin broker on the SDK: it imports `broker-sdk/` for token verification, scope
 filtering (`aee.plugin.owner=<scopeId>` ownership labels), audit, secret
@@ -71,5 +71,5 @@ masking, the health/teardown routes, and the approval pen — and adds only the
 governance the concept asks for: `authorizeAction` (per-scope policy) and a
 `vendor-client` that holds the one vendor credential. Built into the sidecar
 image the manifest names (`localhost/aee-plugin-test-mgmt:latest`) from
-`test-mgmt-broker/Dockerfile`, which vendors `broker-sdk/` into the image the
+`broker/Dockerfile`, which vendors `broker-sdk/` into the image the
 same way plugin #1 does.

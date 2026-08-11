@@ -1,5 +1,5 @@
 'use strict';
-// Run: node --test podman-mcp/compose-validate.test.js
+// Run: node --test plugins/podman-sandbox/broker/compose-validate.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const YAML = require('yaml');

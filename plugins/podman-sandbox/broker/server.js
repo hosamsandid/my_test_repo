@@ -36,7 +36,7 @@ const {
   teardownScopeEndpoint,
   brokerConfig,
   quotaExceeded,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const { validateComposeFile } = require('./compose-validate');
 const { enforceNetworkIsolation, injectResourceDefaults } = require('./compose-harden');
 
@@ -567,7 +567,7 @@ function buildMcpServer(scopeId) {
 // unauthenticated — a plausible-looking but forgeable value is worse in an
 // audit log than an honest one.
 const auditLog = CONFIG.auditDir
-  ? require('../broker-sdk').auditWriter(CONFIG.auditDir, { retentionMs: 7 * 24 * 60 * 60 * 1000 })
+  ? require('../../../broker-sdk').auditWriter(CONFIG.auditDir, { retentionMs: 7 * 24 * 60 * 60 * 1000 })
   : null;
 
 function recordCall(scopeId, subcommand, outcome) {

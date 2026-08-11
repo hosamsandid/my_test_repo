@@ -38,7 +38,7 @@ const {
   healthEndpoint,
   teardownScopeEndpoint,
   approvalHoldingPen,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const vendor = require('./vendor-client');
 const { decide, REQUIRES_APPROVAL } = require('./broker-policy');
 

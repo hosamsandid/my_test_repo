@@ -3123,6 +3123,20 @@ function loadGithubTokenIndex() {
   }
 }
 
+// Read the SSH-key credential index (metadata only — scope/userId/fingerprint,
+// never the private key). Sibling of `loadGithubTokenIndex`; used by offboarding
+// (#1571) to find a departing human's personal SSH keys. Best-effort: an
+// unreadable/absent index yields [].
+function loadSshKeyIndex() {
+  try {
+    const raw = fs.readFileSync(SSH_KEYS_INDEX, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 // Resolve the GitHub-token id an attributed write (PR/HTTPS push) should run
 // under, applying the personal → team → system order with refuse-on-missing
 // (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
@@ -9217,6 +9231,86 @@ class Orchestrator {
     return { ownerId: target, respawned, skipped };
   }
 
+  // Offboarding (#1571, epic #1558 Phase 5; concept §8, decision D6). When a
+  // human is deactivated/removed we (1) PAUSE the agents that were acting under
+  // that person's personal identity, then (2) auto-DELETE that person's personal
+  // credentials — both the index entries and the 0600 secret files.
+  //
+  // Order matters for AC5 (atomic-enough): agents are paused FIRST, so no run is
+  // started under the identity after this point; any in-flight attributed write
+  // that outlives the pause refuses (Phase 3 refuse-on-missing) rather than act
+  // under a now-deleted credential — it never silently drops to a shared one. A
+  // paused agent is DRAINED (disabled in place), never wiped (AC2), and does not
+  // auto-resume: re-enabling it is an explicit human decision, and with the
+  // personal credential gone it refuses until a present human re-owns it.
+  //
+  // Only PERSONAL credentials owned by this `userId` are deleted; the person's
+  // team/system credentials are shared infrastructure and are left untouched
+  // (AC3). There is deliberately no break-glass read/transfer before deletion —
+  // the secret is simply removed (AC4/D2). Best-effort per item so one failure
+  // does not abort the rest; a summary is returned for the caller to log.
+  async offboardOwner(ownerId) {
+    const target = ownerId != null && String(ownerId) !== '' ? String(ownerId) : null;
+    if (!target) return { ownerId: null, paused: [], skipped: [], deletedCredentials: [] };
+
+    // (1) Pause the departing human's agents (disable in place, no wipe).
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owned = credentialResolution.selectAgentIdsForOwner(agents, target, loadAgentConfig);
+    const paused = [];
+    const skipped = [];
+    for (const id of owned) {
+      try {
+        // bypassTeamLock: offboarding is a system action — a team-locked member
+        // owned by the departing human must still be pausable.
+        await this.disableAgent(id, { mode: 'drain', bypassTeamLock: true });
+        paused.push(id);
+      } catch (err) {
+        console.error(`[Orchestrator] offboarding: could not pause ${id} for owner ${target}: ${err.message}`);
+        skipped.push(id);
+      }
+    }
+
+    // (2) Delete the departing human's PERSONAL SSH keys and GitHub tokens.
+    const deletedCredentials = [
+      ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
+      ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
+    ];
+
+    if (paused.length || deletedCredentials.length) {
+      console.log(`[Orchestrator] offboarded owner ${target}: paused ${paused.length} agent(s), deleted ${deletedCredentials.length} personal credential(s)`);
+    }
+    return { ownerId: target, paused, skipped, deletedCredentials };
+  }
+
+  // Delete every PERSONAL credential owned by `ownerId` from one credential
+  // store: unlink the 0600 secret file (named by id) and rewrite the metadata
+  // index without those entries. Pure selection is delegated to
+  // `credential-resolution.selectPersonalCredentialIds` so a team/system entry
+  // is never matched even if its `userId` coincides (AC3). Returns the ids
+  // removed (each tagged with `kind`). Best-effort — a missing file is fine
+  // (the point is that no residual copy remains, AC1/AC4).
+  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind) {
+    const ids = credentialResolution.selectPersonalCredentialIds(index, ownerId);
+    if (!ids.length) return [];
+    const doomed = new Set(ids);
+    for (const id of ids) {
+      try {
+        fs.unlinkSync(path.join(secretDir, path.basename(id)));
+      } catch (err) {
+        if (err && err.code !== 'ENOENT') {
+          console.error(`[Orchestrator] offboarding: could not unlink ${kind} '${id}': ${err.message}`);
+        }
+      }
+    }
+    try {
+      const remaining = index.filter(e => !(e && e.id && doomed.has(String(e.id))));
+      fs.writeFileSync(indexPath, JSON.stringify(remaining, null, 2));
+    } catch (err) {
+      console.error(`[Orchestrator] offboarding: could not rewrite ${kind} index: ${err.message}`);
+    }
+    return ids.map(id => ({ id, kind }));
+  }
+
   // Recreate a single running agent's container so a spawn-time change (e.g. a
   // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
   // left untouched — it picks up the new binding on its next enable. Fresh-reads
@@ -9912,7 +10006,19 @@ async function handleTeamsAdminApi(req, res) {
         return sendJson(res, 200, clean(teamsStore.updateUser(resourceId, body))), true;
       }
       if (req.method === 'DELETE' && resourceId) {
-        return sendJson(res, 200, teamsStore.deleteUser(resourceId)), true;
+        // Offboarding (#1571, Phase 5): pause the departing human's agents and
+        // auto-delete their personal credentials BEFORE removing the user
+        // record, so a partial failure leaves the user recoverable rather than
+        // a deleted user with lingering personal secrets (AC5). Best-effort —
+        // the user removal is what the caller contracted for and still proceeds.
+        let offboarding = null;
+        try {
+          offboarding = await orchestrator.offboardOwner(resourceId);
+        } catch (err) {
+          console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+        }
+        const deleted = teamsStore.deleteUser(resourceId);
+        return sendJson(res, 200, { ...deleted, offboarding }), true;
       }
     }
 

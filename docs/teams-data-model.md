@@ -142,7 +142,7 @@ GET    /internal/admin/users        [?subject=]
 POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
 GET    /internal/admin/users/:id
 PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
-DELETE /internal/admin/users/:id                    (cascades memberships)
+DELETE /internal/admin/users/:id                    (offboards owner first — pause agents + delete personal credentials — then cascades memberships; partial failure leaves user recoverable, #1571)
 
 GET    /internal/admin/memberships  [?userId=&teamId=]
 POST   /internal/admin/memberships                  { userId, teamId, role }   (upsert)
@@ -160,7 +160,7 @@ These are mounted separately from `/internal/teams/*`, which operate on the
 
 - A membership requires both its user and team to exist; `role` must be
   `team-admin` or `team-member`.
-- Deleting a **user** cascades their memberships.
+- Deleting a **user** runs offboarding first (#1571, Phase 5): pauses the person's agents (drain — not wiped) and auto-deletes their **personal** SSH keys + GitHub tokens (index entries + 0600 files; team/system credentials are never touched); then cascades memberships. Offboarding runs before the user record is removed so a partial failure leaves the user recoverable.
 - Deleting a **team** cascades its memberships, refuses the default team, and is
   refused (409) while any agent, environment, or credential still names it as
   owner — reassign those first so nothing is orphaned.

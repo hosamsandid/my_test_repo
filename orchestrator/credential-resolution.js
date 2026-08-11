@@ -163,6 +163,31 @@ function selectAgentIdsForOwner(agents, ownerId, loadAgentConfig) {
   return ids;
 }
 
+// Offboarding selection (#1571, Phase 5). Given a credential-index array
+// (`_keys/index.json` or `_tokens/index.json`) and the departing human's id,
+// return the ids of that human's PERSONAL credentials — the only ones
+// offboarding auto-deletes. A `team`/`system` credential (any non-`personal`
+// scope) is NEVER selected even when its `userId` happens to match, so a
+// person's shared infrastructure is untouched (AC3). Pure — no I/O; the caller
+// unlinks the secret file and rewrites the index.
+function selectPersonalCredentialIds(index, ownerId) {
+  const target = ownerId != null && String(ownerId) !== "" ? String(ownerId) : null;
+  if (!target || !Array.isArray(index)) return [];
+  const ids = [];
+  for (const entry of index) {
+    if (
+      entry &&
+      entry.scope === "personal" &&
+      entry.userId &&
+      String(entry.userId) === target &&
+      entry.id
+    ) {
+      ids.push(String(entry.id));
+    }
+  }
+  return ids;
+}
+
 // The actionable refusal message (AC5): names the owner and what to do, and is
 // explicit that there is deliberately no team/system fallback.
 function buildRefusal(ownerId, kind) {
@@ -184,5 +209,6 @@ module.exports = {
   findPersonalCredential,
   resolveCredential,
   selectAgentIdsForOwner,
+  selectPersonalCredentialIds,
   buildRefusal,
 };

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw } from 'lucide-react';
+import { Link } from 'react-router';
+import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
@@ -229,6 +230,13 @@ export default function Plugins() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 600, margin: 0 }}>Plugins</h1>
         <IconButton icon={RefreshCw} label="Refresh" onClick={refetch} disabled={loading} />
+        <Link to="/plugin-system" style={{
+          display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+          marginLeft: 'auto', fontSize: 'var(--eb-text-sm)', fontWeight: 500,
+          color: 'var(--eb-accent-primary)', textDecoration: 'none',
+        }}>
+          <BookOpen size={15} /> Learn about plugins
+        </Link>
       </div>
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, maxWidth: 720 }}>
         Plugins extend what agents can reach beyond their container — a container runtime, a

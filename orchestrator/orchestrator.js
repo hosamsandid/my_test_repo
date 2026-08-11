@@ -60,6 +60,7 @@ const skillReconcile = require("./skill-reconcile");
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prompt-modes");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
+const credentialResolution = require("./credential-resolution");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
@@ -3093,16 +3094,61 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
 // The orchestrator shares the workspace volume, so it sees the agent's commits
 // and pushes them with the environment's own credentials. See agent-git-ops.js.
 
-function _buildAgentGitEnv(id, repo, env) {
+function _buildAgentGitEnv(id, repo, env, overrides = {}) {
   return agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: repo.url,
-    sshKeyId: repo.sshKeyId,
-    githubTokenId: env?.githubTokenId,
+    // Personal-credential resolution (#1569) may override the env's shared
+    // ssh key / PAT with the owner's personal one for an attributed write.
+    // Absent overrides ⇒ byte-identical to the pre-#1569 env-only behaviour.
+    sshKeyId: overrides.sshKeyId || repo.sshKeyId,
+    githubTokenId: overrides.githubTokenId || env?.githubTokenId,
     baseEnv: process.env,
     sshKeysDir: SSH_KEYS_DIR,
     ghTokensDir: GH_TOKENS_DIR,
   });
+}
+
+// Read the GitHub-token credential index (metadata only — scope/userId, never
+// the secret). Used to resolve an owner's personal PAT for an attributed write
+// (#1569). Best-effort: an unreadable/absent index yields [] so resolution
+// falls through to the shared credential exactly as today.
+function loadGithubTokenIndex() {
+  try {
+    const raw = fs.readFileSync(path.join(GH_TOKENS_DIR, "index.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Resolve the GitHub-token id an attributed write (PR/HTTPS push) should run
+// under, applying the personal → team → system order with refuse-on-missing
+// (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
+// env's shared id when the personal tier does not apply) or throws a
+// `personalCredentialRequired`-tagged Error the caller surfaces as a distinct,
+// actionable failure. Gated on `config.ownerId`: an agent with no owner (every
+// agent until ownerId population lands — AC8) takes the shared id unchanged and
+// never refuses.
+function resolveAttributedGithubToken(id, env, operation) {
+  const cfg = loadAgentConfig(id) || {};
+  const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
+  const personal = credentialResolution.findPersonalCredential(loadGithubTokenIndex(), ownerId);
+  const decision = credentialResolution.resolveCredential({
+    operation,
+    ownerId,
+    personalCredential: personal,
+    sharedCredentialId: env?.githubTokenId || null,
+    kind: "GitHub token",
+  });
+  if (decision.refuse) {
+    const e = new Error(decision.refuse.message);
+    e.personalCredentialRequired = true;
+    e.refusalCode = decision.refuse.code;
+    throw e;
+  }
+  return { githubTokenId: decision.credentialId };
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -5991,11 +6037,17 @@ async function agentCreatePr(id, env, body = {}) {
     throw new Error(`invalid base branch: ${base}`);
   }
 
-  const gitEnv = _buildAgentGitEnv(id, repo, env);
-  return _repoGitQueue(repo.repoPath, () => _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body));
+  // #1569: opening a PR is an attributed write — resolve the owner's personal
+  // PAT (personal → team → system), refusing rather than acting under a shared
+  // identity when an owner is set but has no usable personal token. No owner
+  // (AC8) ⇒ the env's shared token, unchanged.
+  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr");
+  const gitEnv = _buildAgentGitEnv(id, repo, env, { githubTokenId });
+  return _repoGitQueue(repo.repoPath, () =>
+    _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId));
 }
 
-async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
+async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId = null) {
   const run = (args, timeout = 30_000) =>
     _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
 
@@ -6026,7 +6078,13 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
   // missing/unresolvable token surfaces as a distinct, actionable error rather
   // than an opaque `gh` auth failure indistinguishable from a real git reject.
   // Note this gate is only on the PR step — SSH `push` never reaches here.
-  const tokenStatus = agentGitOps.githubTokenStatus({ env, ghTokensDir: GH_TOKENS_DIR });
+  // Validate the token that will ACTUALLY be used — the personal one when
+  // #1569 resolution overrode the env's shared id — not merely env.githubTokenId.
+  const tokenStatus = agentGitOps.githubTokenStatus({
+    env,
+    githubTokenId: githubTokenId || undefined,
+    ghTokensDir: GH_TOKENS_DIR,
+  });
   if (!tokenStatus.resolvable) {
     const e = new Error(
       `no GitHub token available to open a PR for agent '${id}' ` +
@@ -12067,7 +12125,15 @@ async function main() {
           // auth, etc.); 400 for request/config problems.
           const payload = { ok: false, error: msg };
           let status = 400;
-          if (err && err.noGithubToken) {
+          if (err && err.personalCredentialRequired) {
+            // #1569 refuse-on-missing: the agent's owner has no usable personal
+            // credential for this attributed write, and there is deliberately no
+            // team/system fallback. 424 (Failed Dependency) + stable code so the
+            // agent surfaces the actionable message rather than retrying a shared
+            // push. Nothing was pushed/opened.
+            status = 424;
+            payload.code = err.refusalCode || 'personal-credential-required';
+          } else if (err && err.noGithubToken) {
             status = 424;
             payload.code = 'no-github-token';
             if (err.branchPushed) payload.branchPushed = err.branchPushed;

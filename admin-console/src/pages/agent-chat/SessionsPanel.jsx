@@ -1,14 +1,13 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal,
-  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw, Ticket, ExternalLink,
+  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
-import { describeTicket } from './ticket-view.js';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -153,19 +152,6 @@ export default function SessionsPanel({
   // Non-blocking notice shown when a deep-link (#642) couldn't locate the
   // requested session (outside the history window, log pruned, no DM room, …).
   const [notFound, setNotFound] = useState(null); // { correlationId } | null
-
-  // Parent-ticket binding for this room (#1383, AC5) — surfaced above the
-  // session list so a reviewer can see which GitHub issue this work is about.
-  const [ticket, setTicket] = useState(null);
-  useEffect(() => {
-    if (!active || !agentId || !roomId) { setTicket(null); return undefined; }
-    let cancelled = false;
-    apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}/ticket`)
-      .then(d => { if (!cancelled) setTicket(d?.ticket ?? null); })
-      .catch(() => { if (!cancelled) setTicket(null); });
-    return () => { cancelled = true; };
-  }, [active, agentId, roomId]);
-  const ticketView = describeTicket(ticket);
 
   const fetchSessions = useCallback(async () => {
     if (!agentId) return;
@@ -416,38 +402,6 @@ export default function SessionsPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {ticketView && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-2) var(--eb-space-4)',
-          borderBottom: '1px solid var(--eb-border-default)',
-          background: 'var(--eb-bg-surface)',
-          fontSize: 'var(--eb-text-xs)',
-          color: 'var(--eb-text-muted)',
-          flexShrink: 0,
-        }}>
-          <Ticket size={12} style={{ flexShrink: 0 }} />
-          <span style={{ flexShrink: 0 }}>Parent ticket:</span>
-          <a
-            href={ticketView.href}
-            target="_blank"
-            rel="noreferrer"
-            title={`${ticketView.repo} #${ticketView.number}${ticketView.title ? ' — ' + ticketView.title : ''}`}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 3, minWidth: 0,
-              color: ticketView.closed ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)',
-              textDecoration: 'none', overflow: 'hidden',
-            }}
-          >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {ticketView.label}{ticketView.closed ? ' (closed)' : ''}
-            </span>
-            <ExternalLink size={9} style={{ flexShrink: 0 }} />
-          </a>
-        </div>
-      )}
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-4)',

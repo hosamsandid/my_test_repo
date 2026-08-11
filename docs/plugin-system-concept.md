@@ -668,6 +668,25 @@ before it moves from catalog to roadmap.
   governs the agent path; `set-autonomy` stays the `/admin`-only `/api/settings`
   route). The direct-manipulation polish (drag reorder, colour pickers,
   requirement-target-by-click, undo/redo) is a UI refinement over these same mutations.
+- **Kubernetes epic (#1554), Phase 5 — plugin sidecars on Kubernetes** *(shipped — #1565)*:
+  flips `PLUGIN_SIDECARS_SUPPORTED` for **UI-bearing** plugins.
+  `orchestrator/spawn-kubernetes-plugin.js` — a sibling behind the
+  `container-runtime.js` seam, same raw-HTTPS `k8sRequest` style as
+  `spawn-kubernetes-pod.js` — creates a **Deployment + Service + state PVC** per
+  installed plugin; `plugin-runtime.js` delegates `reconcilePluginSidecars` /
+  `reconcilePluginAttachments` / `listLiveSidecars` to it on k8s (the rest of the
+  surface is runtime-agnostic — the Service is named identically to the Podman
+  container, so `brokerBaseUrl` resolves on both). State is a **PVC not
+  `emptyDir`** (audit stays an `emptyDir` — a per-plugin audit PVC is a separable
+  follow-up); RBAC (`deploy/k8s/base/core/10-rbac.yaml`) gains namespaced
+  `apps/deployments` + `services` + `persistentvolumeclaims` + `networkpolicies`.
+  The grant-driven per-agent-network reachability a **broker** plugin needs
+  becomes per-grant `NetworkPolicy` objects — a larger, separable mechanism split
+  out of this phase: a UI-only plugin needs none, so `reconcilePluginAttachments`
+  is a no-op on k8s and a broker plugin's CLI stays at exit 3 there.
+  `capabilities: ["podman-socket"]` has no k8s equivalent, so
+  `plugins/podman-sandbox/` is permanently `platforms: ["podman"]`. See
+  `docs/network-plan-plugin-concept.md` §9.
 
 ## 10. Open questions
 

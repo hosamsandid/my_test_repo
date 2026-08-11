@@ -29,7 +29,12 @@ export default function PluginUiPage() {
     return () => { cancelled = true; };
   }, [id]);
 
-  const uiSrc = `/plugins/${encodeURIComponent(id)}/ui`;
+  // Trailing slash is load-bearing: the plugin UI is a directory, so the served
+  // index.html can reference its assets ("app.js") and data API ("api/board")
+  // with relative paths. Without it the browser resolves those against ".../ui"
+  // as a *file* — "app.js" becomes ".../app.js" (outside the /ui proxy mount,
+  // so it 404s) and the board never loads. See docs/network-plan-plugin-concept §7.
+  const uiSrc = `/plugins/${encodeURIComponent(id)}/ui/`;
 
   return (
     <div style={pageStyle}>

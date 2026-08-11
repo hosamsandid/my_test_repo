@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""aee-patterns — Patterns Catalog plugin CLI facade (UI-only plugin).
+
+Dependency-free single file (concept §4.5): stdlib only, no pip installs. It is
+seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
+per-scope config from `.agent-studio/plugins/patterns-catalog.json` (0600,
+written at seed time by plugin-sync.js) purely to know it is granted.
+
+The Patterns Catalog is a **read-only human reference** surfaced in the console
+UI (the plugin's real purpose). This CLI exists because the plugin manifest
+requires a `cli` block and because it is genuinely useful for an agent to
+enumerate which catalogs exist and where a human can read them. The catalog
+list is static — two entries — so the CLI is fully self-contained and does not
+call the broker.
+
+    aee-patterns list                 # list the available catalogs
+    aee-patterns show sdlc            # show one catalog's metadata
+
+Contract (§4.5): `--json` on every subcommand; exit codes 0 ok / 1 domain error
+/ 2 usage / 3 not granted; `--help` carries the full agent-readable docs. All
+operations are synchronous — no submit->poll verb.
+"""
+import argparse
+import json
+import os
+import sys
+
+PLUGIN_ID = "patterns-catalog"
+
+EXIT_OK = 0
+EXIT_DOMAIN_ERROR = 1
+EXIT_USAGE = 2
+EXIT_NOT_GRANTED = 3
+
+# The static catalog registry. The `ui` path is relative to the plugin's UI
+# mount in the console (/plugins/patterns-catalog/ui/…); a human reads it there.
+CATALOGS = [
+    {
+        "id": "sdlc",
+        "title": "SDLC Catalog",
+        "description": "End-to-end view of the trigger- and label-driven Software "
+                       "Development Lifecycle workflow. Shows how each agent fits "
+                       "into the automated CI/CD pipeline.",
+        "ui": "sdlc.html",
+    },
+    {
+        "id": "mainframe",
+        "title": "Mainframe Modernization Catalog",
+        "description": "Pattern catalog covering COBOL, JCL, DB2, IMS, and related "
+                       "mainframe modernization strategies — re-engineering, "
+                       "strangler-fig, microservice extraction, and more.",
+        "ui": "mainframe.html",
+    },
+]
+
+
+def _config_path():
+    """Path to this agent's plugin config, seeded at grant time.
+
+    Resolves the current `.agent-studio/` state dir, falling back to the legacy
+    `.aee/` (renamed in #1549) so a config seeded before the workspace was
+    migrated is still found.
+    """
+    ws = os.environ.get("AEE_WORKSPACE", os.path.expanduser("~"))
+    new = os.path.join(ws, ".agent-studio", "plugins", f"{PLUGIN_ID}.json")
+    legacy = os.path.join(ws, ".aee", "plugins", f"{PLUGIN_ID}.json")
+    if os.path.exists(new) or not os.path.exists(legacy):
+        return new
+    return legacy
+
+
+def load_config():
+    """Endpoint + scope token written at seed time. Absent until granted."""
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+def emit(payload, as_json):
+    if as_json:
+        print(json.dumps(payload))
+        return
+    if not payload.get("ok"):
+        print(payload.get("message", payload.get("error", "error")), file=sys.stderr)
+        return
+    result = payload.get("result")
+    if isinstance(result, list):
+        for cat in result:
+            print(f"{cat['id']:<10}  {cat['title']}")
+            print(f"            {cat['description']}")
+    elif isinstance(result, dict):
+        print(f"{result['title']} ({result['id']})")
+        print(result["description"])
+    elif isinstance(result, str):
+        print(result)
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+
+    parser = argparse.ArgumentParser(
+        prog="aee-patterns",
+        description="Patterns Catalog plugin CLI — enumerate the read-only pattern "
+                    "catalogs a human can browse in the console. Read-only; there "
+                    "are no write verbs.",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("whoami", parents=[common], help="print the resolved scope identity")
+    sub.add_parser("list", parents=[common], help="list the available catalogs")
+
+    p_show = sub.add_parser("show", parents=[common], help="show one catalog's metadata")
+    p_show.add_argument("catalog_id", help="a catalog id (see `aee-patterns list`)")
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    as_json = getattr(args, "json", False)
+
+    if args.cmd is None:
+        parser.print_help()
+        return EXIT_USAGE
+
+    cfg = load_config()
+    if cfg is None:
+        emit(
+            {"ok": False, "error": "not-granted",
+             "message": "patterns-catalog is not granted to this agent (no config "
+                        "at %s)" % _config_path()},
+            as_json,
+        )
+        return EXIT_NOT_GRANTED
+
+    if args.cmd == "whoami":
+        emit({"ok": True, "result": {"id": cfg.get("scopeId"), "title": "scope",
+                                     "description": cfg.get("endpoint", "")}}, as_json)
+        return EXIT_OK
+
+    if args.cmd == "list":
+        emit({"ok": True, "result": CATALOGS}, as_json)
+        return EXIT_OK
+
+    if args.cmd == "show":
+        for cat in CATALOGS:
+            if cat["id"] == args.catalog_id:
+                emit({"ok": True, "result": cat}, as_json)
+                return EXIT_OK
+        emit({"ok": False, "error": "no-such-catalog",
+              "message": "no catalog '%s' — try `aee-patterns list`" % args.catalog_id},
+             as_json)
+        return EXIT_DOMAIN_ERROR
+
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

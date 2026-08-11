@@ -70,9 +70,6 @@ const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
-const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
-const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
-const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
 const About = lazy(() => import('./pages/About'));
 const GettingStarted = lazy(() => import('./pages/GettingStarted'));
 
@@ -162,9 +159,6 @@ export default function App() {
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
-          <Route path="/patterns"           element={<PatternsCatalog />} />
-          <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
-          <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
           <Route path="/getting-started" element={<GettingStarted />} />
           <Route path="/about" element={<About />} />
         </Routes>

@@ -766,10 +766,6 @@ const LEGACY_ROLE_MAP = {
   "expert-instance": "team-member",
 };
 
-function normalizeRole(role) {
-  return LEGACY_ROLE_MAP[role] || role;
-}
-
 function normalizeAgentConfig(cfg) {
   if (!cfg) return cfg;
   const out = { ...cfg };

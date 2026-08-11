@@ -57,7 +57,7 @@ function useRepoCheck(url, sshKeyId, githubTokenId) {
           githubTokenId: githubTokenId || null,
         });
         if (reqIdRef.current !== myReqId) return; // a newer request is in flight
-        if (result.ok) setState({ status: 'ok', error: null });
+        if (result.ok) setState({ status: 'ok', error: null, empty: !!result.empty });
         else setState({ status: 'error', error: result.error || 'Repository unreachable' });
       } catch (err) {
         if (reqIdRef.current !== myReqId) return;
@@ -70,7 +70,7 @@ function useRepoCheck(url, sshKeyId, githubTokenId) {
   return state;
 }
 
-function RepoStatusIcon({ status, error }) {
+function RepoStatusIcon({ status, error, empty }) {
   if (status === 'pending') {
     return (
       <span title="Checking repository…" style={{ display: 'inline-flex', color: 'var(--eb-text-muted)' }}>
@@ -79,8 +79,11 @@ function RepoStatusIcon({ status, error }) {
     );
   }
   if (status === 'ok') {
+    const title = empty
+      ? 'Repository reachable — but empty (no commits yet). Add an initial commit before agents can clone it.'
+      : 'Repository reachable';
     return (
-      <span title="Repository reachable" style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
+      <span title={title} style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
         <Check size={14} />
       </span>
     );
@@ -157,12 +160,17 @@ function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove 
             alignItems: 'center',
             pointerEvents: 'none',
           }}>
-            <RepoStatusIcon status={check.status} error={check.error} />
+            <RepoStatusIcon status={check.status} error={check.error} empty={check.empty} />
           </div>
         </div>
         {check.status === 'error' && (
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-1)' }}>
             {check.error}
+          </div>
+        )}
+        {check.status === 'ok' && check.empty && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning, #b45309)', marginTop: 'var(--eb-space-1)' }}>
+            Reachable, but the repository is empty (no commits yet). Add an initial commit before agents can clone it.
           </div>
         )}
         {showTokenHint && (

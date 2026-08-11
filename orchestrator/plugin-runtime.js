@@ -388,7 +388,7 @@ async function reconcilePluginAttachments(pluginId, grantedAgentIds) {
 
 // ── broker teardown (§4.9) ──────────────────────────────────────────────────
 
-function postJson(url, body, token, timeoutMs = TEARDOWN_TIMEOUT_MS) {
+function postJson(url, body, token, timeoutMs = TEARDOWN_TIMEOUT_MS, method = 'POST') {
   return new Promise((resolve) => {
     let target;
     try { target = new URL(url); } catch { resolve({ ok: false, error: 'bad url' }); return; }
@@ -398,7 +398,7 @@ function postJson(url, body, token, timeoutMs = TEARDOWN_TIMEOUT_MS) {
         hostname: target.hostname,
         port: target.port,
         path: target.pathname,
-        method: 'POST',
+        method,
         timeout: timeoutMs,
         headers: {
           'Content-Type': 'application/json',
@@ -459,6 +459,8 @@ async function pushScopeCredentials(manifest, scopesMap, dir = REGISTRY_DIR) {
     `${brokerBaseUrl(manifest)}/internal/scope-credentials`,
     { scopes: scopesMap || {} },
     token,
+    TEARDOWN_TIMEOUT_MS,
+    'PUT', // broker matches PUT /internal/scope-credentials (server.js); POST 404s
   );
   if (!res.ok) {
     console.warn(`[plugin-runtime] scope-credentials push to ${manifest.id} failed: ${res.error || res.status}`);

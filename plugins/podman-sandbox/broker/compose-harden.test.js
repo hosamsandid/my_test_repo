@@ -1,5 +1,5 @@
 'use strict';
-// Run: node --test podman-mcp/compose-harden.test.js
+// Run: node --test plugins/podman-sandbox/broker/compose-harden.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {

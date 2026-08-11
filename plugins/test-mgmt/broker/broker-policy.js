@@ -13,8 +13,8 @@
 // §4.8 "the plugin enforces it again"). Dependency-free + pure so it is
 // unit-testable without a live sidecar.
 
-const { authorizeAction } = require('../broker-sdk/authz');
-const { needsApproval } = require('../broker-sdk/approval');
+const { authorizeAction } = require('../../../broker-sdk/authz');
+const { needsApproval } = require('../../../broker-sdk/approval');
 
 // The broker's tool name → the manifest's policy/approval subcommand token.
 const TOOL_SUBCOMMAND = Object.freeze({

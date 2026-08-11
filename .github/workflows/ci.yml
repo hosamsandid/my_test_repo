@@ -3,7 +3,7 @@
 # Covered suites (one job each):
 #   orchestrator          — orchestrator/*.test.js            (node --test)
 #   broker-sdk            — broker-sdk/*.test.js              (node --test, dependency-free)
-#   netzplan-broker       — netzplan-broker/*.test.js         (node --test, dependency-free)
+#   netzplan-broker       — plugins/netzplan/broker/*.test.js (node --test, dependency-free)
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
 #   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
@@ -79,7 +79,7 @@ jobs:
       # (server.js lazy-requires the MCP SDK, so it is never loaded by the test
       # runner). No install step — same shape as the broker-sdk job.
       - name: Run unit tests
-        working-directory: netzplan-broker
+        working-directory: plugins/netzplan/broker
         run: node --test
 
   admin-api:

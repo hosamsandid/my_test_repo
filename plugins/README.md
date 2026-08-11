@@ -6,19 +6,70 @@ sidecar** with a **dependency-free CLI facade** seeded into the agent workspace.
 All security lives server-side in the broker; the CLI is a privilege-less
 client.
 
-Each `plugins/<id>/` is a reference plugin shipped in the repo:
+Each `plugins/<id>/` is a **self-contained** reference plugin shipped in the
+repo — both halves (the CLI facade the agent runs and the broker sidecar that
+holds the privilege) live in the one directory:
 
 ```
 plugins/<id>/
   plugin.json     # the manifest (pluginVersion: 1) — see admin-console/api/plugin-manifest.js
   bin/            # the CLI script(s), seeded into a granted agent's .agent-studio/bin/
+  broker/         # the broker sidecar (server.js + Dockerfile), if the plugin has one
+  README.md       # per-plugin notes (some plugins)
 ```
+
+> **Layout note.** The broker sidecars used to live as top-level directories at
+> the repo root (`podman-mcp/`, `netzplan-broker/`, `test-mgmt-broker/`,
+> `patterns-catalog-broker/`). They now live inside their plugin as
+> `plugins/<id>/broker/`. The shared **`broker-sdk/`** stays at the repo root
+> (it is a library imported by every broker, not a plugin); each broker's
+> Dockerfile has a build context of the repo root and vendors `broker-sdk/`
+> into its image, so `require('../../../broker-sdk')` resolves the same way in
+> the source tree and inside the container.
 
 `make seed-plugins` (chained from `make seed-pool`) copies these into the pool
 volume at `/pool/plugins/<id>/`, which surfaces to operators as the plugin
 registry at `/workspace/plugins/<id>/`. Registering/installing a plugin from
 the registry **grants nothing** to any agent — grants are a separate, Team-Admin
 action (Phase 2).
+
+## Installing a plugin
+
+Getting a plugin from this repo to a granted agent is three deliberate steps —
+building the broker image, seeding the registry, installing, then granting:
+
+1. **Build the broker image(s)** (only for plugins that have a `broker/`):
+
+   ```bash
+   make plugin-images
+   ```
+
+   Builds `localhost/aee-plugin-<id>:latest` for each broker from its
+   `plugins/<id>/broker/Dockerfile` (build context = repo root). Image tags
+   must match the `sidecar.image` in the plugin's `plugin.json`. This is **not**
+   chained from `make up` — a broker sidecar holds real privilege, so building
+   it is an explicit action.
+
+2. **Seed the registry** so operators can see the plugin:
+
+   ```bash
+   make seed-plugins        # or `make seed-pool`, which chains it
+   ```
+
+   Copies `plugins/<id>/` into the pool volume → the operator registry at
+   `/workspace/plugins/<id>/`.
+
+3. **Install** (System Admin) from the **Plugins** page (`/plugins`) or
+   `POST /api/plugins/:id/install`. Install copies the plugin into the operator
+   registry and makes the orchestrator start its broker sidecar. The declared
+   capabilities are shown in plain language for review first, because a sidecar
+   can hold real privilege (e.g. `podman-sandbox` mounts the host Podman
+   socket). **Install still grants nothing to any agent.**
+
+4. **Grant** the plugin to a team or agent (Team Admin) — from the Agents edit
+   form's plugin picker, or `POST /api/agents/:id/plugins/activate`. Only then
+   does the agent get the CLI in its `.agent-studio/bin/` and a scoped token;
+   this is an additive file sync, no respawn.
 
 ## Manifest
 
@@ -62,7 +113,7 @@ decision) and a per-scope `quota`. See `podman-sandbox/README.md`.
 Test management (Phase 5, #1521): a granted agent creates test cases, triggers
 test runs (submit→poll) and manages test data in an external test-management
 system (Xray/Zephyr/qTest) with the `aee-test` CLI. Its broker
-(`../test-mgmt-broker/`) is built on the Broker SDK (`../broker-sdk/`) — the
+(`test-mgmt/broker/`) is built on the Broker SDK (`../broker-sdk/`) — the
 proof a credential-backed broker is thin: the vendor token lives only in the
 sidecar. It is the first plugin to use scope granularity for **authorisation**,
 not just isolation (manifest `policy`: create-case is restricted to the
@@ -77,7 +128,7 @@ zones, lanes, milestones, owners and requirement lines — served from its own
 sidecar and iframed into the console through the §4.8 UI-extension stack (#1562).
 The first **UI-bearing** plugin and the first that holds no privilege at all
 (`capabilities: []`, `credentials: []`, `scopes: ["team"]`). Its broker
-(`../netzplan-broker/`) is built on the Broker SDK and keeps one board **document
+(`netzplan/broker/`) is built on the Broker SDK and keeps one board **document
 per team** on the generic state volume (`AEE_PLUGIN_STATE_DIR`), so state is
 server-side (two browser profiles see the same board; it survives a sidecar
 restart) rather than in a viewer's `localStorage`. The load-bearing model
@@ -86,4 +137,16 @@ never array indices**, so inserting or reordering a milestone shifts nothing
 else. Agent write access is an explicit ladder off by default
 (`settings.agentAutonomy` 0/1/2, §8): agents read with `aee-plan show` at level 0,
 tick milestones at 1, edit structure at 2 — enforced broker-side and audited
-under the calling agent's id. See `netzplan/../netzplan-broker/README.md`.
+under the calling agent's id. See `netzplan/broker/README.md`.
+
+## `patterns-catalog`
+
+A UI-only, privilege-less **reference-catalog** plugin (`capabilities: []`,
+`credentials: []`, `scopes: ["team"]`, one `ui.route` `/` @ `team-member`): the
+former built-in **Patterns Catalog** console page (SDLC + Mainframe
+Modernization catalogs) re-shipped as a plugin, so it is off by default and
+re-activated per install by install + team grant. Its broker
+(`patterns-catalog/broker/`) is a minimal static-file server on the Broker SDK —
+it serves the catalog pages behind the §4.8 signed viewer headers, with no MCP
+tool surface and no state store. The dependency-free `aee-patterns` CLI lists
+the catalogs.

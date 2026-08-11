@@ -1,8 +1,8 @@
 {
   "pluginVersion": 1,
   "id": "netzplan",
-  "name": "Network Plan",
-  "description": "Plugin #3 (epic #1554, Phase 3): an editable team planning board — streams, milestones, owners and dependency lines — served from its own sidecar and proxied into the console through the §4.8 UI-extension stack (#1562). Replaces a hand-edited standalone HTML file whose status ticks lived only in the viewer's localStorage: here the board is one server-side document per team, so two people (or two browser profiles) see the same truth and every change is reviewable. The load-bearing decision is that statuses and requirement targets key on milestone ids, never array indices, so inserting or reordering a milestone shifts nothing else. Agent write access is configurable and off by default (settings.agentAutonomy 0/1/2, §8): agents read the board at level 0, tick milestones at level 1, and edit structure at level 2 — every write enforced broker-side and audited with the calling agent named. Agents drive it with the dependency-free `aee-plan` CLI (e.g. `aee-plan show`, `aee-plan tick <milestoneId>`).",
+  "name": "Project Plan",
+  "description": "An editable planning board for a team. Lay work out as swimlanes with milestones and owners, capture dependencies as a graph, map items to targets, and summarise status in KPI tiles and cards. The board is a single shared document per team, stored on the server, so everyone on the team sees the same plan and every change is kept. You can edit the board directly in the console. Agents can also read it and — when a Team Admin raises the autonomy level — tick milestones or change its structure through the `aee-plan` command-line tool, and every change an agent makes is recorded under its name. Milestone status is tracked by stable identifiers, so inserting or reordering items never disturbs the rest of the plan.",
   "sidecar": {
     "image": "localhost/aee-plugin-netzplan:latest",
     "capabilities": [],
@@ -21,11 +21,11 @@
     "maxObjects": 25
   },
   "ui": {
-    "title": "Network Plan",
+    "title": "Project Plan",
     "routes": [
       { "path": "/", "minRole": "team-member" },
       { "path": "/admin", "minRole": "team-admin" }
     ]
   },
-  "promptLine": "You can read — and, if the Team Admin has raised the autonomy level, tick or edit — the team's Network Plan board with `aee-plan` (run `aee-plan --help`). At the default autonomy level 0 you can only read the board; writes are refused until a human raises the level, and every write you make is audited under your agent id."
+  "promptLine": "You can read — and, if the Team Admin has raised the autonomy level, tick or edit — the team's Project Plan board with `aee-plan` (run `aee-plan --help`). At the default autonomy level 0 you can only read the board; writes are refused until a human raises the level, and every write you make is audited under your agent id."
 }

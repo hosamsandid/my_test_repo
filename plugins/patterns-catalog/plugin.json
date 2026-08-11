@@ -2,7 +2,7 @@
   "pluginVersion": 1,
   "id": "patterns-catalog",
   "name": "Patterns Catalog",
-  "description": "A read-only reference catalog of engineering patterns — the SDLC workflow view and the Mainframe Modernization pattern catalog (COBOL, JCL, DB2, IMS, re-engineering, strangler-fig, microservice extraction, …). Formerly a built-in console page, now a UI-only, privilege-less plugin (capabilities: [], credentials: []) so an operator can turn it on per install by installing and granting it to a team, rather than shipping it to every studio. The broker sidecar holds no secret and reaches nothing outside itself: it just serves the catalog pages, which the console proxies into an iframe through the §4.8 UI-extension stack. Agents can enumerate the available catalogs with the dependency-free `aee-patterns` CLI (`aee-patterns list`).",
+  "description": "A read-only reference catalog of engineering patterns, browsable in the console. It covers an SDLC delivery-workflow view and a Mainframe Modernization pattern catalog (COBOL, JCL, DB2, IMS, re-engineering, strangler-fig, microservice extraction, and more). It is off until an operator turns it on: install it, then grant it to a team to make its catalog pages available. It holds no credentials and reaches nothing outside itself — its sidecar only serves the catalog pages, which the console displays inline. Agents can list the available catalogs with the dependency-free `aee-patterns` command-line tool (e.g. `aee-patterns list`).",
   "sidecar": {
     "image": "localhost/aee-plugin-patterns-catalog:latest",
     "capabilities": [],

@@ -74,9 +74,10 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
-const { resolveViewerRole, uiSubPath, visibleScopes } = require('./plugin-ui-viewer');
+const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -1356,7 +1357,18 @@ app.get('/api/agents', (req, res) => {
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
 app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  const ids = listAgentDirs();
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2).
+  const scope = getScope(req);
+  const ids = listAgentDirs().filter(id => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return cfg && visibleAgent(scope, cfg);
+  });
 
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -7754,6 +7766,11 @@ function pluginUiProxy(req, res) {
     return res.status(404).json({ error: `plugin '${id}' has no UI` });
   }
 
+  // A globally-visible plugin's general UI is reachable by every authenticated
+  // user without a team grant (#1599). It never bypasses INSTALL (readPluginDir
+  // above already 404s an uninstalled plugin) and never widens agent capability.
+  const globalVisible = isGloballyVisibleUi(entry.manifest);
+
   (async () => {
     // Resolve the grant so the proxy stops serving the moment the last grant is
     // revoked (AC), and so the viewer's effective role is judged only against
@@ -7766,13 +7783,18 @@ function pluginUiProxy(req, res) {
     }
     if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
     const grantedAgents = granted.body.grantedAgents || [];
-    if (!grantedAgents.length) {
+    // Without a grant, a non-global plugin has nothing to serve; a global one is
+    // served to every authenticated user (still install-gated, above).
+    if (!grantedAgents.length && !globalVisible) {
       return res.status(403).json({ error: `plugin '${id}' is not granted to any agent` });
     }
     const grantedTeamIds = [...new Set(grantedAgents.map((g) => g.teamId).filter(Boolean))];
 
     const scope = getScope(req);
-    const viewerRole = resolveViewerRole(scope, grantedTeamIds);
+    // Grant-derived role first (so a team-admin/system-admin keeps elevated
+    // access); a purely-global viewer falls back to an ordinary team-member of
+    // the general routes, so an elevated route stays refused by enforceUiRoute.
+    const viewerRole = effectiveViewerRole(scope, grantedTeamIds, { globalVisible });
     if (!viewerRole) return res.status(403).json({ error: 'you do not have access to this plugin' });
 
     const subPath = uiSubPath(req.originalUrl || req.url, id);
@@ -11681,6 +11703,76 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   });
 });
 
+// One-shot: create a repo-less Working Environment bound to a chosen Model
+// Provider plus one standalone chat agent — no GitHub URL, SSH key, or token
+// (#1624). The credential-free sibling of POST /api/quickstart; it deliberately
+// leaves that repo-first flow untouched. Pure validation + id derivation live in
+// quickstart-llm.js; this handler resolves the live registry and writes the
+// env / agent.
+app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
+  const { displayName, llmEndpointId } = req.body || {};
+
+  // Resolve the provider against the live registry, then validate purely. An
+  // empty llmEndpointId yields { llmEndpointId: null } (no error), which the
+  // validator rejects as "select a provider".
+  const binding = resolveLlmBinding(llmEndpointId, undefined);
+  const validated = validateQuickstartLlmInput({
+    displayName,
+    binding,
+    endpointCount: listLlmEndpoints().length,
+  });
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error, ...(validated.code ? { code: validated.code } : {}) });
+  }
+  const { name } = validated;
+
+  // One repo-less environment per agent (isolation, matching the repo-first flow).
+  const envId = llmEnvId(name, id => !!loadEnvironment(id));
+  const env = {
+    id: envId,
+    name,
+    description: `LLM-only environment for ${name}`,
+    repositories: [],
+    githubTokenId: null,
+    llmEndpointId: validated.llmEndpointId,
+    defaultModelId: validated.defaultModelId,
+    additionalContext: '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(envId, env);
+
+  const agentId = llmAgentId(name, id => fs.existsSync(path.join(AGENTS_DIR, id)));
+  const systemPrompt = quickstartLlmSystemPrompt(name);
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  let agentResp;
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: agentId,
+        displayName: name,
+        role: 'agent',
+        systemPrompt,
+        environmentId: envId,
+      }),
+    });
+    agentResp = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(agentResp);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+
+  res.status(201).json({
+    reused: false,
+    mode: 'llm',
+    environment: { id: envId, name: env.name, reused: false },
+    agent: { id: agentId, displayName: name },
+    seed: agentResp,
+  });
+});
+
 /* ─── Team-Setup wizard ────────────────────────────────────────────────
  *
  * One-shot endpoint that materialises an entire team of role-specialised
@@ -11745,15 +11837,6 @@ function loadAgentTemplate(id) {
   if (!agentTemplateStore.TEMPLATE_ID_RE.test(id || '')) return null;
   return readTemplateFile(USER_AGENT_TEMPLATES_DIR, id)
     || readTemplateFile(AGENT_TEMPLATES_DIR, id);
-}
-
-// Substitute `{{varname}}` placeholders. Unknown vars stay literal so a
-// rogue template field doesn't silently disappear into "undefined".
-function applyTemplateVars(s, vars) {
-  if (typeof s !== 'string') return s;
-  return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>
-    vars[k] !== undefined ? String(vars[k]) : `{{${k}}}`,
-  );
 }
 
 // Read-only template summary for the wizard's role-cards step. Strips the

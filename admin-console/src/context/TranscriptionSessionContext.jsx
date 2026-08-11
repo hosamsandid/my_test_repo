@@ -11,7 +11,6 @@ import {
   assembleTranscript,
   countGaps,
   countResolved,
-  hasDeliverableContent,
   durationMinutes,
   formatTranscriptMessage,
   buildRecoveryRecord,

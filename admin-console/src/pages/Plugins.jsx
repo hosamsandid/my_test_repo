@@ -97,6 +97,18 @@ function PluginCard({ row, onInstall, onUninstall, busy }) {
             <span style={{ fontSize: 'var(--eb-text-xs)', color: STATUS_TONE[row.status.tone] }}>
               {row.status.label}
             </span>
+            {row.globalUi && (
+              <span
+                title="This plugin's UI is visible to every logged-in user once installed, independent of any team activation (#1599). Team activation is still the only way its agent CLI is granted."
+                style={{
+                  fontSize: 'var(--eb-text-xs)', padding: '1px 8px', borderRadius: 999,
+                  border: '1px solid var(--eb-border)', color: 'var(--eb-text-secondary)',
+                  background: 'var(--eb-bg-elevated)',
+                }}
+              >
+                Global UI
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
             {row.description}

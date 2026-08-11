@@ -60,4 +60,33 @@ function visibleScopes(scope, scopeList) {
   return (Array.isArray(scopeList) ? scopeList : []).filter((s) => s && s.teamId && teamIds.has(s.teamId));
 }
 
-module.exports = { ROLE_RANK, resolveViewerRole, uiSubPath, visibleScopes };
+// Whether a plugin's UI entry is globally visible to every authenticated user,
+// independent of any team grant (#1599). Opt-in manifest flag `ui.global`;
+// absent/false ⇒ the entry stays grant-gated exactly as before.
+function isGloballyVisibleUi(manifest) {
+  return !!(manifest && manifest.ui && manifest.ui.global === true);
+}
+
+// The EFFECTIVE role the UI proxy enforces `ui.routes[].minRole` against. It
+// starts from the grant-derived role (resolveViewerRole); when the caller has
+// no such role but the plugin is globally visible, they are admitted as an
+// ordinary `team-member` viewer of the plugin's GENERAL routes (#1599, the
+// open-question-2 default) — never team-admin/system-admin. Because the global
+// fallback tops out at team-member, an elevated route (minRole above
+// team-member, e.g. an `/admin` route) is still refused by enforceUiRoute for a
+// purely-global viewer, while a caller who genuinely holds a team-admin/system
+// role keeps it (resolveViewerRole wins first). Returns the role or null.
+function effectiveViewerRole(scope, grantedTeamIds, { globalVisible = false } = {}) {
+  const granted = resolveViewerRole(scope, grantedTeamIds);
+  if (granted) return granted;
+  return globalVisible ? 'team-member' : null;
+}
+
+module.exports = {
+  ROLE_RANK,
+  resolveViewerRole,
+  uiSubPath,
+  visibleScopes,
+  isGloballyVisibleUi,
+  effectiveViewerRole,
+};

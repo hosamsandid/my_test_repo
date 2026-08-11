@@ -152,6 +152,32 @@ test('rejects ui.routes path without leading slash and duplicate paths', () => {
   assert.ok(validatePluginManifest({ ...base(), ui: { routes: [{ path: '/', minRole: 'team-member' }, { path: '/', minRole: 'team-admin' }] } }).errors.some((e) => /duplicate ui.routes path/.test(e)));
 });
 
+// ── ui.global opt-in visibility flag (#1599) ─────────────────────────────────
+test('ui.global true is accepted and preserved', () => {
+  const r = validatePluginManifest({ ...base(), ui: { title: 'Catalog', global: true, routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.ok, true);
+  assert.equal(r.manifest.ui.global, true);
+});
+
+test('ui.global absent or false normalizes byte-identically to today (default off)', () => {
+  // Absent → no `global` key at all (no regression for existing plugins).
+  const absent = validatePluginManifest({ ...base(), ui: { title: 'X', routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.equal(absent.ok, true);
+  assert.equal('global' in absent.manifest.ui, false);
+  // Explicit false is also dropped, so the normalized shape equals the absent one.
+  const off = validatePluginManifest({ ...base(), ui: { title: 'X', global: false, routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.equal(off.ok, true);
+  assert.equal('global' in off.manifest.ui, false);
+  assert.deepEqual(off.manifest.ui, absent.manifest.ui);
+});
+
+test('rejects a non-boolean ui.global', () => {
+  const r = validatePluginManifest({ ...base(), ui: { global: 'yes', routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /ui.global must be a boolean/.test(e)));
+});
+
 test('rejects duplicate credential keys and non-string env values', () => {
   assert.ok(validatePluginManifest({ ...base(), credentials: [{ key: 'a' }, { key: 'a' }] }).errors.some((e) => /duplicate credential key/.test(e)));
   assert.ok(validatePluginManifest({ ...base(), sidecar: { image: 'i:1', internalPort: 1, env: { N: 5 } } }).errors.some((e) => /env values must all be strings/.test(e)));
@@ -336,4 +362,38 @@ test('the shipped netzplan manifest (plugins/netzplan) is valid', () => {
   assert.equal(board && board.minRole, 'team-member');
   const admin = manifest.ui.routes.find((r) => r.path === '/admin');
   assert.equal(admin && admin.minRole, 'team-admin');
+});
+
+// ── ACCEPTANCE: the shipped patterns-catalog manifest validates end to end ───
+test('the shipped patterns-catalog manifest (plugins/patterns-catalog) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'patterns-catalog', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // UI-only, privilege-less reference catalog:
+  assert.deepEqual(manifest.sidecar.capabilities, []);
+  assert.deepEqual(manifest.credentials, []);
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(manifest.cli.name, 'aee-patterns');
+  // #1599: opt-in global UI visibility set so the catalog is reachable by every
+  // authenticated user once installed, without a team activation. Its single
+  // ordinary-user route stays team-member (no elevated route opened up).
+  assert.equal(manifest.ui.global, true);
+  const board = manifest.ui.routes.find((r) => r.path === '/');
+  assert.equal(board && board.minRole, 'team-member');
+});
+
+// ── ACCEPTANCE: the shipped dummy-echo manifest validates end to end ──────────
+test('the shipped dummy-echo manifest (plugins/dummy-echo) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'dummy-echo', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // No-op reference plugin: no capabilities, no credentials.
+  assert.deepEqual(manifest.sidecar.capabilities, []);
+  assert.deepEqual(manifest.credentials, []);
+  assert.deepEqual(manifest.scopes, ['team', 'agent']);
+  assert.equal(manifest.cli.name, 'aee-echo');
 });

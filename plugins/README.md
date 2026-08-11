@@ -93,9 +93,12 @@ Validated by the pure `admin-console/api/plugin-manifest.js` (the
 
 ## `dummy-echo`
 
-A no-op reference plugin used to exercise the core machinery end to end (sidecar
-lifecycle, grant-driven network attachment, uninstall reconciliation) before a
-real broker (Phase 3) exists. Its CLI echoes its arguments back.
+A no-op reference plugin for exercising and demonstrating the plugin system end
+to end. Install and grant it as a safe smoke test — a way to confirm that plugin
+install, sidecar lifecycle and grant-driven network wiring all work before
+installing a plugin that holds real credentials or reaches an external system.
+Agents drive it with the dependency-free `aee-echo` command-line tool
+(e.g. `aee-echo hello`).
 
 ## `podman-sandbox` (plugin #1)
 

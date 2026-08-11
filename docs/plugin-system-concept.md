@@ -366,6 +366,33 @@ UI plugins. The sidecar address comes from the orchestrator
 `AEE_PLUGIN_STATE_DIR` volume beside its audit volume. test-mgmt's manifest
 declares three routes at two roles to exercise the contract end-to-end.
 
+**Global UI visibility (opt-in, #1599).** By default a UI-bearing plugin's nav
+entry and UI are gated on the plugin being *granted* to a team the caller can
+see — the same team activation that gives that team's agents the plugin's CLI.
+That couples the human-facing UI surface to agent-capability activation, which
+is wrong for a plugin whose UI is a reference surface valuable to *any* user
+independently of any team using its capability (e.g. the **Patterns Catalog**
+reference catalog). A plugin may therefore set the opt-in manifest flag
+`ui.global: true` (validated in `plugin-manifest.js`; **off by default** — an
+absent or `false` value normalizes byte-identically to today, so no existing
+plugin changes behaviour). When it is on **and the plugin is installed**, its
+nav entry shows for **every authenticated user** and its **ordinary-user
+routes** are reachable without any team grant: the console proxy admits a caller
+with no grant-derived role as an ordinary `team-member` viewer
+(`effectiveViewerRole` in `plugin-ui-viewer.js`), so `enforceUiRoute` still
+refuses any **elevated** route (`minRole` above `team-member`, e.g. an `/admin`
+route) to a purely-global viewer — the flag never widens beyond the general UI.
+It is strictly a human-UI concern: **agent capability is untouched** — a
+globally-visible but ungranted plugin grants no CLI to any agent, since the
+grant path (`plugin-grants.js`) never reads `ui.global`. Install remains a
+prerequisite (global visibility never auto-installs), authentication remains
+required (the proxy stays behind the session gate), and a plugin that is *both*
+team-granted and globally visible renders exactly one nav entry (a
+team-admin/system-admin caller keeps their elevated role via `resolveViewerRole`,
+which wins before the global fallback). Patterns Catalog ships with
+`ui.global: true` so, once an operator installs it, all users can open it
+without a team having to activate it first.
+
 ### 4.9 Broker SDK
 
 Every broker owes the same obligations (§4.6): token verification, scope
@@ -687,6 +714,13 @@ before it moves from catalog to roadmap.
   `capabilities: ["podman-socket"]` has no k8s equivalent, so
   `plugins/podman-sandbox/` is permanently `platforms: ["podman"]`. See
   `docs/network-plan-plugin-concept.md` §9.
+- **Opt-in global UI visibility** *(shipped — #1599)*: `ui.global: true` in a
+  plugin manifest (off by default) makes the plugin's nav entry and general UI
+  routes visible to every authenticated user once the plugin is installed,
+  without requiring a team grant — decoupling the human-facing reference UI from
+  agent-capability activation. Elevated routes (`minRole > team-member`) still
+  refuse a purely-global viewer. Agent CLI access is unaffected (the grant path
+  never reads `ui.global`). Patterns Catalog is the first plugin to opt in.
 
 ## 10. Open questions
 

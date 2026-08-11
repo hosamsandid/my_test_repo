@@ -118,6 +118,17 @@ test('pluginRegistryRow folds an entry into a renderable row', () => {
   assert.equal(row.action.action, 'uninstall');
 });
 
+test('pluginRegistryRow flags a globally-visible UI plugin (#1599)', () => {
+  // A UI-bearing plugin that opted in.
+  const uiGlobal = manifest({ ui: { title: 'Catalog', global: true, routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.equal(pluginRegistryRow({ id: 'p', ok: true, errors: [], manifest: uiGlobal, installed: true }).globalUi, true);
+  // A UI plugin that did NOT opt in.
+  const uiPlain = manifest({ ui: { title: 'Board', routes: [{ path: '/', minRole: 'team-member' }] } });
+  assert.equal(pluginRegistryRow({ id: 'p', ok: true, errors: [], manifest: uiPlain, installed: true }).globalUi, false);
+  // A plugin with no UI at all — the flag is only meaningful for UI plugins.
+  assert.equal(pluginRegistryRow({ id: 'p', ok: true, errors: [], manifest: manifest(), installed: true }).globalUi, false);
+});
+
 test('pluginRegistryRow degrades safely on a broken entry', () => {
   const row = pluginRegistryRow({ id: 'broken', ok: false, errors: ['bad'], manifest: null, installed: false });
   assert.equal(row.name, 'broken');

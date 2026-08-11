@@ -242,7 +242,7 @@ def build_parser():
 
     parser = argparse.ArgumentParser(
         prog="aee-plan",
-        description="Network Plan plugin CLI — read the team's planning board and, "
+        description="Project Plan plugin CLI — read the team's planning board and, "
                     "when the Team Admin has raised the autonomy level, tick "
                     "milestones or edit structure. Reads are always allowed.",
     )

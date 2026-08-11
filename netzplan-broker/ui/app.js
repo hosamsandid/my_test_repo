@@ -346,7 +346,7 @@
 
   function render() {
     if (!doc) return;
-    document.getElementById('name').textContent = doc.name || 'Network Plan';
+    document.getElementById('name').textContent = doc.name || 'Project Plan';
     document.getElementById('sub').textContent = 'Autonomy level ' + (doc.settings && doc.settings.agentAutonomy) + (editMode ? ' · editing' : '');
     document.querySelectorAll('.editonly').forEach(function (n) { n.classList.toggle('hidden', !editMode); });
     var board = document.getElementById('board');

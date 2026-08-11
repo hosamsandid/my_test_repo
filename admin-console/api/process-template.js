@@ -1379,8 +1379,8 @@ function expandDataFlowSteps(bundle) {
 }
 
 // Substitute `{{varname}}` placeholders. Unknown vars stay literal so a rogue
-// template field doesn't silently disappear into "undefined" — mirrors
-// api.js's applyTemplateVars (kept local so this module stays dependency-free).
+// template field doesn't silently disappear into "undefined". Kept local so
+// this module stays dependency-free.
 function substituteVars(s, vars) {
   if (typeof s !== 'string') return s;
   return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>

@@ -11768,15 +11768,6 @@ function loadAgentTemplate(id) {
     || readTemplateFile(AGENT_TEMPLATES_DIR, id);
 }
 
-// Substitute `{{varname}}` placeholders. Unknown vars stay literal so a
-// rogue template field doesn't silently disappear into "undefined".
-function applyTemplateVars(s, vars) {
-  if (typeof s !== 'string') return s;
-  return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>
-    vars[k] !== undefined ? String(vars[k]) : `{{${k}}}`,
-  );
-}
-
 // Read-only template summary for the wizard's role-cards step. Strips the
 // long prompt text to keep the response small — wizard doesn't need it,
 // the backend reads the canonical version at create time.

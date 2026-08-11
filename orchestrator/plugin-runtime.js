@@ -441,6 +441,31 @@ async function teardownScope(manifest, scopeId, dir = REGISTRY_DIR) {
   return { pluginId: manifest.id, scopeId, ok: !!res.ok, error: res.error, body: res.body };
 }
 
+// Push a per-scope credential + context map to a plugin's broker over a
+// bearer-authed internal route (the same wire shape as teardown-scope: a minted
+// scope token in the Authorization header). Used by the github-issues plugin to
+// hand each granted team its Working-Environment GitHub token + repository list
+// (orchestrator/plugin-github-creds.js resolves the map), so the token stays
+// server-side — it never touches the browser or an agent container. Generic and
+// best-effort: an unreachable broker never blocks a reconcile.
+async function pushScopeCredentials(manifest, scopesMap, dir = REGISTRY_DIR) {
+  if (!PLUGIN_SIDECARS_SUPPORTED) return { pluginId: manifest.id, ok: false, ...UNSUPPORTED };
+  // Any valid scope token authenticates the internal push (the broker checks the
+  // signature only, like PUT /internal/scope-registry). Mint one under a fixed
+  // internal scope id.
+  const token = mintScopeToken(manifest.id, '_internal', dir);
+  if (!token) return { pluginId: manifest.id, ok: false, error: 'no token' };
+  const res = await postJson(
+    `${brokerBaseUrl(manifest)}/internal/scope-credentials`,
+    { scopes: scopesMap || {} },
+    token,
+  );
+  if (!res.ok) {
+    console.warn(`[plugin-runtime] scope-credentials push to ${manifest.id} failed: ${res.error || res.status}`);
+  }
+  return { pluginId: manifest.id, ok: !!res.ok, error: res.error, body: res.body };
+}
+
 module.exports = {
   auditVolumeName,
   AUDIT_MOUNT,
@@ -462,4 +487,5 @@ module.exports = {
   disconnectSidecar,
   reconcilePluginAttachments,
   teardownScope,
+  pushScopeCredentials,
 };

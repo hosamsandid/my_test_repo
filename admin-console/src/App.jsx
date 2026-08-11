@@ -72,6 +72,7 @@ const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const About = lazy(() => import('./pages/About'));
 const GettingStarted = lazy(() => import('./pages/GettingStarted'));
+const PluginSystemHelp = lazy(() => import('./pages/PluginSystemHelp'));
 
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
@@ -160,6 +161,9 @@ export default function App() {
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
           <Route path="/getting-started" element={<GettingStarted />} />
+          {/* Static explanatory help — ungated like Getting Started so a Team
+              Member sees the same content; the Plugins registry page stays admin-only. */}
+          <Route path="/plugin-system" element={<PluginSystemHelp />} />
           <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>

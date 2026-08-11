@@ -50,6 +50,7 @@ const NAV = [
   { items: [
     { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
     { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
+    { path: '/plugin-system',   label: 'Plugin System',       Icon: Puzzle },
     // Self-service personal credentials (#1568) — visible to every authenticated
     // human (no credAdmin gate); the personal tier is strictly owner-only.
     { path: '/my-credentials', label: 'My Credentials',       Icon: KeyRound },
@@ -100,6 +101,7 @@ const BREADCRUMBS = {
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
+  '/plugin-system': 'Plugin System',
   '/teams':        'Teams',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',

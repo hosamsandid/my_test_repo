@@ -383,3 +383,17 @@ test('the shipped patterns-catalog manifest (plugins/patterns-catalog) is valid'
   const board = manifest.ui.routes.find((r) => r.path === '/');
   assert.equal(board && board.minRole, 'team-member');
 });
+
+// ── ACCEPTANCE: the shipped dummy-echo manifest validates end to end ──────────
+test('the shipped dummy-echo manifest (plugins/dummy-echo) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'dummy-echo', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // No-op reference plugin: no capabilities, no credentials.
+  assert.deepEqual(manifest.sidecar.capabilities, []);
+  assert.deepEqual(manifest.credentials, []);
+  assert.deepEqual(manifest.scopes, ['team', 'agent']);
+  assert.equal(manifest.cli.name, 'aee-echo');
+});

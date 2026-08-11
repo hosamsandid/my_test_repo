@@ -12,7 +12,27 @@ Every SSH key and GitHub token carries an **ownership tier** on its index entry 
 
 **Personal tier (epic #1558).** A `personal` credential belongs to exactly one human, identified by the `userId` owner field on its index entry, and is **strictly private** to that person. There is deliberately **no `scope.all` override**: neither a System Admin nor the env single-admin can list, read metadata for, or manage anyone else's personal credential. The owner is always the authenticated caller — a create body may not name a different owner, and a personal credential's ownership is immutable (it cannot be reassigned into or out of a `team`/`system` tier; create a fresh credential instead). Legacy entries without a `scope` field continue to normalize to a `team`/`default` credential, unchanged.
 
-> Phase 1 landed the data-model & RBAC foundation; Phase 2 (below) adds the self-service UI. The runtime resolution order (`personal → team → system`), rotation→respawn propagation and offboarding land in later phases of epic #1558.
+> Phase 1 landed the data-model & RBAC foundation; Phase 2 (below) adds the self-service UI; Phase 3 (below) adds the runtime resolution order. Rotation→respawn propagation and offboarding land in later phases of epic #1558.
+
+### Runtime credential resolution (`personal → team → system`)
+
+*(epic #1558 Phase 3, #1569; concept `personal-credentials-concept.md` §5/§6)*
+
+The credential an agent uses is resolved **per operation class**, because attribution and transport differ:
+
+| Operation | Credential used | Why |
+|---|---|---|
+| **Attributed writes** — commits, pull requests, reviews, HTTPS pushes | the **owner's personal** token/key (personal → team → system order) | These carry the human's name; they must run under the owner's identity. |
+| Read-only clones, the repo-check probe, SSH-only transport push | a shared `team`/`system` credential is fine | No attribution — a shared read credential misattributes no one. |
+| Event polling of a repo | a shared `team`/`system` token **only** | The poller is per-repo infrastructure, not per-human (#1569 AC6 — the personal tier never gates or replaces the poller's token). |
+
+The order is a **preference among tiers, not a fallback for a missing personal credential.** When an attributed write prefers the personal tier and the owner has **no usable personal credential** (absent, or a PAT missing the `repo`/`workflow` scope), the run is **refused** with a clear, actionable message — it does **not** silently drop to a `team`/`system` credential and act under a shared identity (**refuse-on-missing**, D5). The fallback chain applies only where a shared credential is legitimately acceptable (reads, polling).
+
+**"The agent's owner"** is `config.ownerId` — for a `team-member` this is its parent Agent Team's owner (one hop, mirroring `resolveAgentTenant`), so a team operated by several humans still writes under exactly one deterministic identity regardless of which event woke the run (AC3/AC4). A **cron / GitHub-event** run resolves the owner from persisted config, never from whoever initiated the trigger.
+
+**`ownerId`-presence is the switch (reconciling AC5 with AC8).** An agent with **no `ownerId`** — the state of every agent until owner population lands — takes the shared `team`/`system` credential exactly as today and is **never** refused (AC8). Only an agent that actually carries an `ownerId` is subject to the personal preference and refuse-on-missing (AC2/AC5). So existing single-tier environments behave identically to before this phase.
+
+The decision core is the pure, unit-tested `orchestrator/credential-resolution.js` (`resolveAgentOwnerId` / `findPersonalCredential` / `resolveCredential`); the orchestrator threads its result into the attributed-write git env (`_buildAgentGitEnv`) and surfaces the refusal as a distinct `personal-credential-required` error (HTTP 424) on the `gh-as-agent pr` path.
 
 ## My Credentials (self-service)
 

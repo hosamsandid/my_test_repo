@@ -157,15 +157,17 @@ function PublicKeyReveal({ publicKey, onDone }) {
   );
 }
 
-// A rotation replaces the secret in place; propagation to already-running agents
-// is Phase 4 (#1570). Surfaced on every rotate panel per the #1568 edge case.
+// A rotation replaces the secret in place and (Phase 4, #1570) automatically
+// restarts the owner's affected running agents so they pick up the new secret.
+// Surfaced on every rotate panel per the #1568 edge case; the warning now
+// states the in-flight-work interruption that restart causes (AC5).
 function RotationCaveat() {
   return (
     <InfoNote>
-      Rotating replaces the stored secret in place, keeping the same credential. Your agents pick up the
-      new secret the next time they start. Propagating a rotation to <em>already-running</em> agents by
-      restarting them arrives in a later phase (respawn, #1570) — until then, rotate at a quiet moment so
-      no in-flight work is left using the old secret.
+      Rotating replaces the stored secret in place, keeping the same credential. Your affected running
+      agents are <strong>automatically restarted</strong> so they pick up the new secret right away — only
+      yours, not anyone else's. That restart <strong>interrupts any in-flight work</strong> in those agents
+      (a running loop or trigger is cut off), so rotate at a quiet moment.
     </InfoNote>
   );
 }

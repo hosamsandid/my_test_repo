@@ -137,6 +137,32 @@ function resolveCredential({
   return { tier: "shared", credentialId: sharedCredentialId || null };
 }
 
+// Owner-scoped respawn selection (#1570, Phase 4). Given already-loaded agent
+// configs, return the ids of agents whose resolved human OWNER
+// (`resolveAgentOwnerId`) is `ownerId` — i.e. the agents that would resolve a
+// personal credential to that human's. Because a personal credential is unique
+// per (owner, kind), "agents whose resolved credential is this personal
+// credential" reduces to "agents owned by this human"; every such agent must be
+// respawned when the owner SETS or ROTATES a personal SSH key / GitHub token so
+// the new secret takes effect — INCLUDING an agent that only uses the personal
+// credential for attributed writes and never for the clone (issue edge case).
+//
+// Pure — no I/O. `agents` is an array of `{ id, cfg }` (a null/absent `cfg` is
+// skipped, e.g. a corrupt config). The runtime skip rules (disabled /
+// not-running / tokenless) are applied by the caller, mirroring
+// `respawnAgentsForEnvironment`, so this stays a pure owner-match.
+function selectAgentIdsForOwner(agents, ownerId, loadAgentConfig) {
+  const target = ownerId != null && String(ownerId) !== "" ? String(ownerId) : null;
+  if (!target || !Array.isArray(agents)) return [];
+  const ids = [];
+  for (const a of agents) {
+    if (!a || !a.cfg) continue;
+    const owner = resolveAgentOwnerId(a.cfg, loadAgentConfig);
+    if (owner && String(owner) === target) ids.push(a.id);
+  }
+  return ids;
+}
+
 // The actionable refusal message (AC5): names the owner and what to do, and is
 // explicit that there is deliberately no team/system fallback.
 function buildRefusal(ownerId, kind) {
@@ -157,5 +183,6 @@ module.exports = {
   resolveAgentOwnerId,
   findPersonalCredential,
   resolveCredential,
+  selectAgentIdsForOwner,
   buildRefusal,
 };

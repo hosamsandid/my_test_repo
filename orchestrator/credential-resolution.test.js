@@ -13,6 +13,7 @@ const {
   resolveAgentOwnerId,
   findPersonalCredential,
   resolveCredential,
+  selectAgentIdsForOwner,
 } = require("./credential-resolution");
 
 // ── owner resolution (AC3, AC4) ─────────────────────────────────────────────
@@ -171,4 +172,37 @@ test("resolveCredential: refusal message names the credential kind", () => {
     kind: "SSH key",
   });
   assert.match(r.refuse.message, /personal SSH key/);
+});
+
+// ── owner-scoped respawn selection (#1570 Phase 4, AC1/AC2/AC4) ──────────────
+
+test("selectAgentIdsForOwner: returns only the owner's agents (AC1)", () => {
+  const agents = [
+    { id: "a1", cfg: { role: "agent", ownerId: "u-alice" } },
+    { id: "a2", cfg: { role: "agent", ownerId: "u-bob" } },   // other human — untouched
+    { id: "a3", cfg: { role: "agent" } },                      // no owner — untouched (AC8 gate)
+    { id: "a4", cfg: { role: "agent", ownerId: "u-alice" } },
+  ];
+  assert.deepEqual(selectAgentIdsForOwner(agents, "u-alice"), ["a1", "a4"]);
+});
+
+test("selectAgentIdsForOwner: a team-member is selected via its parent team's owner (AC4)", () => {
+  const parents = { squad: { role: "team", ownerId: "u-alice" } };
+  const load = (id) => parents[id] || null;
+  const agents = [
+    { id: "squad-dev", cfg: { role: "team-member", parentTeamId: "squad" } },
+    { id: "squad-rev", cfg: { role: "team-member", parentTeamId: "squad" } },
+    { id: "other-dev", cfg: { role: "team-member", parentTeamId: "other" } }, // parent unknown → no owner
+  ];
+  assert.deepEqual(selectAgentIdsForOwner(agents, "u-alice", load), ["squad-dev", "squad-rev"]);
+});
+
+test("selectAgentIdsForOwner: null/empty owner or a corrupt config selects nothing", () => {
+  const agents = [
+    { id: "a1", cfg: { role: "agent", ownerId: "u-alice" } },
+    { id: "a2", cfg: null }, // corrupt/unreadable — skipped, never throws
+  ];
+  assert.deepEqual(selectAgentIdsForOwner(agents, null), []);
+  assert.deepEqual(selectAgentIdsForOwner(agents, ""), []);
+  assert.deepEqual(selectAgentIdsForOwner(agents, "u-alice"), ["a1"]);
 });

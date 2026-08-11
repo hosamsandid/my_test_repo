@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, BookOpen, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
+  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -77,7 +77,6 @@ const NAV = [
     { path: '/models',       label: 'Model Providers',     Icon: Sparkles, credAdmin: true },
     { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
     { path: '/plugins',      label: 'Plugins',             Icon: Puzzle,  adminOnly: true },
-    { path: '/patterns',     label: 'Patterns Catalog',    Icon: BookOpen },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
   ]},
 ];
@@ -102,9 +101,6 @@ const BREADCRUMBS = {
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
   '/teams':        'Teams',
-  '/patterns':               'Patterns Catalog',
-  '/patterns/sdlc':          'Patterns Catalog / SDLC',
-  '/patterns/mainframe':     'Patterns Catalog / Mainframe Modernization',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',
 };

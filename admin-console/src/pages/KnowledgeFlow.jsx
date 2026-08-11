@@ -5,7 +5,7 @@ import {
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
   Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
-  Pencil,
+  Pencil, Loader2,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import IconButton from '../components/IconButton';
@@ -565,11 +565,15 @@ export default function KnowledgeFlow() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0, borderTop: '1px solid var(--eb-border-default)' }}>
         <div style={{ flex: 1, overflowY: 'auto', background: 'var(--eb-bg-app)', padding: 'var(--eb-space-4) 0' }}>
           {teams === null ? (
-            <div style={{ color: 'var(--eb-text-muted)' }}>Loading…</div>
+            <div aria-busy="true" style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-muted)' }}>
+              <Loader2 size={14} className="kf-spin" aria-hidden="true" /> Loading…
+            </div>
           ) : teams.length === 0 ? (
             <div style={{ color: 'var(--eb-text-muted)' }}>No agents yet — create a team and its agents will start learning.</div>
           ) : !selectedTeamObj ? (
             <ChooseTeam />
+          ) : loading ? (
+            <TeamKnowledgeSkeleton />
           ) : view === 'table' ? (
             <OverviewTable
               key={selectedTeamObj.id}
@@ -797,6 +801,25 @@ function TeamSelector({ teams, selected, onSelect }) {
       <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
         {selected ? 'Showing this team’s knowledge only.' : 'Pick a team to load its knowledge.'}
       </span>
+    </div>
+  );
+}
+
+/* ── Loading skeleton shown while the selected team's knowledge is fetching ──── */
+// Follows the canonical pattern of adjacent pages (McpServers.jsx, TokenUsage.jsx):
+// a fixed-height elevated block carrying aria-busy so screen readers announce the
+// wait. Shown on first team select and on every team switch until the fetch settles.
+
+function TeamKnowledgeSkeleton() {
+  return (
+    <div
+      aria-busy="true"
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)',
+        height: 240, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)',
+        color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+      }}>
+      <Loader2 size={16} className="kf-spin" aria-hidden="true" /> Loading team knowledge…
     </div>
   );
 }

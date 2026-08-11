@@ -98,6 +98,28 @@ class PlanStore {
     return doc;
   }
 
+  // Import a full document into a scope's board (content migration, #1566). Like
+  // `save` it normalizes and pins id/teamId, but it differs in two deliberate
+  // ways that make it the right primitive for the round-trip import UI:
+  //   • it PRESERVES the imported document's createdAt/updatedAt verbatim, so
+  //     `export → import → export` is byte-identical (the concept's round-trip
+  //     guarantee) — an import restores a document, it is not an edit that bumps
+  //     the clock.
+  //   • it PRESERVES the board's current autonomy level rather than taking it
+  //     from the imported document — agent autonomy is a governance setting that
+  //     only the /admin `set-autonomy` route may change, so importing a document
+  //     (even a foreign one) can never silently raise the ladder.
+  import(scopeId, input) {
+    assertScope(scopeId);
+    const current = this.load(scopeId);
+    const doc = normalizePlanDoc(input, { now: this.now() });
+    doc.id = scopeId;
+    doc.teamId = scopeId;
+    doc.settings.agentAutonomy = current.settings.agentAutonomy;
+    this._writeAtomic(scopeId, doc);
+    return doc;
+  }
+
   // Apply one mutation op to a scope's board. `enforceAutonomy` gates agent
   // writes against the board's current level (the server-side defense line);
   // pass false for a human console write (already role-gated by the proxy).

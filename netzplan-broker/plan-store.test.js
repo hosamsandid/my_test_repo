@@ -91,3 +91,44 @@ test('a malformed scopeId is rejected (path-safety defense in depth)', () => {
   assert.throws(() => store.load('../escape'), /invalid scopeId/);
   assert.throws(() => store.load(''), /invalid scopeId/);
 });
+
+// ── content migration: import / export round-trip (#1566) ─────────────────────
+
+test('import stores a full document, pinned to the scope', () => {
+  const { store } = makeStore();
+  const doc = store.import('team-x', {
+    name: 'Imported',
+    owners: [{ id: 'o1', name: 'Ada', color: '#f00' }],
+    panels: [{ id: 'p1', kind: 'swimlane', title: 'Plan', zones: [{ id: 'z1', name: 'Z' }], lanes: [{ id: 'l1', zoneId: 'z1', title: 'Lane', milestones: [{ id: 'm1', label: 'A', done: true }] }], requirements: [] }],
+  });
+  assert.equal(doc.name, 'Imported');
+  assert.equal(doc.id, 'team-x');
+  assert.equal(doc.teamId, 'team-x');
+  assert.equal(doc.panels[0].lanes[0].milestones[0].done, true);
+  // survives a fresh store over the same dir (persisted like every write)
+  const reloaded = store.load('team-x');
+  assert.equal(reloaded.name, 'Imported');
+});
+
+test('AC3: export (load) → import → identical document (byte-stable round-trip)', () => {
+  const { store } = makeStore();
+  const pid = store.load('team-x').panels[0].id;
+  store.mutate('team-x', { type: 'add-lane', panelId: pid, id: 'l1', title: 'Build' });
+  store.mutate('team-x', { type: 'add-milestone', panelId: pid, laneId: 'l1', id: 'm1', label: 'A' });
+  store.mutate('team-x', { type: 'tick-milestone', panelId: pid, id: 'm1', done: true });
+
+  const exported = store.load('team-x');            // what the /api/export route returns
+  const afterImport = store.import('team-x', exported); // re-import the exported doc
+  assert.deepEqual(afterImport, exported);          // identical, timestamps and all
+  assert.deepEqual(store.load('team-x'), exported); // and persisted identically
+});
+
+test('import preserves the board autonomy (governance), never taking it from the document', () => {
+  const { store } = makeStore();
+  // Team-Admin sets the board to level 2.
+  store.mutate('team-x', { type: 'set-autonomy', level: 2 });
+  assert.equal(store.load('team-x').settings.agentAutonomy, 2);
+  // A document that claims autonomy 0 must NOT lower the board's governance.
+  const after = store.import('team-x', { name: 'X', settings: { agentAutonomy: 0 }, owners: [], panels: [] });
+  assert.equal(after.settings.agentAutonomy, 2, 'autonomy is /admin-only, not import-set');
+});

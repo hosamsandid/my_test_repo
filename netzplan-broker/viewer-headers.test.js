@@ -39,6 +39,9 @@ test('/admin needs team-admin; the board root needs team-member', () => {
   assert.equal(requiredRoleForPath('/admin'), 'team-admin');
   assert.equal(requiredRoleForPath('/admin/settings'), 'team-admin');
   assert.equal(requiredRoleForPath('/api/settings'), 'team-admin');
+  // content migration (#1566): import is a Team-Admin board replace; export is a read
+  assert.equal(requiredRoleForPath('/api/import'), 'team-admin');
+  assert.equal(requiredRoleForPath('/api/export'), 'team-member');
   assert.equal(requiredRoleForPath('/'), 'team-member');
   assert.equal(requiredRoleForPath('/api/board'), 'team-member');
 

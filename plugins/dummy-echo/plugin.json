@@ -2,7 +2,7 @@
   "pluginVersion": 1,
   "id": "dummy-echo",
   "name": "Dummy Echo",
-  "description": "A reference plugin used to exercise the plugin machinery (Phase 1, #1517): its sidecar starts, is reachable only from granted agents' networks, and disappears on uninstall. It brokers nothing real — the CLI echoes its arguments back so the registry, sidecar lifecycle and grant-driven network wiring can be verified end to end before a real broker (Phase 3) exists.",
+  "description": "A no-op reference plugin for exercising and demonstrating the plugin system end to end. It brokers nothing real and holds no privilege: its sidecar starts, is reachable only from the networks of the agents it's granted to, and is torn down on uninstall, while its command-line tool simply echoes back whatever arguments you give it. Install and grant it as a safe smoke test — a way to confirm that plugin install, sidecar lifecycle and grant-driven network wiring all work before installing a plugin that holds real credentials or reaches an external system. Agents drive it with the dependency-free `aee-echo` command-line tool (e.g. `aee-echo hello`).",
   "sidecar": {
     "image": "docker.io/library/busybox:latest",
     "capabilities": [],

@@ -47,7 +47,7 @@ Source of truth: `orchestrator/teams-store.js` (pure factory). The orchestrator 
 
 ### Working Environments
 
-A **Working Environment** is a reusable **infrastructure template** at `/workspace/environments/<envId>/environment.json`: `id`/`name`/`description`; `repositories` (array of `{url, branch, sshKeyId}`, one or more repos cloned at creation; legacy single `repository` is migrated to a one-element array on read by the API, ~api.js line 695); `mcpServers` (optional `{serverId, credentialId}` refs into the MCP registry); `additionalContext` (optional text appended to CLAUDE.md).
+A **Working Environment** is a reusable **infrastructure template** at `/workspace/environments/<envId>/environment.json`: `id`/`name`/`description`; `repositories` (array of `{url, branch, sshKeyId}`, zero or more repos cloned at creation — `[]` is valid for LLM-only / credential-free agents; legacy single `repository` is migrated to a one-element array on read by the API, ~api.js line 695); `mcpServers` (optional `{serverId, credentialId}` refs into the MCP registry); `additionalContext` (optional text appended to CLAUDE.md).
 
 **Environments do NOT carry skills — never re-add them.** The skill *grant* is **team-owned** (`orchestrator/skill-grants.js`): team agents (`role: team`) carry `skills[]` (inherited by every member without a `skillsOverride`); standalone agents/orchestrators carry their own; bp-instances inherit from their parent orchestrator. `effectiveSkills(cfg, loadCfg)` resolves the grant everywhere (seeding, CLAUDE.md gating, preview).
 
@@ -321,6 +321,7 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, `POST /api/teams`, agent-templates |
 | `admin-console/api/team-residue.js` | Pure residue classifier + routing decision for team-create (`classifyMemberResidue` / `decideTeamCreate`); shared by both `POST /api/teams` handlers so their collision/orphan routing can't drift (#1525) |
 | `admin-console/api/extract-template.js` | Pure mapping core for Save as template (#1509): `buildExtractedTemplate` (whitelist builder — runtime/identity + team-composition fields can never leak), `sanitizeTemplateTrigger`, `suggestTemplateId`, `inferTemplateCategory`, `inferPatternRole` |
+| `admin-console/api/quickstart-llm.js` | Pure decision core for the LLM-only Single Agent entry path (#1624): `validateQuickstartLlmInput` (no-provider / no-name / binding errors), `llmEnvId`/`llmAgentId` (slug + dedup), `quickstartLlmSystemPrompt`; `POST /api/quickstart/llm` in api.js is the thin adapter |
 | `admin-console/api/process-template.js` | Pure builders/validators for process-template bundles |
 | `admin-console/api/plugin-manifest.js` | Pure validator/normalizer for a `pluginVersion: 1` plugin manifest (#1517) |
 | `orchestrator/plugin-scope-token.js` | HMAC `{pluginId, scopeId}` scope tokens (generalised `podman-token.js`) |

@@ -2,7 +2,7 @@
   "pluginVersion": 1,
   "id": "podman-sandbox",
   "name": "Podman Container Sandbox",
-  "description": "Plugin #1 (epic #1516, Phase 3): lets a granted agent spawn and manage its own compose stacks through a privilege-holding broker sidecar, instead of touching the host Podman socket directly. The broker (podman-mcp/, reworked from PR #1287) holds the libpod socket and stamps every container it creates with the caller's scope owner label, so two scopes sharing one broker never see or operate on each other's containers. Agents drive it with the dependency-free `aee-podman` CLI (e.g. `aee-podman compose up -f compose.yml`).",
+  "description": "Lets a granted agent spawn and manage its own containers without touching the host container runtime directly. A privilege-holding broker sidecar holds the Podman socket on the agent's behalf and stamps every container it creates with the caller's scope, so agents (or teams) sharing one broker never see or operate on each other's containers, and a per-scope quota caps how much each can run at once. Agents drive it with the dependency-free `aee-podman` command-line tool — for example `aee-podman run <image>` for a single container, or `aee-podman compose up -f compose.yml` for a multi-service stack. Runs on Podman only.",
   "sidecar": {
     "image": "localhost/aee-plugin-podman-sandbox:latest",
     "capabilities": ["podman-socket"],

@@ -1356,7 +1356,18 @@ app.get('/api/agents', (req, res) => {
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
 app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  const ids = listAgentDirs();
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2).
+  const scope = getScope(req);
+  const ids = listAgentDirs().filter(id => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return cfg && visibleAgent(scope, cfg);
+  });
 
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';

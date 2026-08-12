@@ -10,6 +10,15 @@ import {
   niceScale,
   buildDaySeries,
   stackSegments,
+  sanitizeHiddenClasses,
+  isClassVisible,
+  toggleHiddenClass,
+  visibleClassList,
+  visibleTotalTokens,
+  visibleMaxTotal,
+  hiddenStorageKey,
+  loadHiddenClasses,
+  saveHiddenClasses,
   buildExportUrl,
   workItemAverages,
   WORK_ITEM_TILE_HELP,
@@ -142,6 +151,94 @@ test('stackSegments scales each nonzero class to a percent of maxTotal', () => {
 
 test('stackSegments returns nothing when maxTotal is 0 (no divide-by-zero)', () => {
   assert.deepEqual(stackSegments({ input: 5 }, 0), []);
+});
+
+/* ── Per-series visibility toggles (#1707) ─────────────────────────── */
+
+test('sanitizeHiddenClasses keeps only valid keys, de-duped, in display order', () => {
+  assert.deepEqual(sanitizeHiddenClasses(['output', 'input', 'bogus', 'input']), ['input', 'output']);
+  assert.deepEqual(sanitizeHiddenClasses(new Set(['cacheReadInput'])), ['cacheReadInput']);
+  // Junk / non-iterables collapse to "nothing hidden".
+  assert.deepEqual(sanitizeHiddenClasses(null), []);
+  assert.deepEqual(sanitizeHiddenClasses('input'), []);
+});
+
+test('isClassVisible defaults to visible and hides only listed classes', () => {
+  // Nothing hidden → all four visible (AC9).
+  for (const c of TOKEN_CLASSES) assert.equal(isClassVisible([], c.key), true);
+  assert.equal(isClassVisible(['cacheReadInput'], 'cacheReadInput'), false);
+  assert.equal(isClassVisible(['cacheReadInput'], 'input'), true);
+});
+
+test('toggleHiddenClass flips one class immutably and ignores unknown keys', () => {
+  const start = [];
+  const hidCache = toggleHiddenClass(start, 'cacheReadInput');
+  assert.deepEqual(hidCache, ['cacheReadInput']);
+  assert.deepEqual(start, []); // original untouched
+  // Toggling again restores it (AC2).
+  assert.deepEqual(toggleHiddenClass(hidCache, 'cacheReadInput'), []);
+  // Unknown key is a no-op (returns the sanitized current set).
+  assert.deepEqual(toggleHiddenClass(['output'], 'nope'), ['output']);
+});
+
+test('visibleClassList drops hidden classes; empty when all hidden', () => {
+  assert.deepEqual(visibleClassList([]).map((c) => c.key), TOKEN_CLASSES.map((c) => c.key));
+  assert.deepEqual(visibleClassList(['input', 'output']).map((c) => c.key), ['cacheCreationInput', 'cacheReadInput']);
+  assert.deepEqual(visibleClassList(TOKEN_CLASSES.map((c) => c.key)), []);
+});
+
+test('visibleTotalTokens sums only visible classes (AC4)', () => {
+  const tokens = { input: 10, output: 20, cacheCreationInput: 300, cacheReadInput: 4000, total: 4330 };
+  assert.equal(visibleTotalTokens(tokens, []), 4330);
+  // Hiding the dominant cache-read series drops it from the total.
+  assert.equal(visibleTotalTokens(tokens, ['cacheReadInput']), 330);
+  assert.equal(visibleTotalTokens(tokens, ['cacheReadInput', 'cacheCreationInput']), 30);
+  assert.equal(visibleTotalTokens(tokens, TOKEN_CLASSES.map((c) => c.key)), 0);
+});
+
+test('visibleMaxTotal rescales the axis to the visible classes (AC5)', () => {
+  const points = [
+    { tokens: { input: 9_000_000, cacheReadInput: 2_230_000_000 } },
+    { tokens: { input: 5_000_000, cacheReadInput: 1_000_000_000 } },
+  ];
+  // All visible → dominated by cache read.
+  assert.equal(visibleMaxTotal(points, []), 2_239_000_000);
+  // Hide cache read → the axis zooms into the Input scale.
+  assert.equal(visibleMaxTotal(points, ['cacheReadInput']), 9_000_000);
+  // Everything hidden → flat 0 (niceScale then yields a 0-baseline axis).
+  assert.equal(visibleMaxTotal(points, TOKEN_CLASSES.map((c) => c.key)), 0);
+  assert.equal(visibleMaxTotal([], []), 0);
+});
+
+test('stackSegments omits hidden classes from a day column (AC4)', () => {
+  const tokens = { input: 10, output: 0, cacheCreationInput: 40, cacheReadInput: 50, total: 100 };
+  const segs = stackSegments(tokens, 100, ['cacheReadInput']);
+  // cacheReadInput hidden; output (0) still dropped; rest kept in display order.
+  assert.deepEqual(segs.map((s) => s.key), ['input', 'cacheCreationInput']);
+  // Omitting the hidden arg keeps the legacy "all visible" behaviour.
+  assert.deepEqual(
+    stackSegments(tokens, 100).map((s) => s.key),
+    ['input', 'cacheCreationInput', 'cacheReadInput'],
+  );
+});
+
+test('hidden-set persistence round-trips through an injectable store, per username', () => {
+  const store = (() => {
+    const m = new Map();
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) };
+  })();
+  assert.equal(hiddenStorageKey('alice'), 'tokenUsage.hiddenSeries.alice');
+  // Unset → all visible.
+  assert.deepEqual(loadHiddenClasses('alice', store), []);
+  saveHiddenClasses('alice', ['cacheReadInput', 'bogus'], store);
+  // Saved value is sanitized; a different user is unaffected.
+  assert.deepEqual(loadHiddenClasses('alice', store), ['cacheReadInput']);
+  assert.deepEqual(loadHiddenClasses('bob', store), []);
+});
+
+test('loadHiddenClasses tolerates corrupt stored JSON', () => {
+  const store = { getItem: () => '{not json', setItem: () => {} };
+  assert.deepEqual(loadHiddenClasses('x', store), []);
 });
 
 test('buildExportUrl builds a scoped, windowed download URL per view and format', () => {

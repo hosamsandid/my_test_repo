@@ -15,6 +15,9 @@ import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
   mostSpecificActivePath,
 } from './nav-model';
+import {
+  PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
+} from './plugin-nav';
 import AccentureLogo from './AccentureLogo';
 import AssistModelSelector from './AssistModelSelector';
 import TranscriptionOverlay from './TranscriptionOverlay';
@@ -229,42 +232,47 @@ export default function Shell({ children }) {
   // declared globally visible (#1599 — `ui.global`, shown to every authenticated
   // user regardless of any grant). Unlike the admin-only Plugins registry entry,
   // these are visible to ordinary users; the console proxy + server re-enforce
-  // access. Refetched on navigation so a revoked grant drops its entry (AC).
+  // access.
+  //
+  // Discovery is session-scoped (#1679): it ran once per mount, NOT on every
+  // navigation. Keying this on `location.pathname` refetched GET /api/plugins
+  // plus the N+1 GET /api/plugins/:id/scopes fan-out on every route change. The
+  // set only changes on install/uninstall or a grant edit, so it re-discovers
+  // once on mount and then only when a caller fires PLUGINS_CHANGED_EVENT (see
+  // Plugins install/uninstall + the Agents plugin grant), so a revoked grant
+  // still drops its entry without polling on navigation.
   const [uiPlugins, setUiPlugins] = useState([]);
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
+    let mounted = true;
+    // Guard against out-of-order resolutions: only the newest run may write.
+    let latest = 0;
+    const load = async () => {
+      const runId = ++latest;
       try {
         const r = await fetch('/api/plugins');
         if (!r.ok) return;
         const body = await r.json();
-        const withUi = (body.installed || []).filter(
-          p => p && p.ok && p.manifest && p.manifest.ui && Array.isArray(p.manifest.ui.routes),
-        );
-        const out = [];
-        for (const p of withUi) {
-          const title = p.manifest.ui.title || p.manifest.name || p.id;
-          // Globally-visible plugins show unconditionally for every user; one
-          // entry per plugin id, so a global + team-granted plugin never renders
-          // twice (AC5).
-          if (p.manifest.ui.global === true) {
-            out.push({ id: p.id, title });
-            continue;
-          }
+        const installed = body.installed || [];
+        // Fetch each non-global plugin's scopes once and cache the result, so
+        // the nav is derived from a single pass rather than a per-navigation
+        // fan-out.
+        const scopesById = {};
+        for (const id of pluginsNeedingScopes(installed)) {
           try {
-            const sr = await fetch(`/api/plugins/${encodeURIComponent(p.id)}/scopes`);
+            const sr = await fetch(`/api/plugins/${encodeURIComponent(id)}/scopes`);
             if (!sr.ok) continue;
             const sb = await sr.json();
-            if (Array.isArray(sb.scopes) && sb.scopes.length) {
-              out.push({ id: p.id, title });
-            }
+            if (Array.isArray(sb.scopes)) scopesById[id] = sb.scopes;
           } catch { /* skip a plugin we cannot resolve scopes for */ }
         }
-        if (!cancelled) setUiPlugins(out);
+        if (mounted && runId === latest) setUiPlugins(buildPluginNav(installed, scopesById));
       } catch { /* orchestrator/plugins unavailable — no dynamic entries */ }
-    })();
-    return () => { cancelled = true; };
-  }, [location.pathname]);
+    };
+    load();
+    const onChanged = () => load();
+    window.addEventListener(PLUGINS_CHANGED_EVENT, onChanged);
+    return () => { mounted = false; window.removeEventListener(PLUGINS_CHANGED_EVENT, onChanged); };
+  }, []);
 
   // UI-plugin entries are a collapsible accordion group like the static ones
   // (#1595 AC12 + follow-up): appended after the built-in groups, but with the

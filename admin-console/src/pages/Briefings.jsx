@@ -463,6 +463,11 @@ export default function Briefings() {
   // set by the "Describe flow…" entry below and by scope changes that should
   // keep the panel open (draft re-key on rename, team → draft bridge).
   const copilotParam = searchParams.get('copilot') === '1';
+  // Create-launcher deep link (#1665): `?new=blank` starts a fresh draft in the
+  // canvas (the "Build it yourself" entry), `?new=describe` a fresh draft with
+  // the Flow Copilot open (the conversational "Describe it" entry). Consumed
+  // once on mount, then replaced by the resulting `?proc=draft:<id>` selection.
+  const newParam = searchParams.get('new');
   const pendingFocus = useMemo(
     () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
     [proc, focusNode, focusTab],
@@ -511,6 +516,9 @@ export default function Briefings() {
   // and drafts to load so the stored id can be validated against live data.
   useEffect(() => {
     if (proc || selectedFlow) return;
+    // A launcher deep link (`?new=…`) owns the initial selection — don't let the
+    // last-selected restore race it and navigate away before it's consumed.
+    if (newParam) return;
     if (!lastSelectedKey) return;
     if (agents === null || draftsList === null) return;
 
@@ -531,6 +539,22 @@ export default function Briefings() {
     }
   }, [agents, draftsList, proc, selectedFlow, lastSelectedKey,
       teams, drafts, orchestrators, setSearchParams]);
+
+  // Consume a Create-launcher `?new=…` deep link exactly once. Waits for the
+  // lists so the new draft appears immediately; newProcess/describeFlow replace
+  // the URL with the draft selection, which clears `new` and prevents re-firing.
+  const launcherNewConsumed = useRef(false);
+  useEffect(() => {
+    if (!newParam || launcherNewConsumed.current) return;
+    if (agents === null || draftsList === null) return;
+    launcherNewConsumed.current = true;
+    if (newParam === 'describe') describeFlow();
+    else if (newParam === 'blank') newProcess();
+    else setSearchParams({}, { replace: true }); // unknown value → drop the param
+    // newProcess/describeFlow are stable hoisted declarations; deps intentionally
+    // omit them so this fires only on the param/data becoming ready.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newParam, agents, draftsList]);
 
   async function newProcess() {
     try {

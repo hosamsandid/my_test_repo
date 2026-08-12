@@ -51,6 +51,7 @@ function CredentialRoute({ children }) {
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
+const Create              = lazy(() => import('./pages/Create'));
 const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
@@ -131,6 +132,7 @@ export default function App() {
           <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
+          <Route path="/create"      element={<Create />} />
           <Route path="/quickstart"   element={<QuickStart />} />
           <Route path="/team-setup"   element={<TeamSetupRoute />} />
           <Route path="/wizard/team"  element={<TeamSetupRoute />} />

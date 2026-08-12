@@ -23,6 +23,11 @@ import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
 import PluginGrantPicker from '../components/PluginGrantPicker';
 import { effectiveGrantFor } from './plugin-grant-view.js';
+import {
+  AGENTS_PAGE_COPY,
+  EMPTY_STATE_PRIMARY_CTA,
+  AGENT_ROLE_CREATE_LINK,
+} from './agents-view.js';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
@@ -3094,9 +3099,18 @@ export default function Agents() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+        <div>
+          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>{AGENTS_PAGE_COPY.heading}</h1>
+          <p style={{ margin: '4px 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {AGENTS_PAGE_COPY.subtitle}
+          </p>
+        </div>
+        {/* Creation actions are demoted to secondary/advanced affordances (AC2):
+            the launcher is the primary "create" door, so neither "Import Agent"
+            nor "+ New Agent" is styled as the page's primary action. Both stay
+            fully available for power users (AC5). */}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexShrink: 0 }}>
           <input
             ref={importFileRef}
             type="file"
@@ -3115,9 +3129,9 @@ export default function Agents() {
           >
             <Upload size={14} /> Import Agent
           </button>
-          <PrimaryBtn onClick={() => openPanel('create', null)}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Agent</span>
-          </PrimaryBtn>
+          <SecondaryBtn onClick={() => openPanel('create', null)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}>
+            <Plus size={15} /> New Agent
+          </SecondaryBtn>
         </div>
       </div>
       {importSuccess && (
@@ -3144,12 +3158,14 @@ export default function Agents() {
         lineHeight: 1.55,
       }}>
         <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-          What is an agent?
+          {AGENTS_PAGE_COPY.introLead}
         </p>
         <p style={{ margin: 0 }}>
           An <strong>Agent</strong> is a long-running Claude Code instance with its own workspace and session history.
-          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is for advanced and custom
-          configurations — for most use cases, the guided paths below are faster:
+          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is where you <strong>manage</strong> the
+          agents and teams you already have — you can also create or import one here for advanced or custom setups, but the
+          guided <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> is
+          the fastest way to start something new:
         </p>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-xs)' }}>
           <thead>
@@ -3161,11 +3177,11 @@ export default function Agents() {
           <tbody>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent</strong></td>
-              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Use <Link to="/quickstart" style={{ color: 'var(--eb-accent-primary)' }}>Single Agent</Link> for the fastest setup.</td>
+              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Create one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> for the fastest setup.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent Team / member</strong></td>
-              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
+              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Start one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
@@ -3208,10 +3224,10 @@ export default function Agents() {
           borderRadius: 'var(--eb-radius-lg)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--eb-space-4)',
         }}>
-          <p style={{ margin: 0 }}>No agents yet. Start with one of the guided paths:</p>
+          <p style={{ margin: 0 }}>{AGENTS_PAGE_COPY.emptyLead} Start something new from the Create launcher:</p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', justifyContent: 'center' }}>
             <Link
-              to="/quickstart"
+              to={EMPTY_STATE_PRIMARY_CTA.to}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
@@ -3219,23 +3235,11 @@ export default function Agents() {
                 fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
               }}
             >
-              Create a single agent
-            </Link>
-            <Link
-              to="/team-setup"
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
-                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
-                border: '1px solid var(--eb-border-default)',
-                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
-              }}
-            >
-              Set up a team
+              {EMPTY_STATE_PRIMARY_CTA.label}
             </Link>
           </div>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)' }}>
-            Prefer full control? <strong>+ New Agent</strong> above is the advanced path.
+            {AGENTS_PAGE_COPY.emptyAdvancedHint}
           </p>
         </div>
       ) : (

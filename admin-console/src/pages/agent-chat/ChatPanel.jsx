@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Plus, Minus, Type } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Gauge, Trash2, GitBranch, ArrowRight, Plus, Minus, Type } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -12,6 +11,8 @@ import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import ChatModelSelector from './ChatModelSelector.jsx';
+import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
 import { latestLoopProgress } from './loop-run-view.js';
@@ -655,13 +656,13 @@ export default function ChatPanel({
     }
   }, [agent?.id]);
 
+  // Switch the agent's model within the current provider (live, no respawn).
+  // A null id clears the per-agent override → back to the environment default.
   async function handleModelChange(newId) {
     if (!agent?.id || modelSwitching) return;
     setModelSwitching(true);
     setError(null);
     try {
-      // Empty string from the <select> means "back to env default" — send
-      // null so the API clears the override.
       const payload = { modelId: newId ? newId : null };
       const resp = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/model`, payload);
       setModelOptions(prev => prev ? { ...prev, override: resp.override } : prev);
@@ -672,16 +673,22 @@ export default function ChatPanel({
     }
   }
 
-  async function handleProviderChange(newEndpointId) {
+  // Switch the agent's provider (respawns the container). A null endpointId means
+  // "back to the environment default". Because the shared popover lets the user
+  // pick a specific model under the new provider group, an optional non-default
+  // modelId is applied with a follow-up model PATCH once the provider is set
+  // (PATCH /provider itself only sets the endpoint and prunes an incompatible
+  // model pin). Either way we refetch the full snapshot — the provider change
+  // clears the old override and swaps the whole catalogue.
+  async function handleProviderSwitch(newEndpointId, modelId) {
     if (!agent?.id || providerSwitching) return;
     setProviderSwitching(true);
     setError(null);
     try {
-      // Empty string means "back to the environment default" → send null.
-      const payload = { endpointId: newEndpointId ? newEndpointId : null };
-      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, payload);
-      // The provider change may have cleared the model override and swapped the
-      // whole catalog — refetch the full snapshot rather than patching locally.
+      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, { endpointId: newEndpointId ? newEndpointId : null });
+      if (modelId) {
+        await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/model`, { modelId });
+      }
       const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
       setModelOptions(fresh);
     } catch (err) {
@@ -689,6 +696,16 @@ export default function ChatPanel({
     } finally {
       setProviderSwitching(false);
     }
+  }
+
+  // Reset to the environment default: clear a provider override through the
+  // provider endpoint (respawns, also prunes the model pin) or a lone model
+  // override through the model endpoint (live). Decided by chatResetAction.
+  async function handleModelReset() {
+    if (!agent?.id) return;
+    const act = chatResetAction(modelOptions);
+    if (act.kind === 'provider') await handleProviderSwitch(null, null);
+    else if (act.kind === 'model') await handleModelChange(null);
   }
 
   async function handleFullLearn() {
@@ -1147,18 +1164,14 @@ export default function ChatPanel({
             Hand-off
           </button>
         )}
-        <ProviderChip
+        <ChatModelSelector
           options={modelOptions}
-          switching={providerSwitching}
           disabled={disabled}
-          onChange={handleProviderChange}
+          busy={providerSwitching || modelSwitching}
+          onModel={handleModelChange}
+          onProvider={handleProviderSwitch}
+          onReset={handleModelReset}
           onOpen={refreshModelOptions}
-        />
-        <ModelPicker
-          options={modelOptions}
-          switching={modelSwitching}
-          disabled={disabled}
-          onChange={handleModelChange}
         />
         <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
@@ -1590,313 +1603,6 @@ function UserStopSeparator({ ts }) {
   );
 }
 
-// Human label for an auth type. `null` (no endpoint) → the .env fallback.
-function authTypeLabel(authType) {
-  if (!authType) return 'Default (.env)';
-  return authType === 'oauth-token' ? 'Subscription' : 'API key';
-}
-
-// Width of the provider popover. The popover is rendered into document.body
-// via a portal with position: fixed, so it is never clipped by the narrow
-// Chat column's overflow nor trapped beneath a neighbouring panel's stacking
-// context — it stays fully visible and on top at any column width (#1280).
-const PROVIDER_POP_WIDTH = 300;
-
-// Compact, always-visible Model-Provider indicator next to the model picker.
-// Shows which LLM endpoint + auth type the agent actually runs on (transparency)
-// and, on click, a popover with the full binding plus a per-agent provider
-// switcher restricted to the agent team's curated, usable providers.
-function ProviderChip({ options, switching, disabled, onChange, onOpen }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
-  const triggerRef = useRef(null);
-  const popRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  // Refetch the resolved model options each time the popover opens (#1305), so
-  // a provider added or (un)assigned to this agent's team elsewhere in the app
-  // is reflected without a full page reload. Bounded to the user's open action
-  // — no polling, no per-render fetch. A ref keeps the effect keyed only on
-  // `open` while always calling the latest callback.
-  const onOpenRef = useRef(onOpen);
-  onOpenRef.current = onOpen;
-  useEffect(() => {
-    if (open) onOpenRef.current?.();
-  }, [open]);
-
-  // Anchor the fixed popover below the trigger, right-aligned to it, then clamp
-  // to the viewport so it can never overflow off-screen when the chat column is
-  // narrow or the trigger sits near the left edge.
-  const place = useCallback(() => {
-    const r = triggerRef.current?.getBoundingClientRect();
-    if (!r) return;
-    const maxLeft = window.innerWidth - PROVIDER_POP_WIDTH - 8;
-    const left = Math.max(8, Math.min(r.right - PROVIDER_POP_WIDTH, maxLeft));
-    setPos({ top: r.bottom + 4, left });
-  }, []);
-
-  // Close on outside click / Escape. The popover is portaled out of rootRef, so
-  // a click inside it must NOT count as "outside" — check popRef too.
-  useEffect(() => {
-    if (!open) return undefined;
-    function onDocClick(e) {
-      const inTrigger = rootRef.current && rootRef.current.contains(e.target);
-      const inPop = popRef.current && popRef.current.contains(e.target);
-      if (!inTrigger && !inPop) setOpen(false);
-    }
-    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  // Keep the fixed popover glued to the trigger while it's open, across window
-  // resizes and scrolls (either would otherwise leave it stranded).
-  useEffect(() => {
-    if (!open) { setPos(null); return undefined; }
-    place();
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
-    return () => {
-      window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
-    };
-  }, [open, place]);
-
-  if (!options) return null;
-
-  const endpoints = options.endpoints || [];
-  const overridden = !!options.endpointOverride;
-  const hasEndpoint = !!options.endpointId;
-  const effectiveModel = options.override || options.defaultModelId || null;
-  // Any-role team members may switch, but only within the curated team set.
-  const canSwitch = !!options.canSwitch && endpoints.length > 0 && !disabled;
-  // The <select> reflects the current binding: the override if set, else the
-  // env endpoint (empty string = "use the environment default").
-  const selectValue = options.endpointOverride || '';
-
-  const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
-  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Default (.env)';
-
-  return (
-    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        title="This agent's Model Provider — click for details & switch"
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 4,
-          padding: '3px 8px',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'inherit',
-          color: chipColor,
-          background: 'transparent',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: 'pointer',
-          maxWidth: 240,
-        }}
-      >
-        {switching
-          ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-          : <Zap size={11} />}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {hasEndpoint ? `${label} · ${authTypeLabel(options.authType)}` : label}
-        </span>
-        {overridden && <span style={{ fontSize: '0.9em' }}>•</span>}
-        <ChevronDown size={11} />
-      </button>
-
-      {open && pos && createPortal(
-        <div
-          ref={popRef}
-          style={{
-            position: 'fixed',
-            top: pos.top,
-            left: pos.left,
-            zIndex: 1000,
-            width: PROVIDER_POP_WIDTH,
-            boxSizing: 'border-box',
-            padding: 12,
-            background: 'var(--eb-bg-elevated)',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            boxShadow: 'var(--eb-shadow-lg)',
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-primary)',
-            cursor: 'default',
-          }}
-        >
-          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env fallback —')} />
-          <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
-          {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
-          <ProviderInfoRow label="Model" value={effectiveModel || '(provider default)'} mono />
-          {overridden && (
-            <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
-              Override active — environment default:{' '}
-              {options.envEndpointId || '(none)'}
-            </div>
-          )}
-
-          <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
-
-          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Switch provider</div>
-          {canSwitch ? (
-            <select
-              value={selectValue}
-              disabled={switching}
-              onChange={(e) => onChange(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '4px 6px',
-                fontSize: 'var(--eb-text-xs)',
-                fontFamily: 'inherit',
-                color: 'inherit',
-                background: 'var(--eb-bg-surface)',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-sm)',
-                cursor: switching ? 'not-allowed' : 'pointer',
-              }}
-            >
-              <option value="">
-                {options.envEndpointId ? 'Environment default' : '— Environment default (no provider) —'}
-              </option>
-              {endpoints.map(ep => (
-                <option key={ep.id} value={ep.id}>
-                  {ep.name} · {authTypeLabel(ep.authType)}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <div style={{ color: 'var(--eb-text-muted)' }}>
-              {endpoints.length === 0
-                ? 'No providers are available for this team.'
-                : 'You are not allowed to switch the provider.'}
-            </div>
-          )}
-          {canSwitch && (
-            <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-              Switching briefly restarts the agent container; the chat session
-              is preserved.
-              {switching && ' Restarting…'}
-            </div>
-          )}
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
-
-function ProviderInfoRow({ label, value, mono }) {
-  return (
-    <div style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
-      <span style={{ color: 'var(--eb-text-muted)', minWidth: 68 }}>{label}</span>
-      <span style={{
-        flex: 1,
-        wordBreak: 'break-all',
-        fontFamily: mono ? 'var(--eb-font-mono, monospace)' : 'inherit',
-        color: 'var(--eb-text-primary)',
-      }}>{value}</span>
-    </div>
-  );
-}
-
-function ModelPicker({ options, switching, disabled, onChange }) {
-  // Render a stable empty placeholder while the options are loading so the
-  // toolbar layout doesn't jump.
-  if (!options) return null;
-
-  const hasEndpoint = !!options.endpointId;
-  const hasModels   = (options.models || []).length > 0;
-  const effective   = options.override || options.defaultModelId || '';
-  const overridden  = !!options.override;
-  const interactionDisabled = disabled || switching || !hasEndpoint || !hasModels;
-
-  // Build a tooltip that explains the binding in one line — useful when the
-  // dropdown shows "(no endpoint)" or "(no models)" so the user knows where
-  // to fix it.
-  const tooltip = !hasEndpoint
-    ? 'No model provider bound to this environment — set one in Working Environments.'
-    : !hasModels
-      ? `Provider "${options.endpointName}" has no models in its catalog.`
-      : overridden
-        ? `Override active. Environment default: ${options.defaultModelId || '(none)'}.`
-        : `Environment default. Provider: ${options.endpointName}.`;
-
-  return (
-    <div
-      title={tooltip}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-        fontSize: 'var(--eb-text-xs)',
-        color: overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-      }}
-    >
-      <Cpu size={11} />
-      <select
-        value={effective}
-        disabled={interactionDisabled}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: '2px 6px',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'inherit',
-          color: 'inherit',
-          background: 'transparent',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: interactionDisabled ? 'not-allowed' : 'pointer',
-          opacity: interactionDisabled ? 0.6 : 1,
-          maxWidth: 220,
-        }}
-      >
-        {!hasEndpoint && <option value="">(no endpoint)</option>}
-        {hasEndpoint && !hasModels && <option value="">(no models)</option>}
-        {hasModels && (
-          <option value="">
-            {options.defaultModelId
-              ? `Default: ${options.defaultModelId}`
-              : '— pick a model —'}
-          </option>
-        )}
-        {options.models?.map(m => (
-          <option key={m.id} value={m.id}>
-            {(m.displayName || m.id) + (m.kind ? ` · ${m.kind}` : '')}
-          </option>
-        ))}
-      </select>
-      {overridden && (
-        <button
-          type="button"
-          onClick={() => onChange('')}
-          disabled={switching || disabled}
-          title="Clear override and fall back to the environment default"
-          style={{
-            background: 'transparent',
-            border: 'none',
-            padding: 0,
-            color: 'var(--eb-accent-primary)',
-            cursor: switching || disabled ? 'not-allowed' : 'pointer',
-            fontSize: 'var(--eb-text-xs)',
-            textDecoration: 'underline',
-          }}
-        >
-          reset
-        </button>
-      )}
-      {switching && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
-    </div>
-  );
-}
 
 function sessionBtnStyle(isDisabled) {
   return {

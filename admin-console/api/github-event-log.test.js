@@ -75,6 +75,27 @@ test('queryEntries skips corrupt lines without throwing', () => {
   assert.deepEqual(out.map(e => e.eventId), ['c']);
 });
 
+test('queryEntries without a window reads only the tail, bounded by limit (#1684)', () => {
+  writeDay('2026-07-20', Array.from({ length: 5 }, (_, i) => ({ ts: `2026-07-20T00:00:0${i}.000Z`, eventId: `old-${i}` })));
+  writeDay('2026-07-21', Array.from({ length: 5 }, (_, i) => ({ ts: `2026-07-21T00:00:0${i}.000Z`, eventId: `new-${i}` })));
+
+  const realOpen = fs.openSync;
+  const opened = [];
+  fs.openSync = (p, ...a) => { opened.push(path.basename(String(p))); return realOpen.call(fs, p, ...a); };
+  let out;
+  try { out = eventLog.queryEntries({ limit: 2 }); } finally { fs.openSync = realOpen; }
+
+  // Newest first, capped at the limit.
+  assert.deepEqual(out.map(e => e.eventId), ['new-4', 'new-3']);
+  // Boundedness: the older day file (and the earlier-written ones) stay closed.
+  assert.ok(opened.includes('github-events-2026-07-21.jsonl'));
+  assert.ok(!opened.includes('github-events-2026-07-20.jsonl'), 'older day file must not be opened');
+
+  // Cleanup so the trailing "missing dir" test still starts from a known state.
+  fs.rmSync(path.join(TMP, 'github-events-2026-07-20.jsonl'), { force: true });
+  fs.rmSync(path.join(TMP, 'github-events-2026-07-21.jsonl'), { force: true });
+});
+
 test('queryEntries returns [] when the log directory does not exist', () => {
   const before = process.env.GITHUB_EVENT_LOG_DIR;
   // listDayFiles reads EVENT_LOG_DIR captured at module load, so simulate

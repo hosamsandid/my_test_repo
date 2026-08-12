@@ -3,8 +3,10 @@ import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
+import VirtualList from '../../components/VirtualList.jsx';
 import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 import { mergeThinkingTokens } from './system-event.js';
+import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
 
 /**
@@ -427,6 +429,7 @@ export default function SessionLogPanel({
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        data-hover-scope="log"
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -472,29 +475,37 @@ export default function SessionLogPanel({
           </div>
         )}
 
-        {renderable.map((ev, i) => {
-          const cid = ev.correlationId || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          // In single-session (scoped) mode every row is the same session, so
-          // the per-correlation colour adds no information — drop the border.
-          const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
-          return (
-            <div
-              key={ev._key ?? i}
-              style={{
-                borderLeft: `2px solid ${accentColor}`,
-                marginLeft: 'var(--eb-space-1)',
-              }}
-            >
-              <LogEvent
-                event={ev}
-                dimmed={dimmed}
+        {/* Virtualized timeline (#1685): only the visible window of tool-event
+            rows is mounted, keeping the DOM bounded for a long-running session.
+            The scroller above owns auto-scroll; VirtualList reads its geometry.
+            Each row carries a stable data-cid for the CSS-driven cross-panel
+            hover dim (#1676). */}
+        <VirtualList
+          items={renderable}
+          scrollerRef={scrollerRef}
+          keyOf={(ev, i) => ev._key ?? `e${i}`}
+          estimateHeight={44}
+          overscan={10}
+          renderItem={(ev) => {
+            const cid = ev.correlationId || null;
+            // In single-session (scoped) mode every row is the same session, so
+            // the per-correlation colour adds no information — drop the border.
+            const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
+            return (
+              <div
+                data-cid={cid || ''}
                 onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
                 onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              />
-            </div>
-          );
-        })}
+                style={{
+                  borderLeft: `2px solid ${accentColor}`,
+                  marginLeft: 'var(--eb-space-1)',
+                }}
+              >
+                <LogEvent event={ev} />
+              </div>
+            );
+          }}
+        />
       </div>
 
       {todoVisible && (
@@ -508,6 +519,8 @@ export default function SessionLogPanel({
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        ${hoverBaseCss('log')}
+        ${hoverDimCss('log', hoveredCorrelationId)}
       `}</style>
     </div>
   );

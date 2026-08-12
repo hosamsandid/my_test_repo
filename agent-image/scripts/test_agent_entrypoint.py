@@ -101,6 +101,74 @@ class FormatAskUserQuestion(unittest.TestCase):
         self.assertNotIn("no label", out)
 
 
+class AskUserQuestionPayload(unittest.TestCase):
+    fn = staticmethod(entrypoint._ask_user_question_payload)
+
+    def test_single_choice_payload_shape(self):
+        out = self.fn({
+            "questions": [{
+                "header": "Auth method",
+                "question": "Which auth method should we use?",
+                "options": [
+                    {"label": "OAuth", "description": "Delegated login"},
+                    {"label": "API key"},
+                ],
+            }],
+        })
+        self.assertEqual(out["version"], 1)
+        self.assertEqual(len(out["questions"]), 1)
+        q = out["questions"][0]
+        self.assertEqual(q["questionId"], "q0")
+        self.assertEqual(q["header"], "Auth method")
+        self.assertEqual(q["question"], "Which auth method should we use?")
+        self.assertEqual(q["options"][0], {
+            "optionId": "0:0", "label": "OAuth", "description": "Delegated login",
+        })
+        # An option with no description omits the key entirely.
+        self.assertEqual(q["options"][1], {"optionId": "0:1", "label": "API key"})
+
+    def test_multiselect_excluded_from_interactive_payload(self):
+        # A multiSelect question is single-select-only in the MVP (D1/AC4):
+        # dropped from the structured payload (still in the text body).
+        self.assertIsNone(self.fn({"questions": [{
+            "header": "H", "question": "Pick some", "multiSelect": True,
+            "options": [{"label": "A"}, {"label": "B"}],
+        }]}))
+
+    def test_multiselect_mixed_keeps_single_choice_only(self):
+        out = self.fn({"questions": [
+            {"header": "Q1", "question": "One?", "options": [{"label": "A"}]},
+            {"header": "Q2", "question": "Many?", "multiSelect": True,
+             "options": [{"label": "B"}, {"label": "C"}]},
+        ]})
+        self.assertEqual(len(out["questions"]), 1)
+        self.assertEqual(out["questions"][0]["questionId"], "q0")
+
+    def test_option_ids_unique_across_questions(self):
+        out = self.fn({"questions": [
+            {"question": "One?", "options": [{"label": "A"}, {"label": "B"}]},
+            {"question": "Two?", "options": [{"label": "C"}]},
+        ]})
+        ids = [o["optionId"] for q in out["questions"] for o in q["options"]]
+        self.assertEqual(ids, ["0:0", "0:1", "1:0"])
+        self.assertEqual(len(set(ids)), len(ids))
+
+    def test_malformed_options_skipped(self):
+        out = self.fn({"questions": [{
+            "question": "Q",
+            "options": [None, "bad", {"description": "no label"}, {"label": "Good"}],
+        }]})
+        self.assertEqual(len(out["questions"][0]["options"]), 1)
+        self.assertEqual(out["questions"][0]["options"][0]["label"], "Good")
+
+    def test_invalid_inputs_return_none(self):
+        for bad in (None, "nope", 42, {}, {"questions": []}, {"questions": "x"}):
+            self.assertIsNone(self.fn(bad))
+
+    def test_all_empty_questions_return_none(self):
+        self.assertIsNone(self.fn({"questions": [{}, {"options": []}]}))
+
+
 class BuildHarvestHint(unittest.TestCase):
     fn = staticmethod(entrypoint.build_harvest_hint)
 

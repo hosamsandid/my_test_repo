@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
+import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
+import { computeChatCounts } from '../context/agent-statuses';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
@@ -18,7 +20,6 @@ import AssistModelSelector from './AssistModelSelector';
 import TranscriptionOverlay from './TranscriptionOverlay';
 import { formatVersionLabel } from './version-info';
 
-const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 // Per-user accordion state for the sidebar groups (#1595). Namespaced under
 // `nav.` (this is the Shell nav, not the Agent-Chat sidebar's `agentChat.`
@@ -203,32 +204,11 @@ export default function Shell({ children }) {
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
   const { user, logout } = useAuth();
-  const [chatCounts, setChatCounts] = useState({ busy: 0, unread: 0 });
-
-  useEffect(() => {
-    const poll = () => {
-      fetch('/api/agents/statuses')
-        .then(r => r.ok ? r.json() : [])
-        .then(list => {
-          const viewed = loadLastViewed();
-          let busy = 0, unread = 0;
-          for (const { id, activityState, lastResponseAt } of list) {
-            if (activityState === 'busy') {
-              busy++;
-            } else if (activityState !== 'disabled' && activityState !== 'offline') {
-              if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
-                unread++;
-              }
-            }
-          }
-          setChatCounts({ busy, unread });
-        })
-        .catch(() => {});
-    };
-    poll();
-    const timer = setInterval(poll, STATUS_POLL_MS);
-    return () => clearInterval(timer);
-  }, []);
+  // Nav badge counts, derived from the shared agent-status poll (#1677) instead
+  // of a Shell-owned interval — one /api/agents/statuses request now feeds every
+  // subscribing surface.
+  const statuses = useAgentStatuses();
+  const chatCounts = useMemo(() => computeChatCounts(statuses, loadLastViewed()), [statuses]);
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 

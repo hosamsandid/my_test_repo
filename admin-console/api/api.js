@@ -76,6 +76,7 @@ const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
+const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
@@ -102,21 +103,53 @@ function controlOrAgentPath(...segs) {
   return path.join(AGENTS_DIR, ...segs);
 }
 
+// Per-archive parsed-events cache (#1684). Session-log archives are immutable
+// once rotated, so their parsed rows never change — a file's (size, mtime) is a
+// safe signature. Caching them means GET .../sessions/history re-reads and
+// re-parses only the growing live file on each poll, not the whole archive set,
+// so response time stays flat as rotated history accumulates. Bounded LRU.
+const SESSION_ARCHIVE_CACHE_MAX = 512;
+const _sessionArchiveCache = new Map(); // `path:size:mtimeMs` -> events[]
+
+function _cachedArchiveEvents(fullPath, parse) {
+  let st;
+  try { st = fs.statSync(fullPath); } catch { return null; }
+  const key = `${fullPath}:${st.size}:${st.mtimeMs}`;
+  const hit = _sessionArchiveCache.get(key);
+  if (hit) {
+    // Refresh LRU recency.
+    _sessionArchiveCache.delete(key);
+    _sessionArchiveCache.set(key, hit);
+    return hit;
+  }
+  let raw;
+  try { raw = fs.readFileSync(fullPath, 'utf8'); } catch { return null; }
+  const events = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim()) events.push(parse(line));
+  }
+  if (_sessionArchiveCache.size >= SESSION_ARCHIVE_CACHE_MAX) {
+    const oldest = _sessionArchiveCache.keys().next().value;
+    _sessionArchiveCache.delete(oldest);
+  }
+  _sessionArchiveCache.set(key, events);
+  return events;
+}
+
 // Rotated session-log archives of `roomId` (#673), oldest→newest, parsed to
 // events via `parse`. Archives are immutable and read WHOLESALE, so a finished
 // session's rows survive rotation. The live file is NOT included — callers
 // concatenate it after these. Best-effort: an unreadable archive is skipped.
+// Parsed archives are memoized (see _cachedArchiveEvents) so repeated reads
+// don't re-parse the whole history (#1684).
 function readSessionArchiveEvents(agentId, roomId, parse) {
   const dir = controlOrAgentPath(agentId, 'sessions');
   let names;
   try { names = fs.readdirSync(dir); } catch { return []; }
   const out = [];
   for (const name of orderedArchiveNames(names, roomId)) {
-    let raw;
-    try { raw = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
-    for (const line of raw.split('\n')) {
-      if (line.trim()) out.push(parse(line));
-    }
+    const events = _cachedArchiveEvents(path.join(dir, name), parse);
+    if (events) out.push(...events);
   }
   return out;
 }
@@ -1358,20 +1391,14 @@ app.get('/api/agents', (req, res) => {
 // NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
-app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  // Scope the status set to the agents the caller may see, using the SAME
-  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
-  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
-  // hidden agents and made the badge disagree with the (already-scoped) list.
-  // getScope(req) respects the caller's scope, so a System Admin / env
-  // single-admin (scope `all`) still sees every agent — the filter is additive,
-  // never a hard global cut (open-question 2).
-  const scope = getScope(req);
-  const ids = listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    return cfg && visibleAgent(scope, cfg);
-  });
-
+// Assemble the FULL (unscoped) per-agent status set: list agent dirs, read each
+// config.json exactly once, ask the orchestrator which containers are up, and
+// read status.json / dm-room.json / the session pointer only for an enabled,
+// running agent (a disabled/offline agent needs none of those). Returns
+// `{ cfg, status }` per agent so the caller can apply its own visibility scope
+// against the same config it was built from. Pure shaping lives in
+// buildAgentStatus (agent-statuses.js, #1677).
+async function buildAllAgentStatuses() {
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -1384,24 +1411,65 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     }
   } catch { /* orchestrator unreachable — all agents appear offline */ }
 
-  const statuses = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const displayName = cfg.displayName ?? id;
-    if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
-    if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
-    const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
-    const hasSession = !!(dmRoom?.roomId &&
-      fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
-    return {
-      id,
-      displayName,
-      activityState: status?.state === 'busy' ? 'busy' : 'idle',
-      lastResponseAt: status?.lastResponseAt ?? null,
-      hasSession,
-    };
-  });
+  const entries = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue; // corrupt/unreadable config — excluded, as before
+    const running = runningIds.has(id);
+    let status = null, dmRoom = null, sessionFileExists = false;
+    if (cfg.enabled !== false && running) {
+      status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
+      dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
+      sessionFileExists = !!(dmRoom?.roomId &&
+        fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
+    }
+    entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
+  }
+  return entries;
+}
 
+// Short-TTL single-flight cache over the full status set. Several console
+// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
+// Maintenance Mode); the front end now shares one poll (#1677), but multiple
+// tabs/users and scope-varying callers can still land close together — a ~2s
+// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
+// in-flight promise also dedups concurrent rebuilds.
+let _statusCache = null; // { builtAt, promise }
+const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+
+function agentStatusEntries() {
+  const now = Date.now();
+  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
+    return _statusCache.promise;
+  }
+  const promise = buildAllAgentStatuses().catch(err => {
+    // Don't cache a failed build — let the next request retry.
+    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+    throw err;
+  });
+  _statusCache = { builtAt: now, promise };
+  return promise;
+}
+
+app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2). The scope filter is applied
+  // per-request on top of the shared (cached) build (#1677).
+  const scope = getScope(req);
+  let entries;
+  try {
+    entries = await agentStatusEntries();
+  } catch {
+    return res.status(500).json({ error: 'Failed to read agent statuses' });
+  }
+  const statuses = entries
+    .filter(e => visibleAgent(scope, e.cfg))
+    .map(e => e.status);
   res.json(statuses);
 });
 
@@ -10318,6 +10386,27 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   res.json({ respawned, skipped });
 });
 
+// Pull a human-readable failure reason out of a proxy's error response body and
+// combine it with the HTTP status. Without this a LiteLLM key whose budget is
+// exhausted answers /v1/models with a 400 whose body says exactly why
+// ("Budget has been exceeded! …") — but the probe used to drop the body and
+// surface a bare "HTTP 400", so the operator had no idea it was a spend cap.
+// Shapes handled: LiteLLM/OpenAI `{ error: { message, type, code } }`, a plain
+// `{ error: "msg" }` or `{ message: "msg" }`, and a non-JSON string body.
+function describeProbeFailure(status, body) {
+  let detail = null;
+  if (body && typeof body === 'object') {
+    const e = body.error;
+    if (e && typeof e === 'object' && typeof e.message === 'string') detail = e.message;
+    else if (typeof e === 'string') detail = e;
+    else if (typeof body.message === 'string') detail = body.message;
+  } else if (typeof body === 'string' && body.trim()) {
+    detail = body.trim();
+  }
+  const base = status ? `HTTP ${status}` : 'request failed';
+  return detail ? `${base} — ${detail}` : base;
+}
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always
@@ -10344,7 +10433,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
     ok,
     url,
     status: result.status,
-    error: result.error || (ok ? null : `HTTP ${result.status}`),
+    error: result.error || (ok ? null : describeProbeFailure(result.status, result.body)),
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
@@ -10355,7 +10444,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
-    return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
+    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
   // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
@@ -14397,9 +14486,20 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
-  const { body } = req.body || {};
+  const { body, extraContent } = req.body || {};
   if (typeof body !== 'string' || !body.trim()) {
     return res.status(400).json({ error: 'body (non-empty string) is required' });
+  }
+
+  // Optional structured payload merged onto the outgoing message content. Only
+  // `io.aee.*` keys are copied through (e.g. the quick-reply answer identifier
+  // `io.aee.ask-answer`, #1663) — this endpoint never lets a caller override
+  // msgtype/body/format or set arbitrary Matrix content fields.
+  const content = { msgtype: 'm.text', body };
+  if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
+    for (const [k, v] of Object.entries(extraContent)) {
+      if (k.startsWith('io.aee.')) content[k] = v;
+    }
   }
 
   const txnId = crypto.randomUUID();
@@ -14408,7 +14508,7 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       {
         method: 'PUT',
-        body: { msgtype: 'm.text', body },
+        body: content,
       });
     if (resp.status >= 400) {
       return res.status(resp.status).json(resp.data);

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
   Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat,
@@ -22,9 +22,11 @@ import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
  *
  * Props:
  *   event:           the (possibly pre-merged) event object
- *   dimmed:          true → reduce opacity for cross-panel hover hint
- *   onMouseEnter,
- *   onMouseLeave:    cross-panel hover correlation handlers
+ *
+ * Cross-panel hover dim (#1676) is driven by CSS off the `data-cid` set on the
+ * wrapper in SessionLogPanel, so this component no longer takes a `dimmed`
+ * prop or the hover handlers — which lets it be memoized (a hover on the chat
+ * side never re-renders these rows).
  */
 const TIME_FMT = new Intl.DateTimeFormat(undefined, {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
@@ -74,7 +76,7 @@ function colorForType(type) {
   }
 }
 
-export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseLeave }) {
+function LogEvent({ event }) {
   const [expanded, setExpanded] = useState(false);
   const type = event?.type || 'unknown';
   // A loop iteration reads as a loop, not a generic trigger (#1155 AC7).
@@ -87,15 +89,7 @@ export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseL
   // event. Render ToolBlock and skip the rest of the row scaffolding.
   if (event?.kind === 'tool') {
     return (
-      <div
-        onMouseEnter={onMouseEnter}
-        onMouseLeave={onMouseLeave}
-        style={{
-          opacity: dimmed ? 0.35 : 1,
-          padding: '2px var(--eb-space-3)',
-          transition: 'opacity 0.15s',
-        }}
-      >
+      <div style={{ padding: '2px var(--eb-space-3)' }}>
         <RowMeta ts={event.ts} type="tool_use" />
         <ToolBlock toolUse={event.toolUse} toolResult={event.toolResult} taskSnapshot={event.taskSnapshot} />
       </div>
@@ -104,15 +98,12 @@ export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseL
 
   return (
     <div
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
       onClick={() => hasExpansion(event) && setExpanded(e => !e)}
       style={{
         display: 'flex',
         gap: 8,
         padding: '4px var(--eb-space-3)',
-        opacity: dimmed ? 0.35 : 1,
-        transition: 'opacity 0.15s, background 0.15s',
+        transition: 'background 0.15s',
         cursor: hasExpansion(event) ? 'pointer' : 'default',
         borderRadius: 'var(--eb-radius-sm)',
       }}
@@ -151,6 +142,11 @@ export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseL
     </div>
   );
 }
+
+// Memoized (#1676): a cross-panel hover re-renders SessionLogPanel, but each
+// row's `event` reference is stable (the list is memoized), so React.memo skips
+// the row entirely.
+export default memo(LogEvent);
 
 function RowMeta({ ts, type }) {
   return (

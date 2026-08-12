@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readLastLinesAcross } = require('./tail-read');
 
 // Same shared volume, same directory the poller writes to. Overridable for tests.
 const EVENT_LOG_DIR = process.env.GITHUB_EVENT_LOG_DIR || '/workspace/github-event-log';
@@ -51,6 +52,19 @@ function queryEntries({ since, until, limit } = {}) {
   const sinceMs = since ? Date.parse(since) : NaN;
   const untilMs = until ? Date.parse(until) : NaN;
   try {
+    // Fast path (#1684): no time window → the caller just wants the newest
+    // `cap` entries. The UI usually omits `since`, so parsing every day file is
+    // wasteful — read only the tail of the most recent files instead, bounding
+    // cost by the requested page size rather than total history.
+    if (!Number.isFinite(sinceMs) && !Number.isFinite(untilMs)) {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT;
+      const files = listDayFiles().map(f => path.join(EVENT_LOG_DIR, f));
+      const entries = [];
+      for (const ln of readLastLinesAcross(files, cap)) {
+        try { entries.push(JSON.parse(ln)); } catch { /* skip corrupt line */ }
+      }
+      return filterEntries(entries, { limit });
+    }
     const entries = [];
     for (const f of listDayFiles()) {
       // Cheap prefilter: skip whole files that end before `since`.

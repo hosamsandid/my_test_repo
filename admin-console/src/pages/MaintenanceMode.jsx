@@ -52,10 +52,14 @@ export default function MaintenanceMode() {
   const statuses = useAgentStatuses();
   const activeSessions = countActiveSessions(statuses);
 
+  // The grace countdown only moves while maintenance is active (remainingSec is
+  // 0 otherwise), so only run the 1s clock tick then — no point re-rendering the
+  // whole page every second on an idle maintenance screen (#1680).
   useEffect(() => {
+    if (!data?.active) return undefined;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [data?.active]);
 
   const remainingSec = useMemo(() => {
     if (!data || !data.active || !data.graceEndsAt) return 0;

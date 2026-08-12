@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { deriveGitControls, discardConfirmMessage } from './git-panel-logic';
+import { useSessionsActive } from './SessionsActiveContext';
+import { isAgentRunning } from './sessions-active';
 
 /**
  * Workspace Git panel for an agent (issue #648).
@@ -29,7 +31,12 @@ export default function DiffView({ agentId, active }) {
   const [selectedRepo, setRepo]       = useState(null);   // repoPath
   const [selected, setSelected]       = useState(null);   // { repoPath, path, status }
 
-  const [running, setRunning]         = useState(false);  // agent has a live session (AC7)
+  // Whether the agent has a live session (AC7) — derived from the shared
+  // active-sessions poll (#1678) rather than a panel-local timer, so this panel
+  // no longer runs its own `/sessions/active` interval.
+  const { sessions, refresh: refreshSessions } = useSessionsActive();
+  const running = isAgentRunning(sessions);
+
   const [actionBusy, setActionBusy]   = useState(false);  // a git action is in flight
   const [actionMsg, setActionMsg]     = useState(null);   // { kind: 'success'|'error', text }
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -75,31 +82,12 @@ export default function DiffView({ agentId, active }) {
       });
   }, [agentId]);
 
-  /* Running-state probe (AC7). Reads the same endpoint the session badge uses;
-     polled while the panel is visible so the controls disable within a few
-     seconds of the agent starting a session. The server re-checks at execution
-     time regardless, so this is purely a UX affordance. */
-  const fetchRunning = useCallback(() => {
-    if (!agentId) return;
-    fetch(`/api/agents/${encodeURIComponent(agentId)}/sessions/active`)
-      .then(r => (r.ok ? r.json() : { sessions: [] }))
-      .then(j => setRunning(Array.isArray(j?.sessions) && j.sessions.length > 0))
-      .catch(() => { /* best-effort; leave prior value */ });
-  }, [agentId]);
-
   /* Initial fetch when this view becomes active. */
   useEffect(() => {
     if (!active || !agentId) return;
     if (data || loading) return;
     fetchStatus();
   }, [active, agentId, data, loading, fetchStatus]);
-
-  useEffect(() => {
-    if (!active || !agentId) return undefined;
-    fetchRunning();
-    const t = setInterval(fetchRunning, 5000);
-    return () => clearInterval(t);
-  }, [active, agentId, fetchRunning]);
 
   /* Execute a deterministic git action (switch / update / discard) against the
      selected repo (AC8), then auto-refresh status + running state (AC10). */
@@ -121,10 +109,10 @@ export default function DiffView({ agentId, active }) {
       .finally(() => {
         setActionBusy(false);
         setConfirmDiscard(false);
-        fetchStatus();     // AC10 — refresh status after any successful action
-        fetchRunning();
+        fetchStatus();       // AC10 — refresh status after any successful action
+        refreshSessions();   // pull the running-state from the shared poll now
       });
-  }, [agentId, actionBusy, fetchStatus, fetchRunning]);
+  }, [agentId, actionBusy, fetchStatus, refreshSessions]);
 
   /* Drop the selected diff if it disappears from the file list (e.g. after
      a refresh). */

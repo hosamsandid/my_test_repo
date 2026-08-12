@@ -58,7 +58,7 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'kn
 export default function RightRail({
   agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
-  onResumeSession, sessionSelectRequest = null, collapsed = false,
+  onResumeSession, sessionSelectRequest = null, collapsed = false, onReferenceInChat = null,
 }) {
   // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
   // standalone agent (#963 AC1).
@@ -357,7 +357,7 @@ export default function RightRail({
           />
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} />
+          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
         </div>
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />

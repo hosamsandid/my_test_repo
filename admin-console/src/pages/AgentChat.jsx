@@ -312,6 +312,17 @@ export default function AgentChat() {
     setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
   }, []);
 
+  // "Reference in chat" (#1699): the workspace browser (RightRail) asks to splice
+  // a `@<workspace-relative-path>` token into the composer (ChatPanel). The two are
+  // siblings, so lift the request here and hand it down — the same request-object
+  // (`{ ref, ts }`, `ts` re-fires on repeat clicks) pattern as railTabRequest /
+  // resumeRequest, just flowing the opposite way to `workspaceRefreshKey`.
+  const [composerRefRequest, setComposerRefRequest] = useState(null);
+  const handleReferenceInChat = useCallback((ref) => {
+    if (!ref) return;
+    setComposerRefRequest({ ref, ts: Date.now() });
+  }, []);
+
   // Resuming a finished session (#574) lives in the Sessions tab (RightRail) but
   // must set the room pointer + send the predefined message from ChatPanel — so
   // route it through here, mirroring railTabRequest. `ts` re-fires the effect on
@@ -592,6 +603,7 @@ export default function AgentChat() {
             onOpenKnowledge={handleOpenKnowledge}
             onKnowledgeChanged={handleKnowledgeChanged}
             resumeRequest={resumeRequest}
+            insertRefRequest={composerRefRequest}
           />
         ) : (
           <EmptyState />
@@ -643,6 +655,7 @@ export default function AgentChat() {
             openTabRequest={railTabRequest}
             onResumeSession={handleResumeSession}
             sessionSelectRequest={sessionSelectRequest}
+            onReferenceInChat={handleReferenceInChat}
           />
         </SessionsActiveProvider>
       </div>

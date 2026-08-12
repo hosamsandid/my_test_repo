@@ -10317,6 +10317,27 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   res.json({ respawned, skipped });
 });
 
+// Pull a human-readable failure reason out of a proxy's error response body and
+// combine it with the HTTP status. Without this a LiteLLM key whose budget is
+// exhausted answers /v1/models with a 400 whose body says exactly why
+// ("Budget has been exceeded! …") — but the probe used to drop the body and
+// surface a bare "HTTP 400", so the operator had no idea it was a spend cap.
+// Shapes handled: LiteLLM/OpenAI `{ error: { message, type, code } }`, a plain
+// `{ error: "msg" }` or `{ message: "msg" }`, and a non-JSON string body.
+function describeProbeFailure(status, body) {
+  let detail = null;
+  if (body && typeof body === 'object') {
+    const e = body.error;
+    if (e && typeof e === 'object' && typeof e.message === 'string') detail = e.message;
+    else if (typeof e === 'string') detail = e;
+    else if (typeof body.message === 'string') detail = body.message;
+  } else if (typeof body === 'string' && body.trim()) {
+    detail = body.trim();
+  }
+  const base = status ? `HTTP ${status}` : 'request failed';
+  return detail ? `${base} — ${detail}` : base;
+}
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always
@@ -10343,7 +10364,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
     ok,
     url,
     status: result.status,
-    error: result.error || (ok ? null : `HTTP ${result.status}`),
+    error: result.error || (ok ? null : describeProbeFailure(result.status, result.body)),
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
@@ -10354,7 +10375,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
-    return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
+    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
   // model_info on each entry. Normalize to our { id, displayName, kind?, … }.

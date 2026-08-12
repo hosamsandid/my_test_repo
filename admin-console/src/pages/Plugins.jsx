@@ -5,6 +5,7 @@ import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import { pluginRegistryRow } from './plugin-registry-view.js';
+import { notifyPluginsChanged } from '../components/plugin-nav';
 
 // Plugin registry (#1547) — the operator-facing install surface for the plugin
 // system (docs/plugin-system-concept.md §4.1/§4.3).
@@ -209,6 +210,9 @@ export default function Plugins() {
         );
       }
       await refetch();
+      // The installed set changed — let the sidebar re-discover its plugin nav
+      // entries (it no longer refetches on navigation, #1679).
+      notifyPluginsChanged();
     } catch (err) {
       setActionError(err.message || 'Install failed');
     } finally { setBusy(false); }
@@ -220,6 +224,8 @@ export default function Plugins() {
       await apiCall('DELETE', `/api/plugins/${encodeURIComponent(row.id)}`);
       setRemoving(null);
       await refetch();
+      // The installed set changed — refresh the sidebar plugin nav (#1679).
+      notifyPluginsChanged();
     } catch (err) {
       setActionError(err.message || 'Uninstall failed');
     } finally { setBusy(false); }

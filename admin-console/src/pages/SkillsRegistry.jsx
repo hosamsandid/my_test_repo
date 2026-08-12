@@ -1816,12 +1816,14 @@ export default function SkillsRegistry() {
           the shared <strong>pool</strong> as well as the copies living inside individual <strong>agents</strong>.
         </p>
         <p style={{ margin: 0 }}>
-          Skills live in two tiers (#306): <strong>Global</strong> skills are visible to everyone, while{' '}
-          <strong>Team</strong> skills are seeded only into agents owned by that team. Both can be edited here and are
-          attached to Working Environments by name (an agent resolves a name from its own team's pool first, then global).
-          A team skill can be copied to the global pool with <em>Promote to global</em> or relocated with <em>Move to global</em>.{' '}
-          <strong>Agent</strong> skills are read-only — lift one into a team pool first, then promote that team skill to global; use{' '}
-          <em>Install into agent</em> to push a global skill into a running agent. Click a skill to browse its files.
+          Skills live in two tiers: <strong>Global</strong> skills are available to every team, while{' '}
+          <strong>Team</strong> skills belong to a single team. You put a skill to work by <strong>granting it to a team
+          or an agent</strong> — on the Agents page, in the Team-Setup wizard, or on the Knowledge page. (Working
+          Environments don't carry skills.) When an agent is set up, each granted skill is resolved from its own team's
+          pool first, then from the global pool. A team skill can be copied to the global pool with <em>Promote to global</em>{' '}
+          or relocated with <em>Move to global</em>. <strong>Agent</strong> skills are read-only — lift one into a team
+          pool first, then promote that team skill to global; use <em>Install into agent</em> to push a global skill into
+          a running agent. Click a skill to browse its files.
         </p>
         <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
           <strong>How skills reach an agent.</strong> Three distinct things sit behind the verbs on this page:{' '}

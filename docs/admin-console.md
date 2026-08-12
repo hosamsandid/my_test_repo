@@ -12,7 +12,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Plugin System** | `/plugin-system` | Persistent, self-contained concept/help page — what a plugin is, how it works technically, typical use cases, and how to build one; ungated (any authenticated user); **no sidebar nav entry** — reached via the "Learn about plugins" link on the Plugins page (#1638); direct links and bookmarks still work |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, import, clone, and save as template agents |
-| **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
+| **Working Environments** | `/environments` | Reusable workspace recipes (repos, GitHub token, model provider, MCP servers) |
 | **My Credentials** | `/my-credentials` | Self-service surface (any authenticated human, no `credAdmin` gate) to create/rotate/rename/delete your own **personal** SSH key and GitHub token; private to you (epic #1558) |
 | **SSH Keys** | `/ssh-keys` | Register team/system SSH key pairs for private repository access (personal keys live on My Credentials) |
 | **GitHub Tokens** | `/github-tokens` | Register team/system GitHub PATs for the GitHub event poller and HTTPS repository access (personal tokens live on My Credentials) |

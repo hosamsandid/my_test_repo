@@ -7,7 +7,7 @@ import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText, FileCode,
   Brain, Sparkles, BookOpen, Loader2, X, RefreshCw, AlertCircle, FileWarning,
   Maximize2, Minimize2, Code2, Eye, GitBranch, Upload, GitCompare, Download, Trash2,
-  ImageOff,
+  ImageOff, AtSign,
 } from 'lucide-react';
 import DiffView from './DiffView';
 import { isImageData, imageSrcUrl } from './workspace-image';
@@ -50,8 +50,13 @@ function contextChip(item) {
  *   - agentId  Selected agent. When null, shows a "pick an agent" stub.
  *   - active   Whether this tab is currently visible. Used to skip the
  *              initial fetch while the panel is hidden behind another tab.
+ *   - onReference  (relPath) => void — called by a per-file "Reference in chat"
+ *              button (#1699) to splice a `@<relPath>` token into the composer.
+ *              Only offered for real workspace files, never a `/context` mount
+ *              key (those are not workspace-relative resolvable — the agent
+ *              cannot open them from its cwd). Omitted ⇒ no reference button.
  */
-export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
+export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onReference = null }) {
   // dirCache:  Map<relativePath, { items, loading, error }>  (resolved listings)
   // expanded:  Set<relativePath>   currently open directories (root is "")
   const [dirCache, setDirCache] = useState(() => new Map());
@@ -614,6 +619,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0 }) {
             selectedFilePath={selectedFile?.path || null}
             onUploadToDir={handleUploadToDir}
             onRequestDelete={requestDelete}
+            onReference={onReference}
             dnd={dnd}
             agentId={agentId}
             contextStatus={contextStatus}
@@ -703,7 +709,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, dnd, agentId, contextStatus, chip }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, onReference, dnd, agentId, contextStatus, chip }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -862,6 +868,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           selectedFilePath={selectedFilePath}
           onUploadToDir={onUploadToDir}
           onRequestDelete={onRequestDelete}
+          onReference={onReference}
           dnd={dnd}
           agentId={agentId}
           contextStatus={contextStatus}
@@ -871,7 +878,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, dnd, agentId, contextStatus }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, onReference, dnd, agentId, contextStatus }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -948,6 +955,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
               onRequestDelete={onRequestDelete}
+              onReference={onReference}
               dnd={readOnly ? null : dnd}
               agentId={agentId}
               chip={(item.key && isContextKey(item.key))
@@ -973,6 +981,15 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               a.click();
             } : null}
             onDelete={onRequestDelete && !readOnly ? () => onRequestDelete(childRel, 'file', item.name) : null}
+            // "Reference in chat" (#1699) — files only, and only for real
+            // workspace paths. A `/context` mount key has a leading slash and is
+            // not resolvable by the agent from its cwd, so it never gets the
+            // control (Open Question 2 → hide where not agent-resolvable). This
+            // is independent of the delete gate, so a read-only context file
+            // that hides Delete would still reference — but context keys are the
+            // only read-only source here, so in practice: workspace files show
+            // it, context files don't.
+            onReference={onReference && !isContextKey(childRel) ? () => onReference(childRel) : null}
             relPath={childRel}
             dnd={readOnly ? null : dnd}
           />
@@ -982,7 +999,7 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
   );
 }
 
-function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete, relPath, dnd }) {
+function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, onDownload, onDelete, onReference, relPath, dnd }) {
   const [hovered, setHovered] = useState(false);
   return (
     <div
@@ -1008,7 +1025,7 @@ function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, 
           minWidth: 0,
           textAlign: 'left',
           paddingLeft: 16 + (indent || 0),
-          paddingRight: (onDownload || onDelete) ? 2 : 8,
+          paddingRight: (onReference || onDownload || onDelete) ? 2 : 8,
           paddingTop: 3,
           paddingBottom: 3,
           background: active ? 'var(--eb-accent-muted)' : (hovered ? 'var(--eb-bg-hover)' : 'none'),
@@ -1062,6 +1079,29 @@ function Row({ indent, icon, label, secondary, dim, active, onClick, gitBranch, 
           </span>
         )}
       </button>
+      {onReference && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReference(); }}
+          title="Reference in chat"
+          aria-label={`Reference ${label} in chat`}
+          style={{
+            ...iconBtnStyle,
+            flexShrink: 0,
+            padding: '3px 6px',
+            marginRight: 2,
+            opacity: hovered ? 1 : 0,
+            pointerEvents: hovered ? 'auto' : 'none',
+            color: 'var(--eb-text-muted)',
+            background: hovered ? 'var(--eb-bg-hover)' : 'none',
+            transition: 'opacity 0.1s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-accent-primary)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <AtSign size={11} />
+        </button>
+      )}
       {onDownload && (
         <button
           type="button"

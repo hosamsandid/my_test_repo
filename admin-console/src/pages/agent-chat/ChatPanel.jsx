@@ -93,10 +93,15 @@ const LEARN_PROMPT =
  *        to the Full-Learn prompt (which may have added KB entries), so the
  *        right rail's Knowledge tab refreshes and the user sees the button
  *        feeding the pipeline.
+ * @param {?{ref:string, ts:number}} [insertRefRequest] Cross-panel request to
+ *        splice a `@<ref>` file reference into the composer draft, forwarded
+ *        straight to MessageInput (#1699 — the workspace browser's "Reference in
+ *        chat" button).
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
+  insertRefRequest,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -1533,6 +1538,7 @@ export default function ChatPanel({
         stopBusy={stopping || loopBusy}
         onStartMeeting={transcription ? () => transcription.startSession({ agentId: agent.id, agentName: agent.displayName || agent.id }) : undefined}
         meetingActive={!!transcription?.active}
+        insertRefRequest={insertRefRequest}
       />
 
       {/* Local keyframes for the spinner; scoped to this page render. The

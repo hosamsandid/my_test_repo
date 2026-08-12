@@ -16,6 +16,7 @@ import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
 import { latestLoopProgress } from './loop-run-view.js';
 import LearningBadge from '../../components/LearningBadge';
+import VirtualList from '../../components/VirtualList.jsx';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
@@ -1367,29 +1368,40 @@ export default function ChatPanel({
           </div>
         )}
 
-        {messages.map(msg => {
-          if (msg.type === 'context-reset') {
-            return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          if (msg.type === 'user-stop') {
-            return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          const cid = correlationByEvent.get(msg.event_id) || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          return (
-            <div
-              key={msg.event_id}
-              onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-              onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              style={{
-                opacity: dimmed ? 0.35 : 1,
-                transition: 'opacity 0.15s',
-              }}
-            >
-              <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
-            </div>
-          );
-        })}
+        {/* Virtualized transcript (#1685): only the visible window of bubbles is
+            mounted, so a very long session keeps a bounded DOM. The scroller is
+            the div above; VirtualList reads its geometry via scrollerRef and the
+            auto-scroll / load-older / unread logic keeps owning scroll. */}
+        <VirtualList
+          items={messages}
+          scrollerRef={scrollerRef}
+          keyOf={msg => msg.event_id}
+          estimateHeight={90}
+          overscan={8}
+          gap={12}
+          renderItem={msg => {
+            if (msg.type === 'context-reset') {
+              return <ContextResetSeparator ts={msg.ts} />;
+            }
+            if (msg.type === 'user-stop') {
+              return <UserStopSeparator ts={msg.ts} />;
+            }
+            const cid = correlationByEvent.get(msg.event_id) || null;
+            const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
+            return (
+              <div
+                onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+                onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+                style={{
+                  opacity: dimmed ? 0.35 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
+              </div>
+            );
+          }}
+        />
 
         {(showSendingDots || showThinking) && (
           <Message

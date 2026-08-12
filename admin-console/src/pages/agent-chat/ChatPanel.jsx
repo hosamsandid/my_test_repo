@@ -20,6 +20,7 @@ import {
   buildAnswerContent, indexAskAnswers, questionState,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
+import VirtualList from '../../components/VirtualList.jsx';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
@@ -1028,51 +1029,6 @@ export default function ChatPanel({
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
 
-  // Memoized transcript rows (#1676). Deliberately NOT keyed on
-  // `hoveredCorrelationId`: the cross-panel hover dim is driven by CSS
-  // (`data-cid` + a generated stylesheet), so a hover re-renders only that
-  // stylesheet, never this list. Each row carries a stable `data-cid` and the
-  // hover handlers are captured once here (both `onHoverCorrelation` and the
-  // per-row `cid` are stable), so the expensive Message/Shiki render is
-  // skipped by React.memo on every unrelated hover. Quick-reply state (#1663)
-  // rides along per row: a question is answerable only while it is the newest
-  // message and no answer references it; a disabled composer (offline /
-  // mid-send / maintenance) blocks a click either way.
-  const transcriptRows = useMemo(() => messages.map((msg, i) => {
-    if (msg.type === 'context-reset') {
-      return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
-    }
-    if (msg.type === 'user-stop') {
-      return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
-    }
-    const cid = correlationByEvent.get(msg.event_id) || null;
-    const isQuestion = !!msg[ASK_QUESTION_FIELD];
-    const qState = isQuestion
-      ? questionState({
-          index: i,
-          messageCount: messages.length,
-          answer: askAnswersByQuestion.get(msg.event_id),
-          disabled: disabled || !roomId || sending || maintenance.active,
-        })
-      : null;
-    return (
-      <div
-        key={msg.event_id}
-        data-cid={cid || ''}
-        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-      >
-        <Message
-          message={msg}
-          agentUserId={agent.userId}
-          onRelaunchLoop={handleRelaunchLoop}
-          onAnswerQuestion={handleAnswerQuestion}
-          questionAnswerable={qState?.answerable}
-          questionAnswer={qState}
-        />
-      </div>
-    );
-  }), [messages, correlationByEvent, agent.userId, handleRelaunchLoop, onHoverCorrelation, askAnswersByQuestion, handleAnswerQuestion, disabled, roomId, sending, maintenance.active]);
   // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
   // only needs to kick a session off for this agent and know whether one is
   // already running (to disable the entry point + quick dictation).
@@ -1460,7 +1416,57 @@ export default function ChatPanel({
           </div>
         )}
 
-        {transcriptRows}
+        {/* Virtualized transcript (#1685): only the visible window of bubbles is
+            mounted, so a very long session keeps a bounded DOM. The scroller is
+            the div above; VirtualList reads its geometry via scrollerRef and the
+            auto-scroll / load-older / unread logic keeps owning scroll. Each row
+            carries a stable data-cid for the CSS-driven cross-panel hover dim
+            (#1676) and rides the quick-reply question state (#1663). */}
+        <VirtualList
+          items={messages}
+          scrollerRef={scrollerRef}
+          keyOf={msg => msg.event_id}
+          estimateHeight={90}
+          overscan={8}
+          gap={12}
+          renderItem={(msg, i) => {
+            if (msg.type === 'context-reset') {
+              return <ContextResetSeparator ts={msg.ts} />;
+            }
+            if (msg.type === 'user-stop') {
+              return <UserStopSeparator ts={msg.ts} />;
+            }
+            const cid = correlationByEvent.get(msg.event_id) || null;
+            // Quick-reply state (#1663): a question is answerable only while it
+            // is the newest message and no answer references it; a disabled
+            // composer (offline / mid-send / maintenance) blocks a click either way.
+            const isQuestion = !!msg[ASK_QUESTION_FIELD];
+            const qState = isQuestion
+              ? questionState({
+                  index: i,
+                  messageCount: messages.length,
+                  answer: askAnswersByQuestion.get(msg.event_id),
+                  disabled: disabled || !roomId || sending || maintenance.active,
+                })
+              : null;
+            return (
+              <div
+                data-cid={cid || ''}
+                onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+                onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+              >
+                <Message
+                  message={msg}
+                  agentUserId={agent.userId}
+                  onRelaunchLoop={handleRelaunchLoop}
+                  onAnswerQuestion={handleAnswerQuestion}
+                  questionAnswerable={qState?.answerable}
+                  questionAnswer={qState}
+                />
+              </div>
+            );
+          }}
+        />
 
         {(showSendingDots || showThinking) && (
           <Message

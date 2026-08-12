@@ -5,6 +5,7 @@ import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 import { mergeThinkingTokens } from './system-event.js';
+import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
 
 /**
@@ -229,6 +230,31 @@ export default function SessionLogPanel({
   );
   const renderable = annotated.rows;
 
+  // Memoized log rows (#1676). Like the chat transcript, the cross-panel hover
+  // dim is CSS-driven off `data-cid`, so this list is deliberately NOT keyed on
+  // `hoveredCorrelationId` — a hover updates only the generated stylesheet and
+  // the memoized LogEvent rows never re-render.
+  const logRows = useMemo(() => renderable.map((ev, i) => {
+    const cid = ev.correlationId || null;
+    // In single-session (scoped) mode every row is the same session, so
+    // the per-correlation colour adds no information — drop the border.
+    const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
+    return (
+      <div
+        key={ev._key ?? i}
+        data-cid={cid || ''}
+        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+        style={{
+          borderLeft: `2px solid ${accentColor}`,
+          marginLeft: 'var(--eb-space-1)',
+        }}
+      >
+        <LogEvent event={ev} />
+      </div>
+    );
+  }), [renderable, scopeCids, onHoverCorrelation]);
+
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
     let usd = 0, tokIn = 0, tokOut = 0;
@@ -427,6 +453,7 @@ export default function SessionLogPanel({
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        data-hover-scope="log"
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -472,29 +499,7 @@ export default function SessionLogPanel({
           </div>
         )}
 
-        {renderable.map((ev, i) => {
-          const cid = ev.correlationId || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          // In single-session (scoped) mode every row is the same session, so
-          // the per-correlation colour adds no information — drop the border.
-          const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
-          return (
-            <div
-              key={ev._key ?? i}
-              style={{
-                borderLeft: `2px solid ${accentColor}`,
-                marginLeft: 'var(--eb-space-1)',
-              }}
-            >
-              <LogEvent
-                event={ev}
-                dimmed={dimmed}
-                onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-                onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              />
-            </div>
-          );
-        })}
+        {logRows}
       </div>
 
       {todoVisible && (
@@ -508,6 +513,8 @@ export default function SessionLogPanel({
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        ${hoverBaseCss('log')}
+        ${hoverDimCss('log', hoveredCorrelationId)}
       `}</style>
     </div>
   );

@@ -15,9 +15,11 @@ const { test, expect } = require('@playwright/test');
 // The env admin is a System Admin, so adminOnly entries are visible too.
 const NAV_PAGES = [
   { label: 'Agent Chat',           breadcrumb: 'Agent Chat' },
-  { label: 'Single Agent',         breadcrumb: 'Single Agent' },
-  // Renamed in the "Agent Team vs human Team" disambiguation (f8937277).
-  { label: 'Agent Team Wizard',    breadcrumb: 'Agent Team Wizard' },
+  // The unified "Create" launcher (#1665) — the persistent "+ Create" control
+  // above the nav, replacing the former separate Single Agent + Agent Team
+  // Wizard sidebar entries (AC8/AC10). Those pages stay reachable via /quickstart
+  // and /team-setup deep links and as launcher targets.
+  { label: 'Create',               breadcrumb: 'Create' },
   { label: 'Agents',               breadcrumb: 'Agents' },
   { label: 'Flows',                breadcrumb: 'Flows' },
   { label: 'Knowledge',            breadcrumb: 'Knowledge' },

@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
+  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -114,8 +114,10 @@ const NAV_TOP = [
 
 const NAV_GROUPS = [
   { key: 'agent-setup', section: 'Agent Setup', items: [
-    { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
-    { path: '/team-setup',   label: 'Agent Team Wizard',   Icon: Users2, subtitle: 'Build a squad of agents' },
+    // The former separate Single Agent + Agent Team Wizard creation entries were
+    // removed here (#1665, AC8/AC10): the persistent "+ Create" control above the
+    // nav is now the single front door. Those pages stay reachable as launcher
+    // targets and via their existing deep links (/quickstart, /team-setup).
     { path: '/agents',       label: 'Agents',              Icon: Layers },
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
@@ -162,6 +164,7 @@ const PLUGINS_GROUP_KEY = 'plugins';
 const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 const BREADCRUMBS = {
+  '/create':       'Create',
   '/quickstart':   'Single Agent',
   '/team-setup':   'Agent Team Wizard',
   '/agents':       'Agents',
@@ -501,6 +504,46 @@ export default function Shell({ children }) {
             <ChevronRight size={16} />
           </button>
         )}
+
+        {/* Persistent "+ Create" control (#1665, AC2 / D4). Always present on
+            every page; navigates to the same launcher as the /create route.
+            Open to every authenticated user, matching the creation pages'
+            visibility (they are ungated). Icon-only in rail mode. */}
+        <div style={{
+          padding: collapsed
+            ? 'var(--eb-space-2) var(--eb-space-2) 0'
+            : 'var(--eb-space-2) var(--eb-space-3) 0',
+          flexShrink: 0,
+        }}>
+          <button
+            type="button"
+            onClick={() => navigate('/create')}
+            title={collapsed ? 'Create' : undefined}
+            aria-label="Create"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 'var(--eb-space-2)',
+              width: '100%',
+              padding: collapsed ? 'var(--eb-space-2) 0' : 'var(--eb-space-2) var(--eb-space-3)',
+              background: 'var(--eb-accent-primary)',
+              color: 'var(--eb-text-inverted)',
+              border: 'none',
+              borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-md)',
+              fontWeight: 'var(--eb-font-semibold)',
+              fontFamily: 'inherit',
+              cursor: 'pointer',
+              transition: 'opacity var(--eb-transition-fast)',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.opacity = '0.9'; }}
+            onMouseLeave={e => { e.currentTarget.style.opacity = '1'; }}
+          >
+            <Plus size={18} style={{ flexShrink: 0 }} />
+            {!collapsed && <span>Create</span>}
+          </button>
+        </div>
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>

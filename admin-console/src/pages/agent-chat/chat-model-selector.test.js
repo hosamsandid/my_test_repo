@@ -9,6 +9,7 @@ import {
   chatSelectable,
   chatTrigger,
   chatNotice,
+  effectiveModelLabel,
   resolveChatSelectAction,
   chatResetAction,
 } from './chat-model-selector.js';
@@ -80,6 +81,37 @@ test('chatTrigger reflects override state', () => {
   assert.equal(ov.showOverrideDot, true);
   const noEp = chatTrigger({ ...OPTIONS, endpointId: null });
   assert.equal(noEp.label, 'Default (.env)');
+});
+
+test('effectiveModelLabel resolves override-then-default against the catalogue (#1704)', () => {
+  // Default in effect → the env default model's display name.
+  assert.equal(effectiveModelLabel(OPTIONS), 'Opus 4.8');
+  // Per-agent override wins over the default.
+  assert.equal(effectiveModelLabel({ ...OPTIONS, override: 'm2' }), 'Haiku');
+  // No catalogue → no model segment (never a dangling "· ").
+  assert.equal(effectiveModelLabel({ ...OPTIONS, models: [] }), null);
+  // No effective model id → null.
+  assert.equal(effectiveModelLabel({ ...OPTIONS, defaultModelId: null }), null);
+  // Effective id not present in the catalogue → fall back to the raw id.
+  assert.equal(effectiveModelLabel({ ...OPTIONS, override: 'gone' }), 'gone');
+  assert.equal(effectiveModelLabel(null), null);
+});
+
+test('chatTrigger shows "<Provider> · <model>" on the closed button (#1704)', () => {
+  // Default selection: provider + effective (default) model.
+  assert.equal(chatTrigger(OPTIONS).label, 'Acme · Opus 4.8');
+  assert.match(chatTrigger(OPTIONS).title, /Acme · Opus 4\.8/);
+  // Override changes the model shown immediately (AC2), dot still set (AC3).
+  const ov = chatTrigger({ ...OPTIONS, override: 'm2' });
+  assert.equal(ov.label, 'Acme · Haiku');
+  assert.equal(ov.showOverrideDot, true);
+  // Degraded — no provider bound: provider label only, no model segment (AC4).
+  assert.equal(chatTrigger({ ...OPTIONS, endpointId: null }).label, 'Default (.env)');
+  // Degraded — provider bound, empty catalogue: provider only, no "· " (AC4).
+  const empty = chatTrigger({ ...OPTIONS, models: [] });
+  assert.equal(empty.label, 'Acme');
+  assert.ok(!empty.label.includes('·'));
+  assert.equal(empty.title, 'Model provider: Acme');
 });
 
 test('chatNotice explains the read-only / disabled reasons', () => {

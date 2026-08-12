@@ -108,7 +108,7 @@ const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
-const { resolveScopeGithubCredentials } = require("./plugin-github-creds");
+const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -2043,14 +2043,49 @@ async function pushGithubIssueScopeCredentials() {
     readToken,
     parseRepoFullName: (url) => ghParseRepoFullName(url, { allowNonGithubHost }),
   });
-  // Enrich each entry with the team's display name (for the UI's team selector);
-  // flow-label suggestions are left to the broker's repo-label fetch for the MVP.
+  // Enrich each entry with the team's display name (for the UI's team selector)
+  // and its FLOW labels + per-repo label→agent trigger preview (#1642, Item 2):
+  // the gate/outcome labels the team's flow uses, suggested ahead of the repo's
+  // raw label list, each previewing which agent(s) it wakes. Derived here (I/O)
+  // and folded by the pure `buildTeamFlowLabels`.
   for (const sid of Object.keys(scopes)) {
     const teamCfg = loadAgentConfig(sid);
     scopes[sid].teamName = (teamCfg && (teamCfg.displayName || teamCfg.name)) || sid;
-    scopes[sid].flowLabels = [];
+    const { flowLabels, labelAgents } = buildTeamFlowLabels({
+      teamLabels: teamCfg && Array.isArray(teamCfg.labels) ? teamCfg.labels : [],
+      members: teamFlowMembers(sid),
+    });
+    scopes[sid].flowLabels = flowLabels;
+    scopes[sid].labelAgents = labelAgents;
   }
   await pluginRuntime.pushScopeCredentials(entry.manifest, scopes);
+}
+
+// The enabled members of a team, each shaped `{ displayName, enabled, triggers,
+// emits }` for `buildTeamFlowLabels`. Mirrors the member+triggers.json read the
+// flow-anomaly sweep does; a team with no members yields []. Best-effort per id.
+function teamFlowMembers(teamId) {
+  const out = [];
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { continue; }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch { /* no triggers yet */ }
+    out.push({
+      displayName: cfg.displayName || id,
+      enabled: cfg.enabled !== false,
+      triggers,
+      emits: _flowLiftEmits(cfg.emits, triggers),
+    });
+  }
+  return out;
 }
 
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the

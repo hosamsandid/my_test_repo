@@ -131,6 +131,28 @@ test('last-used team+repo is persisted per user for pre-selection', () => {
   assert.equal(prefs.some((f) => f.startsWith('team-a__alice')), true);
 });
 
+test('GET /ui/api/labels returns the team flow labels + per-repo trigger preview (#1642)', async () => {
+  // Re-push a full scope map that also carries flowLabels + labelAgents (setCredentials
+  // replaces the whole map, so it must still include the token + repo).
+  const tok = mint('github-issues', '_internal', SECRET);
+  await fetch(`${base}/internal/scope-credentials`, {
+    method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scopes: { 'team-a': {
+      token: 'GH', repos: [{ fullName: 'acme/widgets', defaultBranch: 'main' }], teamName: 'Team A',
+      flowLabels: ['ready', 'ready-for-review'],
+      labelAgents: { 'acme/widgets': { 'ready-for-review': ['Code Reviewer', 'Security Reviewer'] } },
+    } } }),
+  });
+  const r = await fetch(`${base}/ui/api/labels?team=team-a&repo=acme/widgets`, { headers: viewer(['team-a']) });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  // flow labels come through, ahead of the fetched repo labels
+  assert.deepEqual(body.flowLabels, ['ready', 'ready-for-review']);
+  assert.equal(body.repoLabels.some((l) => l.name === 'ready'), true);
+  // the per-repo trigger preview names both waking agents (AC6–8)
+  assert.deepEqual(body.labelAgents['ready-for-review'], ['Code Reviewer', 'Security Reviewer']);
+});
+
 test('the agent CLI path (scope-token authed) returns the scope\'s repositories', async () => {
   const tok = mint('github-issues', 'team-a', SECRET);
   const r = await fetch(`${base}/cli/repos`, { headers: { Authorization: `Bearer ${tok}` } });

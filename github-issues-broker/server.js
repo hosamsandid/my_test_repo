@@ -112,7 +112,17 @@ function teamContext(scopeId) {
     hasToken,
     known,
     flowLabels: (creds && Array.isArray(creds.flowLabels)) ? creds.flowLabels : [],
+    labelAgents: (creds && creds.labelAgents && typeof creds.labelAgents === 'object') ? creds.labelAgents : {},
   };
+}
+
+// The per-repo label→agent trigger preview (#1642, AC6–8): `{ [label]: [name] }`
+// for the selected repo, plus the any-label listeners under '' so the UI can
+// fold them into every label. Repo-scoped because a trigger is repo-specific.
+function labelAgentsForRepo(scopeId, repo) {
+  const all = teamContext(scopeId).labelAgents;
+  const forRepo = (all && all[repo]) || {};
+  return (forRepo && typeof forRepo === 'object') ? forRepo : {};
 }
 
 async function handleUiApi(req, res, apiPath, viewer) {
@@ -188,12 +198,13 @@ async function handleUiApi(req, res, apiPath, viewer) {
     const token = store.tokenForRepo(team, repo);
     if (!token) return void tokenErr(res, team, repo);
     const flowLabels = teamContext(team).flowLabels;
+    const labelAgents = labelAgentsForRepo(team, repo);
     let repoLabels = [];
     try {
       const { data } = await gh.call('list_labels', { repo }, { token });
       repoLabels = Array.isArray(data) ? data.map(gh.shapeLabel) : [];
     } catch { /* suggestions are best-effort; free-text still works */ }
-    return sendJson(res, 200, { flowLabels, repoLabels });
+    return sendJson(res, 200, { flowLabels, repoLabels, labelAgents });
   }
 
   if (apiPath === '/label' && req.method === 'POST') {

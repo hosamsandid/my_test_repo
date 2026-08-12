@@ -47,6 +47,12 @@ import { removeSession } from './sessions-active';
  * nothing is being viewed.
  */
 
+// Coarse cadence for the elapsed-time re-render tick (#1680). "started 5m ago"
+// doesn't need 1s granularity, and a 1s tick re-rendered this panel every
+// second whenever it was open; 30s keeps the label fresh without the churn.
+// (The active-sessions list itself is polled once for all consumers by
+// SessionsActiveContext, #1678 — this panel no longer polls it locally.)
+const ELAPSED_TICK_MS = 30_000;
 const HISTORY_LIMIT = 100;
 
 function formatElapsed(startedAtIso) {
@@ -132,7 +138,8 @@ export default function SessionsPanel({
   const error = actionError || pollError;
   const [selectedId, setSelectedId] = useState(null);
   const [stoppingId, setStoppingId] = useState(null);
-  // Force a re-render every second so elapsed-time labels tick between polls.
+  // Force a re-render on a coarse cadence so elapsed-time labels stay fresh
+  // between polls (see ELAPSED_TICK_MS — #1680).
   const [, setTick] = useState(0);
 
   // Historical sessions (#544). The dropdown is collapsed by default; the list
@@ -163,7 +170,7 @@ export default function SessionsPanel({
   // the elapsed-time labels advance between polls while the tab is visible.
   useEffect(() => {
     if (!active || !agentId) return undefined;
-    const tickTimer = setInterval(() => setTick(t => t + 1), 1000);
+    const tickTimer = setInterval(() => setTick(t => t + 1), ELAPSED_TICK_MS);
     return () => clearInterval(tickTimer);
   }, [active, agentId]);
 

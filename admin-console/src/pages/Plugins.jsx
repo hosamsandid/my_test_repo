@@ -6,6 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import PluginTeamAssign from '../components/PluginTeamAssign';
 import { pluginRegistryRow } from './plugin-registry-view.js';
+import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
 
 // Plugin registry (#1547) — the operator-facing install surface for the plugin
@@ -227,6 +228,9 @@ export default function Plugins() {
         );
       }
       await refetch();
+      // The installed set changed — let the sidebar re-discover its plugin nav
+      // entries (it no longer refetches on navigation, #1679).
+      notifyPluginsChanged();
     } catch (err) {
       setActionError(err.message || 'Install failed');
     } finally { setBusy(false); }
@@ -238,6 +242,8 @@ export default function Plugins() {
       await apiCall('DELETE', `/api/plugins/${encodeURIComponent(row.id)}`);
       setRemoving(null);
       await refetch();
+      // The installed set changed — refresh the sidebar plugin nav (#1679).
+      notifyPluginsChanged();
     } catch (err) {
       setActionError(err.message || 'Uninstall failed');
     } finally { setBusy(false); }

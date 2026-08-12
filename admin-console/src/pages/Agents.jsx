@@ -17,6 +17,7 @@ import {
 } from './prompt-mode-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { notifyPluginsChanged } from '../components/plugin-nav';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
@@ -1420,6 +1421,9 @@ function PluginGrantSection({ agent, parentTeam }) {
         ? `${pluginId} activated — its CLI is available to the agent now, no restart needed.`
         : `${pluginId} deactivated.`);
       await refetch();
+      // A grant change can add/remove a scope the caller can see — refresh the
+      // sidebar's plugin nav, which no longer refetches on navigation (#1679).
+      notifyPluginsChanged();
     } catch (e) {
       setErr(e.message || `Could not ${verb} ${pluginId}`);
       setGrant(serverGrant); // roll the optimistic toggle back

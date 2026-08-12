@@ -62,6 +62,17 @@ class ScopeStore {
       next.set(String(scopeId), {
         token: typeof entry.token === 'string' ? entry.token : '',
         repos,
+        // Flow labels (#1642): the gate/outcome labels the team's flow uses,
+        // suggested ahead of the repo's raw label list. `labelAgents` is the
+        // per-repo label→agent trigger preview (`{ [repo]: { [label]: [name] } }`,
+        // '' = an any-label listener). Both are pushed by the orchestrator; kept
+        // as plain data (never a token) and served on the /labels response.
+        flowLabels: Array.isArray(entry.flowLabels)
+          ? entry.flowLabels.filter((l) => typeof l === 'string' && l)
+          : [],
+        labelAgents: (entry.labelAgents && typeof entry.labelAgents === 'object' && !Array.isArray(entry.labelAgents))
+          ? entry.labelAgents
+          : {},
         updatedAt: entry.updatedAt || null,
       });
     }

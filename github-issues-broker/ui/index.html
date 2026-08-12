@@ -4,6 +4,25 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GitHub Issues</title>
+  <script>
+    // Follow the console's theme before first paint (avoid a flash). This iframe
+    // is proxied on the console's own origin, so it shares localStorage: the
+    // console writes the active theme to `eb-theme` (see admin-console useTheme).
+    // app.js keeps it in sync on live toggles via the `storage` event.
+    (function () {
+      try {
+        var valid = ['admin-dark', 'admin-light', 'high-contrast'];
+        var stored = localStorage.getItem('eb-theme');
+        if (stored && valid.indexOf(stored) >= 0) {
+          document.documentElement.dataset.theme = stored;
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          document.documentElement.dataset.theme = 'admin-light';
+        } else {
+          document.documentElement.dataset.theme = 'admin-dark';
+        }
+      } catch (e) { document.documentElement.dataset.theme = 'admin-dark'; }
+    })();
+  </script>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -52,6 +71,7 @@
 
   <div class="err hidden" id="err"></div>
 
+  <script src="markdown.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

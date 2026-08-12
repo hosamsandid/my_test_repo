@@ -81,6 +81,89 @@ function resolveScopeGithubCredentials(scopeIds, { envForScope, readToken, parse
   return out;
 }
 
+// ─── flow labels + label→agent trigger preview (issue #1642, Item 2) ─────────
+//
+// The plugin's "Add a label" suggestions should surface the labels the team's
+// FLOW actually uses (gate/outcome labels), not the raw GitHub repo label list,
+// and each suggested label should preview WHICH agent(s) it wakes. Both are
+// derivable server-side from the team's flow definition; this pure core does the
+// derivation and the orchestrator pushes the result alongside the credentials.
+//
+// A label counts as a flow label when it appears as:
+//   • a gate/brake entry in the team's label registry (`labels[].name`), or
+//   • a `labelFilter` on a member's `*.labeled` github-event trigger (a wake
+//     label — the label that hands work to that agent), or
+//   • an `emits` token the flow's work sets (an outcome label).
+// The union is order-stable (registry → wake → emits) and repo-independent
+// (union across the team's flows), matching the resolved decision for AC1–3.
+//
+// The trigger preview (AC6–8) is per repository, because a trigger is repo-
+// specific: `labelAgents[repo][label] = [agentDisplayName, ...]` for the enabled
+// agents a label wakes there. A trigger with no/blank `labelFilter` wakes on ANY
+// label, so its agent is recorded under the empty-string key `''` (never a valid
+// label name) for the UI to fold into every label's preview.
+
+const LABELED_EVENTS = ['issues.labeled', 'pull_request.labeled'];
+
+function pushUnique(list, seen, value) {
+  if (typeof value !== 'string') return;
+  const v = value.trim();
+  if (!v || seen.has(v)) return;
+  seen.add(v);
+  list.push(v);
+}
+
+// Add an agent display name to labelAgents[repo][labelKey], creating containers
+// as needed and de-duplicating (an agent listening for the same label on both
+// issues and PRs is still one entry).
+function addLabelAgent(labelAgents, repo, labelKey, name) {
+  if (!repo || typeof name !== 'string' || !name) return;
+  const byRepo = labelAgents[repo] || (labelAgents[repo] = {});
+  const arr = byRepo[labelKey] || (byRepo[labelKey] = []);
+  if (!arr.includes(name)) arr.push(name);
+}
+
+// Build `{ flowLabels, labelAgents }` for one team from its label registry and
+// its members (each `{ displayName, enabled, triggers, emits }`). Pure.
+function buildTeamFlowLabels({ teamLabels, members } = {}) {
+  const flowLabels = [];
+  const seen = new Set();
+  const labelAgents = {};
+
+  // 1) registry gate/brake/outcome labels first
+  for (const l of Array.isArray(teamLabels) ? teamLabels : []) {
+    if (l && typeof l === 'object') pushUnique(flowLabels, seen, l.name);
+    else if (typeof l === 'string') pushUnique(flowLabels, seen, l);
+  }
+
+  // 2) wake labels (labelFilter on *.labeled triggers) + the per-repo preview
+  for (const m of Array.isArray(members) ? members : []) {
+    if (!m || m.enabled === false) continue;
+    const name = (typeof m.displayName === 'string' && m.displayName.trim()) || '';
+    for (const t of Array.isArray(m.triggers) ? m.triggers : []) {
+      if (!t || t.type !== 'github-event' || t.enabled === false) continue;
+      if (!Array.isArray(t.events) || !t.events.some((e) => LABELED_EVENTS.includes(e))) continue;
+      const repo = typeof t.repo === 'string' ? t.repo.trim() : '';
+      const filter = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
+      if (filter) {
+        pushUnique(flowLabels, seen, filter);
+        addLabelAgent(labelAgents, repo, filter, name);
+      } else {
+        // no labelFilter → wakes on ANY label in this repo
+        addLabelAgent(labelAgents, repo, '', name);
+      }
+    }
+  }
+
+  // 3) outcome labels the work sets (emits)
+  for (const m of Array.isArray(members) ? members : []) {
+    if (!m || m.enabled === false) continue;
+    for (const e of Array.isArray(m.emits) ? m.emits : []) pushUnique(flowLabels, seen, e);
+  }
+
+  return { flowLabels, labelAgents };
+}
+
 // The unique team scope ids from a granted-agents enumeration (the shape of
 // GET /internal/plugins/:id/granted-agents). Only team-granularity grants carry
 // a team scope; github-issues declares scopes:["team"] so every grant is a team
@@ -100,4 +183,5 @@ module.exports = {
   unique,
   resolveScopeGithubCredentials,
   teamScopeIdsFromGrants,
+  buildTeamFlowLabels,
 };

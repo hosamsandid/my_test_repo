@@ -31,6 +31,12 @@
     });
     return e;
   }
+  // Defensive fallback only (markdown.js loads before app.js): HTML-escape so a
+  // failed script load still shows the body as safe text, never raw markup.
+  function escapeText(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
   var errTimer = null;
   function setErr(msg) {
     var e = $('err');
@@ -145,8 +151,24 @@
     return (labels || []).map(function (l) {
       var kids = [el('span', { class: 'label-dot', style: l.color ? 'background:#' + l.color : '' }), l.name];
       if (onRemove) kids.push(el('button', { title: 'Remove label', onclick: function (ev) { ev.stopPropagation(); onRemove(l.name); } }, ['×']));
-      return el('span', { class: 'label-chip' }, kids);
+      var agents = onRemove ? agentsForLabel(l.name) : [];
+      var attrs = { class: 'label-chip' };
+      if (agents.length) attrs.title = 'Wakes: ' + agents.join(', ');
+      return el('span', attrs, kids);
     });
+  }
+
+  // Which agent(s) a label wakes for the selected team + repo (#1642, AC6–8),
+  // from the broker's per-repo preview. A label listener with no labelFilter
+  // wakes on ANY label — carried under the '' key — so fold those in too.
+  function agentsForLabel(name) {
+    var map = suggestions.labelAgents || {};
+    var out = [];
+    var seen = {};
+    (map[name] || []).concat(map[''] || []).forEach(function (a) {
+      if (a && !seen[a]) { seen[a] = 1; out.push(a); }
+    });
+    return out;
   }
 
   function renderIssueList() {
@@ -184,7 +206,7 @@
   }
 
   var currentIssue = null;
-  var suggestions = { flowLabels: [], repoLabels: [] };
+  var suggestions = { flowLabels: [], repoLabels: [], labelAgents: {} };
 
   function renderDetail(issue) {
     currentIssue = issue;
@@ -200,7 +222,16 @@
       issue.user ? el('span', {}, ['opened by ' + issue.user]) : null,
       issue.htmlUrl ? el('a', { href: issue.htmlUrl, target: '_blank', rel: 'noopener' }, ['view on GitHub ↗']) : null,
     ]));
-    d.appendChild(el('div', { class: 'body' + (issue.body ? '' : ' empty-body') }, [issue.body || 'No description provided.']));
+    // Render the Markdown body safely (#1642, Item 3). markdown.js escapes all
+    // untrusted text and emits only a whitelisted element set, so its output is
+    // safe to assign via innerHTML; an empty body keeps the placeholder (AC4).
+    if (issue.body) {
+      var body = el('div', { class: 'body md' });
+      body.innerHTML = (window.AEEMarkdown ? window.AEEMarkdown.render(issue.body) : escapeText(issue.body));
+      d.appendChild(body);
+    } else {
+      d.appendChild(el('div', { class: 'body empty-body' }, ['No description provided.']));
+    }
 
     d.appendChild(el('div', { class: 'section-title' }, ['Labels']));
     d.appendChild(el('div', { class: 'labels' }, issue.labels && issue.labels.length ? labelChips(issue.labels, removeLabel) : [el('span', { class: 'hint' }, ['No labels yet.'])]));
@@ -210,8 +241,18 @@
     d.appendChild(el('div', { class: 'add-label' }, [input, el('button', { class: 'btn', onclick: addFromInput }, ['Add'])]));
     var sug = el('div', { class: 'suggest', id: 'suggest' });
     d.appendChild(sug);
-    d.appendChild(el('div', { class: 'hint' }, ['Flow gate labels are suggested first; you can type any label.']));
+    d.appendChild(el('div', { class: 'hint', id: 'suggestHint' }, [suggestHintText()]));
     renderSuggestions();
+  }
+
+  // AC5: the hint must reflect what is actually shown. With flow labels, they're
+  // suggested first; with none, it's the repository's own labels — either way
+  // free-text still works.
+  function suggestHintText() {
+    var hasFlow = (suggestions.flowLabels || []).length > 0;
+    return hasFlow
+      ? 'Your flow\'s gate & outcome labels are suggested first; you can type any label.'
+      : 'This team\'s flow defines no labels yet — showing this repository\'s labels. You can type any label.';
   }
 
   function loadSuggestions() {
@@ -231,9 +272,20 @@
     (suggestions.flowLabels || []).forEach(function (n) { var name = typeof n === 'string' ? n : n.name; if (name && !names[name]) { names[name] = 1; ordered.push({ name: name, color: null }); } });
     (suggestions.repoLabels || []).forEach(function (l) { if (l.name && !names[l.name]) { names[l.name] = 1; ordered.push(l); } });
     ordered.filter(function (l) { return !applied[l.name]; }).slice(0, 24).forEach(function (l) {
-      sug.appendChild(el('span', { class: 'label-chip', title: 'Add this label', onclick: function () { addLabel(l.name); } },
-        [el('span', { class: 'label-dot', style: l.color ? 'background:#' + l.color : '' }), l.name]));
+      var agents = agentsForLabel(l.name);
+      var chip = el('span', {
+        class: 'label-chip', title: agents.length ? ('Add this label — wakes ' + agents.join(', ')) : 'Add this label',
+        onclick: function () { addLabel(l.name); },
+      }, [el('span', { class: 'label-dot', style: l.color ? 'background:#' + l.color : '' }), l.name]);
+      // Inline caption previewing which agent(s) the label triggers (AC6–8);
+      // a label that wakes no agent shows nothing rather than a wrong name.
+      var caption = agents.length
+        ? el('span', { class: 'trigger-hint', title: 'Wakes: ' + agents.join(', ') }, ['wakes ' + agents.join(', ')])
+        : null;
+      sug.appendChild(el('span', { class: 'suggest-item' }, [chip, caption]));
     });
+    var hintEl = $('suggestHint');
+    if (hintEl) hintEl.textContent = suggestHintText();
   }
 
   function addFromInput() {
@@ -285,6 +337,17 @@
   $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); loadIssues(true); });
   $('refreshBtn').addEventListener('click', function () { loadIssues(true); });
   $('moreBtn').addEventListener('click', function () { page += 1; loadIssues(false); });
+
+  // Follow the console's light/dark toggle live: the console (same origin as this
+  // proxied iframe) writes the active theme to localStorage['eb-theme'], which
+  // fires a `storage` event in this document. The pre-paint script in index.html
+  // handles the initial value.
+  window.addEventListener('storage', function (e) {
+    if (e.key !== 'eb-theme' || !e.newValue) return;
+    if (['admin-dark', 'admin-light', 'high-contrast'].indexOf(e.newValue) >= 0) {
+      document.documentElement.dataset.theme = e.newValue;
+    }
+  });
 
   function persistPref() {
     if (!team) return;

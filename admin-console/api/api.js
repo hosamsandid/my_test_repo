@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
 const matrix = require('./matrix');
 const auth = require('./auth');
@@ -23,6 +23,7 @@ const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
 const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
+const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
@@ -75,6 +76,7 @@ const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
+const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
@@ -1357,20 +1359,14 @@ app.get('/api/agents', (req, res) => {
 // NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
-app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  // Scope the status set to the agents the caller may see, using the SAME
-  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
-  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
-  // hidden agents and made the badge disagree with the (already-scoped) list.
-  // getScope(req) respects the caller's scope, so a System Admin / env
-  // single-admin (scope `all`) still sees every agent — the filter is additive,
-  // never a hard global cut (open-question 2).
-  const scope = getScope(req);
-  const ids = listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    return cfg && visibleAgent(scope, cfg);
-  });
-
+// Assemble the FULL (unscoped) per-agent status set: list agent dirs, read each
+// config.json exactly once, ask the orchestrator which containers are up, and
+// read status.json / dm-room.json / the session pointer only for an enabled,
+// running agent (a disabled/offline agent needs none of those). Returns
+// `{ cfg, status }` per agent so the caller can apply its own visibility scope
+// against the same config it was built from. Pure shaping lives in
+// buildAgentStatus (agent-statuses.js, #1677).
+async function buildAllAgentStatuses() {
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -1383,24 +1379,65 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     }
   } catch { /* orchestrator unreachable — all agents appear offline */ }
 
-  const statuses = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const displayName = cfg.displayName ?? id;
-    if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
-    if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
-    const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
-    const hasSession = !!(dmRoom?.roomId &&
-      fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
-    return {
-      id,
-      displayName,
-      activityState: status?.state === 'busy' ? 'busy' : 'idle',
-      lastResponseAt: status?.lastResponseAt ?? null,
-      hasSession,
-    };
-  });
+  const entries = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue; // corrupt/unreadable config — excluded, as before
+    const running = runningIds.has(id);
+    let status = null, dmRoom = null, sessionFileExists = false;
+    if (cfg.enabled !== false && running) {
+      status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
+      dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
+      sessionFileExists = !!(dmRoom?.roomId &&
+        fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
+    }
+    entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
+  }
+  return entries;
+}
 
+// Short-TTL single-flight cache over the full status set. Several console
+// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
+// Maintenance Mode); the front end now shares one poll (#1677), but multiple
+// tabs/users and scope-varying callers can still land close together — a ~2s
+// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
+// in-flight promise also dedups concurrent rebuilds.
+let _statusCache = null; // { builtAt, promise }
+const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+
+function agentStatusEntries() {
+  const now = Date.now();
+  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
+    return _statusCache.promise;
+  }
+  const promise = buildAllAgentStatuses().catch(err => {
+    // Don't cache a failed build — let the next request retry.
+    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+    throw err;
+  });
+  _statusCache = { builtAt: now, promise };
+  return promise;
+}
+
+app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2). The scope filter is applied
+  // per-request on top of the shared (cached) build (#1677).
+  const scope = getScope(req);
+  let entries;
+  try {
+    entries = await agentStatusEntries();
+  } catch {
+    return res.status(500).json({ error: 'Failed to read agent statuses' });
+  }
+  const statuses = entries
+    .filter(e => visibleAgent(scope, e.cfg))
+    .map(e => e.status);
   res.json(statuses);
 });
 
@@ -10317,6 +10354,27 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   res.json({ respawned, skipped });
 });
 
+// Pull a human-readable failure reason out of a proxy's error response body and
+// combine it with the HTTP status. Without this a LiteLLM key whose budget is
+// exhausted answers /v1/models with a 400 whose body says exactly why
+// ("Budget has been exceeded! …") — but the probe used to drop the body and
+// surface a bare "HTTP 400", so the operator had no idea it was a spend cap.
+// Shapes handled: LiteLLM/OpenAI `{ error: { message, type, code } }`, a plain
+// `{ error: "msg" }` or `{ message: "msg" }`, and a non-JSON string body.
+function describeProbeFailure(status, body) {
+  let detail = null;
+  if (body && typeof body === 'object') {
+    const e = body.error;
+    if (e && typeof e === 'object' && typeof e.message === 'string') detail = e.message;
+    else if (typeof e === 'string') detail = e;
+    else if (typeof body.message === 'string') detail = body.message;
+  } else if (typeof body === 'string' && body.trim()) {
+    detail = body.trim();
+  }
+  const base = status ? `HTTP ${status}` : 'request failed';
+  return detail ? `${base} — ${detail}` : base;
+}
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always
@@ -10343,7 +10401,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
     ok,
     url,
     status: result.status,
-    error: result.error || (ok ? null : `HTTP ${result.status}`),
+    error: result.error || (ok ? null : describeProbeFailure(result.status, result.body)),
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
@@ -10354,7 +10412,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
-    return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
+    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
   // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
@@ -14396,9 +14454,20 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
-  const { body } = req.body || {};
+  const { body, extraContent } = req.body || {};
   if (typeof body !== 'string' || !body.trim()) {
     return res.status(400).json({ error: 'body (non-empty string) is required' });
+  }
+
+  // Optional structured payload merged onto the outgoing message content. Only
+  // `io.aee.*` keys are copied through (e.g. the quick-reply answer identifier
+  // `io.aee.ask-answer`, #1663) — this endpoint never lets a caller override
+  // msgtype/body/format or set arbitrary Matrix content fields.
+  const content = { msgtype: 'm.text', body };
+  if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
+    for (const [k, v] of Object.entries(extraContent)) {
+      if (k.startsWith('io.aee.')) content[k] = v;
+    }
   }
 
   const txnId = crypto.randomUUID();
@@ -14407,7 +14476,7 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       {
         method: 'PUT',
-        body: { msgtype: 'm.text', body },
+        body: content,
       });
     if (resp.status >= 400) {
       return res.status(resp.status).json(resp.data);
@@ -15187,65 +15256,93 @@ app.get('/api/agents/:agentId/workspace/tree', apiLimiter, (req, res) => {
   res.json({ path: echoPath, items });
 });
 
-// Git info — branch + dirty status for all git repos in the agent workspace.
-function readGitRepoInfo(repoPath) {
-  let branch = null;
+// Read the checked-out branch from a repo's .git/HEAD — a plain file read, no
+// git process. Returns the branch name, a short SHA for a detached HEAD, or
+// null when HEAD is unreadable / not a recognisable ref.
+function readRepoBranch(repoPath) {
   try {
     const headContent = fs.readFileSync(path.join(repoPath, '.git', 'HEAD'), 'utf8').trim();
     if (headContent.startsWith('ref: refs/heads/')) {
-      branch = headContent.slice('ref: refs/heads/'.length);
-    } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
-      branch = headContent.slice(0, 7); // detached HEAD
+      return headContent.slice('ref: refs/heads/'.length);
     }
-  } catch { return null; }
-
-  let isDirty = false;
-  let changesCount = 0;
-  try {
-    const result = spawnSync('git', ['status', '--porcelain'], {
-      cwd: repoPath, timeout: 5000, encoding: 'utf8',
-    });
-    if (result.status === 0 && result.stdout) {
-      const lines = result.stdout.trim().split('\n').filter(Boolean);
-      changesCount = lines.length;
-      isDirty = changesCount > 0;
+    if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+      return headContent.slice(0, 7); // detached HEAD
     }
-  } catch { /* ignore */ }
-
-  return { branch, isDirty, changesCount };
+  } catch { /* unreadable HEAD → unknown branch */ }
+  return null;
 }
 
-function getAgentGitRepos(agentRoot) {
+// Discover the git repos in an agent workspace using filesystem reads only
+// (readdir + .git/HEAD) — deliberately no `git` spawn, so this stays cheap on
+// the request path (#1683). Returns [{ repoPath, abs, branch }]. Dirty state
+// (which needs an actual `git status`) is computed separately and async by the
+// git-info endpoint, so the repo-resolution and git-status paths never shell
+// out just to enumerate repos.
+function discoverGitRepos(agentRoot) {
   const repos = [];
-  // Check the workspace root itself
+  // The workspace root itself may be a repo.
   if (fs.existsSync(path.join(agentRoot, '.git', 'HEAD'))) {
-    const info = readGitRepoInfo(agentRoot);
-    if (info) repos.push({ repoPath: '.', ...info });
+    repos.push({ repoPath: '.', abs: agentRoot, branch: readRepoBranch(agentRoot) });
   }
-  // Scan first-level subdirectories
+  // Scan first-level subdirectories.
   let entries = [];
   try { entries = fs.readdirSync(agentRoot, { withFileTypes: true }); } catch { return repos; }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const fullPath = path.join(agentRoot, entry.name);
     if (fs.existsSync(path.join(fullPath, '.git', 'HEAD'))) {
-      const info = readGitRepoInfo(fullPath);
-      if (info) repos.push({ repoPath: entry.name, ...info });
+      repos.push({ repoPath: entry.name, abs: fullPath, branch: readRepoBranch(fullPath) });
     }
   }
   return repos;
 }
 
-app.get('/api/agents/:agentId/git-info', (req, res) => {
+// Dirty state (isDirty / changesCount) for one repo. Async so the git-info poll
+// (every 30s per open chat) never blocks the single event loop the console
+// proxies through. `abs` must be a sanitised repo dir (runGitAsync re-validates
+// the cwd). Failures degrade to "clean" rather than throwing.
+async function readGitDirty(abs) {
+  const res = await runGitAsync(['status', '--porcelain'], abs, { maxBuffer: 1024 * 1024 });
+  if (res.error || res.status !== 0) return { isDirty: false, changesCount: 0 };
+  const lines = res.stdout.toString('utf8').trim().split('\n').filter(Boolean);
+  return { isDirty: lines.length > 0, changesCount: lines.length };
+}
+
+// Short-lived cache for git-info dirty results: collapses concurrent pollers
+// (multiple browser tabs on the same agent) onto one `git status` and serves a
+// recently-computed result without re-spawning (#1683). Branch is read fresh
+// from .git/HEAD on every request (cheap) and never cached.
+const gitInfoCache = createTtlCache({
+  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 5000,
+});
+
+app.get('/api/agents/:agentId/git-info', async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  // getAgentGitRepos expects an absolute, sanitised path (post-#116). Use
-  // safeAgentPath so a bare agentId can't escape the agents tree.
+  // safeAgentPath returns the realpath-validated agent root (post-#116), so a
+  // bare agentId can't escape the agents tree.
   const agentRoot = safeAgentPath(agentId, '');
   if (!agentRoot) {
     return res.status(404).json({ error: 'Agent not found' });
   }
-  res.json({ repos: getAgentGitRepos(agentRoot) });
+  try {
+    const repos = discoverGitRepos(agentRoot);
+    const out = await Promise.all(repos.map(async (r) => {
+      const dirty = await gitInfoCache.getOrCompute(
+        `${agentId}::${r.repoPath}`,
+        () => readGitDirty(r.abs),
+      );
+      return {
+        repoPath: r.repoPath,
+        branch: r.branch,
+        isDirty: dirty.isDirty,
+        changesCount: dirty.changesCount,
+      };
+    }));
+    res.json({ repos: out });
+  } catch {
+    res.status(500).json({ error: 'git-info-failed' });
+  }
 });
 
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
@@ -15586,18 +15683,18 @@ const GIT_UNTRACKED_PROBE  = 1024 * 1024;     // bytes scanned for line/binary c
 // without distinguishing between traversal, missing, and non-repo cases.
 //
 // The user-supplied repoPath is never passed to a path operation directly:
-// it must match one of the repos discovered by getAgentGitRepos(), which
+// it must match one of the repos discovered by discoverGitRepos(), which
 // scans the agent root with stat-only filesystem reads. Once allowlisted,
 // the path is reconstructed through safeAgentPath, the canonical path
 // sanitizer in this module.
 function resolveAgentRepo(agentId, repoPath) {
   const wanted = typeof repoPath === 'string' && repoPath ? repoPath : '.';
-  // getAgentGitRepos expects the sanitised absolute agent root, not the bare
+  // discoverGitRepos expects the sanitised absolute agent root, not the bare
   // id. Without this, the discovery scan operates on a relative path and
   // silently returns []  → every repo lookup misses → diff view is empty.
   const agentRoot = safeAgentPath(agentId, '');
   if (!agentRoot) return null;
-  const repos = getAgentGitRepos(agentRoot);
+  const repos = discoverGitRepos(agentRoot);
   const found = repos.find(r => r.repoPath === wanted);
   if (!found) return null;
   return safeAgentPath(agentId, found.repoPath === '.' ? '' : found.repoPath);
@@ -15653,15 +15750,38 @@ function assertSafeGitCwd(cwd) {
   return realCwd;
 }
 
-function runGit(args, cwd, { maxBuffer = GIT_DIFF_MAX_BUFFER } = {}) {
+// Async git runner (#1683). Mirrors spawnSync's return shape
+// ({ status, stdout, stderr, error }) but uses execFile so a slow git call
+// never blocks the event loop the admin console proxies through. `.status` is
+// the numeric exit code (or null on a spawn/timeout/buffer failure); `.error`
+// is set only for such a non-exit failure — exactly how spawnSync populated
+// `.error`. It never rejects for a non-zero exit (e.g. `diff --no-index` → 1),
+// so callers branch on `.status` just as they did with spawnSync.
+// assertSafeGitCwd() throws synchronously for an invalid cwd (unchanged from
+// runGit); call sites run inside a try/catch that answers 500.
+function runGitAsync(args, cwd, { maxBuffer = GIT_DIFF_MAX_BUFFER } = {}) {
   const safeCwd = assertSafeGitCwd(cwd);
-  return spawnSync('git', args, {
-    cwd: safeCwd,
-    timeout: GIT_SPAWN_TIMEOUT_MS,
-    maxBuffer,
-    encoding: 'buffer',
-    // LC_ALL=C keeps porcelain output stable across host locales.
-    env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+  return new Promise((resolve) => {
+    execFile('git', args, {
+      cwd: safeCwd,
+      timeout: GIT_SPAWN_TIMEOUT_MS,
+      maxBuffer,
+      encoding: 'buffer',
+      // LC_ALL=C keeps porcelain output stable across host locales.
+      env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+    }, (error, stdout, stderr) => {
+      const outBuf = stdout || Buffer.alloc(0);
+      const errBuf = stderr || Buffer.alloc(0);
+      if (!error) {
+        resolve({ status: 0, stdout: outBuf, stderr: errBuf, error: null });
+      } else if (typeof error.code === 'number') {
+        // git exited non-zero. Not an error to us — surface it via `.status`.
+        resolve({ status: error.code, stdout: outBuf, stderr: errBuf, error: null });
+      } else {
+        // Spawn failure / timeout / maxBuffer exceeded (ENOBUFS surrogate).
+        resolve({ status: null, stdout: outBuf, stderr: errBuf, error });
+      }
+    });
   });
 }
 
@@ -15770,28 +15890,28 @@ function summarizeStatus(X, Y) {
 // Read branch metadata for the Git panel (#648): the local branch list, plus
 // flags the UI uses to hide/disable controls. All commands are local (no
 // network) and read-only. `abs` is the sanitised repo dir from
-// resolveAgentRepo(); runGit() re-validates the cwd.
-function readRepoBranchMeta(abs) {
+// resolveAgentRepo(); runGitAsync() re-validates the cwd.
+async function readRepoBranchMeta(abs) {
   const meta = { currentBranch: null, branches: [], detached: false, hasRemote: false, hasUpstream: false };
-  const cur = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], abs, { maxBuffer: 64 * 1024 });
+  const cur = await runGitAsync(['rev-parse', '--abbrev-ref', 'HEAD'], abs, { maxBuffer: 64 * 1024 });
   const curBranch = cur.status === 0 ? cur.stdout.toString('utf8').trim() : '';
   meta.detached = curBranch === '' || curBranch === 'HEAD';
   meta.currentBranch = meta.detached ? null : curBranch;
-  const br = runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], abs, { maxBuffer: 256 * 1024 });
+  const br = await runGitAsync(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], abs, { maxBuffer: 256 * 1024 });
   if (br.status === 0) {
     meta.branches = br.stdout.toString('utf8').split('\n').map(s => s.trim()).filter(Boolean);
   }
-  const rem = runGit(['remote'], abs, { maxBuffer: 64 * 1024 });
+  const rem = await runGitAsync(['remote'], abs, { maxBuffer: 64 * 1024 });
   meta.hasRemote = rem.status === 0 && rem.stdout.toString('utf8').trim().length > 0;
-  const up = runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], abs, { maxBuffer: 64 * 1024 });
+  const up = await runGitAsync(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], abs, { maxBuffer: 64 * 1024 });
   meta.hasUpstream = up.status === 0;
   return meta;
 }
 
 // GET /api/agents/:agentId/workspace/git-status
 // Lists changed files for every git repo in the agent workspace. Multi-repo
-// support comes for free via getAgentGitRepos().
-app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) => {
+// support comes for free via discoverGitRepos().
+app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   // safeAgentPath returns null for an invalid id or a missing agent dir, and
@@ -15806,20 +15926,21 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
     ? req.query.repo
     : null;
 
-  const repos = getAgentGitRepos(agentRoot);
+  const repos = discoverGitRepos(agentRoot);
   const repoEntries = repoFilter
     ? repos.filter(r => r.repoPath === repoFilter)
     : repos;
 
+  try {
   const result = [];
   for (const repoMeta of repoEntries) {
     const abs = resolveAgentRepo(agentId, repoMeta.repoPath);
     if (!abs) continue;
 
     // 1. Status — file list with X/Y status bytes.
-    const status = runGit(['status', '--porcelain=v1', '-z'], abs);
+    const status = await runGitAsync(['status', '--porcelain=v1', '-z'], abs);
     if (status.error || status.status !== 0) {
-      result.push({ ...repoMeta, error: 'git-status-failed', files: [] });
+      result.push({ repoPath: repoMeta.repoPath, branch: repoMeta.branch, error: 'git-status-failed', files: [] });
       continue;
     }
     const entries = parsePorcelainZ(status.stdout);
@@ -15828,7 +15949,7 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
     // Combines staged + unstaged because `HEAD` (no --cached) compares the
     // working tree against HEAD directly.
     let numstat = new Map();
-    const numstatRun = runGit(['diff', '--numstat', '-z', 'HEAD', '--'], abs);
+    const numstatRun = await runGitAsync(['diff', '--numstat', '-z', 'HEAD', '--'], abs);
     if (numstatRun.status === 0) {
       numstat = parseNumstatZ(numstatRun.stdout);
     }
@@ -15873,11 +15994,14 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
       changesCount: files.length,
       dirty: files.length > 0,
       files,
-      ...readRepoBranchMeta(abs),
+      ...(await readRepoBranchMeta(abs)),
     });
   }
 
   res.json({ repos: result });
+  } catch {
+    res.status(500).json({ error: 'git-status-failed' });
+  }
 });
 
 // POST /api/agents/:agentId/workspace/git-action — deterministic Workspace Git
@@ -15923,7 +16047,7 @@ app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, async (req, 
 // GET /api/agents/:agentId/workspace/git-diff?repo=...&path=...&context=3
 // Returns the unified diff for a single file. Untracked files are diffed
 // against /dev/null so the UI sees a uniform `diff --git` envelope.
-app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
+app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -15942,16 +16066,15 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
   if (!Number.isFinite(context) || context < 0) context = 3;
   if (context > 20) context = 20;
 
+  try {
   // Decide which form of `git diff` to invoke. For MVP-1 we always compare
   // working tree against HEAD; staged/branch modes are out of scope.
-  const isUntracked = (() => {
-    const lsFiles = runGit(
-      ['ls-files', '--error-unmatch', '--', pathQ],
-      repoAbs,
-      { maxBuffer: 64 * 1024 },
-    );
-    return lsFiles.status !== 0;
-  })();
+  const lsFiles = await runGitAsync(
+    ['ls-files', '--error-unmatch', '--', pathQ],
+    repoAbs,
+    { maxBuffer: 64 * 1024 },
+  );
+  const isUntracked = lsFiles.status !== 0;
 
   let diffRun;
   if (isUntracked) {
@@ -15959,7 +16082,7 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     // Exit code 1 is the success-with-differences case; status 0 (identical
     // file vs /dev/null can't really happen for an untracked file) is also
     // accepted. Anything else is an error.
-    diffRun = runGit(
+    diffRun = await runGitAsync(
       ['diff', '--no-color', `-U${context}`, '--no-index', '--', '/dev/null', pathQ],
       repoAbs,
     );
@@ -15967,7 +16090,7 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
       return res.status(500).json({ error: 'git-diff-failed' });
     }
   } else {
-    diffRun = runGit(
+    diffRun = await runGitAsync(
       ['diff', '--no-color', `-U${context}`, 'HEAD', '--', pathQ],
       repoAbs,
     );
@@ -15976,10 +16099,9 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     }
   }
 
-  // Detect truncation by spawnSync's ENOBUFS surrogate (signal === null,
-  // status === null, error.code === 'ENOBUFS'). We already returned above,
-  // so if we got here the buffer was large enough — but we still cap the
-  // payload size we send back to the client.
+  // Detect truncation by the ENOBUFS surrogate (maxBuffer exceeded sets
+  // `.error`, handled above), so if we got here the buffer was large enough —
+  // but we still cap the payload size we send back to the client.
   const raw = (diffRun.stdout || Buffer.alloc(0)).toString('utf8');
   const truncated = raw.length >= GIT_DIFF_MAX_BUFFER - 1024; // close to the cap
   const diff = truncated ? raw.slice(0, GIT_DIFF_MAX_BUFFER) : raw;
@@ -15997,6 +16119,9 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     binary,
     diff,
   });
+  } catch {
+    res.status(500).json({ error: 'git-diff-failed' });
+  }
 });
 
 // File upload. Accepts multipart/form-data with:

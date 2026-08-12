@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router';
 import { MessageCircle, Loader2 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
+import { computeAgentStatusMap } from '../context/agent-statuses';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
@@ -61,7 +63,6 @@ function ResizeDivider({ onMouseDown, disabled = false }) {
 const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 const FILTER_KEY = 'agentChat.listFilter';
-const STATUS_POLL_MS = 5000;
 
 function loadFilter() {
   try {
@@ -119,61 +120,22 @@ export default function AgentChat() {
   const manuallyUnreadRef = useRef(new Set());
 
   // Map agentId -> effective display state
-  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline')
+  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline'), derived from the
+  // shared agent-status poll (#1677) rather than a page-owned interval.
+  const statuses = useAgentStatuses();
   const [agentStatuses, setAgentStatuses] = useState({});
-  const statusTimerRef = useRef(null);
   useEffect(() => {
-    const poll = () => {
-      // Always mark the currently open agent as "viewed" before computing
-      // statuses so it never flips to "unread" while the user is looking at it.
-      // Exception: skip agents the user explicitly marked as unread.
-      const currentId = agentIdRef.current;
-      if (currentId && !manuallyUnreadRef.current.has(currentId)) {
-        const viewed = loadLastViewed();
-        viewed[currentId] = Date.now();
-        saveLastViewed(viewed);
-      }
-
-      fetch('/api/agents/statuses')
-        .then(r => r.ok ? r.json() : [])
-        .then(list => {
-          const viewed = loadLastViewed();
-          const map = {};
-          for (const { id, activityState, lastResponseAt, hasSession } of list) {
-            let effective;
-            if (activityState === 'disabled') {
-              // Intentionally turned off — a one-click enable brings it back.
-              // Kept distinct from 'offline' so the list can tell the user
-              // whether they need to just enable the agent or investigate a
-              // down container (#1119).
-              effective = 'disabled';
-            } else if (activityState === 'offline') {
-              // Container is not running / crashed — a real problem to look at.
-              effective = 'offline';
-            } else if (activityState === 'busy') {
-              effective = 'busy';
-            } else if (lastResponseAt && new Date(lastResponseAt).getTime() > (viewed[id] || 0)) {
-              effective = 'unread';
-            } else if (hasSession || lastResponseAt) {
-              // Blue "active" = the agent has done work: either a live DM
-              // session pointer, or it has responded at least once. The latter
-              // covers per-invocation agents (triggered runs deliberately keep
-              // no session pointer — see agent-entrypoint.py), which would
-              // otherwise stay grey forever despite having run.
-              effective = 'active';
-            } else {
-              effective = 'idle';
-            }
-            map[id] = effective;
-          }
-          setAgentStatuses(map);
-        })
-        .catch(() => {});
-    };
-    poll();
-    statusTimerRef.current = setInterval(poll, STATUS_POLL_MS);
-    return () => clearInterval(statusTimerRef.current);
-  }, []);
+    // Always mark the currently open agent as "viewed" before deriving statuses
+    // so it never flips to "unread" while the user is looking at it. Exception:
+    // skip agents the user explicitly marked as unread.
+    const currentId = agentIdRef.current;
+    if (currentId && !manuallyUnreadRef.current.has(currentId)) {
+      const viewed = loadLastViewed();
+      viewed[currentId] = Date.now();
+      saveLastViewed(viewed);
+    }
+    setAgentStatuses(computeAgentStatusMap(statuses, loadLastViewed()));
+  }, [statuses]);
 
   // Sidebar filter: All | a specific team | a specific agent. Persisted in
   // localStorage so the user's narrowed view survives reloads.

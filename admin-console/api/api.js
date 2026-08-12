@@ -75,6 +75,7 @@ const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
+const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
@@ -1357,20 +1358,14 @@ app.get('/api/agents', (req, res) => {
 // NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
-app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  // Scope the status set to the agents the caller may see, using the SAME
-  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
-  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
-  // hidden agents and made the badge disagree with the (already-scoped) list.
-  // getScope(req) respects the caller's scope, so a System Admin / env
-  // single-admin (scope `all`) still sees every agent — the filter is additive,
-  // never a hard global cut (open-question 2).
-  const scope = getScope(req);
-  const ids = listAgentDirs().filter(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    return cfg && visibleAgent(scope, cfg);
-  });
-
+// Assemble the FULL (unscoped) per-agent status set: list agent dirs, read each
+// config.json exactly once, ask the orchestrator which containers are up, and
+// read status.json / dm-room.json / the session pointer only for an enabled,
+// running agent (a disabled/offline agent needs none of those). Returns
+// `{ cfg, status }` per agent so the caller can apply its own visibility scope
+// against the same config it was built from. Pure shaping lives in
+// buildAgentStatus (agent-statuses.js, #1677).
+async function buildAllAgentStatuses() {
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -1383,24 +1378,65 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     }
   } catch { /* orchestrator unreachable — all agents appear offline */ }
 
-  const statuses = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const displayName = cfg.displayName ?? id;
-    if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
-    if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
-    const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
-    const hasSession = !!(dmRoom?.roomId &&
-      fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
-    return {
-      id,
-      displayName,
-      activityState: status?.state === 'busy' ? 'busy' : 'idle',
-      lastResponseAt: status?.lastResponseAt ?? null,
-      hasSession,
-    };
-  });
+  const entries = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue; // corrupt/unreadable config — excluded, as before
+    const running = runningIds.has(id);
+    let status = null, dmRoom = null, sessionFileExists = false;
+    if (cfg.enabled !== false && running) {
+      status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
+      dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
+      sessionFileExists = !!(dmRoom?.roomId &&
+        fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
+    }
+    entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
+  }
+  return entries;
+}
 
+// Short-TTL single-flight cache over the full status set. Several console
+// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
+// Maintenance Mode); the front end now shares one poll (#1677), but multiple
+// tabs/users and scope-varying callers can still land close together — a ~2s
+// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
+// in-flight promise also dedups concurrent rebuilds.
+let _statusCache = null; // { builtAt, promise }
+const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+
+function agentStatusEntries() {
+  const now = Date.now();
+  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
+    return _statusCache.promise;
+  }
+  const promise = buildAllAgentStatuses().catch(err => {
+    // Don't cache a failed build — let the next request retry.
+    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+    throw err;
+  });
+  _statusCache = { builtAt: now, promise };
+  return promise;
+}
+
+app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2). The scope filter is applied
+  // per-request on top of the shared (cached) build (#1677).
+  const scope = getScope(req);
+  let entries;
+  try {
+    entries = await agentStatusEntries();
+  } catch {
+    return res.status(500).json({ error: 'Failed to read agent statuses' });
+  }
+  const statuses = entries
+    .filter(e => visibleAgent(scope, e.cfg))
+    .map(e => e.status);
   res.json(statuses);
 });
 

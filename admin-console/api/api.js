@@ -14433,9 +14433,20 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
-  const { body } = req.body || {};
+  const { body, extraContent } = req.body || {};
   if (typeof body !== 'string' || !body.trim()) {
     return res.status(400).json({ error: 'body (non-empty string) is required' });
+  }
+
+  // Optional structured payload merged onto the outgoing message content. Only
+  // `io.aee.*` keys are copied through (e.g. the quick-reply answer identifier
+  // `io.aee.ask-answer`, #1663) — this endpoint never lets a caller override
+  // msgtype/body/format or set arbitrary Matrix content fields.
+  const content = { msgtype: 'm.text', body };
+  if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
+    for (const [k, v] of Object.entries(extraContent)) {
+      if (k.startsWith('io.aee.')) content[k] = v;
+    }
   }
 
   const txnId = crypto.randomUUID();
@@ -14444,7 +14455,7 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       {
         method: 'PUT',
-        body: { msgtype: 'm.text', body },
+        body: content,
       });
     if (resp.status >= 400) {
       return res.status(resp.status).json(resp.data);

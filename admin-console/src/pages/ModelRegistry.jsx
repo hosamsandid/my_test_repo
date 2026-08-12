@@ -327,7 +327,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         ok: r.ok,
         text: r.ok
           ? `OK (HTTP ${r.status}) — ${r.url}`
-          : `Failed: ${r.error || 'HTTP ' + r.status} — ${r.url}`,
+          : `Failed: ${r.error || 'HTTP ' + r.status} (${r.url})`,
       });
     } catch (e) {
       setProbeMsg({ ok: false, text: e.message });

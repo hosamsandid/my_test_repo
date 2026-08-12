@@ -6,6 +6,7 @@ import {
   GROUP_OPTIONS,
   formatInt,
   formatCompact,
+  formatTileCount,
   niceScale,
   buildDaySeries,
   stackSegments,
@@ -48,6 +49,40 @@ test('formatCompact abbreviates with k/M/B, one decimal only when it adds info',
   assert.equal(formatCompact(0), '0');
   assert.equal(formatCompact(undefined), '0');
   assert.equal(formatCompact(NaN), '0');
+});
+
+test('formatTileCount abbreviates the KPI tiles with k/M/B/T at up to two trimmed decimals (#1656 AC1/AC2)', () => {
+  // The screenshot figures the ticket cites, rounded to two decimals.
+  assert.equal(formatTileCount(1_206_966_533), '1.21B');
+  assert.equal(formatTileCount(958_717_975), '958.72M');
+  assert.equal(formatTileCount(301_716), '301.72k');
+  // Trailing zeros trimmed — "two decimals" is an upper bound, not a fixed width.
+  assert.equal(formatTileCount(1_200_000_000), '1.2B');
+  assert.equal(formatTileCount(9_300_000), '9.3M');
+  // A trillions-range total still fits with the T unit (AC4 edge case).
+  assert.equal(formatTileCount(2_500_000_000_000), '2.5T');
+});
+
+test('formatTileCount renders exact unit boundaries with the higher unit, trimmed (#1656 edge cases)', () => {
+  assert.equal(formatTileCount(1000), '1k');
+  assert.equal(formatTileCount(1e6), '1M');
+  assert.equal(formatTileCount(1e9), '1B');
+  assert.equal(formatTileCount(1e12), '1T');
+});
+
+test('formatTileCount keeps values below 1,000 as plain integers, junk as 0 (#1656 AC3)', () => {
+  assert.equal(formatTileCount(385), '385');
+  assert.equal(formatTileCount(999), '999');
+  assert.equal(formatTileCount(0), '0');
+  assert.equal(formatTileCount(undefined), '0');
+  assert.equal(formatTileCount(null), '0');
+  assert.equal(formatTileCount(NaN), '0');
+  assert.equal(formatTileCount(Infinity), '0');
+});
+
+test('formatTileCount never produces a broken string for an unexpected negative (#1656 edge case)', () => {
+  assert.equal(formatTileCount(-500), '-500');
+  assert.equal(formatTileCount(-1_206_966_533), '-1.21B');
 });
 
 test('niceScale picks a round top ≥ max with ~3–5 evenly spaced ticks from 0', () => {

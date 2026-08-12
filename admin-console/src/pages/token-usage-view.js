@@ -36,23 +36,44 @@ export function formatPct(f) {
   return `${Math.round(v * 100)}%`;
 }
 
-// Abbreviated token count for chart axis ticks (#699): thousands as `k`,
-// millions as `M`, billions as `B`, with at most one decimal (dropped when it
-// adds nothing, e.g. `156M` not `156.0M`); values under 1,000 are plain
-// integers. Non-finite → '0'.
-export function formatCompact(n) {
+// Shared core for abbreviated token notation (#699, #1656). Rounds `n / factor`
+// to at most `decimals` places with trailing zeros trimmed (so `1.20B` → `1.2B`,
+// `156.00M` → `156M`) over an ordered unit table (largest factor first). Values
+// under the smallest unit (1,000) are plain rounded integers, and a negative
+// value still yields a clean string rather than a broken one. Non-finite → '0'.
+function abbreviate(n, decimals, units) {
   const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
   const abs = Math.abs(v);
   if (abs < 1000) return String(Math.round(v));
-  const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
+  const pow = Math.pow(10, decimals);
   for (const [factor, suffix] of units) {
     if (abs >= factor) {
-      const scaled = Math.round((v / factor) * 10) / 10;
-      const str = Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1);
-      return `${str}${suffix}`;
+      // Number → String trims trailing zeros for us (1.2, not 1.20).
+      const scaled = Math.round((v / factor) * pow) / pow;
+      return `${scaled}${suffix}`;
     }
   }
   return String(Math.round(v));
+}
+
+// Abbreviated token count for chart axis ticks (#699): thousands as `k`,
+// millions as `M`, billions as `B`, with at most one decimal (dropped when it
+// adds nothing, e.g. `156M` not `156.0M`); values under 1,000 are plain
+// integers. Non-finite → '0'. `B` carries values ≥ 10⁹ arbitrarily far.
+const COMPACT_UNITS = [[1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
+export function formatCompact(n) {
+  return abbreviate(n, 1, COMPACT_UNITS);
+}
+
+// Abbreviated token count for the summary KPI tiles (#1656). Same scheme as
+// `formatCompact` but with up to *two* decimals (trailing zeros trimmed, so
+// `1.21B`, `958.72M`, `301.72k`, but `1k`/`1M`/`1B` at exact boundaries) and an
+// extra `T` (trillion) unit so very large totals still fit a 120px tile. Values
+// under 1,000 stay plain integers (`385`); `0`, missing or non-finite → '0'.
+// The detailed table and CSV/JSON exports keep full-precision `formatInt`.
+const TILE_UNITS = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
+export function formatTileCount(n) {
+  return abbreviate(n, 2, TILE_UNITS);
 }
 
 // Round `x` up to a "nice" 1/2/2.5/5/10 × 10ⁿ number (used for the axis step).

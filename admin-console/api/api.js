@@ -3949,6 +3949,10 @@ function publicEndpointView(ep) {
   return {
     id: ep.id,
     name: ep.name || ep.id,
+    // System/Team scope so the chat selector can render the same scope badge as
+    // the header assist selector (#1670 AC3). Mirrors maskAssistProvider's rule:
+    // legacy endpoints with no `scope` field are treated as team-owned.
+    scope: ep.scope === 'system' ? 'system' : 'team',
     authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
     baseUrl: ep.baseUrl || '',
     defaultModelId: ep.defaultModelId || null,

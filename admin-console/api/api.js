@@ -101,21 +101,53 @@ function controlOrAgentPath(...segs) {
   return path.join(AGENTS_DIR, ...segs);
 }
 
+// Per-archive parsed-events cache (#1684). Session-log archives are immutable
+// once rotated, so their parsed rows never change — a file's (size, mtime) is a
+// safe signature. Caching them means GET .../sessions/history re-reads and
+// re-parses only the growing live file on each poll, not the whole archive set,
+// so response time stays flat as rotated history accumulates. Bounded LRU.
+const SESSION_ARCHIVE_CACHE_MAX = 512;
+const _sessionArchiveCache = new Map(); // `path:size:mtimeMs` -> events[]
+
+function _cachedArchiveEvents(fullPath, parse) {
+  let st;
+  try { st = fs.statSync(fullPath); } catch { return null; }
+  const key = `${fullPath}:${st.size}:${st.mtimeMs}`;
+  const hit = _sessionArchiveCache.get(key);
+  if (hit) {
+    // Refresh LRU recency.
+    _sessionArchiveCache.delete(key);
+    _sessionArchiveCache.set(key, hit);
+    return hit;
+  }
+  let raw;
+  try { raw = fs.readFileSync(fullPath, 'utf8'); } catch { return null; }
+  const events = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim()) events.push(parse(line));
+  }
+  if (_sessionArchiveCache.size >= SESSION_ARCHIVE_CACHE_MAX) {
+    const oldest = _sessionArchiveCache.keys().next().value;
+    _sessionArchiveCache.delete(oldest);
+  }
+  _sessionArchiveCache.set(key, events);
+  return events;
+}
+
 // Rotated session-log archives of `roomId` (#673), oldest→newest, parsed to
 // events via `parse`. Archives are immutable and read WHOLESALE, so a finished
 // session's rows survive rotation. The live file is NOT included — callers
 // concatenate it after these. Best-effort: an unreadable archive is skipped.
+// Parsed archives are memoized (see _cachedArchiveEvents) so repeated reads
+// don't re-parse the whole history (#1684).
 function readSessionArchiveEvents(agentId, roomId, parse) {
   const dir = controlOrAgentPath(agentId, 'sessions');
   let names;
   try { names = fs.readdirSync(dir); } catch { return []; }
   const out = [];
   for (const name of orderedArchiveNames(names, roomId)) {
-    let raw;
-    try { raw = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
-    for (const line of raw.split('\n')) {
-      if (line.trim()) out.push(parse(line));
-    }
+    const events = _cachedArchiveEvents(path.join(dir, name), parse);
+    if (events) out.push(...events);
   }
   return out;
 }

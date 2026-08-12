@@ -5,7 +5,14 @@ import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } fro
  * DataTable — Reusable table with sort, filter, pagination.
  *
  * Props:
- *   columns     — Array of { key, label, sortable?, align?, render? }
+ *   columns     — Array of { key, label, sortable?, align?, render?, wrap?, hidden? }
+ *                 wrap:   opt-in — this column's cells wrap onto multiple
+ *                         lines (and break long unbroken tokens) instead of
+ *                         the default single-line + ellipsis. Off by default,
+ *                         so enabling it on one page never changes another.
+ *                 hidden: keep the column out of the rendered table but still
+ *                         include its values in the text filter — lets a value
+ *                         stay searchable without occupying a column.
  *   data        — Array of row objects
  *   pageSize    — Rows per page (default 10)
  *   onRowClick  — Optional (row) => void
@@ -72,13 +79,26 @@ export default function DataTable({
     setPage(0);
   }, [sortKey]);
 
-  const cellStyle = (col) => ({
-    padding: 'var(--eb-space-2) var(--eb-space-3)',
-    textAlign: col.align || 'left',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  });
+  const cellStyle = (col) => (col.wrap
+    ? {
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        textAlign: col.align || 'left',
+        whiteSpace: 'normal',
+        wordBreak: 'break-word',
+        overflowWrap: 'anywhere',
+        verticalAlign: 'top',
+      }
+    : {
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        textAlign: col.align || 'left',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      });
+
+  // Columns actually drawn (header + body). A `hidden` column stays in
+  // `columns` (so the filter still searches it) but is never rendered.
+  const visibleColumns = columns.filter(col => !col.hidden);
 
   return (
     <div style={{
@@ -122,12 +142,15 @@ export default function DataTable({
         }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--eb-border-default)' }}>
-              {columns.map(col => (
+              {visibleColumns.map(col => (
                 <th
                   key={col.key}
                   onClick={() => col.sortable !== false && toggleSort(col.key)}
                   style={{
                     ...cellStyle(col),
+                    // Headers stay on one line even for wrap columns — the
+                    // labels are short and a wrapped header reads poorly.
+                    whiteSpace: 'nowrap',
                     fontWeight: 'var(--eb-font-medium)',
                     fontSize: 'var(--eb-text-sm)',
                     color: 'var(--eb-text-secondary)',
@@ -154,7 +177,7 @@ export default function DataTable({
             {pageData.length === 0 ? (
               <tr>
                 <td
-                  colSpan={columns.length}
+                  colSpan={visibleColumns.length}
                   style={{
                     padding: 'var(--eb-space-8)',
                     textAlign: 'center',
@@ -179,7 +202,7 @@ export default function DataTable({
                   onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                 >
-                  {columns.map(col => (
+                  {visibleColumns.map(col => (
                     <td key={col.key} style={cellStyle(col)}>
                       {col.render ? col.render(row[col.key], row) : row[col.key]}
                     </td>

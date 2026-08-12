@@ -492,9 +492,12 @@ export default function ScheduledJobs() {
 
   const COLS = [
     { key: '_agentName', label: 'Agent' },
-    { key: 'id',          label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
+    // ID column is hidden (no visible column) to keep the table within the
+    // page width — but stays in the filter so a trigger id is still
+    // searchable (#1643).
+    { key: 'id',          label: 'ID', hidden: true },
     { key: 'type',        label: 'Type', render: v => <TypeBadge type={v} /> },
-    { key: 'schedule',    label: 'Schedule / Trigger', render: (_, row) => {
+    { key: 'schedule',    label: 'Schedule / Trigger', wrap: true, render: (_, row) => {
       if (row.type === 'github-event') {
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
@@ -511,7 +514,7 @@ export default function ScheduledJobs() {
       }
       return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{row.cron || row.at || '—'}</span>;
     }},
-    { key: 'description', label: 'Description' },
+    { key: 'description', label: 'Description', wrap: true },
     { key: 'enabled',     label: 'Enabled', sortable: false, render: (v, row) => (
       <ToggleSwitch
         checked={v !== false}

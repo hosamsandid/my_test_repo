@@ -35,7 +35,8 @@ container (AC10): the broker makes every GitHub call server-side.
   of its signed `teamIds` — the authorization guard), and calls GitHub with that
   team's token. A repository not in the selected team's environment yields no
   token (`ScopeStore.tokenForRepo`), so a viewer can never act outside scope.
-  Data routes: `GET /api/context` (authorized teams + repos + last-used),
+  Data routes: `GET /api/context` (authorized teams + repos + each team's own
+  last view + the globally most-recently-used selection to restore on reopen),
   `GET /api/issues`, `GET /api/issue`, `GET /api/labels` (returns `{ flowLabels,
   repoLabels, labelAgents }` — flow labels suggested first, each previewing which
   agents it wakes), `POST /api/label` (add/remove, re-fetches the issue), `POST
@@ -49,7 +50,7 @@ container (AC10): the broker makes every GitHub call server-side.
 | File | Role |
 |---|---|
 | `github-client.js` | Pure request-shaping / response-shaping / error-mapping for the GitHub REST surface + the thin `call` fetch adapter (`GITHUB_API_BASE` seam). Unit-tested. |
-| `scope-store.js` | In-memory per-scope credentials + repo list (token never on disk) with `tokenForRepo` authorization guard, `flowLabels`/`labelAgents` cache (pushed by the orchestrator alongside the credential), and per-(scope,user) last-used prefs persisted on `AEE_PLUGIN_STATE_DIR`. Unit-tested. |
+| `scope-store.js` | In-memory per-scope credentials + repo list (token never on disk) with `tokenForRepo` authorization guard, `flowLabels`/`labelAgents` cache (pushed by the orchestrator alongside the credential), and per-(scope,user) last-used prefs persisted on `AEE_PLUGIN_STATE_DIR` (`pickLastUsed` selects the globally most-recently-used scope by `updatedAt` — #1650). Unit-tested. |
 | `viewer-headers.js` | Verbatim §4.8 signed-viewer-header verify (copied — the build context can't reach `admin-console/api/`; SDK home is a follow-up). |
 | `server.js` | Wiring: SDK health/teardown, the credential-push route, the `/ui` + `/cli` surfaces, audit. |
 | `ui/markdown.js` | Dependency-free, XSS-safe GFM-subset Markdown renderer (#1642): escapes all untrusted input as text, emits only a whitelisted element set (headings/bold/italic/lists/code/tables/links/hr), protocol-validates `href`/`src` to `http`/`https`/`mailto`. No build step; exported as `window.AEEMarkdown`. Unit-tested (element coverage + XSS: `<script>`/`<img onerror>` escaped, `javascript:`/`data:` dropped). |

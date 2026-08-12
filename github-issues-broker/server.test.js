@@ -142,6 +142,53 @@ test('the agent CLI path (scope-token authed) returns the scope\'s repositories'
   assert.equal(bad.status, 401);
 });
 
+// ── multi-team viewer label writes (#1651) ───────────────────────────────────
+// A viewer in ≥2 teams sends the selected team in the JSON body (like the read
+// paths send it in the query string). Before the fix the body was never read
+// for team resolution, so pickTeam(viewer, null) returned null → HTTP 400
+// "select a team you are a member of". These lock in the fixed behaviour.
+const multiViewer = signViewerHeaders({ sub: 'alice', role: 'team-member', teamIds: ['team-a', 'team-b'] }, SECRET);
+
+test('#1651 POST /ui/api/label: a multi-team viewer can add a label (team from body)', async () => {
+  const r = await fetch(`${base}/ui/api/label`, {
+    method: 'POST', headers: { ...multiViewer, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: 'team-a', repo: 'acme/widgets', number: 5, label: 'ready', action: 'add' }),
+  });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  assert.notEqual(body.error, 'select a team you are a member of');
+  assert.equal(body.issue.labels.some((l) => l.name === 'ready'), true);
+});
+
+test('#1651 POST /ui/api/label: a multi-team viewer can remove a label (team from body)', async () => {
+  const r = await fetch(`${base}/ui/api/label`, {
+    method: 'POST', headers: { ...multiViewer, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: 'team-a', repo: 'acme/widgets', number: 5, label: 'bug', action: 'remove' }),
+  });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  assert.notEqual(body.error, 'select a team you are a member of');
+});
+
+test('#1651 the membership check is not weakened: a body team the viewer does not belong to → 400', async () => {
+  const r = await fetch(`${base}/ui/api/label`, {
+    method: 'POST', headers: { ...multiViewer, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: 'team-c', repo: 'acme/widgets', number: 5, label: 'ready', action: 'add' }),
+  });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'select a team you are a member of');
+});
+
+test('#1651 POST /ui/api/pref: last-used persists for a multi-team viewer (team from body)', async () => {
+  const r = await fetch(`${base}/ui/api/pref`, {
+    method: 'POST', headers: { ...multiViewer, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ team: 'team-a', repo: 'acme/widgets', state: 'open' }),
+  });
+  assert.equal(r.status, 200);
+  const prefs = fs.readdirSync(path.join(stateDir, 'prefs'));
+  assert.equal(prefs.some((f) => f.startsWith('team-a__alice')), true);
+});
+
 test('GET /ui/api/context restores the most-recently-used team + each team\'s own last view (#1650)', async () => {
   // two authorized teams with credentials pushed (replaces the map; team-a kept)
   const tok = mint('github-issues', '_internal', SECRET);

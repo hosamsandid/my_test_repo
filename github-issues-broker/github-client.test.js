@@ -27,6 +27,69 @@ test('buildRequest list_issues clamps + defaults state/page/per_page', () => {
   assert.match(r3.path, /state=open&per_page=30&page=1$/);
 });
 
+test('sanitizeSearchTerms strips qualifier colons and collapses whitespace', () => {
+  assert.equal(gh.sanitizeSearchTerms('  fix   login  '), 'fix login');
+  // a user-typed qualifier is neutralised (colon → space), so it can never
+  // broaden the scope or reach the body
+  assert.equal(gh.sanitizeSearchTerms('repo:evil/x in:body secret'), 'repo evil/x in body secret');
+  assert.equal(gh.sanitizeSearchTerms(''), '');
+  assert.equal(gh.sanitizeSearchTerms(null), '');
+});
+
+test('buildSearchQuery scopes to the repo, title and type — user text leads', () => {
+  assert.equal(
+    gh.buildSearchQuery({ owner: 'acme', name: 'widgets', text: 'login bug', state: 'open' }),
+    'login bug repo:acme/widgets type:issue in:title state:open',
+  );
+  // state:all drops the state qualifier
+  assert.equal(
+    gh.buildSearchQuery({ owner: 'a', name: 'b', text: 'x', state: 'all' }),
+    'x repo:a/b type:issue in:title',
+  );
+  // an empty query still returns the repo's issues (no title constraint)
+  assert.equal(
+    gh.buildSearchQuery({ owner: 'a', name: 'b', text: '', state: 'closed' }),
+    'repo:a/b type:issue in:title state:closed',
+  );
+  // an injected qualifier is defused before it reaches q
+  assert.equal(
+    gh.buildSearchQuery({ owner: 'a', name: 'b', text: 'repo:other/z', state: 'open' }),
+    'repo other/z repo:a/b type:issue in:title state:open',
+  );
+});
+
+test('buildRequest search_issues targets /search/issues with an encoded q + paging', () => {
+  const r = gh.buildRequest('search_issues', { repo: 'acme/widgets', text: 'log in', state: 'open', page: 2, perPage: 999 });
+  assert.equal(r.method, 'GET');
+  assert.equal(
+    r.path,
+    '/search/issues?q=' + encodeURIComponent('log in repo:acme/widgets type:issue in:title state:open') + '&per_page=100&page=2',
+  );
+  // defaults: state→open, page→1, per_page→30
+  const d = gh.buildRequest('search_issues', { repo: 'a/b' });
+  assert.match(d.path, /per_page=30&page=1$/);
+  assert.match(decodeURIComponent(d.path), /repo:a\/b type:issue in:title state:open/);
+  // an invalid repo is still rejected before any path is built
+  assert.throws(() => gh.buildRequest('search_issues', { repo: 'bad repo' }), /invalid repository/);
+});
+
+test('shapeSearchResult narrows items, drops PRs and surfaces total/incomplete', () => {
+  const shaped = gh.shapeSearchResult({
+    total_count: 42,
+    incomplete_results: true,
+    items: [
+      { number: 3, title: 'Real', state: 'open', labels: [] },
+      { number: 4, title: 'A PR', state: 'open', pull_request: { url: 'x' } },
+    ],
+  });
+  assert.equal(shaped.issues.length, 1);
+  assert.equal(shaped.issues[0].number, 3);
+  assert.equal(shaped.totalCount, 42);
+  assert.equal(shaped.incompleteResults, true);
+  // a malformed payload degrades to an empty, safe shape
+  assert.deepEqual(gh.shapeSearchResult(null), { issues: [], totalCount: 0, incompleteResults: false });
+});
+
 test('buildRequest get_issue encodes the number and validates it', () => {
   assert.equal(gh.buildRequest('get_issue', { repo: 'a/b', number: 42 }).path, '/repos/a/b/issues/42');
   assert.throws(() => gh.buildRequest('get_issue', { repo: 'a/b', number: 0 }), /invalid issue number/);

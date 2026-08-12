@@ -33,10 +33,18 @@ const issues = [
   { number: 6, title: 'A PR', state: 'open', pull_request: { url: 'x' }, labels: [] },
 ];
 let addedLabel = false;
+let lastSearchQ = '';
 const fake = http.createServer((req, res) => {
   const [p] = req.url.split('?');
   const send = (c, o) => { res.writeHead(c, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
   if (p === '/repos/acme/widgets/issues') return send(200, issues);
+  if (p === '/search/issues') {
+    // echo the decoded q back so the test can assert the broker built the
+    // repo/title/type qualifiers; return the (non-PR) issue as a match.
+    const q = new URLSearchParams(req.url.split('?')[1] || '').get('q') || '';
+    lastSearchQ = q;
+    return send(200, { total_count: 1, incomplete_results: false, items: [issues[0]] });
+  }
   if (p === '/repos/acme/widgets/issues/5') return send(200, issues[0]);
   if (p === '/repos/acme/widgets/labels') return send(200, [{ name: 'ready', color: '84f5d0' }]);
   if (p === '/repos/acme/widgets/issues/5/labels' && req.method === 'POST') {
@@ -100,6 +108,32 @@ test('GET /ui/api/issues lists issues and drops pull requests', async () => {
   assert.equal(r.status, 200);
   assert.equal(body.issues.length, 1);
   assert.equal(body.issues[0].number, 5);
+});
+
+test('GET /ui/api/search runs a repo/title-scoped server-side search (#1658)', async () => {
+  const r = await fetch(`${base}/ui/api/search?team=team-a&repo=acme/widgets&state=open&q=${encodeURIComponent('real')}`, { headers: viewer(['team-a']) });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(body.issues.length, 1);
+  assert.equal(body.issues[0].number, 5);
+  assert.equal(body.page, 1);
+  assert.equal(body.totalCount, 1);
+  // the broker owns the qualifiers — user text leads, repo/title/type are added
+  assert.match(lastSearchQ, /^real repo:acme\/widgets type:issue in:title state:open$/);
+});
+
+test('GET /ui/api/search neutralises a user-typed qualifier (no scope escape, #1658)', async () => {
+  const r = await fetch(`${base}/ui/api/search?team=team-a&repo=acme/widgets&state=all&q=${encodeURIComponent('repo:other/z')}`, { headers: viewer(['team-a']) });
+  assert.equal(r.status, 200);
+  // the injected repo: is defused (colon stripped) and the broker's own
+  // repo:acme/widgets is the only repo qualifier; state:all drops the state term
+  assert.match(lastSearchQ, /repo other\/z repo:acme\/widgets type:issue in:title$/);
+  assert.equal(/state:/.test(lastSearchQ), false);
+});
+
+test('GET /ui/api/search enforces the repo authorization guard', async () => {
+  const out = await fetch(`${base}/ui/api/search?team=team-a&repo=acme/secret&q=x`, { headers: viewer(['team-a']) });
+  assert.equal(out.status, 403);
 });
 
 test('authorization guards: repo out of scope → 403, team not signed → 400', async () => {

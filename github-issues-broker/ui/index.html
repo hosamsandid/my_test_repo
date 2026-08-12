@@ -55,11 +55,17 @@
 
   <div class="layout">
     <div class="list-pane" id="listPane">
+      <div class="list-search">
+        <input id="searchInput" type="search" autocomplete="off"
+               placeholder="Filter by title…" aria-label="Filter issues by title" />
+      </div>
       <div class="skeleton hidden" id="listSkeleton" aria-busy="true"></div>
       <ul class="issue-list" id="issueList"></ul>
       <div class="empty hidden" id="listEmpty"></div>
-      <div class="list-more hidden" id="listMore">
-        <button class="btn ghost" id="moreBtn">Load more</button>
+      <div class="pager hidden" id="pager">
+        <button class="btn ghost" id="prevBtn" disabled>‹ Previous</button>
+        <span class="pager-info" id="pagerInfo"></span>
+        <button class="btn ghost" id="nextBtn" disabled>Next ›</button>
       </div>
     </div>
 
@@ -72,6 +78,7 @@
   <div class="err hidden" id="err"></div>
 
   <script src="markdown.js"></script>
+  <script src="issue-list.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

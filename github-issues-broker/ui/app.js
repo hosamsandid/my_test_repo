@@ -61,6 +61,14 @@
       });
   }
 
+  // Pure view helpers (issue-list.js UMD, loaded before app.js). Defensive
+  // fallbacks keep the UI usable if that script fails to load.
+  var IssueList = window.AEEIssueList || {
+    normalizeQuery: function (t) { return String(t == null ? '' : t).trim(); },
+    pagerState: function (p, m) { return { page: p, hasPrev: p > 1, hasNext: !!m, label: 'Page ' + p }; },
+    emptyMessage: function (q, s) { return q ? 'No issues match “' + q + '”.' : 'No ' + (s === 'all' ? '' : s + ' ') + 'issues in this repository.'; },
+  };
+
   // ── state ───────────────────────────────────────────────────────────────────
   var teams = [];          // [{teamId, teamName, repos, hasToken, flowLabels}]
   var team = null;         // selected teamId
@@ -68,6 +76,8 @@
   var state = 'open';
   var page = 1;
   var issues = [];
+  var hasMore = false;     // server's paging signal for the current view
+  var searchText = '';     // ephemeral title filter (reset on reload, never stored)
   var selected = null;     // selected issue number
 
   function currentTeam() { return teams.filter(function (t) { return t.teamId === team; })[0] || null; }
@@ -116,32 +126,58 @@
   // ── issue list ───────────────────────────────────────────────────────────────
   function skeleton(on) { $('listSkeleton').classList.toggle('hidden', !on); }
 
-  function loadIssues(reset) {
+  // Reset to the first page (new team/repo/state, or a new search query) and load.
+  function resetAndLoad() {
+    page = 1; selected = null; renderDetail(null);
+    loadList();
+  }
+
+  // Load the current page — the normal listing, or a server-side title search
+  // when the filter box is non-empty (#1658). Each page REPLACES the list (no
+  // more unbounded append); the pager moves between pages. Search and listing
+  // share the same pager (AC7) and the same server paging signal (AC2).
+  function loadList() {
     var t = currentTeam();
-    if (!t || !repo || !t.hasToken) { $('issueList').innerHTML = ''; renderListEmpty(); return; }
-    if (reset) { page = 1; issues = []; selected = null; renderDetail(null); }
+    if (!t || !repo || !t.hasToken) { issues = []; hasMore = false; $('issueList').innerHTML = ''; renderPager(); renderListEmpty(); return; }
     skeleton(true);
     $('listEmpty').classList.add('hidden');
-    req('/issues?team=' + encodeURIComponent(team) + '&repo=' + encodeURIComponent(repo) + '&state=' + encodeURIComponent(state) + '&page=' + page)
+    var q = IssueList.normalizeQuery(searchText);
+    var common = 'team=' + encodeURIComponent(team) + '&repo=' + encodeURIComponent(repo) + '&state=' + encodeURIComponent(state) + '&page=' + page;
+    var path = q ? '/search?' + common + '&q=' + encodeURIComponent(q) : '/issues?' + common;
+    req(path)
       .then(function (data) {
         skeleton(false);
-        issues = issues.concat(data.issues || []);
+        issues = data.issues || [];
+        hasMore = !!data.hasMore;
         renderIssueList();
-        $('listMore').classList.toggle('hidden', !data.hasMore);
+        renderPager();
       })
       .catch(function (err) {
         skeleton(false);
+        issues = []; hasMore = false;
         renderIssueList();
+        renderPager();
+        // never surface a raw 4xx/5xx — req() already carries the broker's
+        // friendly message (rate limit, token, etc.)
         if (err.code === 'no-token') banner(err.message);
         else setErr(err.message);
       });
+  }
+
+  function renderPager() {
+    var st = IssueList.pagerState(page, hasMore);
+    $('prevBtn').disabled = !st.hasPrev;
+    $('nextBtn').disabled = !st.hasNext;
+    $('pagerInfo').textContent = st.label;
+    // hide the pager entirely when there is nothing to page through
+    $('pager').classList.toggle('hidden', !st.hasPrev && !st.hasNext);
   }
 
   function renderListEmpty() {
     var t = currentTeam();
     var e = $('listEmpty');
     if (!t || !t.repos || !t.repos.length || !t.hasToken) { e.classList.add('hidden'); return; }
-    if (!issues.length) { e.textContent = 'No ' + (state === 'all' ? '' : state + ' ') + 'issues in this repository.'; e.classList.remove('hidden'); }
+    if (!issues.length) { e.textContent = IssueList.emptyMessage(searchText, state); e.classList.remove('hidden'); }
     else e.classList.add('hidden');
   }
 
@@ -327,7 +363,7 @@
       renderRepoSelect();
       $('stateSelect').value = state;
       updateBanner();
-      loadIssues(true);
+      loadList();
     }).catch(function (err) { setErr(err.message); });
   }
 
@@ -340,12 +376,25 @@
     repo = (t && t.lastRepo) || null;
     state = (t && t.lastState) || 'open';
     $('stateSelect').value = state;
-    renderRepoSelect(); updateBanner(); saveLocal(); persistPref(); loadIssues(true);
+    renderRepoSelect(); updateBanner(); saveLocal(); persistPref(); resetAndLoad();
   });
-  $('repoSelect').addEventListener('change', function (e) { repo = e.target.value; saveLocal(); persistPref(); loadIssues(true); });
-  $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); persistPref(); loadIssues(true); });
-  $('refreshBtn').addEventListener('click', function () { loadIssues(true); });
-  $('moreBtn').addEventListener('click', function () { page += 1; loadIssues(false); });
+  $('repoSelect').addEventListener('change', function (e) { repo = e.target.value; saveLocal(); persistPref(); resetAndLoad(); });
+  // A state change re-runs the current view (listing OR search) at page 1, so a
+  // search respects the selected state (AC8) and pagination resets (AC3/AC7).
+  $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); persistPref(); resetAndLoad(); });
+  $('refreshBtn').addEventListener('click', function () { loadList(); });
+  $('prevBtn').addEventListener('click', function () { if (page > 1) { page -= 1; loadList(); } });
+  $('nextBtn').addEventListener('click', function () { if (hasMore) { page += 1; loadList(); } });
+
+  // Debounced title filter (AC4/AC11): typing does not fire a request per
+  // keystroke. Each new query resets to the first page (AC7); clearing the box
+  // (empty / whitespace-only) falls back to the normal listing (AC9).
+  var searchTimer = null;
+  $('searchInput').addEventListener('input', function (e) {
+    searchText = e.target.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(resetAndLoad, 300);
+  });
 
   // Follow the console's light/dark toggle live: the console (same origin as this
   // proxied iframe) writes the active theme to localStorage['eb-theme'], which

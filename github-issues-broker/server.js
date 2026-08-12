@@ -122,13 +122,18 @@ async function handleUiApi(req, res, apiPath, viewer) {
   // Discovery: the viewer's authorized teams (with repos + token state) and their
   // last-used selection — everything the selector + pre-selection (AC3–AC5) need.
   if (apiPath === '/context' && req.method === 'GET') {
-    const teams = (viewer.teamIds || []).map(teamContext);
-    // last-used: read whichever authorized team the pref names, else the first team
-    let lastUsed = null;
-    for (const t of teams) {
-      const pref = store.loadPref(t.teamId, actor);
-      if (pref && pref.repo) { lastUsed = { team: t.teamId, repo: pref.repo, state: pref.state || 'open' }; break; }
-    }
+    // Each team carries its OWN last selection (lastRepo/lastState) so switching
+    // back to an older project restores that project's own view (#1650 open-q1);
+    // `lastUsed` is the globally most-recently-used one, restored on reopen.
+    const teams = (viewer.teamIds || []).map((id) => {
+      const ctx = teamContext(id);
+      const pref = store.loadPref(id, actor);
+      return Object.assign(ctx, {
+        lastRepo: (pref && pref.repo) || null,
+        lastState: (pref && pref.state) || null,
+      });
+    });
+    const lastUsed = store.pickLastUsed(viewer.teamIds || [], actor);
     return sendJson(res, 200, { user: actor, teams, lastUsed });
   }
 

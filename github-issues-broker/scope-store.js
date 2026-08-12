@@ -127,6 +127,30 @@ class ScopeStore {
     return doc;
   }
 
+  // The user's globally most-recently-used selection across a set of authorized
+  // scopes (#1650). Each scope keeps its own `{repo, state, updatedAt}` pref;
+  // this picks the ONE whose `updatedAt` is latest so reopening restores the
+  // project the user actually used last — not whichever scope happens to sort
+  // first (the AC2 defect). A pref with no `repo` is ignored (never usefully
+  // restorable). Ties / missing timestamps fall back to `scopeIds` order, so a
+  // single-scope user and pre-#1650 prefs (no `updatedAt`) behave as before.
+  // Authorization is unaffected: the named repo is re-checked by `tokenForRepo`
+  // on the actual list call, so a stale/out-of-scope repo can never grant access.
+  pickLastUsed(scopeIds, userSub) {
+    let best = null;
+    let bestMs = -1;
+    for (const scopeId of Array.isArray(scopeIds) ? scopeIds : []) {
+      const pref = this.loadPref(scopeId, userSub);
+      if (!pref || !pref.repo) continue;
+      const ms = Date.parse(pref.updatedAt) || 0;
+      if (ms > bestMs) {
+        bestMs = ms;
+        best = { team: String(scopeId), repo: String(pref.repo), state: pref.state || 'open' };
+      }
+    }
+    return best;
+  }
+
   // Count persisted pref objects for a scope (quota accounting on the UI path).
   count(scopeId) {
     const dir = this.prefsDir();

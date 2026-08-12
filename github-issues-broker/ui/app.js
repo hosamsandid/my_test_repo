@@ -280,9 +280,18 @@
   }
 
   // ── events ───────────────────────────────────────────────────────────────────
-  $('teamSelect').addEventListener('change', function (e) { team = e.target.value; repo = null; renderRepoSelect(); updateBanner(); saveLocal(); persistPref(); loadIssues(true); });
+  $('teamSelect').addEventListener('change', function (e) {
+    team = e.target.value;
+    // restore this project's own last-used repo + state (#1650); renderRepoSelect
+    // validates the repo against the team's current list and falls back if stale
+    var t = currentTeam();
+    repo = (t && t.lastRepo) || null;
+    state = (t && t.lastState) || 'open';
+    $('stateSelect').value = state;
+    renderRepoSelect(); updateBanner(); saveLocal(); persistPref(); loadIssues(true);
+  });
   $('repoSelect').addEventListener('change', function (e) { repo = e.target.value; saveLocal(); persistPref(); loadIssues(true); });
-  $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); loadIssues(true); });
+  $('stateSelect').addEventListener('change', function (e) { state = e.target.value; saveLocal(); persistPref(); loadIssues(true); });
   $('refreshBtn').addEventListener('click', function () { loadIssues(true); });
   $('moreBtn').addEventListener('click', function () { page += 1; loadIssues(false); });
 

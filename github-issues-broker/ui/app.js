@@ -288,7 +288,9 @@
 
   function persistPref() {
     if (!team) return;
-    req('/pref', { method: 'POST', body: JSON.stringify({ repo: repo, state: state }) }).catch(function () { /* best-effort */ });
+    // team travels in the body (like writeLabel) so a multi-team viewer's pref
+    // resolves server-side — a POST carries no team query param (#1651).
+    req('/pref', { method: 'POST', body: JSON.stringify({ team: team, repo: repo, state: state }) }).catch(function () { /* best-effort */ });
   }
 
   boot();

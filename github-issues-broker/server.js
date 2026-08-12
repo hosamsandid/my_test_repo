@@ -132,10 +132,17 @@ async function handleUiApi(req, res, apiPath, viewer) {
     return sendJson(res, 200, { user: actor, teams, lastUsed });
   }
 
+  // Writes (POST) carry their selection in the JSON body — the same place this
+  // handler already reads `repo` from — while reads carry it in the query string.
+  // Read the body once up front so the team is resolved consistently from either
+  // source; without this a multi-team viewer's POST has no `team` query param and
+  // pickTeam rejects it (#1651).
+  const body = req.method === 'POST' ? parseJson(await readBody(req)) : {};
+
   // Everything below acts within one team+repo. Resolve + authorize both.
-  const team = pickTeam(viewer, params.get('team'));
+  const team = pickTeam(viewer, body.team || params.get('team'));
   if (!team) return sendJson(res, 400, { error: 'select a team you are a member of' });
-  const repo = params.get('repo') || '';
+  const repo = params.get('repo') || body.repo || '';
 
   if (apiPath === '/issues' && req.method === 'GET') {
     if (!repo) return sendJson(res, 400, { error: 'a repository is required' });
@@ -185,7 +192,6 @@ async function handleUiApi(req, res, apiPath, viewer) {
   }
 
   if (apiPath === '/label' && req.method === 'POST') {
-    const body = parseJson(await readBody(req));
     const number = Number(body.number);
     const label = String(body.label || '').trim();
     const action = body.action === 'remove' ? 'remove' : 'add';
@@ -207,7 +213,6 @@ async function handleUiApi(req, res, apiPath, viewer) {
   }
 
   if (apiPath === '/pref' && req.method === 'POST') {
-    const body = parseJson(await readBody(req));
     store.savePref(team, actor, { repo: body.repo || null, state: body.state || null, updatedAt: nowIso() });
     return sendJson(res, 200, { ok: true });
   }

@@ -13324,60 +13324,73 @@ async function main() {
     const resetReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reset-repos$/);
     if (resetReposMatch) {
       const agentId = decodeURIComponent(resetReposMatch[1]);
-      const cfg = loadAgentConfig(agentId);
-      if (!cfg) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Agent not found' }));
-        return;
-      }
-      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-      const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-      const workspace = agentDir(agentId);
-      const results = [];
-      for (const repo of repos) {
-        if (!repo?.url) continue;
-        const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
-        const repoPath = path.join(workspace, repoName);
-        let branch = repo.branch || null;
-        if (!fs.existsSync(path.join(repoPath, '.git'))) {
-          results.push({ repo: repoName, skipped: 'not-a-git-repo' });
-          continue;
+      // Git here is network-bound (fetch, up to a 30s timeout per repo) and the
+      // orchestrator runs on a single event loop the admin console proxies
+      // through — a synchronous fetch froze every in-flight console request for
+      // its whole duration (#1683). Run the whole reset asynchronously so the
+      // loop stays responsive while a slow fetch is in flight.
+      (async () => {
+        const cfg = loadAgentConfig(agentId);
+        if (!cfg) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Agent not found' }));
+          return;
         }
-        const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-        if (repo.sshKeyId) {
-          const keyPath = path.join(SSH_KEYS_DIR, repo.sshKeyId);
-          if (fs.existsSync(keyPath)) {
-            try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
-            gitEnv.GIT_SSH_COMMAND =
-              `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
-              ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
+        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+        const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+        const workspace = agentDir(agentId);
+        const results = [];
+        for (const repo of repos) {
+          if (!repo?.url) continue;
+          const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
+          const repoPath = path.join(workspace, repoName);
+          let branch = repo.branch || null;
+          if (!fs.existsSync(path.join(repoPath, '.git'))) {
+            results.push({ repo: repoName, skipped: 'not-a-git-repo' });
+            continue;
           }
-        }
-        try {
-          execFileSync('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 30_000 });
-          if (!branch) {
-            // No branch configured — resolve the remote's HEAD so we don't
-            // assume 'main'. Falls back to the locally checked-out branch if
-            // the remote HEAD ref isn't available (e.g. older git servers).
-            try {
-              execFileSync('git', ['remote', 'set-head', 'origin', '--auto'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-              branch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 })
-                .toString().trim().replace(/^origin\//, '');
-            } catch {
-              branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 }).toString().trim();
+          const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+          if (repo.sshKeyId) {
+            const keyPath = path.join(SSH_KEYS_DIR, repo.sshKeyId);
+            if (fs.existsSync(keyPath)) {
+              try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+              gitEnv.GIT_SSH_COMMAND =
+                `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
+                ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
             }
           }
-          execFileSync('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-          execFileSync('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-          results.push({ repo: repoName, branch, reset: true });
-        } catch (err) {
-          const detail = (err.stderr || err.stdout || err.message || '').toString().trim().slice(0, 200);
-          console.warn(`[Orchestrator] reset-repos ${agentId}/${repoName}: ${detail}`);
-          results.push({ repo: repoName, branch, failed: true, detail });
+          try {
+            await execFileP('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, timeout: 30_000 });
+            if (!branch) {
+              // No branch configured — resolve the remote's HEAD so we don't
+              // assume 'main'. Falls back to the locally checked-out branch if
+              // the remote HEAD ref isn't available (e.g. older git servers).
+              try {
+                await execFileP('git', ['remote', 'set-head', 'origin', '--auto'], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+                branch = (await execFileP('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: repoPath, env: gitEnv, timeout: 5_000 }))
+                  .stdout.toString().trim().replace(/^origin\//, '');
+              } catch {
+                branch = (await execFileP('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, env: gitEnv, timeout: 5_000 })).stdout.toString().trim();
+              }
+            }
+            await execFileP('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+            await execFileP('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+            results.push({ repo: repoName, branch, reset: true });
+          } catch (err) {
+            const detail = (err.stderr || err.stdout || err.message || '').toString().trim().slice(0, 200);
+            console.warn(`[Orchestrator] reset-repos ${agentId}/${repoName}: ${detail}`);
+            results.push({ repo: repoName, branch, failed: true, detail });
+          }
         }
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, results }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, results }));
+      })().catch((err) => {
+        console.warn(`[Orchestrator] reset-repos ${agentId}: ${err.message}`);
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'reset-repos-failed' }));
+        } catch { /* response already started */ }
+      });
       return;
     }
 

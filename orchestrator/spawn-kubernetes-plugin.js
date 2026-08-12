@@ -20,6 +20,16 @@
 // the AEE_PLUGIN_* env contract) are shared with the Podman path so the two
 // runtimes cannot drift on the substance.
 //
+// ── State-PVC reinstall race (#1698) ─────────────────────────────────────────
+// On GKE the per-plugin ReadWriteOnce state PVC deletes asynchronously (PD
+// detach ~1–2 min). A quick uninstall→reinstall used to 409-skip the create
+// against the still-Terminating PVC, which then finished deleting — leaving the
+// new pod referencing a PVC that no longer exists (FailedScheduling → Pending
+// forever). `ensureStatePvc` treats a Terminating PVC as *absent* and waits for
+// it to vanish before creating a fresh one; `reconcilePluginSidecars` also
+// self-heals an already-live broker whose state PVC went missing, so a wedge
+// recovers on the next reconcile instead of needing a manual uninstall.
+//
 // ── Reachability splits by plugin kind (concept §9) ──────────────────────────
 // A UI-only plugin (netzplan: capabilities: [], credentials: []) needs NO
 // NetworkPolicy: no agent talks to its broker, and the console reaches its
@@ -91,6 +101,11 @@ const IMAGE_PULL_SECRET = process.env.AEE_IMAGE_PULL_SECRET || '';
 const STATE_PVC_SIZE = process.env.AEE_PLUGIN_STATE_PVC_SIZE || '1Gi';
 // '' => the cluster default StorageClass (kind ships `standard`); set to pin one.
 const STORAGE_CLASS = process.env.AEE_PLUGIN_STORAGE_CLASS || '';
+// How long a (re)install waits for a still-Terminating state PVC from a recent
+// uninstall to fully disappear before giving up (#1698). On GKE a ReadWriteOnce
+// PVC's PD detach+delete is asynchronous (~1–2 min), so the default is generous.
+const PVC_DELETE_WAIT_MS = Number(process.env.AEE_PLUGIN_PVC_DELETE_WAIT_MS || 150000);
+const PVC_POLL_INTERVAL_MS = Number(process.env.AEE_PLUGIN_PVC_POLL_INTERVAL_MS || 2000);
 
 // Mount paths — MUST match the Podman path (plugin-runtime.js STATE_MOUNT /
 // AUDIT_MOUNT), because they become AEE_PLUGIN_STATE_DIR / AEE_PLUGIN_AUDIT_DIR
@@ -311,11 +326,66 @@ async function deleteIgnoreMissing(apiPath) {
   return r.status < 300 || r.status === 404;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Pure: what a GET on the state PVC means for (re)install.
+//   'absent'      — 404, safe to create.
+//   'terminating' — exists but carries a deletionTimestamp: an uninstall's
+//                   delete is still in flight; creating now 409-skips and the
+//                   PVC then vanishes, leaving the pod referencing a PVC that no
+//                   longer exists (#1698). Must wait for it to become 'absent'.
+//   'present'     — a live PVC we can reuse.
+//   'error'       — any other non-2xx (surfaced, not retried).
+function classifyPvcState(getResult) {
+  if (!getResult || getResult.status === 404) return 'absent';
+  if (getResult.status >= 300) return 'error';
+  const meta = getResult.body && getResult.body.metadata;
+  return meta && meta.deletionTimestamp ? 'terminating' : 'present';
+}
+
+// Create the state PVC, robust to a still-Terminating PVC left by a recent
+// uninstall (#1698). The bug this fixes: on GKE the per-plugin ReadWriteOnce
+// state PVC deletes asynchronously (PD detach ~1–2 min), so a quick reinstall's
+// naive create returns 409 → treated as "already exists" → skipped; the old PVC
+// then finishes deleting and the new pod references a PVC that no longer exists
+// → FailedScheduling ("persistentvolumeclaim … is being deleted / not found")
+// → Pending forever. So a Terminating PVC is treated as *absent*: wait (poll to
+// 404) for it to disappear, then create a fresh one. Injectable deps keep it
+// unit-testable without a live cluster.
+async function ensureStatePvc(manifest, opts = {}) {
+  const request = opts.request || k8sRequest;
+  const sleepFn = opts.sleepFn || sleep;
+  const now = opts.now || Date.now;
+  const deadlineMs = opts.deadlineMs != null ? opts.deadlineMs : PVC_DELETE_WAIT_MS;
+  const intervalMs = opts.intervalMs != null ? opts.intervalMs : PVC_POLL_INTERVAL_MS;
+  const name = statePvcName(manifest.id);
+  const start = now();
+  for (;;) {
+    const state = classifyPvcState(await request('GET', pvcsPath(name)));
+    if (state === 'present') return { ok: true, existed: true };
+    if (state === 'error') return { ok: false, status: 0, body: { reason: 'state PVC lookup failed', name } };
+    if (state === 'absent') {
+      const created = await request('POST', pvcsPath(), buildStatePvcManifest(manifest.id));
+      if (created.status < 300) return { ok: true, existed: false };
+      // 409 here means a lingering Terminating PVC re-materialised between the
+      // GET and the POST — loop back and wait it out rather than 409-skip.
+      if (created.status !== 409) return { ok: false, status: created.status, body: created.body };
+    }
+    // 'terminating', or an absent→409 race: wait for the old PVC to vanish.
+    if (now() - start >= deadlineMs) {
+      return { ok: false, status: 409, body: { reason: 'state PVC still terminating after wait', name } };
+    }
+    await sleepFn(intervalMs);
+  }
+}
+
 // Start a plugin's broker: PVC first (a Deployment referencing a missing PVC
 // stays Pending on FailedMount), then the Deployment, then the Service.
 async function startSidecar(manifest, dir = REGISTRY_DIR) {
   const secret = signingSecret(dir);
-  const pvc = await createIfAbsent(pvcsPath(), buildStatePvcManifest(manifest.id));
+  const pvc = await ensureStatePvc(manifest);
   if (!pvc.ok) throw new Error(`state PVC for ${manifest.id}: status=${pvc.status} body=${JSON.stringify(pvc.body)}`);
   const dep = await createIfAbsent(deploymentsPath(), buildDeploymentManifest(manifest, { signingSecret: secret }));
   if (!dep.ok) throw new Error(`deployment for ${manifest.id}: status=${dep.status} body=${JSON.stringify(dep.body)}`);
@@ -335,6 +405,48 @@ async function stopSidecar(pluginId) {
   const okPvc = await deleteIgnoreMissing(pvcsPath(statePvcName(pluginId)));
   console.log(`[spawn-kubernetes-plugin] stopped sidecar ${name} (deployment=${okDep} service=${okSvc} pvc=${okPvc})`);
   return okDep && okSvc && okPvc;
+}
+
+// Pure: which eligible plugins already have a live Deployment (so reconcile
+// leaves them running) and therefore should have their state PVC checked for
+// the #1698 wedge. A plugin missing its Deployment is (re)started by toStart and
+// its PVC is (re)created there — it is not a self-heal candidate.
+function healableStatePvcIds(eligibleIds, existingDeployments) {
+  const liveIds = new Set((existingDeployments || []).map(deploymentPluginId).filter(Boolean));
+  return (eligibleIds || []).filter((id) => liveIds.has(id));
+}
+
+// Self-heal the #1698 wedge: a broker whose Deployment exists but whose state
+// PVC was reaped (the reinstall race left the pod stuck FailedScheduling on a
+// PVC that "is being deleted / not found") never recovers on its own, because
+// reconcileSidecars sees the Deployment and considers the sidecar live. So for
+// each already-live eligible plugin we recreate the state PVC when it is absent.
+// Only 'absent' is acted on: a 'present' PVC is healthy and a 'terminating' one
+// belongs to an uninstall still in flight (that plugin would be a toStop orphan,
+// not eligible) — neither is recreated here, and reconcile never blocks waiting.
+// The stuck pod reschedules on the scheduler's own retry once the PVC exists.
+async function selfHealStatePvcs(ids, manifests, opts = {}) {
+  const request = opts.request || k8sRequest;
+  const healed = [];
+  const errors = [];
+  for (const id of ids) {
+    const manifest = manifests[id];
+    if (!manifest) continue;
+    try {
+      const state = classifyPvcState(await request('GET', pvcsPath(statePvcName(id))));
+      if (state !== 'absent') continue;
+      const created = await request('POST', pvcsPath(), buildStatePvcManifest(id));
+      if (created.status < 300 || created.status === 409) {
+        healed.push(id);
+        console.log(`[spawn-kubernetes-plugin] self-healed missing state PVC for ${id}`);
+      } else {
+        errors.push({ pluginId: id, phase: 'self-heal', error: `state PVC recreate status=${created.status}` });
+      }
+    } catch (err) {
+      errors.push({ pluginId: id, phase: 'self-heal', error: err.message });
+    }
+  }
+  return { healed, errors };
 }
 
 // Ensure a Deployment+Service+PVC for each installed plugin, remove orphans of
@@ -365,7 +477,12 @@ async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
       errors.push({ pluginId, phase: 'start', error: err.message });
     }
   }
-  return { started, stopped, errors };
+  // Self-heal already-live brokers whose state PVC vanished (#1698).
+  const heal = await selfHealStatePvcs(healableStatePvcIds(eligibleIds, existing), manifests);
+  const healed = heal.healed;
+  errors.push(...heal.errors);
+
+  return { started, stopped, healed, errors };
 }
 
 // What is actually up, in the `{ Labels: { 'aee.plugin.id': id } }` shape the
@@ -406,6 +523,10 @@ module.exports = {
     deploymentPluginId,
     deploymentIsAvailable,
     manifestSupportsK8s,
+    classifyPvcState,
+    ensureStatePvc,
+    healableStatePvcIds,
+    selfHealStatePvcs,
     STATE_MOUNT,
     AUDIT_MOUNT,
     NAMESPACE,

@@ -20,6 +20,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
+| **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it; links to the Plugin System help page |
 | **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 

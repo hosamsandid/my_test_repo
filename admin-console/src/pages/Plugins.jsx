@@ -4,7 +4,9 @@ import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen } from 'luci
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
+import PluginTeamAssign from '../components/PluginTeamAssign';
 import { pluginRegistryRow } from './plugin-registry-view.js';
+import { grantableTeams } from './plugin-team-assign-view.js';
 
 // Plugin registry (#1547) — the operator-facing install surface for the plugin
 // system (docs/plugin-system-concept.md §4.1/§4.3).
@@ -77,7 +79,7 @@ function CapabilityCard({ cap }) {
   );
 }
 
-function PluginCard({ row, onInstall, onUninstall, busy }) {
+function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, onAssignChanged }) {
   return (
     <div style={{
       border: '1px solid var(--eb-border-default)',
@@ -161,12 +163,28 @@ function PluginCard({ row, onInstall, onUninstall, busy }) {
           )}
         </div>
       </div>
+
+      {/* Team assignment (#1691) — installed cards only, so it disappears with
+          the card on uninstall (AC9). Reuses the existing activation path. */}
+      {row.installed && (
+        <PluginTeamAssign
+          row={row}
+          teams={teams}
+          stackRuntime={stackRuntime}
+          onChanged={onAssignChanged}
+        />
+      )}
     </div>
   );
 }
 
 export default function Plugins() {
   const { data, loading, error, refetch } = useApi('/api/plugins');
+  // Grantable teams for the per-card assignment control (#1691). /api/agents is
+  // already team-scoped server-side, so every team here is one the caller may
+  // grant to; the activation proxy re-enforces the same visibility.
+  const { data: agentsData, refetch: refetchAgents } = useApi('/api/agents');
+  const teams = useMemo(() => grantableTeams(agentsData), [agentsData]);
   const [pending, setPending] = useState(null);   // row awaiting install confirm
   const [removing, setRemoving] = useState(null); // row awaiting uninstall confirm
   const [busy, setBusy] = useState(false);
@@ -229,7 +247,7 @@ export default function Plugins() {
     <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 600, margin: 0 }}>Plugins</h1>
-        <IconButton icon={RefreshCw} label="Refresh" onClick={refetch} disabled={loading} />
+        <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
         <Link to="/plugin-system" style={{
           display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
           marginLeft: 'auto', fontSize: 'var(--eb-text-sm)', fontWeight: 500,
@@ -268,7 +286,16 @@ export default function Plugins() {
         </div>
       )}
       {installed.map((row) => (
-        <PluginCard key={row.id} row={row} busy={busy} onInstall={setPending} onUninstall={setRemoving} />
+        <PluginCard
+          key={row.id}
+          row={row}
+          busy={busy}
+          onInstall={setPending}
+          onUninstall={setRemoving}
+          teams={teams}
+          stackRuntime={stackRuntime}
+          onAssignChanged={refetchAgents}
+        />
       ))}
 
       <h2 style={{ fontSize: 'var(--eb-text-base)', fontWeight: 600, marginTop: 'var(--eb-space-5)' }}>Available</h2>

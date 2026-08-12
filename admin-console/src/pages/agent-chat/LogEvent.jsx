@@ -97,7 +97,7 @@ export default function LogEvent({ event, dimmed = false, onMouseEnter, onMouseL
         }}
       >
         <RowMeta ts={event.ts} type="tool_use" />
-        <ToolBlock toolUse={event.toolUse} toolResult={event.toolResult} />
+        <ToolBlock toolUse={event.toolUse} toolResult={event.toolResult} taskSnapshot={event.taskSnapshot} />
       </div>
     );
   }
@@ -233,7 +233,10 @@ function Body({ event, expanded }) {
     case 'tool_use':
       // Standalone tool_use: render via ToolBlock as pending.
       return (
-        <ToolBlock toolUse={{ tool: event.tool, toolId: event.toolId, input: event.input }} />
+        <ToolBlock
+          toolUse={{ tool: event.tool, toolId: event.toolId, input: event.input }}
+          taskSnapshot={event.taskSnapshot}
+        />
       );
     case 'tool_result':
       // Standalone tool_result without a paired use — still show via

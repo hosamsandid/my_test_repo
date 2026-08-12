@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { RefreshCw, Download } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -89,18 +90,39 @@ const PLOT_HEIGHT = 180;
 const Y_AXIS_WIDTH = 48;
 const X_LABEL_HEIGHT = 44;
 
-function TimeSeries({ summary }) {
-  const { points, maxTotal } = useMemo(() => buildDaySeries(summary), [summary]);
+function TimeSeries({ summary, hidden, onToggle }) {
+  const { points } = useMemo(() => buildDaySeries(summary), [summary]);
+  // The axis + bar heights are driven by the currently-VISIBLE classes (#1707),
+  // so hiding the dominant cache series rescales the whole plot (AC4/AC5).
+  const maxTotal = useMemo(() => visibleMaxTotal(points, hidden), [points, hidden]);
   const { top, ticks } = useMemo(() => niceScale(maxTotal), [maxTotal]);
+  // With every series toggled off the chart has nothing to draw — show a short
+  // empty-state rather than a broken axis (Open Q3 / AC edge). The legend below
+  // stays interactive so the user can switch a series back on.
+  const allHidden = visibleClassList(hidden).length === 0;
   if (points.length === 0) {
-    return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>;
+    return (
+      <div>
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>No usage in this range.</div>
+        <Legend hidden={hidden} onToggle={onToggle} />
+      </div>
+    );
   }
   // Thin the x labels so a wide range (e.g. 30 days) never crowds — show at
   // most ~12, always including the first, each still centered under its bar.
   const labelStride = Math.max(1, Math.ceil(points.length / 12));
   return (
     <div>
-      <div style={{ display: 'flex', paddingTop: 8 }}>
+      <div style={{ display: 'flex', paddingTop: 8, position: 'relative' }}>
+        {allHidden ? (
+          <div style={{
+            position: 'absolute', left: Y_AXIS_WIDTH, right: 0, top: 8, height: PLOT_HEIGHT,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)', pointerEvents: 'none',
+          }}>
+            No series selected — click a legend item below to show it.
+          </div>
+        ) : null}
         {/* Y-axis: dynamically-scaled tick labels aligned to the gridlines. */}
         <div style={{ position: 'relative', width: Y_AXIS_WIDTH, height: PLOT_HEIGHT, flex: '0 0 auto' }}>
           {ticks.map((t) => (
@@ -130,16 +152,20 @@ function TimeSeries({ summary }) {
           ))}
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-2)', padding: '0 var(--eb-space-1)' }}>
             {points.map((p) => {
-              const segs = stackSegments(p.tokens, top);
-              const colHeightPct = top > 0 ? ((p.tokens.total || 0) / top) * 100 : 0;
+              const segs = stackSegments(p.tokens, top, hidden);
+              // Column height + segment shares are relative to the VISIBLE-class
+              // total for this day, not `tokens.total`, so a hidden class is
+              // removed from every stacked column (AC4).
+              const vTotal = visibleTotalTokens(p.tokens, hidden);
+              const colHeightPct = top > 0 ? (vTotal / top) * 100 : 0;
               return (
                 <div key={p.day} style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', minWidth: 8, height: '100%' }}>
                   <div
-                    title={`${p.day}: ${formatInt(p.tokens.total)} tokens, ${formatInt(p.invocations)} invocations`}
+                    title={`${p.day}: ${formatInt(vTotal)} tokens, ${formatInt(p.invocations)} invocations`}
                     style={{ width: '100%', maxWidth: 48, height: `${colHeightPct}%`, minHeight: colHeightPct > 0 ? 2 : 0, display: 'flex', flexDirection: 'column-reverse', borderRadius: 'var(--eb-radius-sm)', overflow: 'hidden' }}
                   >
                     {segs.map((s) => (
-                      <div key={s.key} style={{ height: `${(s.value / (p.tokens.total || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
+                      <div key={s.key} style={{ height: `${(s.value / (vTotal || 1)) * 100}%`, background: CLASS_COLOR[s.key] }} />
                     ))}
                   </div>
                 </div>
@@ -164,20 +190,47 @@ function TimeSeries({ summary }) {
           ))}
         </div>
       </div>
-      <Legend />
+      <Legend hidden={hidden} onToggle={onToggle} />
     </div>
   );
 }
 
-function Legend() {
+// Interactive legend (#1707): each entry is a real toggle button — click or
+// Enter/Space shows/hides its series, and `aria-pressed` exposes the on/off
+// state to assistive tech. A hidden series is dimmed with a hollow swatch and
+// struck-through label so the state is obvious at a glance (AC3/AC7).
+function Legend({ hidden, onToggle }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-2)' }}>
-      {TOKEN_CLASSES.map((c) => (
-        <span key={c.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-          <span style={{ width: 10, height: 10, borderRadius: 2, background: CLASS_COLOR[c.key], display: 'inline-block' }} />
-          {c.label}
-        </span>
-      ))}
+      {TOKEN_CLASSES.map((c) => {
+        const visible = isClassVisible(hidden, c.key);
+        return (
+          <button
+            key={c.key}
+            type="button"
+            onClick={() => onToggle(c.key)}
+            aria-pressed={visible}
+            title={visible ? `Hide ${c.label}` : `Show ${c.label}`}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '2px 4px', border: 'none', background: 'transparent',
+              fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+              color: 'var(--eb-text-secondary)', cursor: 'pointer',
+              opacity: visible ? 1 : 0.5,
+              textDecoration: visible ? 'none' : 'line-through',
+            }}
+          >
+            <span style={{
+              width: 10, height: 10, borderRadius: 2, display: 'inline-block',
+              // Hollow (outlined) swatch when hidden, filled when shown.
+              background: visible ? CLASS_COLOR[c.key] : 'transparent',
+              border: visible ? undefined : `1px solid ${CLASS_COLOR[c.key]}`,
+              boxSizing: 'border-box',
+            }} />
+            {c.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -229,6 +282,21 @@ function StatisticsTab({ team }) {
   const [rangeKey, setRangeKey] = useState('7d');
   const [groupBy, setGroupBy] = useState('agent');
   const { since } = useRangeWindow(rangeKey);
+
+  // Per-series chart visibility (#1707). Held as component state so it survives
+  // Refresh + range / Group-by changes within the visit (AC10), and mirrored to
+  // per-user localStorage for cross-reload persistence (Open Q2). `hidden` is
+  // the set of hidden class keys; empty = all four visible (AC9).
+  const { user } = useAuth();
+  const username = user?.username;
+  const [hidden, setHidden] = useState(() => loadHiddenClasses(username));
+  // Adopt the stored set once the username resolves (auth loads after mount).
+  useEffect(() => { setHidden(loadHiddenClasses(username)); }, [username]);
+  const toggleSeries = (key) => setHidden((cur) => {
+    const next = toggleHiddenClass(cur, key);
+    saveHiddenClasses(username, next);
+    return next;
+  });
 
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
   const teamQ = teamQuery(team);
@@ -294,7 +362,7 @@ function StatisticsTab({ team }) {
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-3)' }}>
           Tokens per day
         </div>
-        <TimeSeries summary={daySummary} />
+        <TimeSeries summary={daySummary} hidden={hidden} onToggle={toggleSeries} />
       </div>
 
       {loading ? (

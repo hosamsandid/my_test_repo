@@ -36,12 +36,18 @@ export function MaintenanceModeProvider({ children }) {
 
   // Ticks the displayed countdown down between polls so it doesn't sit
   // frozen for up to POLL_MS; each poll resync overwrites any drift.
+  // Only armed while maintenance is actually active (#1680): when it isn't,
+  // this provider wraps the whole app, so a 1s tick here would re-render every
+  // useMaintenanceMode() consumer once per second for nothing. Gated on
+  // status.active (not remainingSec) so the interval isn't recreated on every
+  // tick — it starts when maintenance begins and stops when it ends.
   useEffect(() => {
+    if (!status.active) return undefined;
     const timer = setInterval(() => {
       setStatus(s => (s.active && s.remainingSec > 0 ? { ...s, remainingSec: s.remainingSec - 1 } : s));
     }, TICK_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [status.active]);
 
   return (
     <MaintenanceModeContext.Provider value={status}>

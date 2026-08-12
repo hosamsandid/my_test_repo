@@ -51,10 +51,14 @@ export default function MaintenanceMode() {
   const [now, setNow] = useState(Date.now());
   const [activeSessions, setActiveSessions] = useState(0);
 
+  // The grace countdown only moves while maintenance is active (remainingSec is
+  // 0 otherwise), so only run the 1s clock tick then — no point re-rendering the
+  // whole page every second on an idle maintenance screen (#1680).
   useEffect(() => {
+    if (!data?.active) return undefined;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [data?.active]);
 
   useEffect(() => {
     const poll = () => {

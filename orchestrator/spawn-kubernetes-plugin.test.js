@@ -20,6 +20,10 @@ const {
   deploymentPluginId,
   deploymentIsAvailable,
   manifestSupportsK8s,
+  classifyPvcState,
+  ensureStatePvc,
+  healableStatePvcIds,
+  selfHealStatePvcs,
   STATE_MOUNT,
   AUDIT_MOUNT,
 } = _internal;
@@ -115,4 +119,130 @@ test('deploymentPluginId reads the plugin label; availability needs a ready repl
   assert.equal(deploymentIsAvailable({ status: { availableReplicas: 0 } }), false);
   assert.equal(deploymentIsAvailable({ status: {} }), false);
   assert.equal(deploymentPluginId({}), null);
+});
+
+// ── #1698: state-PVC reinstall race ──────────────────────────────────────────
+
+test('classifyPvcState distinguishes absent / terminating / present / error', () => {
+  assert.equal(classifyPvcState({ status: 404, body: { kind: 'Status' } }), 'absent');
+  assert.equal(classifyPvcState(null), 'absent');
+  assert.equal(
+    classifyPvcState({ status: 200, body: { metadata: { deletionTimestamp: '2026-08-12T12:00:00Z' } } }),
+    'terminating',
+    'a PVC carrying a deletionTimestamp is still Terminating',
+  );
+  assert.equal(classifyPvcState({ status: 200, body: { metadata: { name: 'x' } } }), 'present');
+  assert.equal(classifyPvcState({ status: 500, body: 'boom' }), 'error');
+});
+
+// A tiny recorder that answers GET with a scripted sequence of states and
+// records every (method, path) so we can assert the create actually fired.
+function fakeK8s(getResponses, { createStatus = 201 } = {}) {
+  const calls = [];
+  let getIdx = 0;
+  const request = async (method, apiPath) => {
+    calls.push({ method, apiPath });
+    if (method === 'GET') {
+      const r = getResponses[Math.min(getIdx, getResponses.length - 1)];
+      getIdx += 1;
+      return r;
+    }
+    if (method === 'POST') return { status: createStatus, body: {} };
+    return { status: 200, body: {} };
+  };
+  return { request, calls };
+}
+
+const opts = (request) => ({
+  request,
+  sleepFn: async () => {}, // never actually wait in tests
+  now: (() => { let t = 0; return () => (t += 1000); })(),
+  deadlineMs: 30000,
+  intervalMs: 1000,
+});
+
+test('ensureStatePvc creates when the PVC is absent', async () => {
+  const { request, calls } = fakeK8s([{ status: 404, body: {} }]);
+  const r = await ensureStatePvc(manifest(), opts(request));
+  assert.deepEqual(r, { ok: true, existed: false });
+  assert.ok(calls.some((c) => c.method === 'POST'), 'must POST-create the PVC');
+});
+
+test('ensureStatePvc reuses an existing (non-terminating) PVC without creating', async () => {
+  const { request, calls } = fakeK8s([{ status: 200, body: { metadata: { name: 'x' } } }]);
+  const r = await ensureStatePvc(manifest(), opts(request));
+  assert.deepEqual(r, { ok: true, existed: true });
+  assert.ok(!calls.some((c) => c.method === 'POST'), 'must not create when one is present');
+});
+
+test('ensureStatePvc waits out a Terminating PVC, then creates a fresh one (#1698)', async () => {
+  // Two polls see it Terminating, the third sees it gone → then create succeeds.
+  const term = { status: 200, body: { metadata: { deletionTimestamp: 'now' } } };
+  const { request, calls } = fakeK8s([term, term, { status: 404, body: {} }]);
+  const r = await ensureStatePvc(manifest(), opts(request));
+  assert.deepEqual(r, { ok: true, existed: false });
+  const gets = calls.filter((c) => c.method === 'GET').length;
+  assert.equal(gets, 3, 'polled until the terminating PVC disappeared');
+  assert.ok(calls.some((c) => c.method === 'POST'), 'created only after it was gone');
+});
+
+test('ensureStatePvc gives up (not ok) if the PVC stays Terminating past the deadline', async () => {
+  const term = { status: 200, body: { metadata: { deletionTimestamp: 'now' } } };
+  const { request } = fakeK8s([term]); // always terminating
+  const r = await ensureStatePvc(manifest(), { ...opts(request), deadlineMs: 2000, intervalMs: 1000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 409);
+});
+
+test('ensureStatePvc loops on an absent→409 create race instead of skipping', async () => {
+  // GET says absent, but the POST 409s (a lingering PVC re-materialised); next
+  // GET shows it gone and the retry create succeeds.
+  const calls = [];
+  let getIdx = 0;
+  let posts = 0;
+  const getSeq = [{ status: 404, body: {} }, { status: 404, body: {} }];
+  const request = async (method, apiPath) => {
+    calls.push({ method, apiPath });
+    if (method === 'GET') { const r = getSeq[Math.min(getIdx, getSeq.length - 1)]; getIdx += 1; return r; }
+    posts += 1;
+    return posts === 1 ? { status: 409, body: {} } : { status: 201, body: {} };
+  };
+  const r = await ensureStatePvc(manifest(), opts(request));
+  assert.deepEqual(r, { ok: true, existed: false });
+  assert.equal(posts, 2, 'retried the create after the 409 rather than treating it as success');
+});
+
+test('healableStatePvcIds is the eligible plugins that already have a live Deployment', () => {
+  const existing = [
+    { metadata: { labels: { [PLUGIN_ID_LABEL]: 'netzplan' } } },
+    { metadata: { labels: { [PLUGIN_ID_LABEL]: 'ghost' } } }, // not eligible
+  ];
+  assert.deepEqual(healableStatePvcIds(['netzplan', 'patterns'], existing), ['netzplan']);
+  assert.deepEqual(healableStatePvcIds([], existing), []);
+});
+
+test('selfHealStatePvcs recreates a missing PVC but leaves present/terminating alone', async () => {
+  const manifests = {
+    a: manifest({ id: 'a' }),
+    b: manifest({ id: 'b' }),
+    c: manifest({ id: 'c' }),
+  };
+  const getByPath = {
+    [statePvcName('a')]: { status: 404, body: {} }, // missing → recreate
+    [statePvcName('b')]: { status: 200, body: { metadata: {} } }, // present → skip
+    [statePvcName('c')]: { status: 200, body: { metadata: { deletionTimestamp: 'x' } } }, // terminating → skip
+  };
+  const posts = [];
+  const request = async (method, apiPath) => {
+    if (method === 'GET') {
+      const name = Object.keys(getByPath).find((n) => apiPath.endsWith(n));
+      return getByPath[name] || { status: 404, body: {} };
+    }
+    if (method === 'POST') { posts.push(apiPath); return { status: 201, body: {} }; }
+    return { status: 200, body: {} };
+  };
+  const r = await selfHealStatePvcs(['a', 'b', 'c'], manifests, { request });
+  assert.deepEqual(r.healed, ['a']);
+  assert.deepEqual(r.errors, []);
+  assert.equal(posts.length, 1, 'only the missing PVC was recreated');
 });

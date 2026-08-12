@@ -41,6 +41,34 @@ test('readRecords skips corrupt lines without throwing', () => {
   assert.deepEqual(recs.map((r) => r.agentId), ['d']);
 });
 
+test('readRecords caches on a repeat call and invalidates when a file changes (#1684)', () => {
+  writeDay('2026-07-20', [{ ts: '2026-07-20T09:00:00.000Z', agentId: 'p' }]);
+
+  const realRead = fs.readFileSync;
+  const reads = [];
+  fs.readFileSync = (p, ...a) => { if (String(p).includes('usage-2026-07-20')) reads.push(String(p)); return realRead.call(fs, p, ...a); };
+  try {
+    const first = usageLog.readRecords({ since: '2026-07-20T00:00:00.000Z' });
+    const afterCold = reads.length;
+    const second = usageLog.readRecords({ since: '2026-07-20T00:00:00.000Z' });
+    const afterWarm = reads.length;
+
+    assert.deepEqual(first.map(r => r.agentId), ['p']);
+    assert.deepEqual(second.map(r => r.agentId), ['p']);
+    assert.ok(afterCold >= 1, 'cold read parses the file');
+    assert.equal(afterWarm, afterCold, 'warm read is served from cache (no re-parse)');
+
+    // A fresh append changes the file signature (size/mtime) → cache busts.
+    fs.appendFileSync(path.join(TMP, 'usage-2026-07-20.jsonl'), JSON.stringify({ ts: '2026-07-20T10:00:00.000Z', agentId: 'q' }) + '\n');
+    const third = usageLog.readRecords({ since: '2026-07-20T00:00:00.000Z' });
+    assert.deepEqual(third.map(r => r.agentId).sort(), ['p', 'q'], 'new append is reflected, not stale');
+    assert.ok(reads.length > afterWarm, 'a changed file is re-read');
+  } finally {
+    fs.readFileSync = realRead;
+    fs.rmSync(path.join(TMP, 'usage-2026-07-20.jsonl'), { force: true });
+  }
+});
+
 test('readRecords returns [] when the directory does not exist', () => {
   fs.rmSync(TMP, { recursive: true, force: true });
   assert.deepEqual(usageLog.readRecords(), []);

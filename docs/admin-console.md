@@ -12,7 +12,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Plugin System** | `/plugin-system` | Persistent, self-contained concept/help page — what a plugin is, how it works technically, typical use cases, and how to build one; ungated (any authenticated user); **no sidebar nav entry** — reached via the "Learn about plugins" link on the Plugins page (#1638); direct links and bookmarks still work |
 | **Agents** | `/agents` | Create, edit, enable/disable, delete, export, import, clone, and save as template agents |
-| **Working Environments** | `/environments` | Reusable workspace recipes (skills, repos, GitHub token, model provider) |
+| **Working Environments** | `/environments` | Reusable workspace recipes (repos, GitHub token, model provider, MCP servers) |
 | **My Credentials** | `/my-credentials` | Self-service surface (any authenticated human, no `credAdmin` gate) to create/rotate/rename/delete your own **personal** SSH key and GitHub token; private to you (epic #1558) |
 | **SSH Keys** | `/ssh-keys` | Register team/system SSH key pairs for private repository access (personal keys live on My Credentials) |
 | **GitHub Tokens** | `/github-tokens` | Register team/system GitHub PATs for the GitHub event poller and HTTPS repository access (personal tokens live on My Credentials) |
@@ -20,6 +20,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Scheduled Jobs** | `/jobs` | Cross-agent view of all triggers; add/edit/delete cron, one-shot, webhook, and GitHub event triggers |
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
+| **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it; links to the Plugin System help page |
 | **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 

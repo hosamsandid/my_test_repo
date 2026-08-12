@@ -1583,6 +1583,65 @@ def _format_ask_user_question(tool_input) -> str | None:
     )
 
 
+def _ask_user_question_payload(tool_input) -> dict | None:
+    """Structured `AskUserQuestion` data for the Agent Chat quick-reply UI (#1663).
+
+    Returns a JSON-serialisable payload the Admin Console renders as clickable
+    option buttons, or None when the input carries no usable single-choice
+    question. It is attached to the terminal chat message as `io.aee.ask-question`
+    *alongside* the human-readable Markdown `body` (`_format_ask_user_question`),
+    so a Matrix client that cannot render the buttons still sees the full
+    question + options as text (graceful degradation, AC8).
+
+    MVP is single-choice (D1): a `multiSelect: true` question is deliberately
+    omitted from the interactive payload — it still reaches the human as the text
+    body, and the UI leaves it as plain text (AC4). Each option gets a stable
+    `optionId` (`<questionIndex>:<optionIndex>`) unique within the message so the
+    clicked answer can carry a structured identifier back (AC2 / D2).
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+
+    out_questions: list[dict] = []
+    for qi, q in enumerate(questions):
+        if not isinstance(q, dict):
+            continue
+        if q.get("multiSelect") is True:
+            continue  # single-choice only in the MVP (D1)
+        options = q.get("options")
+        if not isinstance(options, list):
+            continue
+        out_options: list[dict] = []
+        for oi, opt in enumerate(options):
+            if not isinstance(opt, dict):
+                continue
+            label = opt.get("label")
+            if not (isinstance(label, str) and label.strip()):
+                continue
+            entry = {"optionId": f"{qi}:{oi}", "label": label.strip()}
+            desc = opt.get("description")
+            if isinstance(desc, str) and desc.strip():
+                entry["description"] = desc.strip()
+            out_options.append(entry)
+        if not out_options:
+            continue
+        qentry: dict = {"questionId": f"q{qi}", "options": out_options}
+        header = q.get("header")
+        if isinstance(header, str) and header.strip():
+            qentry["header"] = header.strip()
+        text = q.get("question")
+        if isinstance(text, str) and text.strip():
+            qentry["question"] = text.strip()
+        out_questions.append(qentry)
+
+    if not out_questions:
+        return None
+    return {"version": 1, "questions": out_questions}
+
+
 # ---- status.json ----
 #
 # Shared between DM-listener path and trigger path. The Node reference
@@ -2987,6 +3046,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         _format_ask_user_question(ask_question_input)
         if ask_question_input is not None else None
     )
+    # Structured quick-reply payload (#1663): stashed onto the caller's
+    # run_context by reference (same channel as `_loopOutputTokens` above) so the
+    # DM path can attach it as `io.aee.ask-question` on the posted message without
+    # widening the return signature. None when the question is not renderable as
+    # single-choice buttons (e.g. multiSelect) — the text body still carries it.
+    if ask_reply is not None and isinstance(run_context, dict):
+        run_context["_askQuestion"] = _ask_user_question_payload(ask_question_input)
 
     if rc != 0:
         was_user_stop = _user_stop_requested
@@ -6506,12 +6572,17 @@ async def run_dm_listener() -> None:
             session = _new_session("dm", room_id=room_id, label="Direct message",
                                    correlation_id=correlation_id)
             _bump_active(+1, session)
+            # Passed by reference so _call_claude_once can stash a structured
+            # AskUserQuestion payload for the quick-reply UI (#1663) — otherwise
+            # inert (it is the default usage-record context either way).
+            dm_run_context = _base_run_context()
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
                 # arrive while a turn is in flight).
                 result = await asyncio.to_thread(
                     _call_claude, body, room_id, correlation_id, blueprint_id,
+                    CLAUDE_TIMEOUT_SEC, dm_run_context,
                 )
             finally:
                 _bump_active(-1, session)
@@ -6531,8 +6602,17 @@ async def run_dm_listener() -> None:
                     "misconfigured or the run was interrupted — check the agent container logs.)_"
                 )
 
+            # If the run paused on an AskUserQuestion, carry the structured
+            # options to the console so it can render clickable quick-reply
+            # buttons (#1663). Absent / multiSelect → plain text reply only.
+            ask_question = dm_run_context.get("_askQuestion")
+            extra_content = (
+                {"io.aee.ask-question": ask_question}
+                if isinstance(ask_question, dict) else None
+            )
+
             try:
-                event_id = await send_formatted(room_id, reply)
+                event_id = await send_formatted(room_id, reply, extra_content=extra_content)
             except Exception as exc:
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,

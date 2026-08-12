@@ -23,7 +23,7 @@ gehört dem Agenten, nicht dem Bediener.
 
 - **Multi-Repo.** Ein Agent-Workspace kann mehrere Git-Repos enthalten — entweder
   direkt im Workspace-Root oder in einem ersten Subdirectory (siehe
-  `getAgentGitRepos()` in `api.js:2465`). Die Diff-View arbeitet pro Repo; bei
+  `discoverGitRepos()` in `api.js`). Die Diff-View arbeitet pro Repo; bei
   mehreren wird ein Repo-Selector vorgeschaltet (Default: erstes Repo, das
   `isDirty: true` meldet, sonst das einzige Repo, sonst ein Hinweis-Stub).
 - **Vergleichsbasis.** Per Default vergleicht die View den **Working Tree gegen
@@ -40,9 +40,11 @@ gehört dem Agenten, nicht dem Bediener.
   kein `git checkout`, kein „revert this hunk“-Knopf. Die View ist eine
   **Inspektionshilfe**, nicht ein Git-Client.
 - **Performance.** `git status --porcelain=v1 -z` und `git diff` werden über
-  `spawnSync` mit kurzen Timeouts (5 s) aufgerufen — analog zum bestehenden
-  `readGitRepoInfo()`. Sehr große Diffs werden serverseitig gekappt
-  (s. §6).
+  `runGitAsync()` (async `execFile`, seit #1683 — vorher `spawnSync`) mit kurzen
+  Timeouts (5 s) aufgerufen, damit ein langsamer git-Aufruf den Event-Loop nicht
+  blockiert. Die Branch-Ermittlung liest `.git/HEAD` direkt (kein git-Prozess);
+  der `git-info`-Poll cached seinen Dirty-Status kurzlebig (`AEE_GIT_INFO_TTL_MS`,
+  Default 5 s). Sehr große Diffs werden serverseitig gekappt (s. §6).
 
 ## 3. UX
 
@@ -172,7 +174,8 @@ versehentlichem Renderen mehrere-MB-Diffs in der Liste.
 ## 4. Backend-API
 
 Zwei neue Endpoints, beide im Stil der bestehenden `workspace/*`-Routen
-(d. h. mit `AGENT_ID_RE`-Validierung, `safeAgentPath`, `spawnSync` mit Timeout).
+(d. h. mit `AGENT_ID_RE`-Validierung, `safeAgentPath`, git-Aufruf mit Timeout —
+seit #1683 async über `runGitAsync()`/`execFile`, davor `spawnSync`).
 
 ### 4.1 `GET /api/agents/:agentId/workspace/git-status`
 
@@ -251,7 +254,7 @@ Liefert den Diff einer einzelnen Datei.
   werden).
 - Deleted: vom `git diff` automatisch korrekt produziert (`/dev/null` als
   rechte Seite).
-- Cap: 1 MB Diff-Output (`spawnSync` `maxBuffer`), bei Überschreitung
+- Cap: 1 MB Diff-Output (`execFile` `maxBuffer`), bei Überschreitung
   `truncated: true` + abgeschnittenes `diff`.
 - Binäre Dateien: `git diff` emittiert nur die `Binary files differ`-Zeile,
   Backend erkennt das und setzt `binary: true`, `diff: ""`.
@@ -263,7 +266,7 @@ Liefert den Diff einer einzelnen Datei.
 - `repoPath` muss tatsächlich auf ein `.git`-Verzeichnis zeigen
   (Existenz-Check vor `git`-Spawn). Sonst 400 — verhindert, dass `git` aus
   einem Übergeordneten-Repo „raus-suchet“.
-- `spawnSync` ohne Shell, `timeout: 5000`, `maxBuffer: 1_000_000`.
+- `execFile` ohne Shell, `timeout: 5000`, `maxBuffer: 1_000_000`.
 - Args werden nicht durchs Templating zusammengebaut, sondern als
   Array-Form übergeben — kein Command-Injection-Risiko.
 

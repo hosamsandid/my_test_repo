@@ -94,8 +94,9 @@ function ErrorBox({ message }) {
 }
 
 // Process first (#428): the process choice is the entry decision — everything
-// else (environment, name, knowledge) qualifies it. As step 1, "Start blank in
-// the canvas" exits without losing any entered configuration.
+// else (environment, name, knowledge) qualifies it. The step lands directly on
+// the template/draft gallery (#1703); describe/blank-canvas authoring lives in
+// the "+ Create" launcher.
 const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
 
 function StepIndicator({ current, onStepClick }) {
@@ -759,7 +760,7 @@ export default function TeamSetup() {
     },
     // Process step (#422): the selected process-template bundle drives
     // team creation.
-    processMode: null,        // null | 'template' | 'describe'
+    processMode: null,        // null | 'template' (describe/blank moved to "+ Create", #1703)
     processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
     processBundle: null,      // processTemplateVersion-1 bundle
     processLints: null,       // authoritative lints for the current bundle
@@ -833,7 +834,7 @@ export default function TeamSetup() {
   function validateStep() {
     if (step === 0) {
       if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
-        return 'Pick a process template or describe a flow first';
+        return 'Pick a process template or saved draft first';
       }
       if ((form.processLints || []).some(l => l.severity === 'error')) {
         return 'The process has wiring errors — fix them before continuing';

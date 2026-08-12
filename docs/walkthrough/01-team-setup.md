@@ -16,7 +16,7 @@ Screenshot: wizard Process step with the Core SDLC template selected; flow previ
 
 The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
 
-Here you have three ways to start: you can use a curated template, you can describe the flow in plain language and let the Flow Copilot generate it, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+The step lands directly on the template gallery: you pick a curated template or one of your saved drafts. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow. (If you'd rather describe the flow in plain language and let the Flow Copilot generate it, or start with a blank canvas and design it free-form, those live in the "+ Create" launcher now — the wizard keeps a small "need a custom flow? use + Create" pointer for that.)
 
 Core SDLC gives us four agents that cover a complete build-and-review loop:
 

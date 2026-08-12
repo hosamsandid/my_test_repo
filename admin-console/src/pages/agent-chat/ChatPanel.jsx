@@ -15,6 +15,10 @@ import MessageInput from './MessageInput';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
 import { latestLoopProgress } from './loop-run-view.js';
+import {
+  ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
+  buildAnswerContent, indexAskAnswers, questionState,
+} from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
@@ -289,6 +293,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+            [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -335,6 +341,9 @@ export default function ChatPanel({
           body:     ev.content?.body || '',
           msgtype:  ev.content?.msgtype || 'm.text',
           'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+          'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+          [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+          [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
         }));
 
       const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -381,6 +390,8 @@ export default function ChatPanel({
       msgtype:  ev.content?.msgtype || 'm.text',
       'io.aee.trigger':  triggerMeta,
       'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+      [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+      [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
     };
 
     // A trigger-started run always posts this notice before invoking Claude
@@ -491,6 +502,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+            [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -866,7 +879,7 @@ export default function ChatPanel({
     }
   }
 
-  async function handleSend(text) {
+  async function handleSend(text, extraContent = null) {
     if (!roomId) return;
     const body = text.trim();
     if (!body) return;
@@ -881,12 +894,18 @@ export default function ChatPanel({
       ts,
       body,
       isOptimistic: true,
+      // Carry any structured payload (e.g. the quick-reply `io.aee.ask-answer`,
+      // #1663) onto the optimistic stub so the answered-question state reflects
+      // immediately, before the canonical event round-trips.
+      ...(extraContent && typeof extraContent === 'object' ? extraContent : {}),
     };
     setMessages(prev => [...prev, optimistic]);
     setSending(true);
     setError(null);
     try {
-      const resp = await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, { body });
+      const payload = { body };
+      if (extraContent && typeof extraContent === 'object') payload.extraContent = extraContent;
+      const resp = await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, payload);
       // Stamp the assigned Matrix event_id onto the optimistic stub so the
       // SSE handler can reconcile by exact id rather than a fuzzy body
       // match. If SSE already delivered the canonical event (stream faster
@@ -907,6 +926,25 @@ export default function ChatPanel({
     } finally {
       setSending(false);
     }
+  }
+
+  /* ─── 5a′. Quick-reply answer (#1663) ────────────────────────────────
+   * Clicking an AskUserQuestion option sends its label as the user's reply
+   * (the normal reply path, so the agent resumes exactly as if it were typed)
+   * plus a structured `io.aee.ask-answer` identifier referencing the question
+   * message. Selection is final (AC5): the optimistic reply lands after the
+   * question, so `questionState` immediately marks the buttons inert — and a
+   * guard here rejects a click once an answer already references this question,
+   * covering the rapid/duplicate-click case.
+   */
+  function handleAnswerQuestion(questionEventId, option) {
+    if (!questionEventId || !option?.label) return;
+    if (sending) return;
+    // Ignore a duplicate/late click for a question already answered.
+    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
+    if (already) return;
+    const extra = buildAnswerContent(questionEventId, option);
+    handleSend(option.label, extra);
   }
 
   /* ─── 5b. Attach files ───────────────────────────────────────────────
@@ -966,32 +1004,10 @@ export default function ChatPanel({
     return map;
   }, [messages, agent.userId]);
 
-  // Memoized transcript rows (#1676). Deliberately NOT keyed on
-  // `hoveredCorrelationId`: the cross-panel hover dim is driven by CSS
-  // (`data-cid` + a generated stylesheet), so a hover re-renders only that
-  // stylesheet, never this list. Each row carries a stable `data-cid` and the
-  // hover handlers are captured once here (both `onHoverCorrelation` and the
-  // per-row `cid` are stable), so the expensive Message/Shiki render is
-  // skipped by React.memo on every unrelated hover.
-  const transcriptRows = useMemo(() => messages.map(msg => {
-    if (msg.type === 'context-reset') {
-      return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
-    }
-    if (msg.type === 'user-stop') {
-      return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
-    }
-    const cid = correlationByEvent.get(msg.event_id) || null;
-    return (
-      <div
-        key={msg.event_id}
-        data-cid={cid || ''}
-        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-      >
-        <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
-      </div>
-    );
-  }), [messages, correlationByEvent, agent.userId, handleRelaunchLoop, onHoverCorrelation]);
+  // Quick-reply answers (#1663): map each answered question's event_id to the
+  // answer record, so a rendered AskUserQuestion can show which option was
+  // chosen and render its buttons inert (AC5 / AC6).
+  const askAnswersByQuestion = useMemo(() => indexAskAnswers(messages), [messages]);
 
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
   const lastMsg = messages[messages.length - 1];
@@ -1011,6 +1027,52 @@ export default function ChatPanel({
   const disabled = agent.enabled === false;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+
+  // Memoized transcript rows (#1676). Deliberately NOT keyed on
+  // `hoveredCorrelationId`: the cross-panel hover dim is driven by CSS
+  // (`data-cid` + a generated stylesheet), so a hover re-renders only that
+  // stylesheet, never this list. Each row carries a stable `data-cid` and the
+  // hover handlers are captured once here (both `onHoverCorrelation` and the
+  // per-row `cid` are stable), so the expensive Message/Shiki render is
+  // skipped by React.memo on every unrelated hover. Quick-reply state (#1663)
+  // rides along per row: a question is answerable only while it is the newest
+  // message and no answer references it; a disabled composer (offline /
+  // mid-send / maintenance) blocks a click either way.
+  const transcriptRows = useMemo(() => messages.map((msg, i) => {
+    if (msg.type === 'context-reset') {
+      return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
+    }
+    if (msg.type === 'user-stop') {
+      return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
+    }
+    const cid = correlationByEvent.get(msg.event_id) || null;
+    const isQuestion = !!msg[ASK_QUESTION_FIELD];
+    const qState = isQuestion
+      ? questionState({
+          index: i,
+          messageCount: messages.length,
+          answer: askAnswersByQuestion.get(msg.event_id),
+          disabled: disabled || !roomId || sending || maintenance.active,
+        })
+      : null;
+    return (
+      <div
+        key={msg.event_id}
+        data-cid={cid || ''}
+        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+      >
+        <Message
+          message={msg}
+          agentUserId={agent.userId}
+          onRelaunchLoop={handleRelaunchLoop}
+          onAnswerQuestion={handleAnswerQuestion}
+          questionAnswerable={qState?.answerable}
+          questionAnswer={qState}
+        />
+      </div>
+    );
+  }), [messages, correlationByEvent, agent.userId, handleRelaunchLoop, onHoverCorrelation, askAnswersByQuestion, handleAnswerQuestion, disabled, roomId, sending, maintenance.active]);
   // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
   // only needs to kick a session off for this agent and know whether one is
   // already running (to disable the entry point + quick dictation).

@@ -5,6 +5,8 @@ import rehypePrettyCode from 'rehype-pretty-code';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, Zap } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
+import AskQuestionCard from './AskQuestionCard';
+import { normalizeAskQuestion } from './ask-question-view.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -372,7 +374,29 @@ function NoticeMessage({ message }) {
   );
 }
 
-function Message({ message, agentUserId, thinking, onRelaunchLoop }) {
+function Message({
+  message, agentUserId, thinking, onRelaunchLoop,
+  onAnswerQuestion, questionAnswerable, questionAnswer,
+}) {
+  // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
+  // carries a structured `io.aee.ask-question` payload — render it as clickable
+  // option controls beneath the question. The plain Markdown `body` is what
+  // other Matrix clients show (AC8); we render the structured version here.
+  if (message.sender === agentUserId && message['io.aee.ask-question']) {
+    const q = normalizeAskQuestion(message['io.aee.ask-question']);
+    if (q) {
+      return (
+        <AskQuestionCard
+          question={q}
+          answerable={!!questionAnswerable}
+          answeredOptionId={questionAnswer?.answeredOptionId ?? null}
+          answeredLabel={questionAnswer?.answeredLabel ?? null}
+          onAnswer={(opt) => onAnswerQuestion?.(message.event_id, opt, q)}
+          time={formatMessageTime(message.ts)}
+        />
+      );
+    }
+  }
   // Finished-loop record (#1231): a persistent, re-runnable card that replaces
   // the plain terminal-outcome bubble in the Admin Console. The full narrative
   // stays available as the message `body` (shown in the card's "Run details").

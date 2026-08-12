@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react';
+import { isTaskTool, formatTodoSummary } from './task-todo.js';
 
 /**
  * Collapsible tool-use / tool-result block, ported from
@@ -14,15 +15,31 @@ import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react
  *   toolUse:    { tool, toolId, input }     — required
  *   toolResult: { ok, content }   | null    — optional; presence flips the
  *                                              block from "pending" to "done"
+ *   taskSnapshot: array | undefined         — for the task-tracking tools
+ *                                              (TaskCreate/TaskUpdate/TaskList/
+ *                                              TaskGet, #1662), the folded task
+ *                                              list as of this event, so the
+ *                                              summary/checklist reflect the
+ *                                              whole list, not one increment.
  */
-export default function ToolBlock({ toolUse, toolResult }) {
+export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
   const [open, setOpen] = useState(false);
 
   const tool = toolUse?.tool || 'tool';
   const input = toolUse?.input;
   const pending = !toolResult;
   const ok = toolResult?.ok !== false;
-  const summary = formatToolSummary(tool, input);
+
+  // Task-tracking tools render as a live checklist. Prefer the folded snapshot
+  // assembled from the incremental Task* events; fall back to a legacy
+  // TodoWrite call's own `input.todos` when no snapshot was threaded through.
+  const isTasky = isTaskTool(tool);
+  const todosForDisplay = Array.isArray(taskSnapshot)
+    ? taskSnapshot
+    : (tool === 'TodoWrite' && Array.isArray(input?.todos) ? input.todos : null);
+  const summary = todosForDisplay
+    ? formatTodoSummary(todosForDisplay)
+    : formatToolSummary(tool, input);
 
   let StatusIcon = Loader2;
   let statusColor = 'var(--eb-accent-primary)';
@@ -133,8 +150,8 @@ export default function ToolBlock({ toolUse, toolResult }) {
           overflowY: 'auto',
           background: 'var(--eb-bg-app)',
         }}>
-          {tool === 'TodoWrite' && Array.isArray(input?.todos) ? (
-            <TodoList todos={input.todos} />
+          {todosForDisplay ? (
+            <TodoList todos={todosForDisplay} />
           ) : input !== undefined && (
             <>
               <div style={{
@@ -156,7 +173,7 @@ export default function ToolBlock({ toolUse, toolResult }) {
             </>
           )}
 
-          {tool === 'TodoWrite' ? null : toolResult ? (
+          {isTasky ? null : toolResult ? (
             <>
               <div style={{
                 fontSize: 10,
@@ -211,16 +228,8 @@ function formatToolSummary(tool, input) {
   }
 }
 
-export function formatTodoSummary(todos) {
-  if (!Array.isArray(todos) || todos.length === 0) return '(no todos)';
-  const total = todos.length;
-  const done  = todos.filter(t => t?.status === 'completed').length;
-  const active = todos.find(t => t?.status === 'in_progress');
-  const label = active
-    ? (active.activeForm || active.content || '')
-    : (done === total ? 'all done' : (todos.find(t => t?.status === 'pending')?.content || ''));
-  return `${done}/${total} · ${truncate(label, 60)}`;
-}
+// `formatTodoSummary` now lives in the pure, unit-tested `task-todo.js` module
+// (#1662, #651 convention) and is imported at the top of this file.
 
 function truncate(s, n) {
   if (typeof s !== 'string') return '';

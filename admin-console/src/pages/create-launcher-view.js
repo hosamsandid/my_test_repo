@@ -55,8 +55,11 @@ const CREATE_ENTRIES = [
     title: 'Just give me one assistant to chat with',
     description:
       'Spin up a single assistant you can start talking to right away. No wiring, '
-      + 'no setup — the quickest path in.',
+      + 'no setup — the quickest path in. It is simply a team of one; grow it into a '
+      + 'full team whenever you need more.',
     // The merged single-agent form from Phase A (#1664) — the "Fast lane" (AC6).
+    // Kept as an explicit shortcut so users who just want one assistant are not
+    // forced through the right-sizing flow (#1667 Phase D, AC4).
     to: '/quickstart',
   },
 ];

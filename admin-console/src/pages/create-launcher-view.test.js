@@ -61,6 +61,22 @@ test('each entry wires to the existing backend/flow route (AC3–AC6)', () => {
   assert.equal(entryByKey('chat').to, '/quickstart');
 });
 
+test('#1667 Phase D — fast-lane tile frames a single agent as a team of one (AC3/AC4)', () => {
+  const chat = entryByKey('chat');
+  assert.ok(chat, 'the explicit fast-lane entry still exists (AC4)');
+  assert.equal(chat.to, '/quickstart', 'fast lane routes to the quickstart form (AC4)');
+  // Consistent "a single agent is a team of one" language in the launcher (AC3).
+  assert.match(chat.description, /team of one/i);
+  // No launcher entry may re-introduce a forced up-front agent-vs-team choice (AC1).
+  const forced = /\b(agent vs team|single agent vs team|choose (a )?(type|size)|which one)\b/i;
+  for (const e of createEntries()) {
+    assert.ok(
+      !forced.test(e.description),
+      `${e.key} description forces a mode choice: ${e.description}`,
+    );
+  }
+});
+
 test('entryByKey returns null for an unknown key and copies (no shared mutation)', () => {
   assert.equal(entryByKey('nope'), null);
   const a = entryByKey('describe');

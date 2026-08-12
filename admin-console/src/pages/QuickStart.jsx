@@ -8,6 +8,7 @@ import {
   quickstartBody,
   showRepoPrerequisites,
   canSubmitQuickstart,
+  QUICKSTART_COPY,
 } from './quickstart-view';
 
 const inputStyle = {
@@ -120,15 +121,14 @@ export default function QuickStart() {
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>Single Agent</h1>
+        }}>{QUICKSTART_COPY.heading}</h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
         }}>
-          Name your agent, pick a model provider, and start chatting. Point it at a
-          GitHub repository if you want it to read code — that part is optional.
+          {QUICKSTART_COPY.intro}
         </p>
       </div>
 
@@ -138,11 +138,7 @@ export default function QuickStart() {
         margin: 0,
         lineHeight: 1.6,
       }}>
-        Creates a single chat agent you can talk to right away. Add a repository and
-        it clones the code and can answer questions about it (SSH key + GitHub token
-        required); leave it empty for a repo-less assistant. Either way it does not
-        include automated code review, issue triage, or a development workflow — use
-        the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> for that.
+        {QUICKSTART_COPY.detail}
       </p>
 
       {!llmEndpointsLoading && !hasLlmEndpoints && (
@@ -442,9 +438,9 @@ export default function QuickStart() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Need a full development team instead?{' '}
+        {QUICKSTART_COPY.teamOfOneNote}{' '}
         <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
-          → Agent Team Wizard
+          {QUICKSTART_COPY.growCtaLabel} →
         </Link>
       </div>
     </div>

@@ -165,7 +165,7 @@ const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 const BREADCRUMBS = {
   '/create':       'Create',
-  '/quickstart':   'Single Agent',
+  '/quickstart':   'One assistant',
   '/team-setup':   'Agent Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',

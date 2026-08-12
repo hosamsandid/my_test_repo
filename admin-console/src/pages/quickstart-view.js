@@ -77,3 +77,51 @@ export function canSubmitQuickstart({
   }
   return !!hasLlmEndpoints && !!(displayName || '').trim() && !!selectedLlmId;
 }
+
+// --- Copy: Phase D framing (#1667, decision D5 — "a single agent is a team of
+// one") ---
+//
+// The fast lane produces ONE assistant: the smallest possible team, not a
+// separate "mode" the user picked instead of "team". So the heading and the
+// forward link frame a team as this same thing SCALED UP ("grow into a full
+// team") — never as an either/or the user must classify up front. Held here as
+// data so the reframing is unit-testable and QuickStart.jsx stays a thin
+// renderer (#651 convention).
+export const QUICKSTART_COPY = {
+  heading: 'Chat with one assistant',
+  intro:
+    'Name your assistant, pick a model provider, and start chatting. Point it at a '
+    + 'GitHub repository if you want it to read code — that part is optional.',
+  // Factual description of what the fast lane does — no wrong-mode nudge.
+  detail:
+    'Creates a single chat assistant you can talk to right away. Add a repository and '
+    + 'it clones the code and can answer questions about it (SSH key + GitHub token '
+    + 'required); leave it empty for a repo-less assistant.',
+  // A single agent is simply a team of one — growing into a full team is an
+  // optional next step, never a mode you should have chosen instead (AC1/AC3).
+  teamOfOneNote:
+    'A single agent is simply a team of one. When you want reviewers, a developer, '
+    + 'or a full development workflow, you can grow into a complete team — nothing to '
+    + 'decide up front.',
+  growCtaLabel: 'Grow into a full team',
+};
+
+// AC3 guard: none of the launcher-path (fast-lane) copy may frame single-vs-team
+// as a forced, up-front choice. Rejects the tell-tale mode-picker phrasings we
+// removed ("…team instead", "…for that", "agent vs team") AND requires the
+// "team of one" framing to be present. Expressed as a predicate so the reframe
+// is asserted, not eyeballed.
+export function fastLaneCopyForcesModeChoice(copy = QUICKSTART_COPY) {
+  const blob = Object.values(copy).join(' ').toLowerCase();
+  const forcedFraming = [
+    'agent vs team',
+    ' vs team',
+    'team instead',
+    'teams instead',
+    'for that', // "…use the Agent Team Wizard for that"
+    'single agent vs',
+  ];
+  const hasForcedFraming = forcedFraming.some((p) => blob.includes(p));
+  const hasTeamOfOne = blob.includes('team of one');
+  return hasForcedFraming || !hasTeamOfOne;
+}

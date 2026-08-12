@@ -8,6 +8,8 @@ import {
   repoPrerequisitesMet,
   showRepoPrerequisites,
   canSubmitQuickstart,
+  QUICKSTART_COPY,
+  fastLaneCopyForcesModeChoice,
 } from './quickstart-view.js';
 
 // --- hasRepoUrl: the single fork predicate ---------------------------------
@@ -93,4 +95,45 @@ test('canSubmit: repo path requires the GitHub prerequisites, independent of nam
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: true, hasSshKeys: true }), true);
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: true, hasSshKeys: false }), false);
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: false, hasSshKeys: true }), false);
+});
+
+// --- QUICKSTART_COPY: Phase D framing (#1667, decision D5) ------------------
+
+test('#1667 AC3: the fast-lane heading drops the "Single Agent" mode label', () => {
+  assert.equal(typeof QUICKSTART_COPY.heading, 'string');
+  assert.ok(QUICKSTART_COPY.heading.length > 0);
+  // The old heading was the mode label "Single Agent"; the reframe removes it.
+  assert.notEqual(QUICKSTART_COPY.heading, 'Single Agent');
+  assert.doesNotMatch(QUICKSTART_COPY.heading, /\bvs\b/i);
+});
+
+test('#1667 AC3: copy carries the "a single agent is a team of one" framing', () => {
+  assert.match(QUICKSTART_COPY.teamOfOneNote, /team of one/i);
+  // The forward link frames a team as this scaled up ("grow into"), not an
+  // alternative mode to pick instead.
+  assert.match(QUICKSTART_COPY.growCtaLabel, /grow/i);
+});
+
+test('#1667 AC1/AC3: no launcher-path copy forces an agent-vs-team choice', () => {
+  assert.equal(fastLaneCopyForcesModeChoice(), false);
+  // Regression guards: reinstating any removed wrong-mode phrasing must trip it.
+  assert.equal(
+    fastLaneCopyForcesModeChoice({
+      ...QUICKSTART_COPY,
+      teamOfOneNote: 'Need a full development team instead?',
+    }),
+    true,
+  );
+  assert.equal(
+    fastLaneCopyForcesModeChoice({
+      ...QUICKSTART_COPY,
+      detail: 'use the Agent Team Wizard for that.',
+    }),
+    true,
+  );
+  // Dropping the "team of one" framing entirely also fails the guard.
+  assert.equal(
+    fastLaneCopyForcesModeChoice({ ...QUICKSTART_COPY, teamOfOneNote: 'x' }),
+    true,
+  );
 });

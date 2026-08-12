@@ -62,13 +62,36 @@ export function chatSelectable(options) {
   return !!(options && options.canSwitch) && ((options.endpoints || []).length > 0);
 }
 
-// Trigger button view model: label, tone (override → accent) and the override dot.
+// The effective model's display label for the closed trigger button (#1704).
+// The effective model is the per-agent override, else the environment default
+// (mirrors chatSelection). Resolved against the current provider's catalogue
+// (options.models) so it reflects the display name; falls back to the raw id
+// when the catalogue lists it under no name. Returns null — so the caller omits
+// the model segment rather than rendering an empty "· " — whenever there is no
+// catalogue (no provider bound / empty catalogue) or no effective model.
+export function effectiveModelLabel(options) {
+  const models = (options && Array.isArray(options.models)) ? options.models : [];
+  if (models.length === 0) return null;
+  const modelId = (options && (options.override || options.defaultModelId)) || null;
+  if (!modelId) return null;
+  const model = models.find(m => m.id === modelId);
+  return plainModelLabel(model) || modelId;
+}
+
+// Trigger button view model: label, tone (override → accent) and the override
+// dot. The label shows the effective model alongside the provider — the
+// "<Provider> · <model>" convention the app-header assist selector uses (#1704),
+// so a user can tell at a glance which model the agent runs on without opening
+// the popover. The model segment is dropped in degraded states (no provider
+// bound, empty catalogue) so the button never shows a dangling "· ".
 export function chatTrigger(options) {
   const hasEndpoint = !!(options && options.endpointId);
   const overridden = !!(options && (options.endpointOverride || options.override));
-  const label = hasEndpoint
+  const provider = hasEndpoint
     ? (options.endpointName || options.endpointId)
     : 'Default (.env)';
+  const modelLabel = hasEndpoint ? effectiveModelLabel(options) : null;
+  const label = modelLabel ? `${provider} · ${modelLabel}` : provider;
   return {
     label,
     tone: overridden ? 'override' : 'default',

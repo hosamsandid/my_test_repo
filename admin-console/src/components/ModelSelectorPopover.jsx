@@ -242,6 +242,7 @@ export default function ModelSelectorPopover({
   return (
     <div ref={rootRef} style={{ position: 'relative' }}>
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         onClick={() => setOpen(!actualOpen)}

@@ -19,6 +19,7 @@ import LearningBadge from '../../components/LearningBadge';
 import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
+import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import {
   MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
   resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
@@ -770,14 +771,16 @@ export default function ChatPanel({
   // confirms/edits in the dialog, exactly like a fresh launch. If a loop is
   // already running the launcher can't open (the composer control is in Stop
   // mode), so surface that rather than silently doing nothing.
-  function handleRelaunchLoop(values) {
+  // Stable identity (#1676) so the memoized transcript rows don't re-render
+  // when this component re-renders for an unrelated reason (e.g. a hover).
+  const handleRelaunchLoop = useCallback((values) => {
     if (activeLoop) {
       setError('A loop is already running for this agent — stop it before starting another.');
       return;
     }
     setRelaunchValues(values || null);
     setLoopDialogOpen(true);
-  }
+  }, [activeLoop]);
 
   function closeLoopDialog() {
     setLoopDialogOpen(false);
@@ -962,6 +965,33 @@ export default function ChatPanel({
     }
     return map;
   }, [messages, agent.userId]);
+
+  // Memoized transcript rows (#1676). Deliberately NOT keyed on
+  // `hoveredCorrelationId`: the cross-panel hover dim is driven by CSS
+  // (`data-cid` + a generated stylesheet), so a hover re-renders only that
+  // stylesheet, never this list. Each row carries a stable `data-cid` and the
+  // hover handlers are captured once here (both `onHoverCorrelation` and the
+  // per-row `cid` are stable), so the expensive Message/Shiki render is
+  // skipped by React.memo on every unrelated hover.
+  const transcriptRows = useMemo(() => messages.map(msg => {
+    if (msg.type === 'context-reset') {
+      return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
+    }
+    if (msg.type === 'user-stop') {
+      return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
+    }
+    const cid = correlationByEvent.get(msg.event_id) || null;
+    return (
+      <div
+        key={msg.event_id}
+        data-cid={cid || ''}
+        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+      >
+        <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
+      </div>
+    );
+  }), [messages, correlationByEvent, agent.userId, handleRelaunchLoop, onHoverCorrelation]);
 
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
   const lastMsg = messages[messages.length - 1];
@@ -1285,6 +1315,7 @@ export default function ChatPanel({
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        data-hover-scope="chat"
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -1367,29 +1398,7 @@ export default function ChatPanel({
           </div>
         )}
 
-        {messages.map(msg => {
-          if (msg.type === 'context-reset') {
-            return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          if (msg.type === 'user-stop') {
-            return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          const cid = correlationByEvent.get(msg.event_id) || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          return (
-            <div
-              key={msg.event_id}
-              onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-              onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              style={{
-                opacity: dimmed ? 0.35 : 1,
-                transition: 'opacity 0.15s',
-              }}
-            >
-              <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
-            </div>
-          );
-        })}
+        {transcriptRows}
 
         {(showSendingDots || showThinking) && (
           <Message
@@ -1445,10 +1454,14 @@ export default function ChatPanel({
         meetingActive={!!transcription?.active}
       />
 
-      {/* Local keyframes for the spinner; scoped to this page render. */}
+      {/* Local keyframes for the spinner; scoped to this page render. The
+          cross-panel hover dim (#1676) is CSS-driven off `data-cid` so it
+          never re-renders the transcript — only this <style> updates. */}
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+        ${hoverBaseCss('chat')}
+        ${hoverDimCss('chat', hoveredCorrelationId)}
       `}</style>
 
       <ConfirmDialog

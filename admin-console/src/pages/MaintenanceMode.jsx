@@ -3,8 +3,7 @@ import { Wrench, PauseCircle, CheckCircle2, Activity } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
 import { countActiveSessions } from './active-sessions';
-
-const ACTIVE_SESSIONS_POLL_MS = 5_000;
+import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 
 function formatDuration(totalSec) {
   const sec = Math.max(0, Math.round(totalSec));
@@ -49,7 +48,9 @@ export default function MaintenanceMode() {
   const [formError, setFormError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [activeSessions, setActiveSessions] = useState(0);
+  // Platform-wide busy-session count, from the shared agent-status poll (#1677).
+  const statuses = useAgentStatuses();
+  const activeSessions = countActiveSessions(statuses);
 
   // The grace countdown only moves while maintenance is active (remainingSec is
   // 0 otherwise), so only run the 1s clock tick then — no point re-rendering the
@@ -59,18 +60,6 @@ export default function MaintenanceMode() {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [data?.active]);
-
-  useEffect(() => {
-    const poll = () => {
-      fetch('/api/agents/statuses')
-        .then((r) => (r.ok ? r.json() : []))
-        .then((list) => setActiveSessions(countActiveSessions(list)))
-        .catch(() => {});
-    };
-    poll();
-    const id = setInterval(poll, ACTIVE_SESSIONS_POLL_MS);
-    return () => clearInterval(id);
-  }, []);
 
   const remainingSec = useMemo(() => {
     if (!data || !data.active || !data.graceEndsAt) return 0;

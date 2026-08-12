@@ -8,6 +8,8 @@ import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
+import { useSessionsActive } from './SessionsActiveContext';
+import { removeSession } from './sessions-active';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -45,10 +47,11 @@ import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-even
  * nothing is being viewed.
  */
 
-const POLL_MS = 3_000;
 // Coarse cadence for the elapsed-time re-render tick (#1680). "started 5m ago"
 // doesn't need 1s granularity, and a 1s tick re-rendered this panel every
 // second whenever it was open; 30s keeps the label fresh without the churn.
+// (The active-sessions list itself is polled once for all consumers by
+// SessionsActiveContext, #1678 — this panel no longer polls it locally.)
 const ELAPSED_TICK_MS = 30_000;
 const HISTORY_LIMIT = 100;
 
@@ -126,9 +129,13 @@ export default function SessionsPanel({
   hoveredCorrelationId, onHoverCorrelation,
   onResumeSession, selectRequest = null,
 }) {
-  const [sessions, setSessions] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  // Active sessions come from the shared per-agent poll (#1678) — no rail-local
+  // timer. `setSessions` is the shared optimistic surface (Stop, deep-link);
+  // `pollError` is the poll's own failure. Action failures (Stop) keep a local
+  // error so they surface in the same banner without being clobbered by a poll.
+  const { sessions, loading, error: pollError, refresh, setSessions } = useSessionsActive();
+  const [actionError, setActionError] = useState(null);
+  const error = actionError || pollError;
   const [selectedId, setSelectedId] = useState(null);
   const [stoppingId, setStoppingId] = useState(null);
   // Force a re-render on a coarse cadence so elapsed-time labels stay fresh
@@ -158,38 +165,14 @@ export default function SessionsPanel({
   // requested session (outside the history window, log pruned, no DM room, …).
   const [notFound, setNotFound] = useState(null); // { correlationId } | null
 
-  const fetchSessions = useCallback(async () => {
-    if (!agentId) return;
-    try {
-      const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
-      setSessions(Array.isArray(data?.sessions) ? data.sessions : []);
-      setError(null);
-    } catch (err) {
-      setError(err.message || 'failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }, [agentId]);
-
+  // The active-sessions list itself is polled once for all consumers by
+  // SessionsActiveContext (#1678); this panel only keeps a per-second tick so
+  // the elapsed-time labels advance between polls while the tab is visible.
   useEffect(() => {
     if (!active || !agentId) return undefined;
-    setLoading(true);
-    let cancelled = false;
-    let timer = null;
-    const loop = async () => {
-      if (cancelled) return;
-      await fetchSessions();
-      if (cancelled) return;
-      timer = setTimeout(loop, POLL_MS);
-    };
-    loop();
     const tickTimer = setInterval(() => setTick(t => t + 1), ELAPSED_TICK_MS);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      clearInterval(tickTimer);
-    };
-  }, [active, agentId, fetchSessions]);
+    return () => clearInterval(tickTimer);
+  }, [active, agentId]);
 
   // Only the expanded dropdown (or a session picked out of it) needs the whole
   // page; resolving the default view needs just the newest slice (#910).
@@ -353,17 +336,20 @@ export default function SessionsPanel({
   const handleStop = useCallback(async (sessionId) => {
     if (!agentId || !sessionId || stoppingId) return;
     setStoppingId(sessionId);
+    setActionError(null);
     try {
       await apiCall('POST', `/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/stop`);
-      // Optimistically drop it — the next poll confirms. The runner posts the
-      // cancellation message to Matrix itself.
-      setSessions(prev => prev.filter(s => s.id !== sessionId));
+      // Optimistically drop it from the shared state — the badge and every
+      // consumer update at once; the next poll (or this refresh) confirms. The
+      // runner posts the cancellation message to Matrix itself.
+      setSessions(prev => removeSession(prev, sessionId));
+      refresh();
     } catch (err) {
-      setError(err.message || 'stop failed');
+      setActionError(err.message || 'stop failed');
     } finally {
       setStoppingId(null);
     }
-  }, [agentId, stoppingId]);
+  }, [agentId, stoppingId, setSessions, refresh]);
 
   const selectActive = useCallback((id) => {
     setHistoricalId(null);

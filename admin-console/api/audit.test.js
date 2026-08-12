@@ -99,6 +99,37 @@ test('auditMutations skips non-mutating methods and logs mutating ones on finish
   assert.equal(after[0].actor, 'dora');
 });
 
+test('recentEntries returns the newest N across day files, cost bounded by N (#1684)', () => {
+  // Far-future dates so these sort newest regardless of what earlier tests wrote
+  // into the shared AUDIT_DIR (the module captured the dir at load time).
+  const older = path.join(audit.AUDIT_DIR, 'audit-2099-12-30.jsonl');
+  const newer = path.join(audit.AUDIT_DIR, 'audit-2099-12-31.jsonl');
+  fs.writeFileSync(older,
+    Array.from({ length: 5 }, (_, i) => JSON.stringify({ ts: `2099-12-30T00:00:0${i}.000Z`, actor: `old-${i}` })).join('\n') + '\n');
+  fs.writeFileSync(newer,
+    Array.from({ length: 5 }, (_, i) => JSON.stringify({ ts: `2099-12-31T00:00:0${i}.000Z`, actor: `new-${i}` })).join('\n') + '\n');
+  try {
+    // Requesting 3 must return the newest 3 (from the newest day file), newest first.
+    const three = audit.recentEntries(3);
+    assert.deepEqual(three.map(e => e.actor), ['new-4', 'new-3', 'new-2']);
+
+    // Boundedness: reading 3 must not open the older day file at all.
+    const realOpen = fs.openSync;
+    const opened = [];
+    fs.openSync = (p, ...a) => { opened.push(path.basename(String(p))); return realOpen.call(fs, p, ...a); };
+    try { audit.recentEntries(3); } finally { fs.openSync = realOpen; }
+    assert.ok(!opened.includes('audit-2099-12-30.jsonl'), 'older day file must not be opened');
+    assert.ok(opened.includes('audit-2099-12-31.jsonl'));
+
+    // A page spanning the boundary still reads correctly, newest first.
+    const seven = audit.recentEntries(7);
+    assert.deepEqual(seven.map(e => e.actor), ['new-4', 'new-3', 'new-2', 'new-1', 'new-0', 'old-4', 'old-3']);
+  } finally {
+    fs.rmSync(older, { force: true });
+    fs.rmSync(newer, { force: true });
+  }
+});
+
 test('record never throws even when the directory is unwritable', () => {
   // A bogus event with a non-string ts still must not throw.
   assert.doesNotThrow(() => audit.record({ ts: 12345, actor: 'x' }));

@@ -3,12 +3,21 @@
 > **Update (#1190): the "Compose a process" option and the Flow-Weaver backend
 > were removed.** The stage-column composer, the custom-role dialog, and the
 > deterministic `POST /api/process/weave` engine (`admin-console/api/flow-weaver.js`)
-> no longer exist. The Process step now offers **three** entries — *Use a
-> template*, *Describe the flow* (Flow Copilot, #1047/#1070), and *Start blank in
-> the canvas*. Sections below that describe the composer/weaver are retained only
-> as history and marked accordingly; the template registry (#419) and catalog v2
-> (#420) survive because they still back the template gallery and the
-> wiring-suggestion feature.
+> no longer exist.
+>
+> **Update (#1703): the three-card chooser was removed — the Process step now
+> lands directly on the template/draft gallery.** *Describe the flow* (Flow
+> Copilot) and *Start blank in the canvas* moved to the unified **"+ Create"
+> launcher** (`/create`, #1665) now that it offers equally-ranked describe/blank
+> tiles, so the wizard's only remaining job is building a team from a ready-made
+> template/flow. The step keeps a lightweight "need a custom flow? use + Create"
+> pointer (and an empty-state link to `/create` when no templates/drafts exist);
+> the "Choose a different entry" back-to-chooser control is gone. The rows below
+> for *Describe the flow* / *Start blank* are retained only as history — those
+> entries no longer exist **inside the wizard** (the capabilities themselves are
+> unchanged, reachable via the launcher and the Flows editor). The template
+> registry (#419) and catalog v2 (#420) survive because they still back the
+> template gallery and the wiring-suggestion feature.
 
 The Team-Setup wizard and the Flow Designer used to be two separate worlds that
 both fed `POST /api/teams`: the wizard picked *flat role lists* from the

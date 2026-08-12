@@ -1,24 +1,21 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, Link } from 'react-router';
 import {
-  LayoutTemplate, PencilRuler, AlertCircle, AlertTriangle, Info,
-  CheckCircle, Loader2, X, Save, Workflow, Sparkles,
+  AlertCircle, AlertTriangle, Info,
+  CheckCircle, Loader2, Save, Workflow,
 } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
-import { assistHeaders, notifyAssistError } from '../../context/assist-transport.js';
 import { computePreviewLayout, previewEdgesFromGraph, ellipsize, PREVIEW } from './flow-preview-layout';
 import { EDGE_STYLES } from '../process/flow-graph-render';
-import { copilotErrorInfo, consumeCopilotStream, phaseLabel } from '../process/flow-copilot-view';
 
-// ─── Wizard "Process" step (#422) ────────────────────────────────────────────
-// Replaces the flat role-checkbox Members step in create mode. Three entries:
-//   • Use a template  — gallery of curated process templates (#419) + drafts
-//   • Describe        — plain-language description → the Flow Copilot endpoint
-//                       (#1070; same POST /api/process/copilot as the editor
-//                       panel — no second LLM/grounding path)
-//   • Blank canvas    — creates an empty draft and jumps to the Flows editor
-// Whatever the entry, the result is one processTemplate bundle on the form,
-// previewed as a mini flow + lint badges, and fed to POST /api/teams(/stream).
+// ─── Wizard "Process" step (#422, #1703) ─────────────────────────────────────
+// Template-only entry: the step lands directly on the template/draft gallery.
+// The former three-card chooser ("Use a template" / "Describe the flow" /
+// "Start blank in the canvas") is gone (#1703) — the describe (Flow Copilot)
+// and blank-canvas entries now live in the unified "+ Create" launcher (#1665),
+// so the wizard's only job is building a team from a ready-made template/flow.
+// The selection produces one processTemplate bundle on the form, previewed as a
+// mini flow + lint badges, and fed to POST /api/teams(/stream).
 
 const cardStyle = {
   background: 'var(--eb-bg-surface)',
@@ -39,19 +36,6 @@ const hintStyle = {
   fontSize: 'var(--eb-text-xs)',
   color: 'var(--eb-text-muted)',
   lineHeight: 1.5,
-};
-
-const selectStyle = {
-  width: '100%',
-  padding: 'var(--eb-space-2) var(--eb-space-3)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)',
-  color: 'var(--eb-text-primary)',
-  fontSize: 'var(--eb-text-sm)',
-  fontFamily: 'inherit',
-  outline: 'none',
-  boxSizing: 'border-box',
 };
 
 const tinyButtonStyle = {
@@ -259,23 +243,6 @@ export function BundleRolesSummary({ bundle, teamId }) {
   );
 }
 
-// ─── Entry cards ────────────────────────────────────────────────────────────
-
-function EntryCard({ icon: Icon, title, copy, onClick }) {
-  return (
-    <button type="button" onClick={onClick} style={{
-      ...cardStyle, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
-      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-    }}>
-      <Icon size={20} style={{ color: 'var(--eb-accent-primary)' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 'var(--eb-text-md)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>{title}</span>
-      </div>
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>{copy}</div>
-    </button>
-  );
-}
-
 // ─── The step ───────────────────────────────────────────────────────────────
 
 const SPIN_KEYFRAMES = <style>{'@keyframes team-setup-spin { to { transform: rotate(360deg); } }'}</style>;
@@ -344,60 +311,42 @@ export default function StepProcess({ form, setForm, templates, error }) {
     }
   }
 
-  async function startBlank() {
-    try {
-      const d = await apiCall('POST', '/api/process/drafts', { name: form.teamName?.trim() || 'New process' });
-      navigate(`/flows?proc=${encodeURIComponent(`draft:${d.id}`)}`);
-    } catch (err) {
-      setWeaveError(err.message || String(err));
-    }
-  }
-
-  // ── entry selection ──
-  if (!form.processMode) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        {SPIN_KEYFRAMES}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 'var(--eb-space-3)' }}>
-          <EntryCard icon={LayoutTemplate} title="Use a template"
-            copy="Start from a curated process (Core SDLC, Extended SDLC, …) or one of your saved drafts. One click, ready to review."
-            onClick={() => setForm(f => ({ ...f, processMode: 'template' }))} />
-          <EntryCard icon={Sparkles} title="Describe the flow"
-            copy="Write the process in plain language — roles, hand-offs, human gates. The Flow Copilot generates a validated flow you review here."
-            onClick={() => setForm(f => ({ ...f, processMode: 'describe' }))} />
-          <EntryCard icon={PencilRuler} title="Start blank in the canvas"
-            copy="Open an empty draft in the Flows editor and design the process free-form. Materialise it into a team later."
-            onClick={startBlank} />
+  // ── template / draft gallery (the only entry — #1703) ──
+  const gallery = [
+    ...((registry?.templates) || []).map(t => ({ ...t, kind: 'registry' })),
+    ...((Array.isArray(drafts) ? drafts : []) || []).map(d => ({
+      id: d.id, name: d.name, description: 'Saved draft from the Flows editor.',
+      roleCount: d.roleCount, stages: [], kind: 'draft',
+    })),
+  ];
+  return (
+    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {SPIN_KEYFRAMES}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+        <div style={labelStyle}>Pick a process template</div>
+        {/* Discoverability pointer (#1703): the describe / blank-canvas entries
+            moved to the "+ Create" launcher — keep a lightweight link so a user
+            who lands here can still reach them, without a full entry card. */}
+        <div style={hintStyle}>
+          Need a custom flow?{' '}
+          <Link to="/create" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>+ Create</Link>{' '}
+          can describe one or start blank in the canvas.
         </div>
-        {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
-        {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
       </div>
-    );
-  }
-
-  const backToEntry = (
-    <button type="button" style={tinyButtonStyle}
-      onClick={() => setForm(f => ({ ...f, processMode: null, processBundle: null, processTemplateId: null, processLints: null }))}>
-      <X size={11} /> Choose a different entry
-    </button>
-  );
-
-  // ── template gallery ──
-  if (form.processMode === 'template') {
-    const gallery = [
-      ...((registry?.templates) || []).map(t => ({ ...t, kind: 'registry' })),
-      ...((Array.isArray(drafts) ? drafts : []) || []).map(d => ({
-        id: d.id, name: d.name, description: 'Saved draft from the Flows editor.',
-        roleCount: d.roleCount, stages: [], kind: 'draft',
-      })),
-    ];
-    return (
-      <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        {SPIN_KEYFRAMES}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={labelStyle}>Pick a process template</div>
-          {backToEntry}
+      {gallery.length === 0 ? (
+        // Empty-state (#1703, open Q1): curated templates normally always ship,
+        // so this is an edge case — point the user at "+ Create" to author a
+        // flow first rather than showing a blank page.
+        <div style={{ ...hintStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <div>No process templates or saved drafts are available yet.</div>
+          <div>
+            Author a flow with{' '}
+            <Link to="/create" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>+ Create</Link>{' '}
+            (describe it or start blank in the canvas), then come back here to build a team from it.
+            If the curated pool looks empty, it may need seeding (`make seed-process-templates`).
+          </div>
         </div>
+      ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 'var(--eb-space-3)' }}>
           {gallery.map(t => {
             const selected = form.processTemplateId === `${t.kind === 'draft' ? 'draft' : 'registry'}:${t.id}`;
@@ -423,157 +372,12 @@ export default function StepProcess({ form, setForm, templates, error }) {
               </button>
             );
           })}
-          {gallery.length === 0 && <div style={hintStyle}>No process templates found — is the pool seeded (`make seed-process-templates`)?</div>}
-        </div>
-        {form.processBundle && (
-          <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
-        )}
-        {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
-        {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
-      </div>
-    );
-  }
-
-  // ── describe (#1070) ──
-  if (form.processMode === 'describe') {
-    return (
-      <DescribeSection
-        form={form} setForm={setForm} setBundle={setBundle}
-        previewGraph={previewGraph} lints={lints} lintLoading={lintLoading}
-        onSaveDraft={saveAsDraft} savingDraft={savingDraft}
-        backToEntry={backToEntry} error={error}
-      />
-    );
-  }
-
-  // processMode can only be null | 'template' | 'describe' — all handled above.
-  return null;
-}
-
-// ─── "Describe" entry (#1070) ────────────────────────────────────────────────
-// A minimal inline variant of the Flow-Copilot exchange: one description field,
-// regenerate on edit — no chat history (the full panel lives in the Flows
-// editor; "Save as draft & open in canvas" hands over to it). Calls the SAME
-// POST /api/process/copilot NDJSON endpoint as the panel; an ok:true bundle
-// lands in form.processBundle where the existing authoritative lint pass
-// (POST /api/flows/graph) gates submission exactly like every other entry.
-
-function DescribeSection({ form, setForm, setBundle, previewGraph, lints, lintLoading, onSaveDraft, savingDraft, backToEntry, error }) {
-  const [running, setRunning] = useState(false);
-  const [phase, setPhase] = useState(null);
-  const [genError, setGenError] = useState(null);   // copilotErrorInfo shape
-  const [summary, setSummary] = useState(null);
-  const [findings, setFindings] = useState(null);   // error lints of an ok:false result
-  const text = form.describeText || '';
-
-  async function generate() {
-    const trimmed = text.trim();
-    if (!trimmed || running) return;
-    setRunning(true); setPhase(null); setGenError(null); setSummary(null); setFindings(null);
-    try {
-      // Always a fresh whole-flow generation from the description (no bundle,
-      // no history) — editing the text and regenerating replaces the result.
-      const res = await fetch('/api/process/copilot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...assistHeaders() },
-        body: JSON.stringify({ messages: [{ role: 'user', content: trimmed }] }),
-      });
-      if (!res.ok) {
-        const b = await res.json().catch(() => null);
-        if (b && b.code) notifyAssistError(b.code);
-        setGenError(copilotErrorInfo(res.status, b && b.error));
-        return;
-      }
-      const out = await consumeCopilotStream(res, setPhase);
-      setSummary(out.summary || '');
-      if (out.ok && out.bundle) {
-        // Lands on the form like the template path; the lint effect
-        // in StepProcess re-checks it authoritatively.
-        setBundle(out.bundle, 'describe');
-      } else {
-        // Error-level findings survived the repair loop — keep the form
-        // untouched (an unappliable bundle must not reach submission) and let
-        // the user refine the description.
-        setFindings((out.lints || []).filter(l => l.severity === 'error'));
-      }
-    } catch (e) {
-      setGenError(copilotErrorInfo(e.status, e.message));
-    } finally {
-      setRunning(false);
-      setPhase(null);
-    }
-  }
-
-  return (
-    <div style={{ ...cardStyle, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {SPIN_KEYFRAMES}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={labelStyle}>Describe the flow</div>
-        {backToEntry}
-      </div>
-      <div style={hintStyle}>
-        Roles, hand-offs, human approval gates — in your own words. Example: <em>"an issue-triage agent
-        labels new issues, a Business Analyst refines them, a human approves with `ready`, a Developer
-        implements and opens a PR, a Code Reviewer routes to a Reworker or approves, a Merger merges."</em>
-      </div>
-      <textarea
-        value={text}
-        onChange={e => { const v = e.target.value; setForm(f => ({ ...f, describeText: v })); }}
-        rows={5}
-        autoFocus
-        disabled={running}
-        placeholder="Describe the process…"
-        style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5, opacity: running ? 0.6 : 1 }}
-      />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <button type="button" onClick={generate} disabled={running || !text.trim()} style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-          borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2) var(--eb-space-4)',
-          fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 600,
-          cursor: (running || !text.trim()) ? 'not-allowed' : 'pointer', opacity: (running || !text.trim()) ? 0.6 : 1,
-        }}>
-          {running
-            ? <Loader2 size={13} style={{ animation: 'team-setup-spin 0.9s linear infinite' }} />
-            : <Sparkles size={13} />}
-          {form.processBundle && form.processMode === 'describe' ? 'Regenerate' : 'Generate flow'}
-        </button>
-        {running && <span style={hintStyle}>{phaseLabel(phase)}</span>}
-      </div>
-
-      {genError && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{genError.message}</div>
-          {genError.kind === 'provider' && (
-            <div style={hintStyle}>
-              The Copilot needs a configured LLM —{' '}
-              <Link to="/models" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>add a Model Provider</Link>{' '}
-              and try again.
-            </div>
-          )}
         </div>
       )}
-
-      {findings && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
-            <AlertCircle size={13} /> The generated flow still has validation errors — refine the description and regenerate.
-          </div>
-          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {findings.map((l, i) => (
-              <li key={i} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{l.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {summary && form.processBundle && !findings && (
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>{summary}</div>
-      )}
-
       {form.processBundle && (
-        <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={onSaveDraft} savingDraft={savingDraft} />
+        <PreviewBlock form={form} graph={previewGraph} lints={lints} lintLoading={lintLoading} onSaveDraft={saveAsDraft} savingDraft={savingDraft} />
       )}
+      {weaveError && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{weaveError}</div>}
       {error && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>}
     </div>
   );

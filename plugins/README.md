@@ -191,6 +191,15 @@ are suggested ahead of the repo's raw label list; each one shows an inline capti
 of which agent(s) it wakes (the `labelAgents` trigger preview). If the flow defines
 no labels, the repo's own labels are shown instead. Free-text entry always works.
 
+**Pagination + title filter (#1658):** the issue list is now a **Previous / Next pager**
+(replaces the old "Load more" append — each page replaces the list) with a debounced
+**title filter** at the top. The filter drives a server-side search over the whole
+repository via GitHub's Search API (`GET /search` on the broker's `/ui` surface) so
+results are not limited to the currently loaded page; clearing the box restores the
+normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue`,
+`in:title`, `state:`) and strips colons from user input so a typed `qualifier:` can
+never broaden scope.
+
 Agents can also browse issues read-only with the dependency-free `aee-issues` CLI
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
 owner/name --number N`). Pull requests are deferred to a later iteration. See

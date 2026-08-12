@@ -8,10 +8,10 @@ import OutcomesPanel from './OutcomesPanel';
 import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { fitTabCount } from './rail-layout';
-import { apiCall } from '../../hooks/useApi';
+import { useSessionsActive } from './SessionsActiveContext';
+import { activeSessionCount } from './sessions-active';
 
 const TAB_KEY = 'agentChat.rightRailTab';
-const SESSION_POLL_MS = 3_000;
 
 // The whole rail toggles with Cmd+Shift+L on macOS / Ctrl+Shift+L elsewhere
 // (handler in AgentChat.jsx). Detect the platform once so the visible hint and
@@ -91,28 +91,13 @@ export default function RightRail({
     if (!showOutcomes && tab === 'outcomes') setTab('sessions');
   }, [agentId, showOutcomes, tab]);
 
-  // Lightweight poll of just the session COUNT — so the "Sessions" tab
-  // can show a badge regardless of which tab is currently visible. The
-  // SessionsPanel itself owns the full list when it's active.
-  const [sessionCount, setSessionCount] = useState(0);
-  useEffect(() => {
-    if (!agentId) { setSessionCount(0); return undefined; }
-    let cancelled = false;
-    let timer = null;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
-        if (!cancelled) setSessionCount(Array.isArray(data?.sessions) ? data.sessions.length : 0);
-      } catch { /* keep prior count */ }
-      if (!cancelled) timer = setTimeout(tick, SESSION_POLL_MS);
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [agentId]);
+  // Session COUNT for the "Sessions" tab badge — regardless of which tab is
+  // visible, and even while the rail is collapsed (the icon dot). Derived from
+  // the shared active-sessions poll (#1678) rather than a rail-local timer, so
+  // the badge, the SessionsPanel list and the DiffView running-probe all read
+  // the same data from a single poller.
+  const { sessions } = useSessionsActive();
+  const sessionCount = activeSessionCount(sessions);
 
   // `Icon` is the component (not a rendered element) because the tab strip and
   // the collapsed icon rail render it at different sizes — 13 inline next to a

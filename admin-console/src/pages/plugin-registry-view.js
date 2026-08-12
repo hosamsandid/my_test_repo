@@ -140,6 +140,15 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
     version: (manifest && manifest.version) || null,
     cliName: (manifest && manifest.cli && manifest.cli.name) || null,
     scopes: (manifest && manifest.scopes) || ['team'],
+    // The platforms the plugin declares (default ["any"]) and the manifest's
+    // own grant default (#1691). Surfaced so the Plugins-page team-assignment
+    // control can honour the platform-mismatch gate and reuse the same default
+    // scope granularity the Agents-page grant would apply — without the raw
+    // manifest leaking past this pure view.
+    platforms: (manifest && Array.isArray(manifest.platforms) && manifest.platforms.length)
+      ? manifest.platforms
+      : ['any'],
+    defaultScopeGranularity: (manifest && manifest.defaultScopeGranularity) || null,
     capabilities: describeCapabilities(manifest),
     quota: quotaSummary(manifest),
     ok: !!(entry && entry.ok),

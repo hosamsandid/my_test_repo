@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -58,7 +58,7 @@ const CLASS_COLOR = {
 // a visible indicator that reveals a plain-language explanation on hover,
 // keyboard focus and tap. Purely additive — cards without `help` render
 // exactly as before (value, order and layout unchanged).
-function StatCard({ label, value, accent, help }) {
+function StatCard({ label, value, accent, help, title }) {
   return (
     <div style={{
       flex: '1 1 120px',
@@ -73,7 +73,8 @@ function StatCard({ label, value, accent, help }) {
         <span>{label}</span>
         {help ? <InfoTip title={label} text={help} size={12} /> : null}
       </div>
-      <div style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
+      {/* Value is abbreviated (#1656); `title` keeps the exact figure one hover away. */}
+      <div title={title} style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
         {value}
       </div>
     </div>
@@ -277,10 +278,10 @@ function StatisticsTab({ team }) {
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
-        <StatCard label="Total tokens" value={formatInt(totals.total)} help={STAT_TILE_HELP.total} />
-        <StatCard label="Invocations" value={formatInt(totals.invocations)} help={STAT_TILE_HELP.invocations} />
+        <StatCard label="Total tokens" value={formatTileCount(totals.total)} title={formatInt(totals.total)} help={STAT_TILE_HELP.total} />
+        <StatCard label="Invocations" value={formatTileCount(totals.invocations)} title={formatInt(totals.invocations)} help={STAT_TILE_HELP.invocations} />
         {TOKEN_CLASSES.map((c) => (
-          <StatCard key={c.key} label={c.label} value={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} help={STAT_TILE_HELP[c.key]} />
+          <StatCard key={c.key} label={c.label} value={formatTileCount(totals[c.key])} title={formatInt(totals[c.key])} accent={CLASS_COLOR[c.key]} help={STAT_TILE_HELP[c.key]} />
         ))}
       </div>
 
@@ -424,7 +425,10 @@ function WorkItemsTab({ team }) {
   // so it re-computes on every range change / Refresh with the cards below.
   // `null` averages (zero work items) render as a placeholder, never NaN.
   const avg = useMemo(() => workItemAverages(data), [data]);
-  const fmtAvg = (v) => (v === null ? '—' : formatInt(v));
+  // Tiles show abbreviated notation (#1656); the exact grouped integer stays a
+  // hover away via `title`. A null average (zero work items) has no exact figure.
+  const fmtAvg = (v) => (v === null ? '—' : formatTileCount(v));
+  const fmtAvgTitle = (v) => (v === null ? undefined : formatInt(v));
 
   const rows = useMemo(() => (data?.workItems || []).map((w) => ({
     id: w.id,
@@ -479,15 +483,15 @@ function WorkItemsTab({ team }) {
       {/* Coverage — attribution is never total, so the remainder is always shown. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)' }}>
         <StatCard label="Attributed" value={formatPct(cov.attributedPct)} accent="var(--eb-status-success)" help={WORK_ITEM_TILE_HELP.attributed} />
-        <StatCard label="Attributed tokens" value={formatInt(cov.tokens.attributed)} help={WORK_ITEM_TILE_HELP.attributedTokens} />
-        <StatCard label="Unattributed tokens" value={formatInt(unatt.total)} accent="var(--eb-status-warning)" help={WORK_ITEM_TILE_HELP.unattributedTokens} />
-        <StatCard label="Unattributed runs" value={formatInt(unatt.runs)} help={WORK_ITEM_TILE_HELP.unattributedRuns} />
-        <StatCard label="Total runs" value={formatInt(cov.runs.total)} help={WORK_ITEM_TILE_HELP.totalRuns} />
-        <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} help={WORK_ITEM_TILE_HELP.avgTotal} />
-        <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} help={WORK_ITEM_TILE_HELP.avgInput} />
-        <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} help={WORK_ITEM_TILE_HELP.avgOutput} />
-        <StatCard label="Ø cache write / work item" value={fmtAvg(avg.cacheCreationInput)} accent={CLASS_COLOR.cacheCreationInput} help={WORK_ITEM_TILE_HELP.avgCacheCreationInput} />
-        <StatCard label="Ø cache read / work item" value={fmtAvg(avg.cacheReadInput)} accent={CLASS_COLOR.cacheReadInput} help={WORK_ITEM_TILE_HELP.avgCacheReadInput} />
+        <StatCard label="Attributed tokens" value={formatTileCount(cov.tokens.attributed)} title={formatInt(cov.tokens.attributed)} help={WORK_ITEM_TILE_HELP.attributedTokens} />
+        <StatCard label="Unattributed tokens" value={formatTileCount(unatt.total)} title={formatInt(unatt.total)} accent="var(--eb-status-warning)" help={WORK_ITEM_TILE_HELP.unattributedTokens} />
+        <StatCard label="Unattributed runs" value={formatTileCount(unatt.runs)} title={formatInt(unatt.runs)} help={WORK_ITEM_TILE_HELP.unattributedRuns} />
+        <StatCard label="Total runs" value={formatTileCount(cov.runs.total)} title={formatInt(cov.runs.total)} help={WORK_ITEM_TILE_HELP.totalRuns} />
+        <StatCard label="Ø total / work item" value={fmtAvg(avg.total)} title={fmtAvgTitle(avg.total)} help={WORK_ITEM_TILE_HELP.avgTotal} />
+        <StatCard label="Ø input / work item" value={fmtAvg(avg.input)} title={fmtAvgTitle(avg.input)} help={WORK_ITEM_TILE_HELP.avgInput} />
+        <StatCard label="Ø output / work item" value={fmtAvg(avg.output)} title={fmtAvgTitle(avg.output)} help={WORK_ITEM_TILE_HELP.avgOutput} />
+        <StatCard label="Ø cache write / work item" value={fmtAvg(avg.cacheCreationInput)} title={fmtAvgTitle(avg.cacheCreationInput)} accent={CLASS_COLOR.cacheCreationInput} help={WORK_ITEM_TILE_HELP.avgCacheCreationInput} />
+        <StatCard label="Ø cache read / work item" value={fmtAvg(avg.cacheReadInput)} title={fmtAvgTitle(avg.cacheReadInput)} accent={CLASS_COLOR.cacheReadInput} help={WORK_ITEM_TILE_HELP.avgCacheReadInput} />
       </div>
 
       {loading ? (

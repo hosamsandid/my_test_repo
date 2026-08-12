@@ -178,6 +178,33 @@ async function handleUiApi(req, res, apiPath, viewer) {
     }
   }
 
+  // Server-side title search over the WHOLE repo via GitHub's Search API (#1658),
+  // so matches surface from any page, not just already-loaded issues. Ephemeral —
+  // never persisted as a last-used pref. `hasMore` honours GitHub's 1000-result
+  // search cap so the pager can't walk into a 422.
+  if (apiPath === '/search' && req.method === 'GET') {
+    if (!repo) return sendJson(res, 400, { error: 'a repository is required' });
+    const token = store.tokenForRepo(team, repo);
+    if (!token) return void tokenErr(res, team, repo);
+    const text = params.get('q') || '';
+    const state = gh.normState(params.get('state'));
+    const page = Number(params.get('page')) || 1;
+    const perPage = gh.DEFAULT_PER_PAGE;
+    try {
+      const { data } = await gh.call('search_issues', { repo, text, state, page, perPage }, { token });
+      const shaped = gh.shapeSearchResult(data);
+      const hasMore = shaped.issues.length >= perPage && page * perPage < 1000;
+      writeAudit(team, actor, 'search', 'ok', repo);
+      return sendJson(res, 200, {
+        issues: shaped.issues, page, hasMore,
+        totalCount: shaped.totalCount, incompleteResults: shaped.incompleteResults,
+      });
+    } catch (err) {
+      writeAudit(team, actor, 'search', 'error', repo);
+      return sendJson(res, err.status || 502, { error: err.message });
+    }
+  }
+
   if (apiPath === '/issue' && req.method === 'GET') {
     const number = Number(params.get('number'));
     const token = store.tokenForRepo(team, repo);

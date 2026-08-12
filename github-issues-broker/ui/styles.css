@@ -170,7 +170,20 @@ body {
 
 .skeleton { height: 220px; background: var(--eb-bg-elevated); border-radius: var(--eb-radius-lg); }
 .empty, .detail-empty { color: var(--eb-text-secondary); padding: 24px 12px; text-align: center; }
-.list-more { text-align: center; padding: 6px; }
+
+/* Title filter (#1658): a search box at the top of the issue list. */
+.list-search { padding: 2px 4px 8px; }
+.list-search input {
+  width: 100%; font: inherit; font-size: var(--eb-text-base); padding: 7px 10px;
+  border-radius: var(--eb-radius-md); border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+}
+.list-search input::placeholder { color: var(--eb-text-muted); }
+.list-search input:focus { outline: none; border-color: var(--eb-accent-primary); }
+
+/* Previous / Next pager (#1658), replacing the old "Load more" append. */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 4px 2px; }
+.pager-info { font-size: var(--eb-text-sm); color: var(--eb-text-muted); }
 
 .detail h2 { margin: 0 0 4px; font-size: var(--eb-text-xl); font-weight: var(--eb-font-semibold); }
 .detail .meta { color: var(--eb-text-secondary); font-size: var(--eb-text-sm); margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }

@@ -64,6 +64,20 @@ function buildRequest(op, args = {}) {
         path: `${seg}/issues?state=${state}&per_page=${per}&page=${page}`,
       };
     }
+    case 'search_issues': {
+      // Title-only, repo-scoped issue search via GitHub's Search API (#1658). The
+      // `in:title` / `repo:` / `type:issue` qualifiers are ADDED here, never taken
+      // from the user (see buildSearchQuery / sanitizeSearchTerms), so the user
+      // cannot broaden the scope beyond the selected repo or reach the body.
+      const per = clampPerPage(args.perPage);
+      const page = clampPage(args.page);
+      const state = normState(args.state);
+      const q = buildSearchQuery({ owner, name, text: args.text, state });
+      return {
+        method: 'GET',
+        path: `/search/issues?q=${encodeURIComponent(q)}&per_page=${per}&page=${page}`,
+      };
+    }
     case 'get_issue':
       return { method: 'GET', path: `${seg}/issues/${encodeInt(args.number)}` };
     case 'list_labels':
@@ -82,6 +96,27 @@ function buildRequest(op, args = {}) {
     default:
       throw new Error(`unknown github operation: ${op}`);
   }
+}
+
+// Reduce the user's free-text to plain title search terms. GitHub search parses
+// `qualifier:value` tokens (repo:, type:, in:, state:, …) out of the *decoded* q
+// string, so a raw colon typed by the user would inject a qualifier and could
+// broaden the scope. Stripping colons neutralises every qualifier while leaving
+// ordinary words intact ("Backup", "fix login") — the deliberate trade of the
+// #1658 edge case: a title colon becomes a word break, never a scope escape.
+function sanitizeSearchTerms(text) {
+  return String(text == null ? '' : text).replace(/:/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Build the GitHub Search API `q` for a repo-scoped, title-only issue search. The
+// broker owns every qualifier; the user contributes only sanitised terms, which
+// lead so an empty query still returns the repo's issues (title unconstrained).
+function buildSearchQuery({ owner, name, text, state } = {}) {
+  const terms = sanitizeSearchTerms(text);
+  const qualifiers = [`repo:${owner}/${name}`, 'type:issue', 'in:title'];
+  const s = normState(state);
+  if (s !== 'all') qualifiers.push(`state:${s}`);
+  return (terms ? terms + ' ' : '') + qualifiers.join(' ');
 }
 
 function encodeInt(n) {
@@ -135,6 +170,18 @@ function shapeIssue(raw) {
 function shapeIssueList(rawArr) {
   if (!Array.isArray(rawArr)) return [];
   return rawArr.filter((r) => !isPullRequest(r)).map(shapeIssue).filter(Boolean);
+}
+
+// Shape a GitHub Search API result (`{ total_count, incomplete_results, items }`)
+// into the same narrow issue objects the list uses. `type:issue` already excludes
+// PRs, but drop any defensively so the UI is issues-only regardless. `totalCount`
+// drives the pager; `incompleteResults` surfaces GitHub's own "index lagged /
+// timed out" signal so the UI can degrade gracefully (#1658 edge case).
+function shapeSearchResult(raw) {
+  const items = raw && Array.isArray(raw.items) ? raw.items : [];
+  const issues = items.filter((r) => !isPullRequest(r)).map(shapeIssue).filter(Boolean);
+  const totalCount = raw && Number.isFinite(raw.total_count) ? raw.total_count : issues.length;
+  return { issues, totalCount, incompleteResults: !!(raw && raw.incomplete_results) };
 }
 
 // Map a GitHub HTTP failure to a clear, actionable message (never a raw 4xx).
@@ -206,11 +253,14 @@ module.exports = {
   MAX_PER_PAGE,
   parseRepoFullName,
   normState,
+  sanitizeSearchTerms,
+  buildSearchQuery,
   buildRequest,
   isPullRequest,
   shapeLabel,
   shapeIssue,
   shapeIssueList,
+  shapeSearchResult,
   mapGithubError,
   apiBaseFrom,
   call,

@@ -1,14 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Clock, Sparkles, Server,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
+import {
+  filterItems, filterSections, activeGroupKey, mergeCollapsed,
+  mostSpecificActivePath,
+} from './nav-model';
 import AccentureLogo from './AccentureLogo';
 import AssistModelSelector from './AssistModelSelector';
 import TranscriptionOverlay from './TranscriptionOverlay';
@@ -16,6 +20,21 @@ import { formatVersionLabel } from './version-info';
 
 const STATUS_POLL_MS = 5_000;
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+// Per-user accordion state for the sidebar groups (#1595). Namespaced under
+// `nav.` (this is the Shell nav, not the Agent-Chat sidebar's `agentChat.`
+// keys); suffixed with the username like assistModel.<username> / flows.lastSelected.<username>.
+const NAV_GROUPS_KEY_BASE = 'nav.collapsedGroups';
+// The group open on a first-ever load (the daily agent-building entry point).
+const DEFAULT_EXPANDED_GROUP = 'agent-setup';
+
+function navGroupsKey(username) {
+  return `${NAV_GROUPS_KEY_BASE}.${username || 'default'}`;
+}
+
+function loadCollapsedGroups(username) {
+  try { return JSON.parse(localStorage.getItem(navGroupsKey(username)) || '{}'); }
+  catch { return {}; }
+}
 const VERSION_LABEL = formatVersionLabel(import.meta.env.VITE_GIT_COMMIT, import.meta.env.VITE_GIT_DIRTY);
 
 function loadLastViewed() {
@@ -46,44 +65,101 @@ function NavBadge({ count, color }) {
   );
 }
 
-const NAV = [
-  { items: [
-    { path: '/chats',          label: 'Agent Chat',          Icon: MessageCircle },
-    { path: '/getting-started', label: 'Getting Started',     Icon: Compass },
-    // The Plugin System help page (#1620) has no standalone sidebar entry (#1638):
-    // it is reached via the "Learn about plugins" link on the Plugins page. The
-    // route (App.jsx) + its BREADCRUMBS entry below stay, so direct links /
-    // breadcrumbs keep working.
-    // Self-service personal credentials (#1568) — visible to every authenticated
-    // human (no credAdmin gate); the personal tier is strictly owner-only.
-    { path: '/my-credentials', label: 'My Credentials',       Icon: KeyRound },
-  ]},
-  { section: 'AGENT SETUP', items: [
+// A clickable accordion header for a collapsible nav group (#1595). Renders the
+// group's uppercase micro-label plus a chevron reflecting expanded state.
+function GroupHeader({ label, expanded, onToggle }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 'var(--eb-space-2)',
+        width: '100%',
+        padding: 'var(--eb-space-1) var(--eb-space-4)',
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        fontSize: 'var(--eb-text-xs)',
+        fontWeight: 'var(--eb-font-medium)',
+        color: 'var(--eb-text-muted)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        textAlign: 'left',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+      onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+    >
+      <span>{label}</span>
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    </button>
+  );
+}
+
+// Sidebar information architecture, re-cut by user task (#1595). Two tiers:
+//   • NAV_TOP     — ungrouped, primary/daily (Agent Chat, with its badges).
+//   • NAV_GROUPS  — collapsible accordions in workflow order (key = accordion +
+//                   persistence id; `section` = header label). Help is the final
+//                   group; the dynamic Plugins group is inserted just before it.
+// Role gating (`adminOnly` / `credAdmin`) is unchanged from the old flat NAV.
+// Dynamically-appended UI-plugin entries (incl. the Patterns Catalog, now a
+// plugin) are added at runtime below — see `pluginSection`.
+const NAV_TOP = [
+  { path: '/chats',           label: 'Agent Chat',           Icon: MessageCircle },
+];
+
+const NAV_GROUPS = [
+  { key: 'agent-setup', section: 'Agent Setup', items: [
     { path: '/quickstart',   label: 'Single Agent',        Icon: Rocket },
     { path: '/team-setup',   label: 'Agent Team Wizard',   Icon: Users2, subtitle: 'Build a squad of agents' },
     { path: '/agents',       label: 'Agents',              Icon: Layers },
-    { path: '/flows',         label: 'Flows',               Icon: GitBranch },
-    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
-    // { path: '/orchestrator-wizard', label: 'Orchestrator Wizard', Icon: Wand2 },
-  ]},
-  { section: 'INFRASTRUCTURE', items: [
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,    credAdmin: true },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github, credAdmin: true },
-    { path: '/environments',  label: 'Working Environments', Icon: Boxes },
-  ]},
-  { section: 'CONFIGURATION', items: [
-    { path: '/teams',        label: 'Teams',               Icon: Building2, subtitle: 'Human members & access' },
+    { path: '/flows',        label: 'Flows',               Icon: GitBranch },
+    { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
-    { path: '/role-templates', label: 'Agent Templates',    Icon: UserCog, adminOnly: true },
+    { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
     { path: '/jobs',         label: 'Triggers',            Icon: Clock },
-    { path: '/github-events', label: 'GitHub Event Log',   Icon: History },
-    { path: '/token-usage',  label: 'Token Usage',         Icon: BarChart3, adminOnly: true },
-    { path: '/models',       label: 'Model Providers',     Icon: Sparkles, credAdmin: true },
-    { path: '/mcp',          label: 'MCP Servers',         Icon: Server,  adminOnly: true },
-    { path: '/plugins',      label: 'Plugins',             Icon: Puzzle,  adminOnly: true },
-    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench, adminOnly: true },
+  ]},
+  // Ordered by a typical setup flow: pick a Model Provider first, then the
+  // credentials (SSH keys / GitHub tokens / personal), then MCP servers (an env
+  // may reference them), then build a Working Environment — and finally the
+  // GitHub Event Log, which only makes sense once an environment exists.
+  { key: 'connections', section: 'Connections', items: [
+    { path: '/models',        label: 'Model Providers',      Icon: Sparkles, credAdmin: true },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github,   credAdmin: true },
+    // My Credentials (#1568) — personal credential self-service, visible to every
+    // authenticated human (no credAdmin gate).
+    { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
+    { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
+    { path: '/environments',  label: 'Working Environments', Icon: Boxes },
+    { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
+  ]},
+  { key: 'administration', section: 'Administration', items: [
+    { path: '/teams',            label: 'Teams',            Icon: Building2, subtitle: 'Human members & access' },
+    { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
+    { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
+    { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
+  ]},
+  // Help is a normal collapsible section at the tail of the nav — part of the
+  // scrolling accordion, not a pinned bottom cluster. The dynamic Plugins group
+  // is inserted just before it at runtime so Help stays the final section.
+  { key: 'help', section: 'Help', items: [
+    { path: '/getting-started', label: 'Getting Started', Icon: Compass },
   ]},
 ];
+
+const NAV_GROUP_KEYS = NAV_GROUPS.map(g => g.key);
+
+// The dynamic UI-plugin section is a first-class collapsible group too (#1595
+// follow-up): its key must live in the collapse map so it can be expanded/
+// collapsed and persisted like the static groups, even though its items are
+// resolved at runtime. It is appended after the static groups.
+const PLUGINS_GROUP_KEY = 'plugins';
+const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 const BREADCRUMBS = {
   '/quickstart':   'Single Agent',
@@ -160,20 +236,13 @@ export default function Shell({ children }) {
   // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens,
   // #798; Model Providers, #800) use a looser `credAdmin` gate: visible to
   // System Admins AND any Team Admin, so a team can self-serve its credentials
-  // and model providers. Backend route guards
-  // (App.jsx) and the scoped API back this up — defence-in-depth, not the only
-  // enforcement. Drop sections that end up empty.
+  // and model providers. Backend route guards (App.jsx) and the scoped API back
+  // this up — defence-in-depth, not the only enforcement. Gating is unchanged by
+  // the #1595 re-grouping; a group or bottom cluster left empty renders no header.
   const canSeeCreds = canAccessCredentialPages(user);
-  const nav = NAV
-    .map(section => ({
-      ...section,
-      items: section.items.filter(item => {
-        if (item.adminOnly) return !!user?.admin;
-        if (item.credAdmin) return canSeeCreds;
-        return true;
-      }),
-    }))
-    .filter(section => section.items.length > 0);
+  const gate = { admin: !!user?.admin, canSeeCreds };
+  const topItems = filterItems(NAV_TOP, gate);
+  const groups = filterSections(NAV_GROUPS, gate);
 
   // Dynamic nav entries for UI-bearing plugins that are installed AND either
   // granted to a scope the caller can see (Network Plan epic #1554, Phase 2) or
@@ -217,12 +286,154 @@ export default function Shell({ children }) {
     return () => { cancelled = true; };
   }, [location.pathname]);
 
-  const navSections = uiPlugins.length
-    ? [...nav, {
-        section: 'PLUGINS',
+  // UI-plugin entries are a collapsible accordion group like the static ones
+  // (#1595 AC12 + follow-up): appended after the built-in groups, but with the
+  // same GroupHeader / collapse / persistence behaviour so it can be folded away
+  // and never blows up the sidebar when many plugins are installed. The Patterns
+  // Catalog is one of these now that it ships as a plugin rather than a built-in.
+  const pluginSection = uiPlugins.length
+    ? {
+        key: PLUGINS_GROUP_KEY,
+        section: 'Plugins',
         items: uiPlugins.map(p => ({ path: `/plugins/${p.id}/view`, label: p.title, Icon: Puzzle })),
-      }]
-    : nav;
+      }
+    : null;
+
+  // The full accordion list = static groups + the dynamic plugins group (when
+  // any UI plugins resolve), inserted just before the trailing Help group so Help
+  // stays the final nav section. Drives both active-group auto-expand and rendering.
+  const allGroups = (() => {
+    if (!pluginSection) return groups;
+    const helpIdx = groups.findIndex(g => g.key === 'help');
+    if (helpIdx === -1) return [...groups, pluginSection];
+    return [...groups.slice(0, helpIdx), pluginSection, ...groups.slice(helpIdx)];
+  })();
+
+  // ── Collapsible group state (#1595) ──────────────────────────────────
+  // Which group holds the active route (auto-expanded on load / deep-link /
+  // refresh — AC8); null when the route lives in the top or a bottom cluster.
+  const activeGroup = useMemo(
+    () => activeGroupKey(allGroups, location.pathname),
+    [allGroups, location.pathname],
+  );
+
+  // The single most specific active nav path across every tier (top row + all
+  // accordion groups). Item highlighting keys off an exact match to this so an
+  // overlapping prefix — e.g. the Connections /plugins registry item under a
+  // /plugins/:id/view plugin route — never lights up alongside the real target
+  // (#1595 follow-up). null when no nav item matches the current route.
+  const activePath = useMemo(() => {
+    const allPaths = [
+      ...topItems.map(i => i.path),
+      ...allGroups.flatMap(g => g.items.map(i => i.path)),
+    ];
+    return mostSpecificActivePath(allPaths, location.pathname);
+  }, [topItems, allGroups, location.pathname]);
+
+  // Per-user collapse map, reconciled against the current group keys so a future
+  // group addition/removal degrades gracefully. `true` === collapsed.
+  const [collapsedGroups, setCollapsedGroups] = useState(
+    () => mergeCollapsed(loadCollapsedGroups(user?.username), ALL_GROUP_KEYS, DEFAULT_EXPANDED_GROUP),
+  );
+  useEffect(() => {
+    try { localStorage.setItem(navGroupsKey(user?.username), JSON.stringify(collapsedGroups)); }
+    catch { /* storage unavailable — non-fatal */ }
+  }, [collapsedGroups, user?.username]);
+
+  // Auto-expand the group containing the active route on mount / route change.
+  // Keyed on activeGroup only (not the collapse map): navigating *into* a
+  // collapsed group opens it, but the user may re-collapse it afterwards without
+  // it snapping back until they navigate into it again.
+  useEffect(() => {
+    if (activeGroup) {
+      setCollapsedGroups(prev => (prev[activeGroup] ? { ...prev, [activeGroup]: false } : prev));
+    }
+  }, [activeGroup]);
+
+  const toggleGroup = (key) => setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+
+  // Render one nav item button (shared by the top row and every accordion group,
+  // including the dynamic plugin section). Behaviour/styling unchanged from the flat NAV.
+  const renderNavItem = ({ path, label, Icon, subtitle }) => {
+    const isActive = path === activePath;
+    const isChat = path === '/chats';
+    const dotColor = chatCounts.unread > 0
+      ? 'var(--eb-status-success)'
+      : chatCounts.busy > 0
+        ? 'var(--eb-status-warning)'
+        : null;
+    return (
+      <button
+        key={path}
+        onClick={() => navigate(path)}
+        title={collapsed ? label : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-3)',
+          width: '100%',
+          padding: collapsed
+            ? 'var(--eb-space-2) 0'
+            : 'var(--eb-space-2) var(--eb-space-4)',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          background: isActive ? 'var(--eb-bg-selected)' : 'transparent',
+          border: 'none',
+          borderLeft: isActive ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
+          color: isActive ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+          fontSize: 'var(--eb-text-md)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          textAlign: 'left',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+        onMouseEnter={e => {
+          if (!isActive) e.currentTarget.style.background = 'var(--eb-bg-hover)';
+        }}
+        onMouseLeave={e => {
+          if (!isActive) e.currentTarget.style.background = 'transparent';
+        }}
+      >
+        {/* Icon — with dot overlay in collapsed mode */}
+        <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+          <Icon size={20} />
+          {isChat && collapsed && dotColor && (
+            <span style={{
+              position: 'absolute',
+              top: -2,
+              right: -2,
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: dotColor,
+              border: '1.5px solid var(--eb-bg-surface)',
+            }} />
+          )}
+        </span>
+        {!collapsed && (
+          <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <span>{label}</span>
+            {subtitle && (
+              <span style={{
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-muted)',
+                fontWeight: 'normal',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}>{subtitle}</span>
+            )}
+          </span>
+        )}
+        {/* Status badges in expanded mode */}
+        {isChat && !collapsed && (
+          <span style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>
+            <NavBadge count={chatCounts.unread} color="var(--eb-status-success)" />
+            <NavBadge count={chatCounts.busy}   color="var(--eb-status-warning)" />
+          </span>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
@@ -293,102 +504,31 @@ export default function Shell({ children }) {
 
         {/* Nav sections */}
         <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {navSections.map((section, sectionIndex) => (
-            <div key={section.section || sectionIndex} style={{ marginBottom: 'var(--eb-space-2)' }}>
-              {!collapsed && section.section && (
-                <div style={{
-                  padding: 'var(--eb-space-1) var(--eb-space-4)',
-                  fontSize: 'var(--eb-text-xs)',
-                  fontWeight: 'var(--eb-font-medium)',
-                  color: 'var(--eb-text-muted)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                }}>
-                  {section.section}
-                </div>
-              )}
-              {section.items.map(({ path, label, Icon, subtitle }) => {
-                const isActive = location.pathname === path || location.pathname.startsWith(path + '/');
-                const isChat = path === '/chats';
-                const dotColor = chatCounts.unread > 0
-                  ? 'var(--eb-status-success)'
-                  : chatCounts.busy > 0
-                    ? 'var(--eb-status-warning)'
-                    : null;
-                return (
-                  <button
-                    key={path}
-                    onClick={() => navigate(path)}
-                    title={collapsed ? label : undefined}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 'var(--eb-space-3)',
-                      width: '100%',
-                      padding: collapsed
-                        ? 'var(--eb-space-2) 0'
-                        : 'var(--eb-space-2) var(--eb-space-4)',
-                      justifyContent: collapsed ? 'center' : 'flex-start',
-                      background: isActive ? 'var(--eb-bg-selected)' : 'transparent',
-                      border: 'none',
-                      borderLeft: isActive ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
-                      color: isActive ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-                      fontSize: 'var(--eb-text-md)',
-                      cursor: 'pointer',
-                      fontFamily: 'inherit',
-                      textAlign: 'left',
-                      transition: 'background var(--eb-transition-fast)',
-                    }}
-                    onMouseEnter={e => {
-                      if (!isActive) e.currentTarget.style.background = 'var(--eb-bg-hover)';
-                    }}
-                    onMouseLeave={e => {
-                      if (!isActive) e.currentTarget.style.background = 'transparent';
-                    }}
-                  >
-                    {/* Icon — with dot overlay in collapsed mode */}
-                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                      <Icon size={20} />
-                      {isChat && collapsed && dotColor && (
-                        <span style={{
-                          position: 'absolute',
-                          top: -2,
-                          right: -2,
-                          width: 7,
-                          height: 7,
-                          borderRadius: '50%',
-                          background: dotColor,
-                          border: '1.5px solid var(--eb-bg-surface)',
-                        }} />
-                      )}
-                    </span>
-                    {!collapsed && (
-                      <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <span>{label}</span>
-                        {subtitle && (
-                          <span style={{
-                            fontSize: 'var(--eb-text-xs)',
-                            color: 'var(--eb-text-muted)',
-                            fontWeight: 'normal',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                          }}>{subtitle}</span>
-                        )}
-                      </span>
-                    )}
-                    {/* Status badges in expanded mode */}
-                    {isChat && !collapsed && (
-                      <span style={{ display: 'flex', gap: 3, marginLeft: 'auto' }}>
-                        <NavBadge count={chatCounts.unread} color="var(--eb-status-success)" />
-                        <NavBadge count={chatCounts.busy}   color="var(--eb-status-warning)" />
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+          {/* Ungrouped top — primary/daily (Agent Chat, with its badges) */}
+          {topItems.length > 0 && (
+            <div style={{ marginBottom: 'var(--eb-space-2)' }}>
+              {topItems.map(renderNavItem)}
             </div>
-          ))}
+          )}
+
+          {/* Collapsible groups (accordions), including the dynamic Plugins group
+              appended last. In rail mode headers are hidden and every item stays
+              reachable, exactly as today (AC10). */}
+          {allGroups.map(group => {
+            const expanded = collapsed || !collapsedGroups[group.key];
+            return (
+              <div key={group.key} style={{ marginBottom: 'var(--eb-space-2)' }}>
+                {!collapsed && (
+                  <GroupHeader
+                    label={group.section}
+                    expanded={expanded}
+                    onToggle={() => toggleGroup(group.key)}
+                  />
+                )}
+                {expanded && group.items.map(renderNavItem)}
+              </div>
+            );
+          })}
         </nav>
 
         {/* Copyright footer — links to /about */}

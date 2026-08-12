@@ -4,6 +4,8 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 
 ## Navigation
 
+The left sidebar is organised into task-based collapsible accordion groups (#1595). **Agent Chat** sits at the top (ungrouped, always-visible). Below it four collapsible groups appear in workflow order: **Agent Setup** (Single Agent · Agent Team Wizard · Agents · Flows · Agent Templates · Skills · Knowledge · Triggers), **Connections** (Working Environments · Model Providers · MCP Servers · Plugins · SSH Keys · GitHub Tokens), **Insights** (Token Usage · GitHub Event Log), and **Administration** (Teams · Maintenance Mode). Small always-visible clusters at the bottom hold **Help** (Getting Started) and **Account** (My Credentials). The group containing the active page auto-expands; collapse state persists per user in `localStorage` under `nav.collapsedGroups.<username>`. Installed UI plugins appear as an additional collapsible **Plugins** group at the end of the accordion list (collapsed by default, so a long plugin list folds away); the bottom Help/Account clusters stay pinned in view below the scrolling list. A group or cluster with no visible items for the current role renders no header (role gating is unchanged: `adminOnly` = System Admin; `credAdmin` = System Admin or Team Admin).
+
 | Page | Route | Purpose |
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |

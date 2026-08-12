@@ -67,6 +67,38 @@ test('last-used selection persists per (scope,user) and survives a reload', () =
   assert.equal(s2.count('team-a'), 2);
 });
 
+test('pickLastUsed returns the globally most-recently-used scope, not first-in-list (#1650)', () => {
+  const dir = tmpDir();
+  const s = new ScopeStore({ stateDir: dir });
+  // team-a saved earlier, team-b later — team-b is the one actually used last
+  s.savePref('team-a', 'alice', { repo: 'acme/a', state: 'open', updatedAt: '2026-01-01T00:00:00Z' });
+  s.savePref('team-b', 'alice', { repo: 'acme/b', state: 'all', updatedAt: '2026-06-01T00:00:00Z' });
+  // list order puts team-a first; the fix must still pick team-b by updatedAt
+  assert.deepEqual(s.pickLastUsed(['team-a', 'team-b'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all' });
+  assert.deepEqual(s.pickLastUsed(['team-b', 'team-a'], 'alice'), { team: 'team-b', repo: 'acme/b', state: 'all' });
+});
+
+test('pickLastUsed preserves the `all` state and is per-user', () => {
+  const dir = tmpDir();
+  const s = new ScopeStore({ stateDir: dir });
+  s.savePref('team-a', 'alice', { repo: 'acme/a', state: 'all', updatedAt: '2026-01-01T00:00:00Z' });
+  s.savePref('team-a', 'bob', { repo: 'acme/z', state: 'closed', updatedAt: '2026-02-01T00:00:00Z' });
+  assert.equal(s.pickLastUsed(['team-a'], 'alice').state, 'all'); // not coerced to open
+  assert.equal(s.pickLastUsed(['team-a'], 'bob').repo, 'acme/z'); // bob's own selection
+});
+
+test('pickLastUsed skips prefs without a repo, is null when none, and falls back to order without timestamps', () => {
+  const dir = tmpDir();
+  const s = new ScopeStore({ stateDir: dir });
+  assert.equal(s.pickLastUsed(['team-a', 'team-b'], 'alice'), null); // first-ever visit
+  s.savePref('team-a', 'alice', { state: 'open' }); // no repo → not restorable
+  assert.equal(s.pickLastUsed(['team-a'], 'alice'), null);
+  // legacy prefs (pre-#1650) carry no updatedAt → deterministic list-order fallback
+  s.savePref('team-a', 'alice', { repo: 'acme/a', state: 'open' });
+  s.savePref('team-b', 'alice', { repo: 'acme/b', state: 'open' });
+  assert.equal(s.pickLastUsed(['team-a', 'team-b'], 'alice').team, 'team-a');
+});
+
 test('teardown reaps a scope\'s in-memory creds and persisted prefs only', () => {
   const dir = tmpDir();
   const s = new ScopeStore({ stateDir: dir });

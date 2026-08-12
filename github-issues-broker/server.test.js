@@ -188,3 +188,30 @@ test('#1651 POST /ui/api/pref: last-used persists for a multi-team viewer (team 
   const prefs = fs.readdirSync(path.join(stateDir, 'prefs'));
   assert.equal(prefs.some((f) => f.startsWith('team-a__alice')), true);
 });
+
+test('GET /ui/api/context restores the most-recently-used team + each team\'s own last view (#1650)', async () => {
+  // two authorized teams with credentials pushed (replaces the map; team-a kept)
+  const tok = mint('github-issues', '_internal', SECRET);
+  await fetch(`${base}/internal/scope-credentials`, {
+    method: 'PUT', headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scopes: {
+      'team-a': { token: 'GH', repos: [{ fullName: 'acme/widgets' }], teamName: 'Team A' },
+      'team-b': { token: 'GH', repos: [{ fullName: 'acme/gadgets' }], teamName: 'Team B' },
+    } }),
+  });
+  // carol used team-a first, then team-b (later) with state 'all'
+  server.store.savePref('team-a', 'carol', { repo: 'acme/widgets', state: 'closed', updatedAt: '2026-01-01T00:00:00Z' });
+  server.store.savePref('team-b', 'carol', { repo: 'acme/gadgets', state: 'all', updatedAt: '2026-07-01T00:00:00Z' });
+
+  const headers = signViewerHeaders({ sub: 'carol', role: 'team-member', teamIds: ['team-a', 'team-b'] }, SECRET);
+  const r = await fetch(`${base}/ui/api/context`, { headers });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  // AC2: most-recently-used team wins (team-b), not first-in-list (team-a)
+  assert.deepEqual(body.lastUsed, { team: 'team-b', repo: 'acme/gadgets', state: 'all' });
+  // per-team last view is exposed so switching back restores that project's own selection
+  const a = body.teams.find((t) => t.teamId === 'team-a');
+  const b = body.teams.find((t) => t.teamId === 'team-b');
+  assert.deepEqual([a.lastRepo, a.lastState], ['acme/widgets', 'closed']);
+  assert.deepEqual([b.lastRepo, b.lastState], ['acme/gadgets', 'all']);
+});

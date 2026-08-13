@@ -25,6 +25,7 @@ import {
   STAT_TILE_HELP,
   TIER_SIGNAL_HELP,
   COST_NOTE,
+  PAGE_INTRO,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -440,4 +441,22 @@ test('COST_NOTE states figures are token counts, not costs (#1151 AC1)', () => {
   assert.equal(typeof COST_NOTE, 'string');
   assert.match(COST_NOTE, /not cost/i);
   assert.match(COST_NOTE, /pric/i);
+});
+
+test('PAGE_INTRO is a plain-language banner that frames the page and both tabs', () => {
+  for (const key of ['lead', 'statistics', 'workItems']) {
+    assert.equal(typeof PAGE_INTRO[key], 'string', `${key} must be a string`);
+    assert.ok(PAGE_INTRO[key].trim().length > 0, `${key} must be non-empty`);
+  }
+  // The lead explains what the page is about (tokens/usage), in plain words.
+  assert.match(PAGE_INTRO.lead, /token/i);
+  // Each tab description leads with the exact tab label the TABS array renders,
+  // so the banner and the tab strip can never drift apart.
+  assert.match(PAGE_INTRO.statistics, /^Statistics\b/);
+  assert.match(PAGE_INTRO.workItems, /^Work items\b/);
+});
+
+test('PAGE_INTRO does not claim the figures are money (stays consistent with COST_NOTE)', () => {
+  const all = `${PAGE_INTRO.lead} ${PAGE_INTRO.statistics} ${PAGE_INTRO.workItems}`;
+  assert.doesNotMatch(all, /\$|\bcost\b|\bprice\b|\bdollar/i);
 });

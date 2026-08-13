@@ -211,6 +211,24 @@ export const TIER_SIGNAL_HELP =
 export const COST_NOTE =
   'Figures are token counts, not costs — apply your provider per-model pricing separately.';
 
+// Plain-language page intro (the banner under the H1). Token Usage is one of
+// the most data-dense pages in the console — a first-time user lands on charts,
+// token-class names and two tabs with no framing for what they mean. Every peer
+// admin page (MCP Servers, GitHub Tokens, SSH Keys, Model Providers, Working
+// Environments, Skills) opens with a "what this page is" banner; this brings
+// Token Usage in line and states, in one place, what the page shows and how the
+// two tabs differ. Single-sourced here so the copy is unit-testable and never
+// drifts from the JSX (the token-usage-view.js convention, #651). `statistics`
+// and `workItems` lead with the exact tab labels rendered by TABS.
+export const PAGE_INTRO = {
+  lead:
+    'See how many tokens your agents used against the model provider — the raw usage behind every agent run, so you can tell where the spend goes.',
+  statistics:
+    'Statistics — the overall picture: the total for the selected period, how it trends over time, and a breakdown you can group by agent, team, model or day.',
+  workItems:
+    'Work items — usage tied to a specific GitHub issue and the pull request(s) that resolve it, so you can see how much one piece of work consumed.',
+};
+
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server

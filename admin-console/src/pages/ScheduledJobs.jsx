@@ -9,7 +9,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
-import { summarizeLoopTrigger } from './agent-chat/trigger-summary.js';
+import { summarizeLoopTrigger, eventLabel } from './agent-chat/trigger-summary.js';
 import { humanizeCron, humanizeOnce } from './cron-humanize.js';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
@@ -415,6 +415,10 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
                     type="button"
                     key={name}
                     onClick={() => toggleEvent(name)}
+                    // Show the plain-language label (e.g. "PR opened") so the
+                    // picker is legible without knowing the Events API keys;
+                    // the raw key stays on hover for anyone who needs it.
+                    title={name}
                     style={{
                       padding: '2px 8px',
                       borderRadius: 'var(--eb-radius-full)',
@@ -422,11 +426,10 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
                       background: active ? 'var(--eb-accent-primary)' : 'transparent',
                       color: active ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
                       fontSize: 'var(--eb-text-xs)',
-                      fontFamily: 'var(--eb-font-mono)',
                       cursor: 'pointer',
                     }}
                   >
-                    {name}
+                    {eventLabel(name)}
                   </button>
                 );
               })}
@@ -515,10 +518,19 @@ export default function ScheduledJobs() {
     { key: 'type',        label: 'Type', render: v => <TypeBadge type={v} /> },
     { key: 'schedule',    label: 'Schedule / Trigger', wrap: true, render: (_, row) => {
       if (row.type === 'github-event') {
+        const events = row.events || [];
+        const raw = events.join(', ');
+        const friendly = events.map(eventLabel).join(', ');
         return (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
-            <span>{row.repo || '—'}</span>
-            <span style={{ color: 'var(--eb-text-muted)' }}>{(row.events || []).join(', ') || '—'}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
+            <span style={{ fontFamily: 'var(--eb-font-mono)' }}>{row.repo || '—'}</span>
+            <span>{friendly || '—'}</span>
+            {/* Raw event keys kept as a muted sub-line so the exact GitHub
+                Events key stays visible for debugging (only when it differs
+                from the friendly label). */}
+            {raw && raw !== friendly && (
+              <span style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>{raw}</span>
+            )}
           </div>
         );
       }

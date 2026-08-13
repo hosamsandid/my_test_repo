@@ -242,7 +242,7 @@
   }
 
   var currentIssue = null;
-  var suggestions = { flowLabels: [], repoLabels: [], labelAgents: {} };
+  var suggestions = { flowLabels: [], repoLabels: [], labelAgents: {}, labelUsage: {} };
 
   function renderDetail(issue) {
     currentIssue = issue;
@@ -258,6 +258,12 @@
       issue.user ? el('span', {}, ['opened by ' + issue.user]) : null,
       issue.htmlUrl ? el('a', { href: issue.htmlUrl, target: '_blank', rel: 'noopener' }, ['view on GitHub ↗']) : null,
     ]));
+    // Workflow-trigger action bar (#1730): a row of prominent buttons — one per
+    // flow label that wakes an agent — sits between the meta line and the
+    // scrollable body. Populated by renderActionBar() (also re-run after
+    // loadSuggestions resolves, since it needs the pushed flow-label data).
+    d.appendChild(el('div', { class: 'action-bar hidden', id: 'actionBar' }));
+    renderActionBar();
     // Render the Markdown body safely (#1642, Item 3). markdown.js escapes all
     // untrusted text and emits only a whitelisted element set, so its output is
     // safe to assign via innerHTML; an empty body keeps the placeholder (AC4).
@@ -293,8 +299,108 @@
 
   function loadSuggestions() {
     req('/labels?team=' + encodeURIComponent(team) + '&repo=' + encodeURIComponent(repo))
-      .then(function (data) { suggestions = data; renderSuggestions(); })
+      .then(function (data) { suggestions = data; renderSuggestions(); renderActionBar(); })
       .catch(function () { /* suggestions are optional */ });
+  }
+
+  // How the label is normally used, for the action-bar colour coding (#1730,
+  // AC4). Only the two known classes count; anything else (incl. a data gap)
+  // degrades to a neutral treatment rather than being mis-coloured.
+  function triggerUsage(name) {
+    var u = (suggestions.labelUsage || {})[name];
+    return (u === 'humanGate' || u === 'agentEmitted') ? u : 'neutral';
+  }
+  var USAGE_META = {
+    humanGate:    { cls: 'gate',    tag: 'human-set gate',   glyph: '⇤', legend: 'Human-set gate — a hand-off you deliberately set' },
+    agentEmitted: { cls: 'agent',   tag: 'agent-set label',  glyph: '⚙', legend: 'Agent-set label — usually set by an agent itself' },
+    neutral:      { cls: 'neutral', tag: 'workflow label',   glyph: '•', legend: 'Workflow label' },
+  };
+
+  // AC3 primary copy: "Trigger <Agent>"; when >1 agent wakes, convey that too.
+  function triggerButtonLabel(agents) {
+    if (agents.length === 1) return 'Trigger ' + agents[0];
+    if (agents.length === 2) return 'Trigger ' + agents[0] + ' & ' + agents[1];
+    return 'Trigger ' + agents[0] + ' +' + (agents.length - 1) + ' more';
+  }
+
+  // The workflow-trigger action bar (#1730). One button per FLOW label that
+  // wakes ≥1 agent for the selected team+repo (AC2), colour-coded by usage
+  // (AC4), disabled-with-hint when already applied (AC6). Renders nothing when
+  // no label qualifies (AC7). Re-run on every renderDetail + after the flow
+  // labels load, so it never shows stale buttons from a prior ticket (AC10).
+  function renderActionBar() {
+    var bar = $('actionBar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    if (!currentIssue) { bar.classList.add('hidden'); return; }
+
+    var applied = {};
+    (currentIssue.labels || []).forEach(function (l) { applied[l.name] = true; });
+
+    // Candidate labels: the team's flow labels, de-duplicated, that actually
+    // wake an agent in this repo. A label that wakes nobody gets no button.
+    var seen = {};
+    var buttons = [];
+    (suggestions.flowLabels || []).forEach(function (n) {
+      var name = typeof n === 'string' ? n : (n && n.name);
+      if (!name || seen[name]) return;
+      seen[name] = 1;
+      var agents = agentsForLabel(name);
+      if (!agents.length) return;
+      buttons.push({ name: name, agents: agents, usage: triggerUsage(name) });
+    });
+
+    if (!buttons.length) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+
+    bar.appendChild(el('div', { class: 'action-bar-title' }, ['Trigger a workflow']));
+
+    var row = el('div', { class: 'trigger-btns' });
+    buttons.forEach(function (b) {
+      var meta = USAGE_META[b.usage] || USAGE_META.neutral;
+      var isApplied = !!applied[b.name];
+      var wakesText = 'Wakes ' + b.agents.join(', ');
+      var attrs = {
+        class: 'trigger-btn ' + meta.cls + (isApplied ? ' applied' : ''),
+        type: 'button',
+        title: isApplied
+          ? (b.name + ' is already applied — already triggered (' + wakesText + ')')
+          : ('Add the “' + b.name + '” label — ' + wakesText),
+      };
+      if (isApplied) { attrs.disabled = ''; attrs['aria-disabled'] = 'true'; }
+      else { attrs.onclick = function () { addLabel(b.name); }; }
+      var kids = [
+        el('span', { class: 'tb-main' }, [
+          el('span', { class: 'tb-glyph', 'aria-hidden': 'true' }, [meta.glyph]),
+          triggerButtonLabel(b.agents),
+        ]),
+        el('span', { class: 'tb-sub' }, [
+          el('span', { class: 'tb-usage' }, [meta.tag]),
+          el('span', { class: 'tb-label' }, [b.name]),
+        ]),
+      ];
+      if (isApplied) kids.push(el('span', { class: 'tb-hint' }, ['✓ already triggered']));
+      row.appendChild(el('button', attrs, kids));
+    });
+    bar.appendChild(row);
+
+    // Legend (AC4): explain the colour coding, but only for the treatments
+    // actually present, and never rely on colour alone — each swatch carries the
+    // glyph + text that also appears on the buttons.
+    var present = {};
+    buttons.forEach(function (b) { present[b.usage] = 1; });
+    var legendKeys = ['humanGate', 'agentEmitted', 'neutral'].filter(function (k) { return present[k]; });
+    if (legendKeys.length > 1) {
+      var legend = el('div', { class: 'action-legend' });
+      legendKeys.forEach(function (k) {
+        var meta = USAGE_META[k];
+        legend.appendChild(el('span', { class: 'legend-item ' + meta.cls }, [
+          el('span', { class: 'legend-swatch', 'aria-hidden': 'true' }, [meta.glyph]),
+          meta.legend,
+        ]));
+      });
+      bar.appendChild(legend);
+    }
   }
 
   function renderSuggestions() {

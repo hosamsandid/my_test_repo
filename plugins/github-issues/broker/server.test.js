@@ -175,6 +175,7 @@ test('GET /ui/api/labels returns the team flow labels + per-repo trigger preview
       token: 'GH', repos: [{ fullName: 'acme/widgets', defaultBranch: 'main' }], teamName: 'Team A',
       flowLabels: ['ready', 'ready-for-review'],
       labelAgents: { 'acme/widgets': { 'ready-for-review': ['Code Reviewer', 'Security Reviewer'] } },
+      labelUsage: { ready: 'humanGate', 'ready-for-review': 'agentEmitted' },
     } } }),
   });
   const r = await fetch(`${base}/ui/api/labels?team=team-a&repo=acme/widgets`, { headers: viewer(['team-a']) });
@@ -185,6 +186,8 @@ test('GET /ui/api/labels returns the team flow labels + per-repo trigger preview
   assert.equal(body.repoLabels.some((l) => l.name === 'ready'), true);
   // the per-repo trigger preview names both waking agents (AC6–8)
   assert.deepEqual(body.labelAgents['ready-for-review'], ['Code Reviewer', 'Security Reviewer']);
+  // the per-label usage classification drives the trigger-button colour-coding (#1730)
+  assert.deepEqual(body.labelUsage, { ready: 'humanGate', 'ready-for-review': 'agentEmitted' });
 });
 
 test('the agent CLI path (scope-token authed) returns the scope\'s repositories', async () => {

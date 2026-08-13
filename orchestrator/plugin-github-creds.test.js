@@ -139,8 +139,49 @@ test('buildTeamFlowLabels ignores disabled agents/triggers', () => {
 });
 
 test('buildTeamFlowLabels tolerates empty / missing input', () => {
-  assert.deepEqual(buildTeamFlowLabels(), { flowLabels: [], labelAgents: {} });
-  assert.deepEqual(buildTeamFlowLabels({}), { flowLabels: [], labelAgents: {} });
+  assert.deepEqual(buildTeamFlowLabels(), { flowLabels: [], labelAgents: {}, labelUsage: {} });
+  assert.deepEqual(buildTeamFlowLabels({}), { flowLabels: [], labelAgents: {}, labelUsage: {} });
+});
+
+test('buildTeamFlowLabels classifies label usage (humanGate vs agentEmitted) for colour-coding (#1730)', () => {
+  const { labelUsage } = buildTeamFlowLabels({
+    teamLabels: [{ name: 'ready', humanGate: true }, { name: 'ready-to-merge' }],
+    members: [
+      { displayName: 'Developer', enabled: true, triggers: [
+        { type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', repo: 'acme/widgets' },
+      ], emits: ['ready-for-review'] },
+      { displayName: 'Code Reviewer', enabled: true, triggers: [
+        { type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review', repo: 'acme/widgets' },
+      ], emits: ['revisions-required'] },
+    ],
+  });
+  // registry humanGate flag → human gate; a member's emits → agent-set.
+  assert.equal(labelUsage['ready'], 'humanGate');
+  assert.equal(labelUsage['ready-for-review'], 'agentEmitted');
+  assert.equal(labelUsage['revisions-required'], 'agentEmitted');
+  // a plain registry label that is neither gate-flagged nor emitted stays
+  // unclassified (the UI degrades it to a neutral button).
+  assert.equal(labelUsage['ready-to-merge'], undefined);
+});
+
+test('buildTeamFlowLabels lets a humanGate flag win over an emit (gate-violation truth, #1730)', () => {
+  const { labelUsage } = buildTeamFlowLabels({
+    teamLabels: [{ name: 'ready', humanGate: true }],
+    members: [
+      { displayName: 'Rogue', enabled: true, triggers: [], emits: ['ready'] },
+    ],
+  });
+  assert.equal(labelUsage['ready'], 'humanGate');
+});
+
+test('buildTeamFlowLabels ignores disabled members when classifying usage (#1730)', () => {
+  const { labelUsage } = buildTeamFlowLabels({
+    teamLabels: [],
+    members: [
+      { displayName: 'Off', enabled: false, triggers: [], emits: ['ghost'] },
+    ],
+  });
+  assert.equal(labelUsage['ghost'], undefined);
 });
 
 test('teamScopeIdsFromGrants extracts unique team ids and skips agent-granularity', () => {

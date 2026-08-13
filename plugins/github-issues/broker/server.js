@@ -113,6 +113,7 @@ function teamContext(scopeId) {
     known,
     flowLabels: (creds && Array.isArray(creds.flowLabels)) ? creds.flowLabels : [],
     labelAgents: (creds && creds.labelAgents && typeof creds.labelAgents === 'object') ? creds.labelAgents : {},
+    labelUsage: (creds && creds.labelUsage && typeof creds.labelUsage === 'object') ? creds.labelUsage : {},
   };
 }
 
@@ -224,14 +225,16 @@ async function handleUiApi(req, res, apiPath, viewer) {
   if (apiPath === '/labels' && req.method === 'GET') {
     const token = store.tokenForRepo(team, repo);
     if (!token) return void tokenErr(res, team, repo);
-    const flowLabels = teamContext(team).flowLabels;
+    const ctx = teamContext(team);
+    const flowLabels = ctx.flowLabels;
+    const labelUsage = ctx.labelUsage;
     const labelAgents = labelAgentsForRepo(team, repo);
     let repoLabels = [];
     try {
       const { data } = await gh.call('list_labels', { repo }, { token });
       repoLabels = Array.isArray(data) ? data.map(gh.shapeLabel) : [];
     } catch { /* suggestions are best-effort; free-text still works */ }
-    return sendJson(res, 200, { flowLabels, repoLabels, labelAgents });
+    return sendJson(res, 200, { flowLabels, repoLabels, labelAgents, labelUsage });
   }
 
   if (apiPath === '/label' && req.method === 'POST') {

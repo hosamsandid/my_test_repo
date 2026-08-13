@@ -187,6 +187,55 @@ body {
 
 .detail h2 { margin: 0 0 4px; font-size: var(--eb-text-xl); font-weight: var(--eb-font-semibold); }
 .detail .meta { color: var(--eb-text-secondary); font-size: var(--eb-text-sm); margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* Workflow-trigger action bar (#1730): prominent buttons above the description,
+ * one per flow label that wakes an agent. Visually distinct from the routine
+ * label editing below — these read as "start this workflow", not "add a tag". */
+.action-bar { margin: 0 0 14px; }
+.action-bar-title {
+  font-size: var(--eb-text-xs); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--eb-text-secondary); font-weight: var(--eb-font-semibold); margin-bottom: 8px;
+}
+.trigger-btns { display: flex; flex-wrap: wrap; gap: 10px; }
+.trigger-btn {
+  font: inherit; cursor: pointer; text-align: left;
+  display: inline-flex; flex-direction: column; gap: 3px;
+  padding: 8px 12px; min-width: 150px;
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  border: 1px solid var(--eb-border-hover); border-left-width: 4px;
+  border-radius: var(--eb-radius-md);
+}
+.trigger-btn:hover { border-color: var(--eb-border-hover); background: var(--eb-bg-hover); }
+.trigger-btn:focus-visible { outline: 2px solid var(--eb-accent-primary); outline-offset: 2px; }
+/* Colour coding by usage (AC4) — reinforced by the glyph + text tag on every
+ * button, so the distinction never rests on colour alone. */
+.trigger-btn.gate    { border-left-color: var(--eb-accent-primary); }
+.trigger-btn.gate:hover { border-color: var(--eb-accent-primary); }
+.trigger-btn.agent   { border-left-color: var(--eb-status-info); }
+.trigger-btn.agent:hover { border-color: var(--eb-status-info); }
+.trigger-btn.neutral { border-left-color: var(--eb-border-hover); }
+.trigger-btn:disabled, .trigger-btn.applied { opacity: .55; cursor: default; }
+.trigger-btn:disabled:hover, .trigger-btn.applied:hover { background: var(--eb-bg-elevated); }
+.trigger-btn .tb-main {
+  font-weight: var(--eb-font-semibold); font-size: var(--eb-text-base);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.trigger-btn .tb-glyph { color: var(--eb-text-secondary); font-size: var(--eb-text-md); }
+.trigger-btn.gate  .tb-glyph { color: var(--eb-accent-primary); }
+.trigger-btn.agent .tb-glyph { color: var(--eb-status-info); }
+.trigger-btn .tb-sub { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trigger-btn .tb-usage { font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
+.trigger-btn .tb-label {
+  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-primary);
+  background: var(--eb-bg-app); border: 1px solid var(--eb-border-default);
+  border-radius: var(--eb-radius-sm); padding: 0 5px;
+}
+.trigger-btn .tb-hint { font-size: var(--eb-text-xs); color: var(--eb-status-success); }
+.action-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.legend-item { font-size: var(--eb-text-xs); color: var(--eb-text-muted); display: inline-flex; align-items: center; gap: 5px; }
+.legend-swatch { font-size: var(--eb-text-sm); }
+.legend-item.gate  .legend-swatch { color: var(--eb-accent-primary); }
+.legend-item.agent .legend-swatch { color: var(--eb-status-info); }
+
 .detail .body {
   background: var(--eb-bg-surface); border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg); padding: 14px;
   word-break: break-word; font-size: var(--eb-text-base); line-height: 1.5; max-height: 46vh; overflow: auto;

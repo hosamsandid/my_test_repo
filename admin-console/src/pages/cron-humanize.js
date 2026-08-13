@@ -1,6 +1,8 @@
-// Pure, framework-free helper that turns a raw 5-field cron expression into a
-// plain-language sentence a non-expert can read at a glance — "0 9 * * 1-5" →
-// "At 09:00, Monday to Friday".
+// Pure, framework-free helpers that turn a trigger's stored schedule into a
+// plain-language sentence a non-expert can read at a glance — a raw 5-field
+// cron expression ("0 9 * * 1-5" → "At 09:00, Monday to Friday") via
+// `humanizeCron`, or a one-shot `once` trigger's ISO timestamp
+// ("2026-05-01T09:00:00Z" → "1 May 2026 at 09:00 UTC") via `humanizeOnce`.
 //
 // Why a second cron helper next to agent-chat/cron-format.js: that module's
 // `describeCron` describes the chat builder's *own* limited UI state (daily /
@@ -138,4 +140,44 @@ export function humanizeCron(raw) {
   // Anything else (e.g. a minute list at a fixed hour) — not worth a clumsy
   // sentence; the caller shows the raw cron.
   return '';
+}
+
+// Days per month for a light validity check (Feb allows 29 so leap years pass;
+// we never claim precision beyond "is this a plausible calendar date").
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// Turn a one-shot `once` trigger's ISO timestamp into a plain-language moment —
+// "2026-05-01T09:00:00Z" → "1 May 2026 at 09:00 UTC". Same fail-safe contract as
+// humanizeCron: return '' for any shape we can't describe confidently (an
+// out-of-range field, a numeric offset we won't mislabel, or junk), so the
+// caller just shows the raw timestamp and never a wrong description.
+//
+// Parses the string's own fields directly (no Date construction) so the result
+// is deterministic and never shifted by the runtime's local timezone.
+export function humanizeOnce(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  // date [ (T|space) HH:MM (:SS)? (.fraction)? ] [ Z ]
+  const m = raw.trim().match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::\d{2})?(?:\.\d+)?(Z)?)?$/
+  );
+  if (!m) return '';
+
+  const year = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10); // 1–12
+  const day = parseInt(m[3], 10);
+  if (month < 1 || month > 12) return '';
+  if (day < 1 || day > DAYS_IN_MONTH[month - 1]) return '';
+
+  const date = `${day} ${MONTH_LABELS[month - 1]} ${year}`;
+
+  // Date only — no time component.
+  if (m[4] === undefined) return date;
+
+  const hour = parseInt(m[4], 10);
+  const minute = parseInt(m[5], 10);
+  if (hour > 23 || minute > 59) return '';
+
+  const zone = m[6] ? ' UTC' : '';
+  return `${date} at ${pad(hour)}:${pad(minute)}${zone}`;
 }

@@ -96,9 +96,16 @@ export default function AgentList({
     [orderedGroups, orderedSingles, filter],
   );
 
-  // Arrows are only shown when the full unfiltered list is visible so that
-  // the visual position matches the stored order.
+  // Group and single-agent reorder are only offered when the full unfiltered
+  // list is visible so that the visual position matches the stored order — under
+  // a filter you cannot see the other groups/singles, so a move would be
+  // ambiguous.
   const canReorder = filter.kind === 'all';
+  // Member-within-group reorder, by contrast, is unambiguous under a single-team
+  // filter too: that view shows the team's complete, ordered member set, and the
+  // drag writes the same complete per-group order it would in the unfiltered view
+  // (#1725). Orchestrator (bp-instance ordering) / single-agent filters stay out.
+  const canReorderMembers = filter.kind === 'all' || filter.kind === 'team';
 
   // Latest ordered lists behind a ref so the reorder/drag callbacks below stay
   // referentially stable across renders — otherwise every memoized row would
@@ -234,7 +241,7 @@ export default function AgentList({
           onSelect={onSelect}
           onMarkAsUnread={onMarkAsUnread}
           statuses={statuses}
-          canReorder={canReorder}
+          memberReorder={canReorderMembers}
           onReorder={reorderByOne}
           drag={drag}
           groupDragKey={groupKey(group)}
@@ -288,7 +295,7 @@ const GroupSection = React.memo(function GroupSection({
   onSelect,
   onMarkAsUnread,
   statuses,
-  canReorder,
+  memberReorder,
   onReorder,
   drag,
   groupDragKey,
@@ -297,7 +304,7 @@ const GroupSection = React.memo(function GroupSection({
   const Icon = group.kind === 'team' ? Users : Layers;
   const count = group.children.length + (group.header ? 1 : 0);
   const memberScope = `members:${groupDragKey}`;
-  const memberDragEnabled = canReorder && group.children.length > 1;
+  const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
   // The Working Environment shared by this group's rows is shown once, on the
   // header; rows that inherit it drop their own line (#1451).

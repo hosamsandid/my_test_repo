@@ -374,6 +374,10 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         id: m.id.trim(),
         displayName: (m.displayName || m.id).trim(),
         ...(m.kind ? { kind: m.kind } : {}),
+        // #1717: preserve the provider-reported context window captured by
+        // discovery so it round-trips to the server (and back into the chat
+        // header) instead of being dropped on save.
+        ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
       }));
     const payload = {
       name: name.trim(),

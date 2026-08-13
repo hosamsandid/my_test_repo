@@ -1253,23 +1253,32 @@ export default function ChatPanel({
             {sessionCost.usd.toFixed(4)}
           </span>
         )}
-        {contextFillLevel && (
+        {contextFill && typeof contextFill.tokensIn === 'number' && (
+          // #1717: show the used count whenever we have one. Only render the
+          // "/ <window>" denominator and the warning/critical colouring when the
+          // model's real context window is known (discovery populated it) — a
+          // model with an unknown window shows the used count alone, muted, with
+          // no guessed limit and never a false over-limit (red) state.
           <span
-            title={`${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`}
+            title={contextWindowTokens != null
+              ? `${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`
+              : `${contextFill.tokensIn.toLocaleString()} tokens · ${contextFill.model}`}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 3,
               fontFamily: 'var(--eb-font-mono)',
               fontSize: 'var(--eb-text-xs)',
-              color: contextFillLevel.level === 'critical' ? 'var(--eb-status-error)'
-                : contextFillLevel.level === 'warning' ? 'var(--eb-status-warning)'
+              color: contextFillLevel?.level === 'critical' ? 'var(--eb-status-error)'
+                : contextFillLevel?.level === 'warning' ? 'var(--eb-status-warning)'
                 : 'var(--eb-text-muted)',
               whiteSpace: 'nowrap',
             }}
           >
             <Gauge size={10} />
-            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
+            {contextWindowTokens != null
+              ? `${formatTokenCountK(contextFill.tokensIn)} / ${formatTokenCountK(contextWindowTokens)}`
+              : formatTokenCountK(contextFill.tokensIn)}
           </span>
         )}
         {sessionId && (

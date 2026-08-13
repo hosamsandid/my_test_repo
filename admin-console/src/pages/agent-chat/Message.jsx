@@ -61,7 +61,7 @@ const MarkdownGfmOnly = React.memo(function MarkdownGfmOnly({ body }) {
  * memoized (see above) so the error boundary re-rendering never re-runs the
  * markdown pipeline for unchanged text.
  */
-class SafeMarkdown extends React.Component {
+export class SafeMarkdown extends React.Component {
   constructor(props) {
     super(props);
     this.state = { fallback: false };
@@ -198,7 +198,7 @@ const AGENT_CHAT_MD_CSS = `
  * every markdown render.
  */
 let mdCssInjected = false;
-function ensureAgentChatMdCss() {
+export function ensureAgentChatMdCss() {
   if (mdCssInjected || typeof document === 'undefined') return;
   if (document.getElementById('agent-chat-md-css')) { mdCssInjected = true; return; }
   const el = document.createElement('style');

@@ -8,6 +8,8 @@
 // the admin-console-src CI job (JSX stays uncovered per #651).
 
 import { plainModelLabel } from '../../components/model-selector-view.js';
+import { resolveContextWindowTokens } from './context-window.js';
+import { selectorWindowLabel } from './session-info.js';
 
 // The chat popover's clarifying hint (#1670 decision 4 / AC10) — makes clear this
 // controls the model/provider the agent RUNS on, not the assist billing model,
@@ -23,6 +25,11 @@ export function authTypeLabel(authType) {
 // The curated provider set as shared popover groups. Each provider carries its
 // System/Team scope badge (AC3), auth-type + endpoint detail rows (AC4 "provider
 // details remain visible per group"), and plain model labels (no kind suffix, AC9).
+// Each model row also carries a `meta` caption — its context window, e.g.
+// "1M context" (#1718) — resolved from the model's `contextWindow` field (the
+// known-Claude-family fallback in resolveContextWindowTokens keeps it consistent
+// with the header fill indicator); null/omitted when the window is unknown so a
+// row never shows a guessed size.
 export function buildChatGroups(options) {
   const endpoints = (options && Array.isArray(options.endpoints)) ? options.endpoints : [];
   return endpoints.map(ep => {
@@ -35,11 +42,15 @@ export function buildChatGroups(options) {
       scope: ep.scope === 'system' ? 'system' : 'team',
       details,
       defaultModelId: ep.defaultModelId || null,
-      models: models.map(m => ({
-        id: m.id,
-        label: plainModelLabel(m),
-        isDefault: m.id === ep.defaultModelId,
-      })),
+      models: models.map(m => {
+        const meta = selectorWindowLabel(resolveContextWindowTokens(m));
+        return {
+          id: m.id,
+          label: plainModelLabel(m),
+          isDefault: m.id === ep.defaultModelId,
+          ...(meta ? { meta } : {}),
+        };
+      }),
       emptyText: 'No models in this provider’s catalogue.',
     };
   });

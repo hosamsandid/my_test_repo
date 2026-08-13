@@ -7,6 +7,7 @@ import { MaintenanceModeProvider } from './context/MaintenanceModeContext';
 import { ModelSelectionProvider } from './context/ModelSelectionContext';
 import { AgentStatusesProvider } from './context/AgentStatusesContext.jsx';
 import { TranscriptionSessionProvider } from './context/TranscriptionSessionContext.jsx';
+import { HelperChatProvider } from './context/HelperChatContext.jsx';
 import './theme/tokens.css';
 
 createRoot(document.getElementById('root')).render(
@@ -21,7 +22,11 @@ createRoot(document.getElementById('root')).render(
             {/* Meeting Note-Taker session (#1296): mounted above the router so the
                 mic + segment loop survive all client-side navigation. */}
             <TranscriptionSessionProvider>
-              <App />
+              {/* Helper Chat (#1735): app-level so the help panel + its
+                  conversation survive all client-side navigation. */}
+              <HelperChatProvider>
+                <App />
+              </HelperChatProvider>
             </TranscriptionSessionProvider>
           </AgentStatusesProvider>
         </MaintenanceModeProvider>

@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus,
+  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -21,6 +21,10 @@ import {
 import AccentureLogo from './AccentureLogo';
 import AssistModelSelector from './AssistModelSelector';
 import TranscriptionOverlay from './TranscriptionOverlay';
+import HelperChatPanel from './HelperChatPanel';
+import { useHelperChat } from '../context/HelperChatContext';
+import { breadcrumbFor } from './breadcrumbs';
+import { formatVersionLabel } from './version-info';
 import { formatCommitTimestamp } from './version-info';
 
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
@@ -167,49 +171,14 @@ const NAV_GROUP_KEYS = NAV_GROUPS.map(g => g.key);
 const PLUGINS_GROUP_KEY = 'plugins';
 const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
-const BREADCRUMBS = {
-  '/create':       'Create',
-  '/quickstart':   'One assistant',
-  '/team-setup':   'Agent Team Wizard',
-  '/agents':       'Agents',
-  '/flows':        'Flows',
-  '/knowledge':    'Knowledge',
-  '/chats':        'Agent Chat',
-  '/environments': 'Working Environments',
-  '/ssh-keys':     'SSH Keys',
-  '/github-tokens': 'GitHub Tokens',
-  '/my-credentials': 'My Credentials',
-  '/skills':       'Skills Registry',
-  '/role-templates': 'Agent Templates',
-  '/jobs':         'Triggers',
-  '/github-events': 'GitHub Event Log',
-  '/token-usage':  'Token Usage',
-  '/models':       'Model Providers',
-  '/mcp':          'MCP Servers',
-  '/plugins':      'Plugins',
-  '/plugin-system': 'Plugin System',
-  '/teams':        'Access & Users',
-  '/orchestrator-wizard': 'Orchestrator Wizard',
-  '/maintenance-mode': 'Maintenance Mode',
-};
-
-function breadcrumbFor(pathname) {
-  if (BREADCRUMBS[pathname]) return BREADCRUMBS[pathname];
-  if (pathname.startsWith('/chats/')) {
-    const id = pathname.slice('/chats/'.length);
-    return `Agent Chat / ${id}`;
-  }
-  const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
-  if (pluginView) return `Plugins / ${pluginView[1]}`;
-  return pathname;
-}
-
 export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
   const { user, logout } = useAuth();
+  // Helper Chat (#1735): the header Help button toggles the app-level panel.
+  const { isOpen: helpOpen, toggle: toggleHelp } = useHelperChat();
   // Nav badge counts, derived from the shared agent-status poll (#1677) instead
   // of a Shell-owned interval — one /api/agents/statuses request now feeds every
   // subscribing surface.
@@ -624,6 +593,39 @@ export default function Shell({ children }) {
             {breadcrumbFor(location.pathname)}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+            <button
+              onClick={toggleHelp}
+              title="Help — ask anything about Agent Studio"
+              aria-label="Help"
+              aria-pressed={helpOpen}
+              style={{
+                background: helpOpen ? 'var(--eb-bg-selected)' : 'none',
+                border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: helpOpen ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--eb-space-2)',
+                padding: 'var(--eb-space-1) var(--eb-space-2)',
+                fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)',
+                transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
+              }}
+              onMouseEnter={e => {
+                if (helpOpen) return;
+                e.currentTarget.style.background = 'var(--eb-bg-hover)';
+                e.currentTarget.style.color = 'var(--eb-text-primary)';
+              }}
+              onMouseLeave={e => {
+                if (helpOpen) return;
+                e.currentTarget.style.background = 'none';
+                e.currentTarget.style.color = 'var(--eb-text-secondary)';
+              }}
+            >
+              <HelpCircle size={16} />
+              <span>Help</span>
+            </button>
             <AssistModelSelector />
             <button
               onClick={toggleLightDark}
@@ -697,6 +699,10 @@ export default function Shell({ children }) {
       {/* Persistent Meeting Note-Taker overlay (#1296) — portaled to body, so
           it floats over every page while a meeting transcription runs. */}
       <TranscriptionOverlay />
+
+      {/* Helper Chat panel (#1735) — a non-blocking slide-in help assistant,
+          mounted once here so it is available on every route without a backdrop. */}
+      <HelperChatPanel />
     </div>
   );
 }

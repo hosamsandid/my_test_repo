@@ -311,6 +311,24 @@ auth.registerAuthRoutes(app, {
 });
 app.use('/api', auth.gate);
 
+// Helper Chat guided-tour manifest (#1737, Phase 2.2). Serves the pre-built
+// tour manifest (generated + vendored by #1736) behind the global /api gate
+// above. The loader degrades to an empty { chapters: [] } when the generated
+// file is not present, so this endpoint never fails the API to boot on a
+// checkout where #1736 has not merged yet. Memoized once real chapters load.
+const { readTourManifest: _readTourManifest } = require('./helper-chat/tour-manifest-loader');
+let _tourManifestCache = null;
+app.get('/api/helper/tour-manifest', (req, res) => {
+  if (!_tourManifestCache) {
+    const m = _readTourManifest();
+    // Only cache once the real (non-empty) manifest is present, so the endpoint
+    // self-heals if the generated file appears after startup.
+    if (Array.isArray(m.chapters) && m.chapters.length > 0) _tourManifestCache = m;
+    return res.json(m);
+  }
+  res.json(_tourManifestCache);
+});
+
 // Speech-to-text transcription: proxies audio to the STT service and returns { text }.
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());

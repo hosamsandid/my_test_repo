@@ -6,14 +6,16 @@ import {
   resolveContextTokensForResult,
 } from './context-window.js';
 
-test('resolveContextWindowTokens: explicit contextWindow wins over the known-model table', () => {
-  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6', contextWindow: 500_000 }), 500_000);
+test('resolveContextWindowTokens: uses the explicit contextWindow when set', () => {
+  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6', contextWindow: 1_000_000 }), 1_000_000);
+  assert.equal(resolveContextWindowTokens({ id: 'some-custom-model', contextWindow: 500_000 }), 500_000);
 });
 
-test('resolveContextWindowTokens: falls back to the known Claude family window', () => {
-  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6' }), 200_000);
-  assert.equal(resolveContextWindowTokens({ id: 'claude-haiku-4-5' }), 200_000);
-  assert.equal(resolveContextWindowTokens({ id: 'claude-opus-4-7' }), 200_000);
+test('resolveContextWindowTokens: no name fallback — a claude-* id with no explicit value is null (#1717)', () => {
+  // The removed `claude-* → 200000` rule turned every 1M-window model red.
+  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6' }), null);
+  assert.equal(resolveContextWindowTokens({ id: 'claude-haiku-4-5' }), null);
+  assert.equal(resolveContextWindowTokens({ id: 'claude-opus-4-8' }), null);
 });
 
 test('resolveContextWindowTokens: unknown model with no explicit value resolves to null', () => {
@@ -21,7 +23,7 @@ test('resolveContextWindowTokens: unknown model with no explicit value resolves 
 });
 
 test('resolveContextWindowTokens: ignores a non-positive explicit value', () => {
-  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6', contextWindow: 0 }), 200_000);
+  assert.equal(resolveContextWindowTokens({ id: 'claude-sonnet-4-6', contextWindow: 0 }), null);
   assert.equal(resolveContextWindowTokens({ id: 'some-custom-model', contextWindow: -1 }), null);
 });
 

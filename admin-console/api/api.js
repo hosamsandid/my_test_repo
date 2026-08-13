@@ -30,6 +30,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { buildAssistModelOptions } = require('./assist-model-options');
+const { normalizeDiscoveredModels } = require('./model-discovery');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -9993,6 +9994,13 @@ function validateModels(models) {
   if (!Array.isArray(models)) return 'models must be an array';
   for (const m of models) {
     if (!m || typeof m.id !== 'string' || !m.id.trim()) return 'every model needs a non-empty id';
+    // contextWindow is optional (populated by discovery, #1717) but when set it
+    // must be a positive number — a malformed value would surface as a bogus
+    // limit in the chat header.
+    if (m.contextWindow !== undefined && m.contextWindow !== null
+        && !(typeof m.contextWindow === 'number' && m.contextWindow > 0)) {
+      return 'contextWindow must be a positive number when set';
+    }
   }
   return null;
 }
@@ -10451,22 +10459,13 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
     return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
-  // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
+  // model_info on each entry. Normalize to our { id, displayName, kind?,
+  // contextWindow? } — capturing the provider-reported input context window
+  // (#1717) so the real limit, not a guessed 200K, drives the chat header.
   const raw = Array.isArray(result.body?.data) ? result.body.data
             : Array.isArray(result.body)       ? result.body
             : [];
-  const models = raw
-    .map(m => {
-      const id = typeof m === 'string' ? m : m?.id;
-      if (!id) return null;
-      const lower = String(id).toLowerCase();
-      let kind;
-      if (lower.includes('opus'))   kind = 'opus';
-      else if (lower.includes('sonnet')) kind = 'sonnet';
-      else if (lower.includes('haiku'))  kind = 'haiku';
-      return { id, displayName: id, ...(kind ? { kind } : {}) };
-    })
-    .filter(Boolean);
+  const models = normalizeDiscoveredModels(raw);
   return { url, count: models.length, models };
 }
 

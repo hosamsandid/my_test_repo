@@ -26,7 +26,7 @@ const NAV_PAGES = [
   { label: 'SSH Keys',             breadcrumb: 'SSH Keys' },
   { label: 'GitHub Tokens',        breadcrumb: 'GitHub Tokens' },
   { label: 'Working Environments', breadcrumb: 'Working Environments' },
-  { label: 'Teams',                breadcrumb: 'Teams' },
+  { label: 'Access & Users',       breadcrumb: 'Access & Users' },
   { label: 'Skills',               breadcrumb: 'Skills Registry' },
   { label: 'Agent Templates',      breadcrumb: 'Agent Templates' },
   { label: 'Triggers',             breadcrumb: 'Triggers' },

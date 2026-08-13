@@ -4,13 +4,13 @@ The Admin Console at `http://localhost:4000` (configurable via `.env`) is the ce
 
 ## Navigation
 
-The left sidebar is organised into task-based collapsible accordion groups (#1595). **Agent Chat** sits at the top (ungrouped, always-visible). A persistent **+ Create** control sits above the groups — the single launcher (#1665, Phase B/C of epic #1661) for starting something new (describe it · start from a ready-made setup · build it yourself · one assistant to chat with); it replaced the former separate **Single Agent** and **Agent Team Wizard** sidebar entries (those pages remain reachable as launcher targets and via their `/quickstart` / `/team-setup` deep links). Below it four collapsible groups appear in workflow order: **Agent Setup** (Agents · Flows · Agent Templates · Skills · Knowledge · Triggers), **Connections** (Working Environments · Model Providers · MCP Servers · Plugins · SSH Keys · GitHub Tokens), **Insights** (Token Usage · GitHub Event Log), and **Administration** (Teams · Maintenance Mode). Small always-visible clusters at the bottom hold **Help** (Getting Started) and **Account** (My Credentials). The group containing the active page auto-expands; collapse state persists per user in `localStorage` under `nav.collapsedGroups.<username>`. Installed UI plugins appear as an additional collapsible **Plugins** group at the end of the accordion list (collapsed by default, so a long plugin list folds away); the bottom Help/Account clusters stay pinned in view below the scrolling list. A group or cluster with no visible items for the current role renders no header (role gating is unchanged: `adminOnly` = System Admin; `credAdmin` = System Admin or Team Admin).
+The left sidebar is organised into task-based collapsible accordion groups (#1595). **Agent Chat** sits at the top (ungrouped, always-visible). A persistent **+ Create** control sits above the groups — the single launcher (#1665, Phase B/C of epic #1661) for starting something new (describe it · start from a ready-made setup · build it yourself · one assistant to chat with); it replaced the former separate **Single Agent** and **Agent Team Wizard** sidebar entries (those pages remain reachable as launcher targets and via their `/quickstart` / `/team-setup` deep links). Below it four collapsible groups appear in workflow order: **Agent Setup** (Agents · Flows · Agent Templates · Skills · Knowledge · Triggers), **Connections** (Working Environments · Model Providers · MCP Servers · Plugins · SSH Keys · GitHub Tokens), **Insights** (Token Usage · GitHub Event Log), and **Administration** (Access & Users · Maintenance Mode). Small always-visible clusters at the bottom hold **Help** (Getting Started) and **Account** (My Credentials). The group containing the active page auto-expands; collapse state persists per user in `localStorage` under `nav.collapsedGroups.<username>`. Installed UI plugins appear as an additional collapsible **Plugins** group at the end of the accordion list (collapsed by default, so a long plugin list folds away); the bottom Help/Account clusters stay pinned in view below the scrolling list. A group or cluster with no visible items for the current role renders no header (role gating is unchanged: `adminOnly` = System Admin; `credAdmin` = System Admin or Team Admin).
 
 | Page | Route | Purpose |
 |---|---|---|
 | **Agent Chat** | `/` (redirects to `/chats`) | 1:1 chat with any agent; session log; workspace browser; trigger editor — the console's entry page |
 | **Create** | `/create` | The unified creation launcher (#1665): equally-ranked entries — *Describe what you need* (Flow Copilot), *Start from a ready-made setup* (template registry via the wizard), *Build it yourself* (blank Flows draft), *Just give me one assistant to chat with* (the one-assistant fast lane — a single agent is simply a team of one, #1667). Opened from the persistent **+ Create** sidebar control or this route |
-| **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Teams, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
+| **Getting Started** | `/getting-started` | Persistent concept overview (Agents, Access & Users, Flows, Environments, Knowledge, Model Providers) — always-reachable alternative to the one-time setup wizard; also linked from the Agent Chat empty state |
 | **Plugin System** | `/plugin-system` | Persistent, self-contained concept/help page — what a plugin is, how it works technically, typical use cases, and how to build one; ungated (any authenticated user); **no sidebar nav entry** — reached via the "Learn about plugins" link on the Plugins page (#1638); direct links and bookmarks still work |
 | **Agents** | `/agents` | Manage the agents and teams you already have (edit, enable/disable, delete, export, clone, save as template, add members/roles); creation and import stay here as advanced affordances, but the primary "create" path is the **+ Create** launcher (#1661 Phase F) |
 | **Working Environments** | `/environments` | Reusable workspace recipes (repos, GitHub token, model provider, MCP servers) |
@@ -22,7 +22,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
 | **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it; links to the Plugin System help page |
-| **Teams** | `/teams` | Manage human **Teams** (tenant scope): team CRUD, users, per-team roles, and assigning agents/environments to a team |
+| **Access & Users** | `/teams` | Manage human access scopes (**Teams**, the tenant) and users: team CRUD, users, per-team roles, and assigning agents/environments to a team. Renamed from "Teams" (#1726) to avoid confusion with the *Agent Team* squad; the route, API and internal entity stay `team` |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
@@ -56,8 +56,8 @@ to the login screen; an expired session (any `401`) does the same automatically.
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
-**Per-user local passwords (#374, interim).** Human users created on the Teams
-page (#308) can be given a local password (Teams → Manage Users → the
+**Per-user local passwords (#374, interim).** Human users created on the Access & Users
+page (#308) can be given a local password (Access & Users → Manage Users → the
 🔑 button), letting more than one person log in before SSO lands. Login then
 resolves in two steps: first the **user store** (match by `subject`, verify a
 salted **scrypt** hash held in the user record and never returned by any API),
@@ -77,12 +77,15 @@ it in the login route). Swapping it for an OIDC/SAML token exchange (and adding
 the IdP callback route) requires no change to the session format, cookie
 handling, gate middleware, or the login UI/routing.
 
-## Teams (#308)
+## Access & Users (#308, renamed #1726)
 
-The **Teams** page (`/teams`) is the UI for the human **Team** scope (the
-tenant) introduced by the teams data model (#299). It is distinct from the
+The **Access & Users** page (`/teams`) is the UI for the human **Team** scope
+(the tenant) introduced by the teams data model (#299). It is distinct from the
 *Agent Team* squad created by the **Agent Team Wizard** — see
-[docs/teams-data-model.md](./teams-data-model.md).
+[docs/teams-data-model.md](./teams-data-model.md). The section was renamed from
+"Teams" (#1726) because users kept confusing it with the *Agent Team* construct;
+this is a UI-label rename only — the `/teams` route, the `/api/admin/{teams,…}`
+endpoints and the internal **Team** entity are unchanged.
 
 A System Admin can:
 - **Team CRUD** — create / edit / delete teams. The `default` team cannot be deleted.

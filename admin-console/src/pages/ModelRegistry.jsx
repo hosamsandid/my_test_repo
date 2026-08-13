@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock, LogIn, ShieldAlert } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -1125,7 +1126,7 @@ export default function ModelRegistry() {
         );
       },
     },
-    { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : (v ? new Date(v).toLocaleString() : '—') },
+    { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : <WhenCell iso={v} /> },
     {
       key: '_actions',
       label: '',

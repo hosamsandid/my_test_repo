@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -467,7 +468,7 @@ export default function SshKeys() {
       },
     },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     {
       key: '_usedBy', label: 'Used by', sortable: false,
       render: (_, row) => {

@@ -308,4 +308,5 @@ kubectl -n <ns> get deploy -o wide     # image tags = deployed version
 ```
 
 The console footer (bottom-left, under *About*) shows the deployed commit's
-short SHA.
+creation timestamp (e.g. `2026-08-13 17:52 +0200`); clicking it opens the
+About page, which still shows the commit's short SHA.

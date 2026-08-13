@@ -7,6 +7,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
@@ -434,7 +435,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         placeholder="e.g. litellm-prod"
         helpText={isEdit
           ? <>Cannot be changed after creation.</>
-          : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
+          : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
 
       {/* Ownership / team scope (#800) */}

@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
@@ -337,7 +338,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         placeholder="e.g. cobol-migration"
         helpText={isEdit
           ? <>A unique identifier for this environment. <strong>Cannot be changed after creation.</strong></>
-          : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only (e.g. <code>cobol-migration</code>). <strong>Cannot be changed after creation.</strong></>}
+          : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
 
       {isEdit && (

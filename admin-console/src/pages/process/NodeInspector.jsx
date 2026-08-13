@@ -6,6 +6,7 @@ import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
+import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import {
   PROMPT_MODES,
@@ -166,7 +167,7 @@ export default function NodeInspector({
                     <input value={id}
                       onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
                       style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all of this agent's inputs and hand-offs.</span>
+                    <span style={hint}>{ID_FORMAT_HINT} Renaming rewires all of this agent's inputs and hand-offs.</span>
                   </>
                 )}
               </Field>

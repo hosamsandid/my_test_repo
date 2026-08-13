@@ -20,6 +20,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
 import PluginGrantPicker from '../components/PluginGrantPicker';
@@ -855,7 +856,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         helpText={
           <>
             Auto-derived from Display Name; edit to override.
-            Lowercase letters, digits and hyphens only. Used as the agent's URL
+            {' '}{ID_FORMAT_HINT} Used as the agent's URL
             (<code>/chats/{form.id || 'id'}</code>) and the workspace folder name.
             <strong> Cannot be changed after creation.</strong>
           </>

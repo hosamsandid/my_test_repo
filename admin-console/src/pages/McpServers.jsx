@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import InfoTip from '../components/InfoTip';
 
@@ -80,7 +81,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="wiki"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits, dashes. Used as the key in <code>.claude/settings.json</code> <code>mcpServers</code>.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the key in <code>.claude/settings.json</code> <code>mcpServers</code>.</>}
       />
 
       <FormInput label="Description" value={description} onChange={setDescription} placeholder="What agents use this server for" />
@@ -203,7 +204,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="confluence-team-a"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored secret.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored secret.</>}
       />
 
       <div>

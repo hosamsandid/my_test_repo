@@ -5,6 +5,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import StatusBadge from '../components/StatusBadge';
 
@@ -86,7 +87,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="e.g. cobol-agent"
-        helpText={<>Auto-derived from Display Name; edit to override. Lowercase letters, digits, hyphens. Becomes the agent identifier.</>}
+        helpText={<>Auto-derived from Display Name; edit to override. {ID_FORMAT_HINT} Becomes the agent identifier.</>}
       />
 
       <div>
@@ -168,7 +169,7 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
           onChange={e => update('instanceId', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
         />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          Lowercase letters, digits and hyphens only. Identifies the agent in URLs and as the workspace folder name.
+          {ID_FORMAT_HINT} Identifies the agent in URLs and as the workspace folder name.
         </div>
       </div>
 

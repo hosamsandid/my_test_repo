@@ -28,10 +28,10 @@ const CONCEPTS = [
   },
   {
     Icon: Building2,
-    title: 'Teams',
+    title: 'Access & Users',
     to: '/teams',
-    linkLabel: 'Open Teams',
-    body: 'A team is a group of agents that work together on one repository, hand work off to each other, and share a common knowledge base. Team Admins and Members control who can change what.',
+    linkLabel: 'Open Access & Users',
+    body: 'Manage access scopes (Teams — the human tenant every agent, environment and credential is owned by) and the human users in them. Team Admins and Members control who can change what. This is not the Agent Team squad — that lives on the Agents page.',
   },
   {
     Icon: GitBranch,

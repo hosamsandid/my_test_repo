@@ -489,7 +489,7 @@ const ROLE_INFO = {
     body: (
       <>
         A squad of agents working a repo — <em>not</em> the same thing as a <strong>Team</strong> on the
-        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Teams</Link> page (which is a human tenant / access scope).
+        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Access &amp; Users</Link> page (which is a human tenant / access scope).
         This construct stores a system-prompt template without creating an agent itself. Instead you click
         <strong> Add Member</strong> on the team card to spawn one or more agents that all
         share the same prompt and Working Environment, but each gets its own workspace and

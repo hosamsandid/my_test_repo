@@ -145,7 +145,7 @@ const NAV_GROUPS = [
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
   { key: 'administration', section: 'Administration', items: [
-    { path: '/teams',            label: 'Teams',            Icon: Building2, subtitle: 'Human members & access' },
+    { path: '/teams',            label: 'Access & Users',   Icon: Building2, subtitle: 'Human members & access' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
@@ -188,7 +188,7 @@ const BREADCRUMBS = {
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
   '/plugin-system': 'Plugin System',
-  '/teams':        'Teams',
+  '/teams':        'Access & Users',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',
 };

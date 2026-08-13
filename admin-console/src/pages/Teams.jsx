@@ -574,7 +574,7 @@ export default function Teams() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Teams</h1>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Access &amp; Users</h1>
         {/* Creating teams and managing global user records are System-Admin
             actions (#584); a Team Admin manages memberships within their own
             team via the per-team Manage panel, not here. */}
@@ -595,10 +595,11 @@ export default function Teams() {
         border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
       }}>
-        A <strong>Team</strong> is a <em>human</em> collaboration & visibility scope (the tenant). Every agent, Agent Team,
-        orchestrator and Working Environment is owned by exactly one Team. Add human users as <strong>Team Admins</strong> or
-        <strong> Team Members</strong>; <strong>System Admins</strong> have global access. This is distinct from the
-        <em> Agent Team</em> construct (a squad of agents) created via the Agent Team Wizard.
+        This section manages <strong>access scopes</strong> and the <strong>human users</strong> in them. A scope — internally a
+        <strong> Team</strong> — is a <em>human</em> collaboration &amp; visibility tenant: every agent, Agent Team, orchestrator and
+        Working Environment is owned by exactly one. Add human users as <strong>Team Admins</strong> or <strong>Team Members</strong>;
+        <strong> System Admins</strong> have global access. This is <em>not</em> the <em>Agent Team</em> construct (a squad of agents)
+        created via the Agent Team Wizard.
       </div>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />

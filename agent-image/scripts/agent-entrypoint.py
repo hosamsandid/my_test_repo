@@ -358,8 +358,12 @@ def run_agent(system_prompt: str, user_prompt: str) -> int:
         "claude",
         "--print",
         "--system-prompt", str(sys_prompt_path),
+        # Offer AskUserQuestion headlessly via the bundled MCP server (#1712) —
+        # merged with any env MCP servers (no --strict-mcp-config).
+        "--mcp-config", _ask_user_mcp_config(),
         "--allowedTools",
-        "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*)",
+        "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*) "
+        + _ASK_USER_MCP_TOOL,
     ]
 
     # Credential check — any of the auth mechanisms the Claude CLI understands:
@@ -1519,17 +1523,56 @@ def _map_stream_json_line(line: str, correlation_id: str,
     return events
 
 
-# ---- AskUserQuestion → chat message (#447) ----
+# ---- AskUserQuestion → chat message (#447, reachable via bundled MCP #1712) ----
 #
 # `AskUserQuestion` is Claude Code's structured "ask the human a question" tool.
-# It is intentionally NOT in the runner's --allowedTools whitelist: an agent turn
-# is a single non-interactive process (stdin closed), so the tool can never be
-# answered in-line and the CLI denies it. Rather than let that surface as a
-# silent "no output" / generic error, we intercept the tool_use, render the
-# question(s) into a readable chat message, and post it. The user's next chat
-# message then continues the resumed session — the answer arrives as a normal,
-# context-bearing turn.
+# Its *built-in* form is interactive-TTY-only: in the `-p`/print mode every agent
+# turn runs in (a single non-interactive process, stdin closed) the CLI removes it
+# from the model's tool set entirely, so the model can never emit it — adding it to
+# --allowedTools / --tools does not help (the tool is filtered before permissions
+# are consulted). To close that gap (#1712) the runner instead offers an
+# identically-shaped `AskUserQuestion` tool from a bundled, dependency-free stdio
+# MCP server (`ask-user-mcp.py`) via --mcp-config, so it *is* available to the
+# model headlessly. When the model calls it the tool_use surfaces in the stream as
+# `mcp__aee-ask__AskUserQuestion`; the MCP tool returns a short "end your turn and
+# wait" instruction so the turn completes cleanly (a normal success `result`, the
+# session stays coherent for --resume) rather than erroring. We intercept that
+# tool_use, render the question(s) into a readable chat message (+ the #1663
+# quick-reply payload), and post it instead of the model's reply. The user's next
+# chat message then continues the resumed session — the answer arrives as a normal,
+# context-bearing turn. The bare-name match is kept so an interactive/legacy
+# built-in emission is handled identically.
 _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+# The bundled MCP server that re-supplies the tool headlessly, the key it is
+# registered under, and the resulting namespaced tool name the model calls.
+_ASK_USER_MCP_SERVER = SCRIPTS_DIR / "ask-user-mcp.py"
+_ASK_USER_MCP_KEY = "aee-ask"
+_ASK_USER_MCP_TOOL = f"mcp__{_ASK_USER_MCP_KEY}__{_ASK_USER_QUESTION_TOOL}"
+
+
+def _ask_user_mcp_config() -> str:
+    """Inline --mcp-config JSON registering the bundled AskUserQuestion server.
+
+    Passed alongside (not instead of) any env-provisioned MCP servers in the
+    agent's settings.json — without --strict-mcp-config the CLI merges the two.
+    """
+    return json.dumps({
+        "mcpServers": {
+            _ASK_USER_MCP_KEY: {
+                "command": "python3",
+                "args": [str(_ASK_USER_MCP_SERVER)],
+            }
+        }
+    })
+
+
+def _is_ask_user_question_tool(name) -> bool:
+    """True for the AskUserQuestion tool by its bare built-in name or its
+    MCP-namespaced form (`mcp__<server>__AskUserQuestion`)."""
+    return isinstance(name, str) and (
+        name == _ASK_USER_QUESTION_TOOL
+        or name.endswith(f"__{_ASK_USER_QUESTION_TOOL}")
+    )
 
 
 def _format_ask_user_question(tool_input) -> str | None:
@@ -2582,8 +2625,13 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     if model_arg:
         args.extend(["--model", model_arg])
     for tool in ("Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
-                 "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)"):
+                 "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)",
+                 # AskUserQuestion, offered headlessly via the bundled MCP server
+                 # (#1712); its tool_use is intercepted and turned into a paused
+                 # chat question rather than executed for real.
+                 _ASK_USER_MCP_TOOL):
         args.extend(["--allowedTools", tool])
+    args.extend(["--mcp-config", _ask_user_mcp_config()])
     return args
 
 
@@ -2955,7 +3003,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
             elif ev.get("type") == "assistant_text" and isinstance(ev.get("text"), str):
                 assistant_chunks.append(ev["text"])
             elif (ev.get("type") == "tool_use"
-                    and ev.get("tool") == _ASK_USER_QUESTION_TOOL
+                    and _is_ask_user_question_tool(ev.get("tool"))
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]

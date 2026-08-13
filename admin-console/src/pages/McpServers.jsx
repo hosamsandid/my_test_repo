@@ -390,7 +390,7 @@ export default function McpServers() {
             <Plus size={15} /> New server
           </button>
         </div>
-        <DataTable columns={SERVER_COLUMNS} data={servers ?? []} emptyText="No MCP servers configured yet." />
+        <DataTable columns={SERVER_COLUMNS} data={servers ?? []} emptyText="No MCP servers configured yet. Click 'New server' to add one." />
       </section>
 
       <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -405,7 +405,7 @@ export default function McpServers() {
             <Plus size={15} /> New credential
           </button>
         </div>
-        <DataTable columns={CRED_COLUMNS} data={credentials ?? []} emptyText="No credentials stored yet." />
+        <DataTable columns={CRED_COLUMNS} data={credentials ?? []} emptyText="No credentials stored yet. Click 'New credential' to add one." />
       </section>
 
       <SidePanel

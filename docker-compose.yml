@@ -137,6 +137,7 @@ services:
         # still succeeds without git metadata.
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_DIRTY: ${GIT_DIRTY:-}
+        GIT_COMMIT_TIME: ${GIT_COMMIT_TIME:-}
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
     # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).

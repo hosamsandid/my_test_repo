@@ -56,21 +56,25 @@ test('buildChatGroups carries scope badge, detail rows and plain (no-kind) model
   assert.equal(groups[0].models[1].isDefault, false);
 });
 
-test('buildChatGroups adds a context-window caption per model, omitted when unknown (#1718 AC1)', () => {
+test('buildChatGroups adds a context-window caption per model, omitted when unknown (#1718 AC1 / #1717)', () => {
   const groups = buildChatGroups({
     endpoints: [{
       id: 'ep1', name: 'Acme', scope: 'team', authType: 'api-key', baseUrl: 'https://acme.example',
       defaultModelId: 'big',
       models: [
-        { id: 'big', displayName: 'Big', contextWindow: 1_000_000 }, // explicit window
-        { id: 'claude-sonnet-4-6', displayName: 'Sonnet' },          // known Claude family → 200K fallback
-        { id: 'mystery', displayName: 'Mystery' },                   // unknown → no caption
+        { id: 'big', displayName: 'Big', contextWindow: 1_000_000 },              // explicit 1M window
+        { id: 'claude-sonnet-4-5', displayName: 'Sonnet', contextWindow: 200_000 }, // explicit 200K window
+        { id: 'claude-opus-4-8', displayName: 'Opus' },                           // #1717: Claude family, no
+                                                                                  // discovered window → no caption
+                                                                                  // (never the old 200K guess)
+        { id: 'mystery', displayName: 'Mystery' },                                // unknown → no caption
       ],
     }],
   });
   assert.equal(groups[0].models[0].meta, '1M context');
   assert.equal(groups[0].models[1].meta, '200K context');
   assert.equal('meta' in groups[0].models[2], false);
+  assert.equal('meta' in groups[0].models[3], false);
 });
 
 test('buildChatGroups tolerates missing options', () => {

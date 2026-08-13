@@ -26,6 +26,16 @@ import { computeWindow } from './virtual-window.js';
  *   gap            vertical space between rows (px) — applied as margin so the
  *                  virtualized block matches a `gap`-spaced flex list
  *   rowStyle       optional style merged onto each row wrapper
+ *   stickToBottom  when true, re-pin the scroller to the true bottom after each
+ *                  measuring pass. Rows below the fold are estimated until they
+ *                  are scrolled into view, so a single `scrollTop = scrollHeight`
+ *                  (issued by the caller on load / send) lands short of the real
+ *                  bottom; re-asserting it here as those rows mount and are
+ *                  measured converges on the newest message within a frame or
+ *                  two, and keeps the view pinned while a reply streams in
+ *                  (#1710). The caller drives this from its own `atBottom`
+ *                  intent, so scrolling up (atBottom → false) stops the re-pin
+ *                  and older-history restore is never fought.
  */
 export default function VirtualList({
   items,
@@ -36,6 +46,7 @@ export default function VirtualList({
   overscan = 6,
   gap = 0,
   rowStyle,
+  stickToBottom = false,
 }) {
   const innerRef = useRef(null);
   const heightsRef = useRef(new Map());   // key -> measured outer height (px, incl. gap)
@@ -134,6 +145,23 @@ export default function VirtualList({
       }
     }
     measureViewport();
+    // Re-assert "bottom" after measuring. On initial load / room switch the
+    // rendered window starts at the top, so the rows below the fold are all
+    // estimates and the caller's `scrollTop = scrollHeight` landed short of the
+    // true bottom; as those rows scroll into view here and are measured the
+    // total height grows, so we push scrollTop to the (now larger) scrollHeight
+    // and re-measure so the window recomputes toward the bottom. Repeating this
+    // per commit converges on the newest message — and keeps the view pinned as
+    // a streamed reply grows — without reintroducing full-list rendering. The
+    // caller only sets `stickToBottom` while the user is at the bottom, so a
+    // deliberate scroll-up (or older-history restore) is never overridden.
+    if (stickToBottom) {
+      const scroller = scrollerRef.current;
+      if (scroller) {
+        scroller.scrollTop = scroller.scrollHeight;
+        measureViewport();
+      }
+    }
     if (changed) setMeasureTick(t => t + 1);
   });
 

@@ -84,11 +84,23 @@ SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 # a tarball checkout) never fails the build.
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dirty || echo)
+# About-page contributors (#1742) — same reason: extracted on the host, passed
+# into the Docker build. We ship the unique `<name>\t<email>` git-log identities
+# (sort -u keeps the build arg small) base64-encoded onto a single line, ARG-safe
+# regardless of names containing commas, angle brackets or "[bot]";
+# vite.config.js does the de-dup/extraction. Empty on a missing .git so the
+# About section simply hides (AC6).
+GIT_CONTRIBUTORS := $(shell git log --format='%aN%x09%aE' 2>/dev/null | sort -u | base64 2>/dev/null | tr -d '\n')
+# The commit's own creation timestamp (committer date, strict ISO-8601 with the
+# authoring timezone offset preserved, e.g. 2026-08-13T17:52:03+02:00), shown in
+# the sidebar About box in place of the hash (#1741). Empty when git is absent —
+# the frontend falls back to "unknown".
+GIT_COMMIT_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo)
 # Make doesn't export its own variables to recipe subprocesses by default —
-# without this, podman-compose would never see GIT_COMMIT/GIT_DIRTY and the
-# docker-compose.yml `${GIT_COMMIT:-unknown}` interpolation would always fall
-# back to "unknown".
-export GIT_COMMIT GIT_DIRTY
+# without this, podman-compose would never see GIT_COMMIT/GIT_DIRTY/GIT_COMMIT_TIME/
+# GIT_CONTRIBUTORS and the docker-compose.yml `${GIT_COMMIT:-unknown}` interpolation
+# would always fall back to "unknown".
+export GIT_COMMIT GIT_DIRTY GIT_CONTRIBUTORS GIT_COMMIT_TIME
 
 .PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys
 

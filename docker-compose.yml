@@ -137,6 +137,10 @@ services:
         # still succeeds without git metadata.
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_DIRTY: ${GIT_DIRTY:-}
+        # Base64 of the raw `<name>\t<email>` git-log lines for the About-page
+        # contributors list (#1742); empty default keeps a bare compose build green.
+        GIT_CONTRIBUTORS: ${GIT_CONTRIBUTORS:-}
+        GIT_COMMIT_TIME: ${GIT_COMMIT_TIME:-}
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
     # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).

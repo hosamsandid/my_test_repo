@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Trash2, Plus, KeyRound, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -341,7 +342,7 @@ export default function McpServers() {
     { key: 'name', label: 'Name' },
     { key: 'serverId', label: 'Default server', render: v => v ? <span style={monoStyle}>{v}</span> : '—' },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ ...monoStyle, color: 'var(--eb-text-secondary)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteCred(row)} /></div>
     )},

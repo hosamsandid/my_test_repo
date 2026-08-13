@@ -28,6 +28,7 @@ export function useHelperChat() {
   return useContext(HelperChatContext) || {
     isOpen: false, toggle: () => {}, messages: [],
     sendMessage: () => {}, isStreaming: false, clearHistory: () => {},
+    mode: 'chat', setMode: () => {}, openTour: () => {},
   };
 }
 
@@ -42,6 +43,11 @@ export function HelperChatProvider({ children }) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  // Which face of the panel is showing: 'chat' (default, #1735) or 'tour'
+  // (#1737). Lifted to the provider so an external entry point (the Getting
+  // Started page's "Take the Tour" button) can open the panel straight into
+  // tour mode.
+  const [mode, setMode] = useState('chat');
 
   // A synchronous mirror of the list so sendMessage builds the request from the
   // just-appended user turn without waiting for a state flush.
@@ -53,6 +59,13 @@ export function HelperChatProvider({ children }) {
 
   const toggle = useCallback(() => setIsOpen(o => !o), []);
   const clearHistory = useCallback(() => setBoth([]), [setBoth]);
+
+  // Open the panel directly on the guided tour (used by the Getting Started
+  // page). Idempotent — safe to call whether the panel is open or closed.
+  const openTour = useCallback(() => {
+    setMode('tour');
+    setIsOpen(true);
+  }, []);
 
   const sendMessage = useCallback(async (text) => {
     const trimmed = (text || '').trim();
@@ -135,7 +148,8 @@ export function HelperChatProvider({ children }) {
 
   const value = useMemo(() => ({
     isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory]);
+    mode, setMode, openTour,
+  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour]);
 
   return (
     <HelperChatContext.Provider value={value}>

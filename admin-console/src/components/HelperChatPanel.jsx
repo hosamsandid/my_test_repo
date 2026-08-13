@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Send, HelpCircle } from 'lucide-react';
+import { X, Send, HelpCircle, MessageCircle, Compass } from 'lucide-react';
 import { useHelperChat } from '../context/HelperChatContext';
 import { SafeMarkdown, ensureAgentChatMdCss } from '../pages/agent-chat/Message.jsx';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
+import HelperChatTour from './HelperChatTour.jsx';
 
 // Helper Chat panel (#1735, Phase 1.3). A non-blocking slide-in help assistant,
 // mounted once in Shell.jsx. Unlike SidePanel.jsx it has NO backdrop — the user
@@ -42,12 +43,52 @@ function Bubble({ role, content, streaming }) {
   );
 }
 
-function SuggestedPrompts({ onPick }) {
+function TourCta({ onTakeTour }) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 'var(--eb-space-2)',
+      background: 'var(--eb-bg-surface)',
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+      padding: 'var(--eb-space-3)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-text-primary)' }}>
+        <span aria-hidden style={{ fontSize: 'var(--eb-text-base)' }}>👋</span>
+        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 600 }}>New to Agent Studio?</span>
+      </div>
+      <button
+        onClick={onTakeTour}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 'var(--eb-space-1)',
+          background: 'var(--eb-accent-primary)',
+          color: 'var(--eb-text-inverted)',
+          border: 'none',
+          borderRadius: 'var(--eb-radius-md)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          fontSize: 'var(--eb-text-sm)',
+          fontWeight: 600,
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+        }}
+      >
+        <Compass size={15} /> Take the guided tour
+      </button>
+    </div>
+  );
+}
+
+function SuggestedPrompts({ onPick, onTakeTour }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4)' }}>
+      <TourCta onTakeTour={onTakeTour} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-text-secondary)' }}>
         <HelpCircle size={18} />
-        <span style={{ fontSize: 'var(--eb-text-base)', fontWeight: 600 }}>How can I help?</span>
+        <span style={{ fontSize: 'var(--eb-text-base)', fontWeight: 600 }}>Or ask a question</span>
       </div>
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
         Ask anything about Agent Studio, or start with one of these:
@@ -79,10 +120,51 @@ function SuggestedPrompts({ onPick }) {
   );
 }
 
+function TabBar({ mode, setMode }) {
+  const tab = (id, label, Icon) => {
+    const activeTab = mode === id;
+    return (
+      <button
+        onClick={() => setMode(id)}
+        aria-pressed={activeTab}
+        style={{
+          flex: 1,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 'var(--eb-space-1)',
+          background: 'none',
+          border: 'none',
+          borderBottom: activeTab ? '2px solid var(--eb-accent-primary)' : '2px solid transparent',
+          color: activeTab ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          fontSize: 'var(--eb-text-sm)',
+          fontWeight: activeTab ? 600 : 500,
+          padding: 'var(--eb-space-2)',
+        }}
+      >
+        <Icon size={14} /> {label}
+      </button>
+    );
+  };
+  return (
+    <div style={{
+      display: 'flex',
+      borderBottom: '1px solid var(--eb-border-default)',
+      flexShrink: 0,
+    }}>
+      {tab('chat', 'Chat', MessageCircle)}
+      {tab('tour', 'Tour', Compass)}
+    </div>
+  );
+}
+
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
+  const isTour = mode === 'tour';
 
   useEffect(() => { ensureAgentChatMdCss(); }, []);
 
@@ -159,13 +241,28 @@ export default function HelperChatPanel() {
         </button>
       </div>
 
+      {/* Tab bar: Chat / Tour */}
+      <TabBar mode={mode} setMode={setMode} />
+
+      {isTour ? (
+        /* Tour mode */
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          <HelperChatTour />
+        </div>
+      ) : (
+      <>
       {/* Message list */}
       <div
         ref={scrollRef}
         style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}
       >
         {messages.length === 0
-          ? <SuggestedPrompts onPick={(p) => { if (!isStreaming) sendMessage(p); }} />
+          ? (
+            <SuggestedPrompts
+              onPick={(p) => { if (!isStreaming) sendMessage(p); }}
+              onTakeTour={() => setMode('tour')}
+            />
+          )
           : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4)' }}>
               {messages.map(m => (
@@ -225,6 +322,8 @@ export default function HelperChatPanel() {
           <Send size={16} />
         </button>
       </div>
+      </>
+      )}
     </div>
   );
 }

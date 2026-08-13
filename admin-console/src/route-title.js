@@ -39,7 +39,7 @@ export const ROUTE_TITLES = {
   '/maintenance-mode': 'Maintenance Mode',
   '/getting-started': 'Getting Started',
   '/create': 'Create',
-  '/quickstart': 'One Assistant',
+  '/quickstart': 'One assistant',
   '/team-setup': 'Agent Team Wizard',
   '/wizard/team': 'Agent Team Wizard',
   '/orchestrator-wizard': 'Orchestrator Wizard',

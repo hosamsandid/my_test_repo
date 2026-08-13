@@ -8,6 +8,9 @@ test('static routes resolve to their sidebar label', () => {
   assert.equal(pageNameForPath('/jobs'), 'Triggers');
   assert.equal(pageNameForPath('/teams'), 'Access & Users');
   assert.equal(pageNameForPath('/chats'), 'Agent Chat');
+  // Must match Shell.jsx BREADCRUMBS exactly (lowercase 'a') — the tab title
+  // has to read the same as the in-app breadcrumb the user navigated to.
+  assert.equal(pageNameForPath('/quickstart'), 'One assistant');
 });
 
 test('full document title is "<Page> · Agent Studio"', () => {

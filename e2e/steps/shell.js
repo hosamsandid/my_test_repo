@@ -6,10 +6,11 @@
 // present on every page but varies between builds does not create spurious
 // visual-diff noise against the main baseline.
 //
-// `app-version`: the sidebar footer renders `v{VITE_GIT_COMMIT}` (Shell.jsx),
-// baked in at build time. The baseline is built at main's SHA and each PR at
-// its own SHA, so this label differs by construction on every PR — masking it
-// keeps the before/after diff focused on real UI changes.
+// `app-version`: the sidebar footer renders the running build's commit creation
+// timestamp (`VITE_GIT_COMMIT_TIME`, #1741 — was the `v{VITE_GIT_COMMIT}` hash),
+// baked in at build time. The baseline is built at main's SHA and each PR at its
+// own SHA, so this label differs by construction on every PR — masking it keeps
+// the before/after diff focused on real UI changes.
 
 /** @param {import('@playwright/test').Page} page */
 function volatileLocators(page) {

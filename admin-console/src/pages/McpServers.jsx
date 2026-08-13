@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trash2, Plus, KeyRound, Server } from 'lucide-react';
+import { Trash2, Plus, KeyRound, Server, Info } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import WhenCell from '../components/WhenCell';
@@ -11,6 +11,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import InfoTip from '../components/InfoTip';
+import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
 
 const inputStyle = {
   width: '100%',
@@ -26,6 +27,27 @@ const inputStyle = {
 };
 
 const monoStyle = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' };
+
+// When a Save button is disabled (and not merely mid-save), spell out exactly
+// which required field is still empty so a user new to the console isn't left
+// guessing why the form looks broken. Mirrors the AgentCreateForm hint (#1773).
+function SubmitBlockers({ label, reasons }) {
+  if (reasons.length === 0) return null;
+  return (
+    <div style={{
+      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+    }}>
+      <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+      <span>
+        {label} is disabled until you:
+        <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+          {reasons.map(r => <li key={r.field}>{r.message}</li>)}
+        </ul>
+      </span>
+    </div>
+  );
+}
 
 function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [id, setId] = useState('');
@@ -61,7 +83,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
     return out;
   }
 
-  const canSave = id.trim() && name.trim() && (isHttp ? url.trim() : command.trim());
+  const { canSave, reasons: submitBlockers } = describeServerSubmitState({ id, name, transport, command, url });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -135,7 +157,9 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {!saving && <SubmitBlockers label="Save server" reasons={submitBlockers} />}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button
           onClick={() => onSave({
             id: id.trim(),
@@ -168,6 +192,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
           borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
           cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
         }}>Cancel</button>
+        </div>
       </div>
     </div>
   );
@@ -184,7 +209,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
     getName: () => name,
   });
 
-  const canSave = name.trim() && secret.trim();
+  const { canSave, reasons: submitBlockers } = describeCredentialSubmitState({ name, secret });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -237,7 +262,9 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {!saving && <SubmitBlockers label="Save credential" reasons={submitBlockers} />}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button
           onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, serverId: serverId || null, secret: secret.trim() })}
           disabled={saving || !canSave}
@@ -258,6 +285,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
           borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
           cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
         }}>Cancel</button>
+        </div>
       </div>
     </div>
   );

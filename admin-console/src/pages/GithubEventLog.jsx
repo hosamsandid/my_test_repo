@@ -6,6 +6,7 @@ import DataTable from '../components/DataTable';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
 import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
+import { eventLabel } from './agent-chat/trigger-summary';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -176,11 +177,26 @@ function ProcessedEventsView() {
   const COLS = [
     { key: 'ts', label: 'Time', render: v => v ? new Date(v).toLocaleString() : '—' },
     { key: 'repo', label: 'Repository' },
-    { key: 'event', label: 'Event', render: (v, row) => (
-      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
-        {v || '—'}{row.label ? ` (${row.label})` : ''}
-      </span>
-    ) },
+    { key: 'event', label: 'Event', render: (v, row) => {
+      // Lead with the plain-language event name (single source of truth: the
+      // shared eventLabel map used by the trigger editor) so this log reads
+      // for someone who doesn't know the GitHub Events API vocabulary; keep
+      // the raw key as a muted technical sub-line for exact matching. When the
+      // key is unknown, eventLabel() returns the raw key unchanged, so we skip
+      // the duplicate sub-line.
+      const friendly = eventLabel(v);
+      const showRaw = !!v && friendly !== v;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span>{friendly || '—'}{row.label ? ` (${row.label})` : ''}</span>
+          {showRaw && (
+            <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              {v}
+            </span>
+          )}
+        </div>
+      );
+    } },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {
       if (row.noMatchingTrigger) return <NoMatchBadge />;

@@ -15,6 +15,7 @@ import ChatModelSelector from './ChatModelSelector.jsx';
 import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
+import { isAtBottom, isNearTop } from './chat-scroll.js';
 import { latestLoopProgress } from './loop-run-view.js';
 import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
@@ -273,6 +274,10 @@ export default function ChatPanel({
     setUnread(0);
     setEndToken(null);
     setOlderExhausted(false);
+    // Switching into a chat must land at the newest message regardless of where
+    // the previously-open chat was scrolled (#1710, AC2) — re-arm stick-to-
+    // bottom so the freshly loaded history pins to the bottom.
+    setAtBottom(true);
     if (!roomId) return;
     let cancelled = false;
     setLoading(true);
@@ -441,11 +446,13 @@ export default function ChatPanel({
   });
 
   /* ─── 4. Auto-scroll behaviour ───────────────────────────────────── */
+  // The actual "pin to the bottom" is owned by VirtualList via `stickToBottom`
+  // (below): with the transcript windowed, off-screen rows are estimated, so a
+  // one-shot `scrollTop = scrollHeight` here would land short of the real bottom
+  // (#1710). This effect only maintains the unread counter on a new message —
+  // reset it while pinned, bump it while the user is reading older history.
   useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
     if (atBottom) {
-      el.scrollTop = el.scrollHeight;
       setUnread(0);
     } else {
       // Count of messages the user hasn't scrolled to yet.
@@ -457,14 +464,13 @@ export default function ChatPanel({
 
   function handleScroll(e) {
     const el = e.currentTarget;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const isAtBottom = distance < 100;
-    setAtBottom(isAtBottom);
-    if (isAtBottom) setUnread(0);
+    const atBottomNow = isAtBottom(el);
+    setAtBottom(atBottomNow);
+    if (atBottomNow) setUnread(0);
 
     // Top-edge backfill: when the user scrolls within 100 px of the top and
     // we still have an `endToken`, fetch the next-older 50 messages.
-    if (el.scrollTop < 100 && endToken && !loadingOlder && !olderExhausted) {
+    if (isNearTop(el) && endToken && !loadingOlder && !olderExhausted) {
       loadOlder();
     }
   }
@@ -472,6 +478,8 @@ export default function ChatPanel({
   function scrollToBottom() {
     const el = scrollerRef.current;
     if (!el) return;
+    // Immediate nudge to the estimated bottom; re-arming stick-to-bottom lets
+    // VirtualList converge on the true bottom as the off-screen rows settle.
     el.scrollTop = el.scrollHeight;
     setAtBottom(true);
     setUnread(0);
@@ -1447,6 +1455,7 @@ export default function ChatPanel({
           estimateHeight={90}
           overscan={8}
           gap={12}
+          stickToBottom={atBottom}
           renderItem={(msg, i) => {
             if (msg.type === 'context-reset') {
               return <ContextResetSeparator ts={msg.ts} />;

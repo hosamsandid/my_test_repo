@@ -9,6 +9,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
+import GithubTokenHint from '../components/GithubTokenHint';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -244,6 +245,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
             fontSize: 'var(--eb-text-xs)',
           }}
         />
+        <GithubTokenHint value={token} />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Paste the full token value. Fine-grained tokens start with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>github_pat_</code>,
           classic tokens with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ghp_</code>.

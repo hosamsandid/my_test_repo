@@ -42,3 +42,37 @@ export function resolveEmptyState({ dataLength = 0, resultLength = 0, filter = '
 export function noMatchText(query) {
   return `No matches for “${query}”.`;
 }
+
+/** How many column names to spell out in the filter placeholder before eliding. */
+export const MAX_FILTER_HINT_COLUMNS = 3;
+
+/**
+ * Self-describing placeholder for the DataTable filter input.
+ *
+ * A bare "Filter…" tells a first-time user nothing about what typing there
+ * actually does — the table filters across *every* column's values, but that
+ * is invisible. Naming the first few visible column headers ("Filter by Name,
+ * Environment, Status…") makes the control intuitive: the user sees exactly
+ * which fields their text is matched against.
+ *
+ * Only visible (non-`hidden`) columns with a non-empty text `label` are named
+ * — icon-only / action columns (blank label) and search-only hidden columns
+ * are skipped so the hint stays short and truthful about what's on screen.
+ * Falls back to a plain "Filter…" when no column carries a usable label.
+ *
+ * @param {Array<{label?: string, hidden?: boolean}>} columns
+ * @returns {string}
+ */
+export function filterPlaceholder(columns = []) {
+  const labels = [];
+  for (const col of Array.isArray(columns) ? columns : []) {
+    if (!col || col.hidden) continue;
+    const label = typeof col.label === 'string' ? col.label.trim() : '';
+    if (!label) continue;
+    if (!labels.includes(label)) labels.push(label);
+  }
+  if (labels.length === 0) return 'Filter…';
+  const shown = labels.slice(0, MAX_FILTER_HINT_COLUMNS);
+  const suffix = labels.length > shown.length ? '…' : '';
+  return `Filter by ${shown.join(', ')}${suffix}`;
+}

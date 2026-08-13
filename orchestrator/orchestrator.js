@@ -2051,12 +2051,15 @@ async function pushGithubIssueScopeCredentials() {
   for (const sid of Object.keys(scopes)) {
     const teamCfg = loadAgentConfig(sid);
     scopes[sid].teamName = (teamCfg && (teamCfg.displayName || teamCfg.name)) || sid;
-    const { flowLabels, labelAgents } = buildTeamFlowLabels({
+    const { flowLabels, labelAgents, labelUsage } = buildTeamFlowLabels({
       teamLabels: teamCfg && Array.isArray(teamCfg.labels) ? teamCfg.labels : [],
       members: teamFlowMembers(sid),
     });
     scopes[sid].flowLabels = flowLabels;
     scopes[sid].labelAgents = labelAgents;
+    // Per-label usage classification (#1730) so the plugin can colour-code the
+    // workflow-trigger buttons (human-set gate vs. agent-emitted label).
+    scopes[sid].labelUsage = labelUsage;
   }
   await pluginRuntime.pushScopeCredentials(entry.manifest, scopes);
 }

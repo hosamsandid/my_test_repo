@@ -73,6 +73,13 @@ class ScopeStore {
         labelAgents: (entry.labelAgents && typeof entry.labelAgents === 'object' && !Array.isArray(entry.labelAgents))
           ? entry.labelAgents
           : {},
+        // Per-label usage classification (#1730): `{ [label]: 'humanGate' |
+        // 'agentEmitted' }`, so the UI can colour-code the workflow-trigger
+        // buttons. Team-level (not per-repo), like flowLabels; a label absent
+        // here degrades to a neutral button treatment.
+        labelUsage: (entry.labelUsage && typeof entry.labelUsage === 'object' && !Array.isArray(entry.labelUsage))
+          ? entry.labelUsage
+          : {},
         updatedAt: entry.updatedAt || null,
       });
     }

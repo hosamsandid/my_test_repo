@@ -123,17 +123,35 @@ function addLabelAgent(labelAgents, repo, labelKey, name) {
   if (!arr.includes(name)) arr.push(name);
 }
 
-// Build `{ flowLabels, labelAgents }` for one team from its label registry and
-// its members (each `{ displayName, enabled, triggers, emits }`). Pure.
+// Build `{ flowLabels, labelAgents, labelUsage }` for one team from its label
+// registry and its members (each `{ displayName, enabled, triggers, emits }`).
+// Pure.
+//
+// `labelUsage` (#1730) classifies each flow label by HOW it is normally set, so
+// the plugin can colour-code the workflow-trigger buttons: a `humanGate`-flagged
+// registry label is `'humanGate'` (a hand-off a human deliberately sets), a
+// label some agent `emits` is `'agentEmitted'` (a label an agent usually sets
+// itself). `humanGate` wins if a label is somehow both (an agent emitting a gate
+// label is the flow's `gate-violation`, so the human intent is the truthful
+// classification). A label we cannot place (a wake label neither gate-flagged
+// nor emitted) is simply omitted — the UI degrades it to a single neutral
+// treatment rather than mis-colouring it.
 function buildTeamFlowLabels({ teamLabels, members } = {}) {
   const flowLabels = [];
   const seen = new Set();
   const labelAgents = {};
+  const labelUsage = {};
 
   // 1) registry gate/brake/outcome labels first
   for (const l of Array.isArray(teamLabels) ? teamLabels : []) {
-    if (l && typeof l === 'object') pushUnique(flowLabels, seen, l.name);
-    else if (typeof l === 'string') pushUnique(flowLabels, seen, l);
+    if (l && typeof l === 'object') {
+      pushUnique(flowLabels, seen, l.name);
+      if (l.humanGate && typeof l.name === 'string' && l.name.trim()) {
+        labelUsage[l.name.trim()] = 'humanGate';
+      }
+    } else if (typeof l === 'string') {
+      pushUnique(flowLabels, seen, l);
+    }
   }
 
   // 2) wake labels (labelFilter on *.labeled triggers) + the per-repo preview
@@ -155,13 +173,19 @@ function buildTeamFlowLabels({ teamLabels, members } = {}) {
     }
   }
 
-  // 3) outcome labels the work sets (emits)
+  // 3) outcome labels the work sets (emits). An emitted label is agent-set —
+  // unless the registry already flagged it a human gate (which wins, above).
   for (const m of Array.isArray(members) ? members : []) {
     if (!m || m.enabled === false) continue;
-    for (const e of Array.isArray(m.emits) ? m.emits : []) pushUnique(flowLabels, seen, e);
+    for (const e of Array.isArray(m.emits) ? m.emits : []) {
+      pushUnique(flowLabels, seen, e);
+      if (typeof e === 'string' && e.trim() && !labelUsage[e.trim()]) {
+        labelUsage[e.trim()] = 'agentEmitted';
+      }
+    }
   }
 
-  return { flowLabels, labelAgents };
+  return { flowLabels, labelAgents, labelUsage };
 }
 
 // The unique team scope ids from a granted-agents enumeration (the shape of

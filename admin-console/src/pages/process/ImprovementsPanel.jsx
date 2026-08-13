@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { TrendingUp, Play, AlertTriangle, Info, Clock, Lightbulb, Undo2, Check, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import WhenCell from '../../components/WhenCell';
 import { apiCall } from '../../hooks/useApi';
 import {
   hasSnapshot, isMaintenance, snapshotMeta, metricTiles,
@@ -168,7 +169,7 @@ export default function ImprovementsPanel({ teamId, onClose }) {
             <Clock size={12} />
             {meta.windowDays ? `${meta.windowDays}-day window · ` : ''}
             {meta.totalRuns} run(s)
-            {meta.generatedAt ? ` · last pass ${new Date(meta.generatedAt).toLocaleString()}` : ''}
+            {meta.generatedAt ? <> · last pass <WhenCell iso={meta.generatedAt} /></> : ''}
           </div>
         </>
       )}
@@ -410,7 +411,7 @@ function LedgerRow({ card }) {
       <div style={{ fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
         {cardClassLabel(card.class)}
         {card.appliedBy ? ` · applied by ${card.appliedBy}` : ''}
-        {when ? ` · ${new Date(when).toLocaleString()}` : ''}
+        {when ? <> · <WhenCell iso={when} /></> : ''}
         {verdict ? ` · ${verdict}` : ''}
       </div>
     </div>

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Wrench, PauseCircle, CheckCircle2, Activity } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
+import WhenCell from '../components/WhenCell';
 import { countActiveSessions } from './active-sessions';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 
@@ -155,7 +156,7 @@ export default function MaintenanceMode() {
                   active
                 </span>
                 <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
-                  since {new Date(data.activatedAt).toLocaleString()}
+                  since <WhenCell iso={data.activatedAt} />
                 </span>
               </div>
 

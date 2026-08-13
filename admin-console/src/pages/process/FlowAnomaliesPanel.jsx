@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import WhenCell from '../../components/WhenCell';
 import { apiCall } from '../../hooks/useApi';
 import { anomalyView, summarize, classInfo } from './flow-anomalies-view';
 
@@ -101,7 +102,7 @@ export default function FlowAnomaliesPanel({ teamId, onClose, onData }) {
 
       {data && data.generatedAt && (
         <p style={{ marginTop: 'var(--eb-space-4)', fontSize: 11, color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
-          Swept {data.swept ?? 0} open item(s) · {new Date(data.generatedAt).toLocaleString()}
+          Swept {data.swept ?? 0} open item(s) · <WhenCell iso={data.generatedAt} />
         </p>
       )}
     </SidePanel>

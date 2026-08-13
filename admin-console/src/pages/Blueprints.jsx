@@ -6,6 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
+import { missingFieldsHint } from './submit-hint.js';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import StatusBadge from '../components/StatusBadge';
 
@@ -25,11 +26,12 @@ const inputStyle = {
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
 };
 
-function PrimaryBtn({ children, onClick, disabled, saving, style = {} }) {
+function PrimaryBtn({ children, onClick, disabled, saving, style = {}, title }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled || saving}
+      title={title}
       style={{
         padding: 'var(--eb-space-2) var(--eb-space-4)',
         background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
@@ -70,6 +72,14 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
   const { data: environments } = useApi('/api/environments');
   const envs = environments || [];
   const canSubmit = form.id && form.displayName && form.systemPrompt && form.environmentId;
+  // Explain a disabled "Create Blueprint" by naming the still-empty required
+  // fields (in form order) — see submit-hint.js.
+  const submitHint = missingFieldsHint([
+    { label: 'Display Name', filled: !!form.displayName },
+    { label: 'ID', filled: !!form.id },
+    { label: 'Working Environment', filled: !!form.environmentId },
+    { label: 'System Prompt', filled: !!form.systemPrompt },
+  ]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -130,7 +140,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
       </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
+        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit} title={submitHint || undefined}>
           {saving ? 'Creating…' : 'Create Blueprint'}
         </PrimaryBtn>
         <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
@@ -148,6 +158,10 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const canSubmit = form.instanceId && form.displayName;
+  const submitHint = missingFieldsHint([
+    { label: 'Instance ID', filled: !!form.instanceId },
+    { label: 'Display Name', filled: !!form.displayName },
+  ]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -180,7 +194,7 @@ function InstanceCreateForm({ blueprint, onSave, onCancel, saving, error }) {
       />
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
+        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit} title={submitHint || undefined}>
           {saving ? 'Creating instance…' : 'Create Instance'}
         </PrimaryBtn>
         <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>

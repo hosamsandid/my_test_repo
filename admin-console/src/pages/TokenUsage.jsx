@@ -5,7 +5,7 @@ import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_INTRO, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -603,6 +603,25 @@ export default function TokenUsage() {
           Token Usage
         </h1>
         <TeamFilter teams={teams} value={team} onChange={setTeam} />
+      </div>
+
+      {/* Plain-language intro banner — mirrors the "what this page is" banner
+          every peer admin page opens with; copy single-sourced in
+          token-usage-view.js (PAGE_INTRO). */}
+      <div style={{
+        padding: 'var(--eb-space-3) var(--eb-space-4)',
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+        lineHeight: 1.6,
+      }}>
+        <p style={{ margin: 0 }}>{PAGE_INTRO.lead}</p>
+        <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)' }}>
+          <li>{PAGE_INTRO.statistics}</li>
+          <li style={{ marginTop: 'var(--eb-space-1)' }}>{PAGE_INTRO.workItems}</li>
+        </ul>
       </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', borderBottom: '1px solid var(--eb-border-default)' }}>

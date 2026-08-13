@@ -204,3 +204,28 @@ Agents can also browse issues read-only with the dependency-free `aee-issues` CL
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
 owner/name --number N`). Pull requests are deferred to a later iteration. See
 `github-issues/broker/README.md`.
+
+## `gke`
+
+**Read-only Kubernetes cluster access.** It gives a team's granted agents
+read-only `kubectl` against the team's GKE cluster, reached through the GCP
+Connect Gateway, brokered so the Google cloud credential never enters an agent
+container. Agents drive it with the dependency-free `aee-gke` CLI — for example
+`aee-gke get ns`, `aee-gke get pods -n platform`, `aee-gke describe deploy <name>
+-n <ns>`, `aee-gke logs <pod> -n <ns>`, `aee-gke api-resources`.
+
+**Strictly read-only.** Only read verbs are exposed (get / describe / logs /
+api-resources); there is deliberately no apply / create / edit / delete, so an
+agent cannot change or remove anything in the cluster — it is the **read-only
+pilot** for the pattern.
+
+**Authentication happens in the plugin's own UI** (team-admin only): a team admin
+signs the broker in to GCP **once** (gcloud OAuth device flow); the credential is
+stored on the broker's state volume, the ~1 h access token is refreshed by the
+broker itself, and from then on the team's agents read the cluster without ever
+handling a credential. This is a plugin and not a skill precisely because a cloud
+credential must not sit in every agent container. Its broker (`broker/`) holds the
+Google OAuth credential and runs kubectl (`capabilities: ["egress"]`,
+`scopes: ["team","agent"]`, `platforms: ["podman","kubernetes"]`). The page also
+carries an always-visible **"What this plugin does"** block above the sign-in
+options so a team admin sees the capability before signing in (#1716).

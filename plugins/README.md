@@ -200,6 +200,17 @@ normal paginated listing. The broker owns all qualifiers (`repo:`, `type:issue`,
 `in:title`, `state:`) and strips colons from user input so a typed `qualifier:` can
 never broaden scope.
 
+**Workflow-trigger buttons (#1730):** the issue detail now leads with an **action
+bar** — between the issue's meta line and its description — of prominent
+**`Trigger <Agent>`** buttons, one per flow label that wakes at least one agent.
+Each reads as an active "start this workflow" intervention (under the hood it is
+the same add-label call) and is colour-coded by how the label is normally set —
+a **human-set gate** vs an **agent-set label** — using a glyph and a text tag as
+well as colour, so the distinction survives dark / light / high-contrast. A
+button shows the underlying label name and, when a label wakes more than one
+agent, says so; an already-applied label's button is shown visible-but-disabled.
+The "Labels" list and free-text "add a label" area at the bottom are unchanged.
+
 Agents can also browse issues read-only with the dependency-free `aee-issues` CLI
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
 owner/name --number N`). Pull requests are deferred to a later iteration. See

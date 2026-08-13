@@ -154,12 +154,36 @@ function entryKind(e) {
 //    without the context this is exactly the Phase-3 lexical behaviour.
 //    Cross-kind linking deliberately stays exact-only (embeddings would
 //    reintroduce the over-merging #605 ruled out).
-function entriesLink(a, b, simThreshold, semantic = null) {
-  if (entryKind(a) === entryKind(b)) {
-    return similar(a.text, b.text, simThreshold) || semanticLinks(a, b, semantic);
+// Operates over entries whose `normalizeText` + `tokenSet` were computed ONCE up
+// front (`prepareEntry` / `clusterEntries`). The naive form recomputes both —
+// four `normalizeText` passes over the full text per pair — and the clustering
+// below calls this O(n²) times, so at a few thousand entries the redundant
+// Unicode-regex work pegged the single-threaded control plane for ~15-20 s per
+// collector pass. Precomputing makes it a cheap set-intersection per pair.
+// Semantics (unchanged, #605/#918):
+//   - SAME kind: exact-normalized fast path OR token-set Jaccard >= threshold,
+//     OR the optional embedding-cosine `semanticLinks` when context supplies both
+//     vectors (additive — without context this is pure lexical behaviour).
+//   - DIFFERENT kind: only an EXACT normalized-text match links, so one lesson
+//     recorded under two kinds converges while fuzzy matches stay within a kind.
+// `a`/`b` are `{ entry, kind, norm, tokens }` prepared records.
+function entriesLinkPrepared(a, b, simThreshold, semantic = null) {
+  const t = Number.isFinite(simThreshold) ? simThreshold : 0.6;
+  if (a.kind === b.kind) {
+    // similar(): exact-normalized fast path OR token-set Jaccard >= threshold.
+    // Both empty-norm cases score 0 in similarity(), i.e. never link on text.
+    if (a.norm !== '' && b.norm !== '' && (a.norm === b.norm || jaccard(a.tokens, b.tokens) >= t)) {
+      return true;
+    }
+    return semanticLinks(a.entry, b.entry, semantic);
   }
-  const na = normalizeText(a.text);
-  return na !== '' && na === normalizeText(b.text);
+  // Different kind: only an EXACT normalized-text match links (C1, #605).
+  return a.norm !== '' && a.norm === b.norm;
+}
+
+// Precompute the canonical comparison forms once per entry.
+function prepareEntry(e) {
+  return { entry: e, kind: entryKind(e), norm: normalizeText(e.text), tokens: tokenSet(e.text) };
 }
 
 // Shape a settled member list into a cluster record. The FIRST member (oldest,
@@ -183,7 +207,7 @@ function buildCluster(memberList) {
 
 /**
  * Single-link agglomerative clustering over ALL clusterable entries: an entry
- * joins a cluster if it `entriesLink`s ANY member. Same-kind entries link by
+ * joins a cluster if it `entriesLinkPrepared`s ANY member. Same-kind entries link by
  * similarity (exact or fuzzy); different-kind entries link only on an exact
  * normalized-text match (C1, #605), so an identical lesson recorded under two
  * kinds converges while fuzzy matches stay within one kind. O(n²) worst case,
@@ -194,26 +218,29 @@ function buildCluster(memberList) {
  */
 function clusterEntries(entries, { simThreshold = 0.6, semantic = null } = {}) {
   const items = sortMembers((Array.isArray(entries) ? entries : []).filter(isClusterable));
+  // Normalize + tokenize each entry ONCE (was recomputed on every pairwise link
+  // test — the O(n²) hot path that stalled the event loop; see entriesLinkPrepared).
+  const preps = items.map(prepareEntry);
   const clusters = [];
-  for (const e of items) {
+  for (const p of preps) {
     let joined = null;
     for (const c of clusters) {
       // Lexical first (cheap, always-on); a link that only holds semantically
       // flags the cluster so the suggestion card can show the "semantic match"
       // hint — an operator sanity-checks a surprising grouping before promoting.
-      const lexicalHit = c.members.some((m) => entriesLink(m, e, simThreshold));
-      if (lexicalHit || (semantic && c.members.some((m) => entriesLink(m, e, simThreshold, semantic)))) {
+      const lexicalHit = c.members.some((m) => entriesLinkPrepared(m, p, simThreshold));
+      if (lexicalHit || (semantic && c.members.some((m) => entriesLinkPrepared(m, p, simThreshold, semantic)))) {
         if (!lexicalHit) c.semanticLink = true;
-        c.members.push(e);
+        c.members.push(p);
         joined = c;
         break;
       }
     }
-    if (!joined) clusters.push({ members: [e] });
+    if (!joined) clusters.push({ members: [p] });
   }
   // Stable overall order: kind, then canonical createdAt, then id.
   return clusters.map((c) => {
-    const cluster = buildCluster(c.members);
+    const cluster = buildCluster(c.members.map((m) => m.entry));
     if (c.semanticLink) cluster.semanticLink = true;
     return cluster;
   }).sort(

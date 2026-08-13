@@ -270,11 +270,11 @@ Separate from the audit trail: answers "what did the poller see and what happene
 Each agent runs:
 
 ```
-claude [--resume <sessionId>] -p <prompt> \
+claude [--resume <sessionId>] --print \
   --output-format stream-json --verbose --permission-mode acceptEdits
 ```
 
-NDJSON stdout is parsed and written with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`) to `/workspace/agents/<agentId>/sessions/<roomId>.jsonl` (schema: `docs/agent-chat-plan.md` §4.1). Every entry carries a `correlationId` (Matrix `event_id`, or `trigger:<id>:<ts>`) tying log rows to chat bubbles.
+The user prompt is written to `claude` on **stdin** (via a daemon writer thread), not passed as an argv argument — so a message that *begins* with an option-like character (`-`, en-dash `–`, German quote `„`, a `--help`-style token) is never mis-parsed by the CLI as an unknown flag (#1727); this is why the invocation uses the bare boolean `--print` rather than `-p <prompt>`. NDJSON stdout is parsed and written with wrapper events (`message.received`, `claude.invoke`, `message.posted`, `error`, `trigger.fired`) to `/workspace/agents/<agentId>/sessions/<roomId>.jsonl` (schema: `docs/agent-chat-plan.md` §4.1). Every entry carries a `correlationId` (Matrix `event_id`, or `trigger:<id>:<ts>`) tying log rows to chat bubbles.
 
 **Per-room session pinning.** After each successful run the runner writes `session_id` to `<roomId>.current.json`; the next message in that room uses `--resume` (on failure it clears the pointer and retries once). `GET`/`DELETE /api/agents/:agentId/session/:roomId/current` read/drop it; the chat header shows *Reset Session* / *Save & Learn*. Snapshots live under `~/.claude/projects/<encoded-cwd>/` (persisted via the `claude-home` volume so `--resume` survives restarts).
 

@@ -7,6 +7,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -210,7 +211,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="e.g. accenture-pat"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored token.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored token.</>}
       />
 
       <CredentialOwnership

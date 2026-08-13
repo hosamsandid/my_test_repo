@@ -7,6 +7,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
@@ -95,7 +96,7 @@ function CreateTeamForm({ onSave, onCancel, saving, error }) {
         value={id} onChange={handleIdChange}
         isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
         placeholder="e.g. payments"
-        helpText="Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens; must start alphanumeric."
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
       />
       <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} placeholder="What this team owns" />
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>

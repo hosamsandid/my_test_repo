@@ -9,6 +9,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
@@ -239,7 +240,7 @@ function SshKeyForm({ rotateTarget, onCreatePaste, onCreateGenerate, onRotatePas
             value={id} onChange={handleIdChange}
             isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
             placeholder="e.g. my-laptop-key"
-            helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only.</>}
+            helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
           />
         </>
       )}
@@ -321,7 +322,7 @@ function GithubTokenForm({ rotateTarget, onCreate, onRotate, onCancel, saving, e
             value={id} onChange={handleIdChange}
             isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
             placeholder="e.g. my-github-pat"
-            helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only.</>}
+            helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
           />
         </>
       )}

@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -208,7 +209,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
     getName: () => name,
   });
 
-  const idHelp = <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored key.</>;
+  const idHelp = <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored key.</>;
 
   if (generated) {
     return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;

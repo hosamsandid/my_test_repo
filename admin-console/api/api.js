@@ -314,6 +314,21 @@ app.use('/api', auth.gate);
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());
 
+// Helper Chat tour screenshots (#1736, Phase 2.1). The tour manifest
+// (admin-console/api/helper-chat/tour-manifest.json) references screenshots by
+// relative path ("team-setup/select-process.png"); the PNGs are written by a
+// green journey run under e2e/artifacts/ and served here as static files.
+// express.static normalizes and rejects "../" traversal internally, so the
+// user-controlled URL sub-path cannot escape the artifacts root. Behind the
+// global /api limiter + auth gate above. Development/monorepo layout by default
+// (Option A in #1736); the admin-console image build context is admin-console/
+// and does NOT contain e2e/artifacts/, so for a production build the CI pipeline
+// must copy e2e/artifacts/ into the image or a sibling volume and point
+// TOUR_ARTIFACTS_DIR at it — the route simply 404s until that directory exists.
+const TOUR_ARTIFACTS_DIR = process.env.TOUR_ARTIFACTS_DIR
+  || path.resolve(__dirname, '..', '..', 'e2e', 'artifacts');
+app.use('/api/helper/tour-screenshot', express.static(TOUR_ARTIFACTS_DIR));
+
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {
   res.json(audit.recentEntries(Number(req.query.limit) || 200));

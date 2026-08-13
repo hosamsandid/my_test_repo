@@ -7,14 +7,9 @@
 // Everything an agent receives beyond its authored role prompt is composed
 // here: the CLAUDE.md that gets seeded into the workspace, and the runtime
 // `--append-system-prompt` memory hint. Keeping the composition in one pure,
-// fs-free module means:
-//
-//   * the prompt-preview endpoint renders EXACTLY what gets seeded (it calls the
-//     same functions with the same inputs), so operators review the composed
-//     whole instead of guessing from individual files;
-//   * the ordering / de-duplication / conditional-gating rules live in one
-//     testable place instead of being smeared across a template file, a JS
-//     builder, and a Python builder.
+// fs-free module means the ordering / de-duplication / conditional-gating rules
+// live in one testable place instead of being smeared across a template file, a
+// JS builder, and a Python builder.
 //
 // The base CLAUDE.md template text is passed IN (read from disk by the caller)
 // so this module has no I/O and is trivial to unit-test.
@@ -484,8 +479,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // inlining its text. The seeded CLAUDE.md then stays constant while the authored
 // prompt lives in AGENT-PROMPT.md alone, so an edited prompt takes effect on the
 // next session with no CLAUDE.md rebuild and no duplicated copy to drift (#510).
-// Left null (the default) the prompt is inlined — the form the prompt-preview
-// endpoint uses so the operator sees the fully-resolved text.
+// Left null (the default) the prompt is inlined — the fully-resolved text.
 // `skills`: the agent's resolved skill grant (team-owned — skill-grants.js).
 // `skillDescriptions`: optional `{ <skillName>: description }` map the caller
 // reads from each granted skill's SKILL.md frontmatter (#617). Supplied as data

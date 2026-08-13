@@ -1145,7 +1145,7 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
 // and mirrors it into an isolated agent's volume — but ONLY when the state
 // actually flipped, so a no-op edit (e.g. adding a 2nd trigger) never churns
 // (AC4). Reconstructs prompt/env/blueprintId exactly like the skill-sync
-// rebuild + prompt-preview. Best-effort: a rebuild failure never fails the
+// rebuild. Best-effort: a rebuild failure never fails the
 // (already-persisted) trigger write.
 async function reconcileAgentAutonomyPrompt(id, wasAutonomous) {
   try {
@@ -2093,8 +2093,7 @@ function teamFlowMembers(teamId) {
 
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the
 // ordering / conditional-gating / de-duplication rules live in the pure,
-// unit-tested `prompt-assembly` module, which the prompt-preview endpoint also
-// calls so the preview is byte-identical to what gets seeded.
+// unit-tested `prompt-assembly` module.
 function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {}) {
   const candidates = [
     path.join(TEMPLATE_WORKSPACE, "CLAUDE.md"),
@@ -2125,8 +2124,8 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     plugins: Array.isArray(opts.plugins) ? opts.plugins : [],
     blueprintId,
     autonomous: !!opts.autonomous,
-    // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
-    // prompt-preview endpoint omits it to render the fully-resolved prompt.
+    // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; a
+    // caller may omit it to inline the fully-resolved prompt instead.
     promptRef: opts.promptRef || null,
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
@@ -10611,74 +10610,6 @@ async function main() {
     }
 
     // ── End blueprint routes ───────────────────────────────────────────────
-
-    // Prompt preview: render the fully-composed system prompt an agent actually
-    // receives — the seeded CLAUDE.md plus the runtime `--append-system-prompt`
-    // memory hint — using the SAME assembly path as workspace seeding, so what
-    // the operator sees is what the agent gets. Recomputed live from the agent's
-    // current AGENT-PROMPT.md + role + environment + triggers.
-    const promptPreviewMatch = req.method === 'GET' &&
-      req.url.match(/^\/internal\/agents\/([^/]+)\/prompt-preview$/);
-    if (promptPreviewMatch) {
-      const id = decodeURIComponent(promptPreviewMatch[1]);
-      try {
-        const cfg = loadAgentConfig(id);
-        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
-        let prompt = '';
-        try {
-          prompt = fs.readFileSync(path.join(agentDir(id), 'AGENT-PROMPT.md'), 'utf8');
-        } catch {
-          prompt = cfg.systemPrompt || cfg.systemPromptTemplate || '';
-        }
-        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-        const blueprintId = cfg.blueprintId || null;
-        const autonomous = agentIsAutonomous(id, cfg.role);
-        // Team-owned skills: resolve the same grant the seed path uses, so the
-        // preview's Skills gate is byte-identical to what gets seeded.
-        const skills = effectiveSkills(cfg, loadAgentConfig);
-        // #617: same skill-description enrichment (and same source resolution)
-        // as the seed path, so the preview's Skills section is byte-identical.
-        const skillDescriptions = agentSkillDescriptions(id, agentKnowledgeTeamId(cfg || {}), skills);
-        // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
-        // checkout): digest import, unified Memory System section AND the
-        // unified memory hint all flip together — byte-identical to what the
-        // runtime resolves via _memory_model_unified().
-        const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-        // Same gate as the seed path (#1286): the section appears iff the agent
-        // actually carries mount(s). Resolved list (#1290) carries each folder's
-        // target + access mode (#1289), so preview is byte-identical to seeded.
-        const contextMounts = resolveContextMounts(cfg);
-        // Same resolution as the seed path (#1547): the grant joined with the
-        // installed manifests, so the preview's Plugin Capabilities gate is
-        // byte-identical to what gets seeded — including the case where a
-        // granted plugin has since been uninstalled.
-        const plugins = agentPluginDisplays(cfg);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, knowledgeDigestRef, contextMounts });
-        const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
-        return sendJson(res, 200, {
-          agentId: id,
-          role: cfg.role || null,
-          claudeMd,
-          appendSystemPrompt,
-          agentPrompt: prompt,
-          meta: {
-            autonomous,
-            sessionPolicy: cfg.sessionPolicy || 'persistent',
-            blueprintInstance: !!blueprintId,
-            hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
-            hasSkills: skills.length > 0,
-            hasPlugins: plugins.length > 0,
-            hasKnowledgeDigest: !!knowledgeDigestRef,
-            hasContextMount: contextMounts.length > 0,
-            environmentId: cfg.environmentId || null,
-            environmentName: (env && env.name) || null,
-          },
-        });
-      } catch (err) {
-        console.error(`[Orchestrator] prompt-preview error for ${id}: ${err.message}`);
-        return sendJson(res, 500, { error: err.message });
-      }
-    }
 
     // Rebuild an agent's CLAUDE.md after a config change the prompt is gated on
     // (#1286: setting/clearing the context mount). Idempotent and best-effort —

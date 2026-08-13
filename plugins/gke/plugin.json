@@ -1,0 +1,29 @@
+{
+  "pluginVersion": 1,
+  "id": "gke",
+  "name": "GKE Cluster Access",
+  "description": "Read-only kubectl against a GKE cluster reached through the GCP Connect Gateway, brokered so the cloud credential never enters an agent container. A granted agent drives it with the dependency-free `aee-gke` CLI (`aee-gke get ns`, `aee-gke describe pod <name> -n <ns>`, `aee-gke logs <pod> -n <ns>`); the broker sidecar holds the Google OAuth credential, refreshes the ~1h access token itself, and runs kubectl. Authentication is done IN THE PLUGIN'S OWN UI (team-admin only): a team admin signs the broker in to GCP once (gcloud OAuth device flow, credential stored on the broker's state volume), and from then on the team's agents can read the cluster. This is a plugin and not a skill because a cloud credential must not sit in every agent container (concept §7 boundary rule); it is the READ-ONLY pilot — no apply/delete verbs are exposed.",
+  "sidecar": {
+    "image": "localhost/aee-plugin-gke:latest",
+    "capabilities": ["egress"],
+    "internalPort": 4007,
+    "env": {
+      "GKE_CONNECT_SERVER": "https://connectgateway.googleapis.com/v1/projects/594390336049/locations/global/gkeMemberships/accessio-gke-membership"
+    }
+  },
+  "cli": {
+    "name": "aee-gke",
+    "entrypoint": "bin/aee-gke",
+    "runtime": "python3"
+  },
+  "platforms": ["podman", "kubernetes"],
+  "scopes": ["team", "agent"],
+  "defaultScopeGranularity": "team",
+  "ui": {
+    "title": "GKE Access",
+    "routes": [
+      { "path": "/", "minRole": "team-admin" }
+    ]
+  },
+  "promptLine": "You can run READ-ONLY kubectl against the team's GKE cluster with `aee-gke` — run `aee-gke --help`. Examples: `aee-gke get ns`, `aee-gke get pods -n platform`, `aee-gke describe deploy mimir-nginx -n platform`, `aee-gke logs <pod> -n <ns>`. The broker holds the cloud credential and only exposes read verbs (get/describe/logs/api-resources); there is no apply/delete. If a call fails with 'not signed in', a team admin must authenticate the plugin in its UI first."
+}

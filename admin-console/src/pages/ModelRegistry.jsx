@@ -1301,7 +1301,7 @@ export default function ModelRegistry() {
       <DataTable
         columns={COLUMNS}
         data={envFallback ? [envFallback, ...(endpoints ?? [])] : (endpoints ?? [])}
-        emptyText="No model providers registered yet."
+        emptyText="No model providers registered yet. Click 'New provider' to add one."
         onRowClick={row => {
           // The .env row opens its read-only panel; a manageable provider opens
           // the editor. A visible-but-unmanageable system provider (Team Admin)

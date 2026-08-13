@@ -33,6 +33,7 @@ import {
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
+import { describeAgentSubmitState } from './agent-create-submit-state.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -827,10 +828,12 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.role, form.environmentId, repoDirs]);
 
-  // System prompt is optional for teams: members can be given their own
-  // per-role prompts later, so a team can be created without a default.
-  const canSubmit = form.id && form.displayName && form.environmentId &&
-    (form.role === 'orchestrator' || form.role === 'team' || form.systemPrompt);
+  // System prompt is optional for teams and orchestrators: members can be given
+  // their own per-role prompts later, so a team can be created without a
+  // default. The pure helper derives the gate AND the ordered list of unmet
+  // requirements from one place, so the disabled button and the "why" hint
+  // below can never disagree.
+  const { canSubmit, reasons: submitBlockers } = describeAgentSubmitState(form);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -993,11 +996,32 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
       )}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
-          {saving ? 'Creating…' : 'Create Agent'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {/* When the button is disabled (and not merely saving), spell out
+            exactly which required field is still empty so a user new to the
+            console isn't left guessing why the form looks broken. */}
+        {!saving && submitBlockers.length > 0 && (
+          <div style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+          }}>
+            <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+            <span>
+              Create Agent is disabled until you:
+              <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+                {submitBlockers.map(r => (
+                  <li key={r.field}>{r.message}</li>
+                ))}
+              </ul>
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
+            {saving ? 'Creating…' : 'Create Agent'}
+          </PrimaryBtn>
+          <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+        </div>
       </div>
     </div>
   );

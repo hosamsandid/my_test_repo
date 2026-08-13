@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { AlertTriangle, Info, Loader2 } from 'lucide-react';
+import { resolveDismissHandler, backdropDismisses, escapeDismisses } from './confirm-dialog-view.js';
 
 /**
  * ConfirmDialog -- Modal confirmation dialog replacing window.confirm/alert.
@@ -33,6 +34,10 @@ export default function ConfirmDialog({
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
+  // Tracks whether a backdrop press STARTED on the overlay, so a drag that
+  // begins inside the card (e.g. selecting the message text) and releases out
+  // on the backdrop does not count as a dismiss click.
+  const pressedOverlayRef = useRef(false);
 
   useEffect(() => {
     if (open && confirmRef.current) {
@@ -43,15 +48,29 @@ export default function ConfirmDialog({
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(e) {
-      if (e.key === 'Escape') {
-        onCancel?.();
+      if (e.key === 'Escape' && escapeDismisses({ busy })) {
+        resolveDismissHandler({ alertOnly, onConfirm, onCancel })?.();
       }
     }
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [open, onCancel]);
+  }, [open, busy, alertOnly, onConfirm, onCancel]);
 
   if (!open) return null;
+
+  // Dismiss on a click that both started and ended on the dimmed backdrop —
+  // the instinctive "click outside to close" gesture. A confirmation cancels
+  // (safe default); an alert acknowledges. Presses that originate on the card
+  // never dismiss (guarded by the mousedown target check).
+  function handleOverlayMouseDown(e) {
+    pressedOverlayRef.current = e.target === e.currentTarget;
+  }
+  function handleOverlayClick(e) {
+    const releasedOverlay = e.target === e.currentTarget;
+    const shouldDismiss = backdropDismisses({ pressedOverlay: pressedOverlayRef.current, releasedOverlay, busy });
+    pressedOverlayRef.current = false;
+    if (shouldDismiss) resolveDismissHandler({ alertOnly, onConfirm, onCancel })?.();
+  }
 
   const iconColor = variant === 'danger' ? 'var(--eb-status-error)'
     : variant === 'info' ? 'var(--eb-accent-primary)'
@@ -69,6 +88,8 @@ export default function ConfirmDialog({
       aria-modal="true"
       aria-label={title}
       style={overlayStyle}
+      onMouseDown={handleOverlayMouseDown}
+      onClick={handleOverlayClick}
     >
       <div style={{ ...dialogStyle, maxWidth }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>

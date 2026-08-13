@@ -1,11 +1,10 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain, Target } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import OutcomesPanel from './OutcomesPanel';
-import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { fitTabCount } from './rail-layout';
 import { useSessionsActive } from './SessionsActiveContext';
@@ -20,7 +19,7 @@ const IS_MAC = typeof navigator !== 'undefined'
   && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'knowledge'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -33,7 +32,6 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'kn
  *   - "Outcomes"  — read-only view of the agent's outcome options (#963); the
  *     outputs counterpart of Triggers, so it sits next to it. Team members only
  *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
- *   - "Prompt"    — read-only preview of the composed system prompt
  *   - "Knowledge" — the agent's knowledge base
  *
  * The active tab is persisted in localStorage so it survives reloads; an old
@@ -107,7 +105,6 @@ export default function RightRail({
     { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
     { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
     ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
-    { key: 'prompt', Icon: FileText, label: 'Prompt', hint: 'Read-only preview of the composed system prompt' },
     { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
   ], [sessionCount, showOutcomes]);
 
@@ -367,9 +364,6 @@ export default function RightRail({
             <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
           </div>
         )}
-        <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <PromptPreviewPanel agentId={agentId} embedded />
-        </div>
         <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>

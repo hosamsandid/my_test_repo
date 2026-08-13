@@ -126,7 +126,7 @@ so it cannot be faked down:
 - **T2 GitHub-writing** — env has repo + PAT and/or `github-event` triggers.
 - **T3 host-writing** — any `contextMounts[].readWrite: true`.
 
-The tier appears as a badge (Agents page, Prompt tab via `prompt-badges.js`), is stamped
+The tier appears as a badge (Agents page), is stamped
 into audit lines, and keys the defaults of trigger policy (§7), creation rules (§3.1)
 and mount governance (§10). *P0, small build.*
 

@@ -25,6 +25,7 @@ import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { breadcrumbFor } from './breadcrumbs';
 import { formatVersionLabel } from './version-info';
+import { formatCommitTimestamp } from './version-info';
 
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 // Per-user accordion state for the sidebar groups (#1595). Namespaced under
@@ -42,7 +43,7 @@ function loadCollapsedGroups(username) {
   try { return JSON.parse(localStorage.getItem(navGroupsKey(username)) || '{}'); }
   catch { return {}; }
 }
-const VERSION_LABEL = formatVersionLabel(import.meta.env.VITE_GIT_COMMIT, import.meta.env.VITE_GIT_DIRTY);
+const COMMIT_TIME_LABEL = formatCommitTimestamp(import.meta.env.VITE_GIT_COMMIT_TIME, import.meta.env.VITE_GIT_DIRTY);
 
 function loadLastViewed() {
   try { return JSON.parse(localStorage.getItem(LAST_VIEWED_KEY) || '{}'); }
@@ -559,7 +560,7 @@ export default function Shell({ children }) {
           >
             <div style={{ fontWeight: 'bold' }}>About</div>
             <div>© 2026 Accenture. All rights reserved.</div>
-            <div data-testid="app-version" style={{ color: 'var(--eb-text-muted)' }}>v{VERSION_LABEL}</div>
+            <div data-testid="app-version" style={{ color: 'var(--eb-text-muted)' }}>{COMMIT_TIME_LABEL}</div>
           </button>
         )}
       </aside>

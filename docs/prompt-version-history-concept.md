@@ -7,9 +7,8 @@
 ## 1. Problem
 
 Editing an authored system prompt overwrites `AGENT-PROMPT.md` / `config.json`
-immediately and globally, with **no history, no undo, no rollback**. A read-only
-Prompt preview exists (`PromptPreviewPanel.jsx`), byte-identical to what is
-seeded, but there is no way back to a known-good previous version.
+immediately and globally, with **no history, no undo, no rollback**, and there is
+no way back to a known-good previous version.
 
 Blast radius is already contained by the one-team-per-human model, so this is an
 ergonomics/safety improvement, not a multi-tenant emergency.
@@ -138,23 +137,17 @@ Never destructive (undo-of-undo works). **AC "rollback goes through the same
 assembly/seed path, preview stays byte-identical"** is satisfied for free, since
 no new seed path is introduced. "Undo" = revert to `currentVersion - 1`.
 
-## 7. Read API + preview reuse
+## 7. Read API
 
 - `GET /api/agents/:id/prompt-history`
   → `{ field, currentVersion, history: [{ version, at, by, action, note, hash, contentPreview }] }`
   (truncated snippets in the list; full content fetched on demand for
   diff/preview).
-- Optional (can slip to a later cut): extend `GET /api/agents/:id/prompt-preview`
-  (`orchestrator.js:8396`) to accept a `promptOverride` so a historical version
-  can be rendered byte-identically through `buildAgentClaudeMd` *before* the
-  revert. A client-side diff against the active prompt may suffice for v1.
 
 ## 8. Frontend
 
 A reusable `PromptHistory` component — version list (`at` / `by` / `action`),
 diff against the active prompt, **Revert** button with confirm — mounted in:
-- the **Prompt tab** `PromptPreviewPanel.jsx` (chat RightRail) — standalone
-  agents & members,
 - the **NodeInspector** Prompt tab (Flow editor) — live teams & members
   (team templates have no chat room).
 
@@ -190,7 +183,6 @@ diff against the active prompt, **Revert** button with confirm — mounted in:
 | `admin-console/api/prompt-history.js` (new) | Pure stamp/read/write module |
 | `admin-console/api/prompt-history.fixture.json` (new) | Golden fixture |
 | `admin-console/api/api.js` | `captureAuthoredPromptEdit` helper; wire into the 3 choke-points; `GET /prompt-history`; `POST /prompt-history/:version/revert` |
-| `admin-console/src/pages/agent-chat/PromptPreviewPanel.jsx` | Mount `PromptHistory` |
 | `admin-console/src/pages/process/NodeInspector.jsx` | Mount `PromptHistory` in the Prompt tab |
 | `admin-console/src/pages/.../PromptHistory.jsx` (new) | Version list + diff + Revert |
 | tests | Unit + integration per §10 |

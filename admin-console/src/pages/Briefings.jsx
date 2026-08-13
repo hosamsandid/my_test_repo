@@ -4,6 +4,7 @@ import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Fil
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
@@ -616,14 +617,26 @@ export default function Briefings() {
     }
   }
 
-  async function deleteDraft(d) {
-    if (!window.confirm(`Delete draft “${d.name}”? This cannot be undone.`)) return;
+  // Delete confirmation goes through the shared styled ConfirmDialog (like every
+  // other delete action in the console) rather than a native browser prompt,
+  // so the flow looks and behaves consistently across pages.
+  const [deleteTarget, setDeleteTarget] = useState(null); // the draft pending deletion
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  async function confirmDeleteDraft() {
+    const d = deleteTarget;
+    if (!d) return;
+    setDeleteBusy(true);
     try {
       await apiCall('DELETE', `/api/process/drafts/${d.id}`);
       // If the deleted draft was open, drop the selection.
       if (proc === `draft:${d.id}`) setSearchParams({});
       refetchDrafts();
     } catch { /* leave the list as-is; the draft may already be gone */ }
+    finally {
+      setDeleteBusy(false);
+      setDeleteTarget(null);
+    }
   }
 
   // Import the selected BriefingPack flow as an editable process draft (#377) —
@@ -852,7 +865,7 @@ export default function Briefings() {
                     sub={`${d.roleCount} agent${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
-                    onDelete={() => deleteDraft(d)}
+                    onDelete={() => setDeleteTarget(d)}
                     deleteTitle="Delete draft"
                   />
                 ))
@@ -951,6 +964,26 @@ export default function Briefings() {
         {/* AC 2: help panel slide-in overlay */}
         {helpOpen && <HelpPanel onClose={closeHelp} />}
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete draft"
+        message={
+          <>
+            <p style={{ margin: 0 }}>
+              Really delete "<strong>{deleteTarget?.name || deleteTarget?.id}</strong>"?
+            </p>
+            <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+              This cannot be undone.
+            </p>
+          </>
+        }
+        variant="danger"
+        confirmLabel="Delete"
+        busy={deleteBusy}
+        onConfirm={confirmDeleteDraft}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

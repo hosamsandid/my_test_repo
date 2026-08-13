@@ -54,6 +54,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
@@ -331,6 +332,21 @@ app.get('/api/helper/tour-manifest', (req, res) => {
 // Speech-to-text transcription: proxies audio to the STT service and returns { text }.
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());
+
+// Helper Chat tour screenshots (#1736, Phase 2.1). The tour manifest
+// (admin-console/api/helper-chat/tour-manifest.json) references screenshots by
+// relative path ("team-setup/select-process.png"); the PNGs are written by a
+// green journey run under e2e/artifacts/ and served here as static files.
+// express.static normalizes and rejects "../" traversal internally, so the
+// user-controlled URL sub-path cannot escape the artifacts root. Behind the
+// global /api limiter + auth gate above. Development/monorepo layout by default
+// (Option A in #1736); the admin-console image build context is admin-console/
+// and does NOT contain e2e/artifacts/, so for a production build the CI pipeline
+// must copy e2e/artifacts/ into the image or a sibling volume and point
+// TOUR_ARTIFACTS_DIR at it — the route simply 404s until that directory exists.
+const TOUR_ARTIFACTS_DIR = process.env.TOUR_ARTIFACTS_DIR
+  || path.resolve(__dirname, '..', '..', 'e2e', 'artifacts');
+app.use('/api/helper/tour-screenshot', express.static(TOUR_ARTIFACTS_DIR));
 
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {
@@ -1500,23 +1516,6 @@ app.get('/api/agents/:id', (req, res) => {
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json({ id, ...cfg, triggers });
-});
-
-// Prompt preview: proxy to the orchestrator, which renders the fully-composed
-// system prompt (seeded CLAUDE.md + runtime append hint) via the same assembly
-// path as workspace seeding. Lets an operator review the composed whole instead
-// of reading the template, the env, and the runtime hint separately.
-app.get('/api/agents/:id/prompt-preview', apiLimiter, async (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-preview`);
-    const body = await r.json().catch(() => ({ error: 'invalid orchestrator response' }));
-    return res.status(r.status).json(body);
-  } catch (err) {
-    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
-  }
 });
 
 // Best-effort: nudge a running agent (SIGUSR2 via the orchestrator) to re-pull
@@ -7648,6 +7647,26 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   if (!aborted) res.end();
 });
+
+/* ─── Helper Chat (#1734, spec docs/helper-chat-concept.md) ──────────────
+ * POST /api/helper/chat — the in-console documentation assistant. Grounds the
+ * model on the vendored docs corpus (#1733, ./helper-chat/corpus.js) and streams
+ * the reply as an NDJSON delta/done stream, the same transport as the Flow
+ * Copilot above. Request-shape / provider errors stay plain JSON (400/403,
+ * headers not yet sent); once the stream opens, `{type:'delta',text}` then
+ * `{type:'done'}` (or `{type:'error',message}`) flow. The handler lives in its
+ * own module for testability (api.js has no isolated harness); the LLM transport
+ * helpers are injected from here. Auth is the global /api gate (auth.js), same as
+ * every other /api route including the copilot route above. */
+const helperChatHandler = createHelperChatHandler({
+  resolveAssistTarget,
+  buildMessagesUrl,
+  httpPostJson,
+  extractMessageText,
+  assistMeta,
+  sendAssistSelectionError,
+});
+app.post('/api/helper/chat', heavyLimiter, helperChatHandler);
 
 /* ─── Process-template registry (#419) ──────────────────────────────────
  * Curated whole-process templates — the process-level analogue of the

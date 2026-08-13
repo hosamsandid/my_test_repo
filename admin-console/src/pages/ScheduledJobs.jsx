@@ -6,6 +6,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { summarizeLoopTrigger } from './agent-chat/trigger-summary.js';
@@ -253,7 +254,7 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         placeholder="e.g. daily-report"
         helpText={isEdit
           ? <>Cannot be changed after creation.</>
-          : <>Auto-derived from Description; edit to override. Lowercase letters, digits and hyphens only.</>}
+          : <>Auto-derived from Description; edit to override. {ID_FORMAT_HINT}</>}
       />
 
       <div>

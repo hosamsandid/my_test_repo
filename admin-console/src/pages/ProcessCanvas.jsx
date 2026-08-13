@@ -20,6 +20,7 @@ import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
+import { toolbarTitle } from './process-toolbar-hints';
 
 // Display names for the actor pseudo-nodes (#411) — the graph carries them as
 // nodes when they have edges, but a drag can also start from a placeholder.
@@ -622,13 +623,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <>
             {/* Structural editing pauses while a Copilot proposal is on screen —
                 the draft underneath is not what the canvas shows. */}
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus} disabled={!!proposal}>Add agent</ToolbarButton>
-            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User} disabled={!!proposal}>Add human</ToolbarButton>
-            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers} disabled={!!proposal}>Stages</ToolbarButton>
-            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag} disabled={!!proposal}>Labels</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus} disabled={!!proposal}
+              title={toolbarTitle('addAgent', { hasProposal: !!proposal })}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User} disabled={!!proposal}
+              title={toolbarTitle('addHuman', { hasProposal: !!proposal })}>Add human</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers} disabled={!!proposal}
+              title={toolbarTitle('stages', { hasProposal: !!proposal })}>Stages</ToolbarButton>
+            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag} disabled={!!proposal}
+              title={toolbarTitle('labels', { hasProposal: !!proposal })}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
-              title="Create a real team and its agents from this design"
+              title={toolbarTitle('materialize', { hasProposal: !!proposal, roleCount: draftBundle?.roles?.length || 0 })}
               disabled={!!proposal || !draftBundle?.roles?.length}>Materialize…</ToolbarButton>
           </>
         )}

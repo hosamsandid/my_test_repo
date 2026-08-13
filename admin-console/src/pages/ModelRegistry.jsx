@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Trash2, Plus, Pencil, Check, X, RefreshCw, PlugZap, Star, Lock, LogIn, ShieldAlert } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
@@ -433,7 +435,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         placeholder="e.g. litellm-prod"
         helpText={isEdit
           ? <>Cannot be changed after creation.</>
-          : <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. <strong>Cannot be changed after creation.</strong></>}
+          : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
 
       {/* Ownership / team scope (#800) */}
@@ -1125,7 +1127,7 @@ export default function ModelRegistry() {
         );
       },
     },
-    { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : (v ? new Date(v).toLocaleString() : '—') },
+    { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : <WhenCell iso={v} /> },
     {
       key: '_actions',
       label: '',
@@ -1301,7 +1303,7 @@ export default function ModelRegistry() {
       <DataTable
         columns={COLUMNS}
         data={envFallback ? [envFallback, ...(endpoints ?? [])] : (endpoints ?? [])}
-        emptyText="No model providers registered yet."
+        emptyText="No model providers registered yet. Click 'New provider' to add one."
         onRowClick={row => {
           // The .env row opens its read-only panel; a manageable provider opens
           // the editor. A visible-but-unmanageable system provider (Team Admin)

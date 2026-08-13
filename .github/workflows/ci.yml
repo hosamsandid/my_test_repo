@@ -203,6 +203,9 @@ jobs:
       - name: Catalog freshness
         working-directory: e2e
         run: npm run journeys:catalog:check
+      - name: Tour manifest freshness
+        working-directory: e2e
+        run: npm run journeys:tour:check
       - name: Lint journeys
         working-directory: e2e
         run: npm run journeys:lint

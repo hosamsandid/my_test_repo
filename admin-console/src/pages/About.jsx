@@ -1,11 +1,16 @@
 import React from 'react';
 import AccentureLogo from '../components/AccentureLogo';
 import { formatVersionLabel } from '../components/version-info';
+import { decodeContributors } from '../components/contributors';
 
 const VERSION_LABEL = formatVersionLabel(
   import.meta.env.VITE_GIT_COMMIT,
   import.meta.env.VITE_GIT_DIRTY,
 );
+
+// Contributors extracted from git history at build time (#1742). Empty when the
+// build had no git metadata available — the section then hides itself (AC6).
+const CONTRIBUTORS = decodeContributors(import.meta.env.VITE_CONTRIBUTORS);
 
 export default function About() {
   return (
@@ -31,6 +36,38 @@ export default function About() {
       </div>
 
       <hr style={{ width: '100%', border: 'none', borderTop: '1px solid var(--eb-border-default)' }} />
+
+      {/* Contributors — extracted live from git history at build time (#1742).
+          Hidden entirely when the build had no git metadata (AC6). */}
+      {CONTRIBUTORS.length > 0 && (
+        <>
+          <div style={{ textAlign: 'center', width: '100%' }}>
+            <div style={{
+              fontSize: 'var(--eb-text-md)',
+              color: 'var(--eb-text-primary)',
+              fontWeight: 'var(--eb-font-medium)',
+              marginBottom: 'var(--eb-space-3)',
+            }}>
+              Contributors
+            </div>
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+              gap: 'var(--eb-space-2) var(--eb-space-3)',
+              fontSize: 'var(--eb-text-sm)',
+              color: 'var(--eb-text-secondary)',
+              lineHeight: 1.6,
+            }}>
+              {CONTRIBUTORS.map((name) => (
+                <span key={name}>{name}</span>
+              ))}
+            </div>
+          </div>
+
+          <hr style={{ width: '100%', border: 'none', borderTop: '1px solid var(--eb-border-default)' }} />
+        </>
+      )}
 
       {/* Parakeet attribution (CC-BY-4.0 required) */}
       <div style={{ textAlign: 'center', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.7 }}>

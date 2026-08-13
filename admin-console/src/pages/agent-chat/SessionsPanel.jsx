@@ -10,6 +10,7 @@ import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
 import { useSessionsActive } from './SessionsActiveContext';
 import { removeSession } from './sessions-active';
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -164,6 +165,7 @@ export default function SessionsPanel({
   // Non-blocking notice shown when a deep-link (#642) couldn't locate the
   // requested session (outside the history window, log pruned, no DM room, …).
   const [notFound, setNotFound] = useState(null); // { correlationId } | null
+  const [confirmResume, setConfirmResume] = useState(false); // resume would replace an active session
 
   // The active-sessions list itself is polled once for all consumers by
   // SessionsActiveContext (#1678); this panel only keeps a per-second tick so
@@ -374,22 +376,29 @@ export default function SessionsPanel({
   // confirm first (Open Question B). ChatPanel owns the pointer PUT + sending
   // the predefined message; we just hand it the chosen session-ID and switch
   // back to the live view so the resumed session shows as active (AC4).
-  const handleResume = useCallback(() => {
-    if (!historical || !canResumeSession(historical) || !onResumeSession) return;
-    if (resumeNeedsConfirm(sessions)) {
-      const ok = window.confirm(
-        'A session is currently active in this room. Resuming this finished '
-        + 'session will replace the active one (there is a single session per '
-        + 'room). Continue?',
-      );
-      if (!ok) return;
-    }
+  // Actually perform the resume (after any confirmation). ChatPanel owns the
+  // pointer PUT; we hand it the chosen session-ID and switch back to the live
+  // view so the resumed session shows as active (AC4).
+  const proceedResume = useCallback(() => {
+    if (!historical || !onResumeSession) return;
+    setConfirmResume(false);
     onResumeSession(historical.sessionId);
     // Switch from the read-only historical view to the live view; the resumed
     // session appears as the active session once the run starts.
     setHistoryPinned(false);
     setHistoricalId(null);
-  }, [historical, onResumeSession, sessions]);
+  }, [historical, onResumeSession]);
+
+  const handleResume = useCallback(() => {
+    if (!historical || !canResumeSession(historical) || !onResumeSession) return;
+    if (resumeNeedsConfirm(sessions)) {
+      // Overwriting a live session is irreversible — confirm through the shared
+      // styled dialog (consistent with every other console confirmation).
+      setConfirmResume(true);
+      return;
+    }
+    proceedResume();
+  }, [historical, onResumeSession, sessions, proceedResume]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -822,6 +831,20 @@ export default function SessionsPanel({
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
+
+      <ConfirmDialog
+        open={confirmResume}
+        title="Replace the active session?"
+        message={
+          'A session is currently active in this room. Resuming this finished '
+          + 'session will replace the active one — there is a single session per '
+          + 'room. Continue?'
+        }
+        variant="warning"
+        confirmLabel="Resume"
+        onConfirm={proceedResume}
+        onCancel={() => setConfirmResume(false)}
+      />
     </div>
   );
 }

@@ -5,10 +5,14 @@ import {
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
+import GithubTokenHint from '../components/GithubTokenHint';
+import { GITHUB_TOKEN_PREFIX_HINT } from './github-token-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
@@ -239,7 +243,7 @@ function SshKeyForm({ rotateTarget, onCreatePaste, onCreateGenerate, onRotatePas
             value={id} onChange={handleIdChange}
             isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
             placeholder="e.g. my-laptop-key"
-            helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only.</>}
+            helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
           />
         </>
       )}
@@ -321,7 +325,7 @@ function GithubTokenForm({ rotateTarget, onCreate, onRotate, onCancel, saving, e
             value={id} onChange={handleIdChange}
             isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
             placeholder="e.g. my-github-pat"
-            helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only.</>}
+            helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
           />
         </>
       )}
@@ -343,6 +347,10 @@ function GithubTokenForm({ rotateTarget, onCreate, onRotate, onCancel, saving, e
           placeholder="github_pat_… or ghp_…"
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
+        <GithubTokenHint value={token} />
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
+          Paste the full token value. {GITHUB_TOKEN_PREFIX_HINT}
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
@@ -523,18 +531,17 @@ function CredentialSection({
 
 const mono = v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>;
 const muted = v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{v}</span>;
-const when  = v => v ? new Date(v).toLocaleString() : '—';
 
 const SSH_COLUMNS = [
   { key: 'name', label: 'Name' },
   { key: 'fingerprint', label: 'Fingerprint', render: mono },
-  { key: 'createdAt', label: 'Added', render: when },
+  { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
 ];
 const GH_COLUMNS = [
   { key: 'name', label: 'Name' },
   { key: 'preview', label: 'Token', render: mono },
   { key: 'fingerprint', label: 'Fingerprint', render: muted },
-  { key: 'createdAt', label: 'Added', render: when },
+  { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
 ];
 
 export default function MyCredentials() {

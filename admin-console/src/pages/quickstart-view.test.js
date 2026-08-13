@@ -8,6 +8,7 @@ import {
   repoPrerequisitesMet,
   showRepoPrerequisites,
   canSubmitQuickstart,
+  quickstartSubmitReasons,
   QUICKSTART_COPY,
   fastLaneCopyForcesModeChoice,
 } from './quickstart-view.js';
@@ -136,4 +137,76 @@ test('#1667 AC1/AC3: no launcher-path copy forces an agent-vs-team choice', () =
     fastLaneCopyForcesModeChoice({ ...QUICKSTART_COPY, teamOfOneNote: 'x' }),
     true,
   );
+});
+
+// --- quickstartSubmitReasons: explain the disabled submit button -----------
+
+// The hard invariant: the checklist and the button gate can never disagree.
+test('quickstartSubmitReasons: canSubmit matches canSubmitQuickstart across cases', () => {
+  const cases = [
+    // repo-less
+    { url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: false, displayName: '', selectedLlmId: '' },
+    { url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true, displayName: '', selectedLlmId: '' },
+    { url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true, displayName: 'Bot', selectedLlmId: '' },
+    { url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true, displayName: 'Bot', selectedLlmId: 'ep1' },
+    { url: '  ', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true, displayName: '   ', selectedLlmId: 'ep1' },
+    // repo path
+    { url: 'https://github.com/o/r', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
+    { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: false, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
+    { url: 'https://github.com/o/r', hasTokens: false, hasSshKeys: true, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
+    { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
+  ];
+  for (const c of cases) {
+    assert.equal(
+      quickstartSubmitReasons(c).canSubmit,
+      canSubmitQuickstart(c),
+      `parity mismatch for ${JSON.stringify(c)}`,
+    );
+  }
+});
+
+test('quickstartSubmitReasons: repo-less lists name + provider, in form order', () => {
+  const { canSubmit, reasons } = quickstartSubmitReasons({
+    url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: false,
+    displayName: '', selectedLlmId: '',
+  });
+  assert.equal(canSubmit, false);
+  assert.deepEqual(reasons.map(r => r.field), ['name', 'provider']);
+  assert.match(reasons[1].message, /model provider/i);
+});
+
+test('quickstartSubmitReasons: repo-less with providers but none selected → choose', () => {
+  const { reasons } = quickstartSubmitReasons({
+    url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true,
+    displayName: 'My Assistant', selectedLlmId: '',
+  });
+  assert.deepEqual(reasons.map(r => r.field), ['provider']);
+  assert.match(reasons[0].message, /choose/i);
+});
+
+test('quickstartSubmitReasons: a fully-ready repo-less form has no reasons', () => {
+  const { canSubmit, reasons } = quickstartSubmitReasons({
+    url: '', hasTokens: false, hasSshKeys: false, hasLlmEndpoints: true,
+    displayName: 'My Assistant', selectedLlmId: 'ep1',
+  });
+  assert.equal(canSubmit, true);
+  assert.equal(reasons.length, 0);
+});
+
+test('quickstartSubmitReasons: repo path lists missing GitHub prerequisites (ssh before token)', () => {
+  const { canSubmit, reasons } = quickstartSubmitReasons({
+    url: 'https://github.com/o/r', hasTokens: false, hasSshKeys: false,
+    hasLlmEndpoints: true, displayName: 'x', selectedLlmId: 'ep1',
+  });
+  assert.equal(canSubmit, false);
+  assert.deepEqual(reasons.map(r => r.field), ['ssh-key', 'github-token']);
+});
+
+test('quickstartSubmitReasons: repo path with both prerequisites met has no reasons', () => {
+  const { canSubmit, reasons } = quickstartSubmitReasons({
+    url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true,
+    hasLlmEndpoints: false, displayName: '', selectedLlmId: '',
+  });
+  assert.equal(canSubmit, true);
+  assert.equal(reasons.length, 0);
 });

@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { resolveEmptyState, filterPlaceholder } from './data-table-view.js';
 
 /**
  * DataTable — Reusable table with sort, filter, pagination.
@@ -68,6 +69,15 @@ export default function DataTable({
   const safePage = Math.min(page, totalPages - 1);
   const pageData = sorted.slice(safePage * pageSize, (safePage + 1) * pageSize);
 
+  // Distinguish "dataset is empty" (show the create-CTA emptyText) from
+  // "filter matched nothing" (show a way back instead of a misleading CTA).
+  const emptyState = resolveEmptyState({
+    dataLength: data.length,
+    resultLength: sorted.length,
+    filter,
+    emptyText,
+  }) || { kind: 'empty', text: emptyText, showClear: false };
+
   /* ── Sort toggle ─────────────────────────────────────────────────── */
   const toggleSort = useCallback((key) => {
     if (sortKey === key) {
@@ -100,6 +110,10 @@ export default function DataTable({
   // `columns` (so the filter still searches it) but is never rendered.
   const visibleColumns = columns.filter(col => !col.hidden);
 
+  // Self-describing filter hint ("Filter by Name, Environment…") so a first-time
+  // user knows what typing there searches, instead of an opaque "Filter…".
+  const filterHint = filterPlaceholder(columns);
+
   return (
     <div style={{
       background: 'var(--eb-bg-surface)',
@@ -116,7 +130,8 @@ export default function DataTable({
         <input
           value={filter}
           onChange={e => { setFilter(e.target.value); setPage(0); }}
-          placeholder="Filter..."
+          placeholder={filterHint}
+          aria-label={filterHint}
           style={{
             flex: 1, maxWidth: 280,
             padding: 'var(--eb-space-1) var(--eb-space-3)',
@@ -185,7 +200,27 @@ export default function DataTable({
                     fontSize: 'var(--eb-text-sm)',
                   }}
                 >
-                  {emptyText}
+                  {emptyState.text}
+                  {emptyState.showClear && (
+                    <>
+                      {' '}
+                      <button
+                        type="button"
+                        onClick={() => { setFilter(''); setPage(0); }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          padding: 0,
+                          color: 'var(--eb-accent-primary)',
+                          cursor: 'pointer',
+                          font: 'inherit',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Clear filter
+                      </button>
+                    </>
+                  )}
                 </td>
               </tr>
             ) : (

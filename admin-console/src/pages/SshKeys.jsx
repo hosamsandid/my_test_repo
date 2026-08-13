@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -208,7 +210,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
     getName: () => name,
   });
 
-  const idHelp = <>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored key.</>;
+  const idHelp = <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored key.</>;
 
   if (generated) {
     return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;
@@ -467,7 +469,7 @@ export default function SshKeys() {
       },
     },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     {
       key: '_usedBy', label: 'Used by', sortable: false,
       render: (_, row) => {

@@ -285,8 +285,10 @@ export default function AgentChat() {
 
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
-  const handleCostUpdate = useCallback((usd, tokIn, tokOut) => {
-    setSessionCost({ usd, tokIn, tokOut });
+  // `breakdown` (#1718) carries the four raw token classes for the header info
+  // popover; `tokIn`/`tokOut` stay the cache-summed totals used elsewhere.
+  const handleCostUpdate = useCallback((usd, tokIn, tokOut, breakdown) => {
+    setSessionCost({ usd, tokIn, tokOut, breakdown: breakdown || null });
   }, []);
 
   // Last completed request's input tokens + model, fed by SessionLogPanel via

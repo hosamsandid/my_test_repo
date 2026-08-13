@@ -105,6 +105,11 @@ function ProviderGroup({ group, selection, selectable, onSelect }) {
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {m.label}
             </span>
+            {m.meta && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+                {m.meta}
+              </span>
+            )}
             {m.isDefault && (
               <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
                 default

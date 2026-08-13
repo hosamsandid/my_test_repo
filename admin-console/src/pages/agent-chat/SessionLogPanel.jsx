@@ -234,6 +234,10 @@ export default function SessionLogPanel({
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
     let usd = 0, tokIn = 0, tokOut = 0;
+    // #1718: the header info popover shows a per-class token breakdown, so keep
+    // the four raw classes separate here in addition to the #494 "tokens in"
+    // sum. cacheCreationInput = cache-write, cacheReadInput = cache-read.
+    let input = 0, output = 0, cacheWrite = 0, cacheRead = 0;
     for (const ev of scopedEvents) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
@@ -241,13 +245,17 @@ export default function SessionLogPanel({
         // must include cache-creation/-read tokens, not just input_tokens.
         tokIn  += sumContextTokens(ev.tokens) ?? 0;
         tokOut += ev.tokens?.output ?? 0;
+        input      += ev.tokens?.input ?? 0;
+        output     += ev.tokens?.output ?? 0;
+        cacheWrite += ev.tokens?.cacheCreationInput ?? 0;
+        cacheRead  += ev.tokens?.cacheReadInput ?? 0;
       }
     }
-    return { usd, tokIn, tokOut };
+    return { usd, tokIn, tokOut, breakdown: { input, output, cacheWrite, cacheRead } };
   }, [scopedEvents]);
 
   useEffect(() => {
-    if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
+    if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut, costTotals.breakdown);
   }, [costTotals, onCostUpdate]);
 
   /* ─── 5b. Last-request context-window snapshot (#471, #509) ────────────

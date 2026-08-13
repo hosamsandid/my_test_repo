@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Gauge, Trash2, GitBranch, ArrowRight, Plus, Minus, Type } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, Gauge, Trash2, GitBranch, ArrowRight, Plus, Minus, Type } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -23,7 +23,9 @@ import {
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import VirtualList from '../../components/VirtualList.jsx';
-import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
+import { headerContextIndicator } from './session-info.js';
+import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
@@ -193,6 +195,22 @@ export default function ChatPanel({
     if (!contextFill || contextWindowTokens == null) return null;
     return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
   }, [contextFill, contextWindowTokens]);
+  // #1718: the compact header context-usage indicator model — "used / window · %"
+  // when the window is known, else the used count alone (consistent with #1717).
+  const contextIndicator = useMemo(
+    () => (contextFill ? headerContextIndicator(contextFill.tokensIn, contextWindowTokens, contextFillLevel) : null),
+    [contextFill, contextWindowTokens, contextFillLevel],
+  );
+  // #1718: the currently *selected* (effective) model — its context window and,
+  // when discovery captured it, its max-output tokens — drives the info popover's
+  // Model section. Distinct from contextFill.model (the last completed run's).
+  const selectedModelInfo = useMemo(() => {
+    const modelId = (modelOptions?.override) || (modelOptions?.defaultModelId) || null;
+    const entry = modelId ? (modelOptions?.models || []).find(m => m.id === modelId) : null;
+    const windowTokens = entry ? resolveContextWindowTokens(entry) : (modelId ? resolveContextWindowTokens({ id: modelId }) : null);
+    const maxOutput = typeof entry?.maxOutputTokens === 'number' && entry.maxOutputTokens > 0 ? entry.maxOutputTokens : null;
+    return { windowTokens, maxOutput };
+  }, [modelOptions]);
   // Wall-clock at the moment the user clicked "Save & Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
@@ -1236,58 +1254,37 @@ export default function ChatPanel({
         />
         <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
-        {sessionCost !== null && sessionCost.usd > 0 && (
+        {/* #1718: compact context-usage indicator (used / real window · %, or the
+            used count alone when the window is unknown). The session id, price and
+            per-class token breakdown moved into the info popover below. */}
+        {contextIndicator && (
           <span
-            title={`Session total: $${sessionCost.usd.toFixed(4)} · ${sessionCost.tokIn.toLocaleString()} tokens in / ${sessionCost.tokOut.toLocaleString()} tokens out`}
+            title={contextWindowTokens != null
+              ? `${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`
+              : `${contextFill.tokensIn.toLocaleString()} tokens · ${contextFill.model}`}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 3,
               fontFamily: 'var(--eb-font-mono)',
               fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <DollarSign size={10} />
-            {sessionCost.usd.toFixed(4)}
-          </span>
-        )}
-        {contextFillLevel && (
-          <span
-            title={`${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              fontFamily: 'var(--eb-font-mono)',
-              fontSize: 'var(--eb-text-xs)',
-              color: contextFillLevel.level === 'critical' ? 'var(--eb-status-error)'
-                : contextFillLevel.level === 'warning' ? 'var(--eb-status-warning)'
+              color: contextIndicator.level === 'critical' ? 'var(--eb-status-error)'
+                : contextIndicator.level === 'warning' ? 'var(--eb-status-warning)'
                 : 'var(--eb-text-muted)',
               whiteSpace: 'nowrap',
             }}
           >
             <Gauge size={10} />
-            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
+            {contextIndicator.text}
           </span>
         )}
-        {sessionId && (
-          <span
-            title={`Session ID: ${sessionId}${sessionUpdatedAt ? ` (updated ${sessionUpdatedAt})` : ''}`}
-            style={{
-              fontFamily: 'var(--eb-font-mono)',
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              maxWidth: 120,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {sessionId.slice(0, 8)}…
-          </span>
-        )}
+        <SessionInfoPopover
+          sessionId={sessionId}
+          sessionUpdatedAt={sessionUpdatedAt}
+          sessionCost={sessionCost}
+          contextWindowTokens={selectedModelInfo.windowTokens}
+          maxOutputTokens={selectedModelInfo.maxOutput}
+        />
       </div>
 
       {disabled && (

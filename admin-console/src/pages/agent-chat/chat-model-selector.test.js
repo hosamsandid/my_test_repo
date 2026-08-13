@@ -56,6 +56,23 @@ test('buildChatGroups carries scope badge, detail rows and plain (no-kind) model
   assert.equal(groups[0].models[1].isDefault, false);
 });
 
+test('buildChatGroups adds a context-window caption per model, omitted when unknown (#1718 AC1)', () => {
+  const groups = buildChatGroups({
+    endpoints: [{
+      id: 'ep1', name: 'Acme', scope: 'team', authType: 'api-key', baseUrl: 'https://acme.example',
+      defaultModelId: 'big',
+      models: [
+        { id: 'big', displayName: 'Big', contextWindow: 1_000_000 }, // explicit window
+        { id: 'claude-sonnet-4-6', displayName: 'Sonnet' },          // known Claude family → 200K fallback
+        { id: 'mystery', displayName: 'Mystery' },                   // unknown → no caption
+      ],
+    }],
+  });
+  assert.equal(groups[0].models[0].meta, '1M context');
+  assert.equal(groups[0].models[1].meta, '200K context');
+  assert.equal('meta' in groups[0].models[2], false);
+});
+
 test('buildChatGroups tolerates missing options', () => {
   assert.deepEqual(buildChatGroups(null), []);
   assert.deepEqual(buildChatGroups({}), []);

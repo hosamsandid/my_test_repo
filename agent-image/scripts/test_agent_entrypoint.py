@@ -206,6 +206,24 @@ class AskUserQuestionReachable(unittest.TestCase):
         allowed = {args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"}
         self.assertIn(entrypoint._ASK_USER_MCP_TOOL, allowed)
 
+    def test_base_claude_args_keeps_prompt_off_argv(self):
+        # #1727: the prompt is delivered on stdin, never as an argv argument, so
+        # an option-like leading character can't be parsed as a CLI flag. The
+        # builder emits the boolean `--print` and no `-p <prompt>` pair.
+        prompt = "„Zeig mir die Pods"
+        args = entrypoint._base_claude_args(prompt, "mem-hint", "some-model")
+        self.assertIn("--print", args)
+        self.assertNotIn("-p", args)
+        self.assertNotIn(prompt, args)
+        # A dash-leading prompt likewise never reaches argv (would be an option).
+        self.assertNotIn("-v please explain this",
+                         entrypoint._base_claude_args("-v please explain this",
+                                                      "", None))
+        # Existing invocation features are untouched.
+        self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+        self.assertEqual(args[args.index("--model") + 1], "some-model")
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "mem-hint")
+
 
 class AskUserMcpServer(unittest.TestCase):
     """Drive the bundled ask-user-mcp.py stdio server over JSON-RPC."""
@@ -2666,6 +2684,43 @@ class FakeClaudeShim(unittest.TestCase):
             events = self._parse(stdout)
             text = next(e for e in events if e["type"] == "assistant_text")["text"]
             self.assertEqual(text, "Done.")
+
+    def test_prompt_via_stdin_survives_option_like_leading_chars(self):
+        """#1727: the production runtime passes a bare `--print` and feeds the
+        prompt on stdin, so a message beginning with an option-like character is
+        treated as prompt text, never parsed as a CLI flag. The shim mirrors the
+        real CLI (reads stdin for a bare `--print`); an `[[E2E:<tok>]]` marker in
+        the prompt is echoed back verbatim, proving the leading character neither
+        crashed the invocation nor was stripped from the prompt (AC1-4, 8, 9)."""
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["AEE_FAKE_CLAUDE_SESSION_ID"] = self.fixture["sessionId"]
+        cases = [
+            "„Zeig mir die Pods [[E2E:de-quote]]",   # U+201E German opening quote
+            "-v please explain [[E2E:hyphen]]",       # leading hyphen
+            "–dash prefixed [[E2E:endash]]",          # U+2013 en-dash
+            "--help me [[E2E:ddash]] with this",      # double-dash-like token
+            "   -leading whitespace [[E2E:ws]]",      # whitespace then punctuation
+            "line one\n--line two [[E2E:multiline]]",  # multi-line
+        ]
+        for prompt in cases:
+            with self.subTest(prompt=prompt):
+                proc = subprocess.run(
+                    ["python3", str(self.shim), "--print",
+                     "--output-format", "stream-json", "--verbose"],
+                    input=prompt, capture_output=True, text=True,
+                    env=env, timeout=30,
+                )
+                # Exit 0 — no "unknown option" crash (AC1-4, 6).
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+                events = self._parse(proc.stdout)
+                text = next(e for e in events
+                            if e["type"] == "assistant_text")["text"]
+                tok = prompt.split("[[E2E:")[1].split("]]")[0]
+                # The prompt was received verbatim (marker echoed) — nothing was
+                # stripped or escaped as a side effect (AC9).
+                self.assertIn(f"E2E-ACK:{tok}", text)
 
     def test_resume_id_used_as_session_when_no_env_override(self):
         import os

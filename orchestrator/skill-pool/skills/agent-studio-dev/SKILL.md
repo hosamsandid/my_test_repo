@@ -171,9 +171,9 @@ per run; other intermediate tool calls do **not** reach the chat on their own �
 the one exception is `AskUserQuestion`, which is intercepted (see below).
 
 **`AskUserQuestion` in this environment:** a turn is a single non-interactive
-`claude -p` process with stdin closed, so the tool's *built-in* form (which is
-interactive-TTY-only) is removed from the model's tool set entirely in `-p` mode
-— a bare `--allowedTools` add does nothing. To make asking the user possible
+`claude --print` process (the prompt is fed on stdin, #1727), so the tool's
+*built-in* form (which is interactive-TTY-only) is removed from the model's tool
+set entirely in headless print mode — a bare `--allowedTools` add does nothing. To make asking the user possible
 headlessly (#1712) the runner re-supplies an **identically-shaped**
 `AskUserQuestion` from a bundled, dependency-free stdio MCP server
 (`agent-image/scripts/ask-user-mcp.py`, registered via `--mcp-config` in

@@ -2615,8 +2615,17 @@ def _resolve_model_arg() -> str | None:
 
 
 def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> list[str]:
+    # The user prompt is fed to `claude` on STDIN by _call_claude_once (#1727),
+    # not as a bare argv argument. A prompt handed to argv is parsed by the CLI's
+    # own option parser, so a message that *begins* with an option-like character
+    # (`-`, en-dash `–`, German quote `„`, `--help`, …) is mistaken for an unknown
+    # flag and the whole turn crashes with a non-zero exit. `--print` (boolean,
+    # the same flag the already-immune Briefing-Pack `run_agent` path uses) reads
+    # the prompt from stdin, so no leading character can ever be read as an option.
+    # `prompt` is kept in the signature as the builder's documented contract even
+    # though it deliberately no longer appears in argv.
     args = [
-        "-p", prompt,
+        "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "acceptEdits",
@@ -2951,13 +2960,31 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         ["claude", *args],
         cwd=str(_agent_workdir()),
         env=env,
-        stdin=subprocess.DEVNULL,
+        # The prompt is written to stdin (#1727) rather than passed on argv, so a
+        # message beginning with an option-like character is never parsed as a
+        # CLI flag. Fed by a daemon thread below so an arbitrarily long prompt
+        # can't deadlock against claude's stdin pipe buffer.
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
     )
     _active_claude_proc = proc
+
+    def feed_stdin():
+        # Hand the whole prompt to claude, then close stdin so it sees EOF and
+        # starts generating. Best-effort: if claude has already exited (e.g. a
+        # user Stop terminated it) the write/close races into a broken pipe,
+        # which is harmless and must never crash the run.
+        try:
+            if proc.stdin:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=feed_stdin, daemon=True).start()
 
     final_result: str | None = None
     observed_session: str | None = None

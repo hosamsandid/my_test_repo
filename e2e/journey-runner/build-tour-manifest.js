@@ -62,18 +62,22 @@ const ROUTE_MAP = {
 const MANIFEST_NOTE = 'GENERATED — do not edit. Rebuild with: make tour-manifest';
 
 // Build an artifact-existence predicate over a real artifacts directory. When
-// the directory is absent (fresh checkout / podman-free CI lane) every step is
-// kept — the committed manifest is the full narrated set, and the check lane
-// regenerates it identically. When the directory exists, each PNG is verified.
+// the directory is absent (fresh checkout / podman-free CI lane) OR present but
+// empty (a prior `make e2e` whose PNGs were since cleared, leaving a bare
+// directory) every step is kept — the committed manifest is the full narrated
+// set, and the check lane regenerates it identically. Per-PNG verification is
+// activated only when the directory actually holds journey subdirectories.
 function makeArtifactChecker(artifactsDir = ARTIFACTS_DIR) {
-  let dirExists = false;
+  let hasArtifacts = false;
   try {
-    dirExists = fs.statSync(artifactsDir).isDirectory();
+    hasArtifacts =
+      fs.statSync(artifactsDir).isDirectory() &&
+      fs.readdirSync(artifactsDir, { withFileTypes: true }).some((e) => e.isDirectory());
   } catch {
-    dirExists = false;
+    hasArtifacts = false;
   }
   return (journeyId, screenshot) => {
-    if (!dirExists) return true;
+    if (!hasArtifacts) return true;
     try {
       return fs.statSync(path.join(artifactsDir, journeyId, `${screenshot}.png`)).isFile();
     } catch {

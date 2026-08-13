@@ -3,10 +3,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const {
   buildTourManifest,
   renderManifestJson,
   manifestsEqualIgnoringGenerated,
+  makeArtifactChecker,
   MANIFEST_NOTE,
   OUTPUT_PATH,
 } = require('./build-tour-manifest');
@@ -134,6 +137,36 @@ test('rendering is deterministic and the check ignores the generated timestamp',
   assert.ok(manifestsEqualIgnoringGenerated(a, b));
   // Trailing newline for a diff-stable committed file.
   assert.ok(a.endsWith('\n'));
+});
+
+test('makeArtifactChecker treats a missing or empty artifacts dir as "keep all"', () => {
+  // A directory that does not exist → keep every step.
+  const absent = path.join(os.tmpdir(), 'aee-tour-absent-does-not-exist');
+  assert.equal(makeArtifactChecker(absent)('team-setup', 'process-step'), true);
+
+  // A directory that exists but holds no journey subdirectories (a prior
+  // `make e2e` whose PNGs were cleared) → also keep every step, so the committed
+  // manifest stays the full set and `--check` reproduces it. This is the case
+  // that used to generate an empty manifest and red the freshness guard.
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-tour-empty-'));
+  try {
+    assert.equal(makeArtifactChecker(empty)('team-setup', 'process-step'), true);
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+
+  // A directory that actually holds a journey subdirectory → per-PNG verified:
+  // the present PNG passes, an absent one fails.
+  const populated = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-tour-populated-'));
+  try {
+    fs.mkdirSync(path.join(populated, 'team-setup'));
+    fs.writeFileSync(path.join(populated, 'team-setup', 'process-step.png'), 'png');
+    const check = makeArtifactChecker(populated);
+    assert.equal(check('team-setup', 'process-step'), true);
+    assert.equal(check('team-setup', 'missing-shot'), false);
+  } finally {
+    fs.rmSync(populated, { recursive: true, force: true });
+  }
 });
 
 test('the committed tour-manifest.json is up to date with the journey YAMLs', () => {

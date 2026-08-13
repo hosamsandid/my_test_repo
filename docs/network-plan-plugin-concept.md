@@ -165,7 +165,7 @@ maintainable surface.
 plugins/netzplan/
   plugin.json          # manifest
   bin/aee-plan         # dependency-free CLI facade (CONTRACT.md §4.5)
-netzplan-broker/        # sidecar: serves the board UI + the document store
+  broker/              # sidecar: serves the board UI + the document store
 ```
 
 Manifest, in the terms the validator already understands:

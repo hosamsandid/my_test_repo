@@ -116,7 +116,7 @@ decision) and a per-scope `quota`. See `podman-sandbox/README.md`.
 Test management (Phase 5, #1521): a granted agent creates test cases, triggers
 test runs (submit→poll) and manages test data in an external test-management
 system (Xray/Zephyr/qTest) with the `aee-test` CLI. Its broker
-(`test-mgmt/broker/`) is built on the Broker SDK (`../broker-sdk/`) — the
+(`test-mgmt/broker/`) is built on the Broker SDK (`../../../broker-sdk/`) — the
 proof a credential-backed broker is thin: the vendor token lives only in the
 sidecar. It is the first plugin to use scope granularity for **authorisation**,
 not just isolation (manifest `policy`: create-case is restricted to the
@@ -135,7 +135,7 @@ Once installed its nav entry is also visible to every authenticated user without
 a per-team grant (opt-in `ui.global: true` in the manifest — a human-UI
 convenience; agent CLI access still requires a team grant). It holds no
 credentials and reaches nothing outside itself (`capabilities: []`,
-`credentials: []`, `scopes: ["team"]`). Its broker (`../patterns-catalog-broker/`)
+`credentials: []`, `scopes: ["team"]`). Its broker (`broker/`)
 is a minimal static-file server: `server.js` serves the catalog pages behind
 `verifyViewerHeaders` and exposes no MCP tools and keeps no state; teardown is a
 no-op. Agents list the available catalogs with the dependency-free `aee-patterns`
@@ -179,7 +179,7 @@ so releasing work (e.g. a BA applying a `ready` gate) no longer means switching
 to GitHub: pick a team you are on → one of its Working Environment's repositories
 → **list** that repo's issues, **read** one (body rendered as Markdown), and
 **add / remove a label**. It reuses the single GitHub token already bound to the
-team's Working Environment — the broker (`../github-issues-broker/`) holds it and
+team's Working Environment — the broker (`broker/`) holds it and
 makes every call server-side, so the token never reaches the browser or an agent.
 Standard **team-grant gating** (no `ui.global`): it appears only for the teams it
 is granted to, and any member of such a team may use it.
@@ -203,4 +203,4 @@ never broaden scope.
 Agents can also browse issues read-only with the dependency-free `aee-issues` CLI
 (`aee-issues repos`, `aee-issues list --repo owner/name`, `aee-issues show --repo
 owner/name --number N`). Pull requests are deferred to a later iteration. See
-`github-issues-broker/README.md`.
+`github-issues/broker/README.md`.

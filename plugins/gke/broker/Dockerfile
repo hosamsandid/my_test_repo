@@ -24,12 +24,12 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
  && apt-get install -y --no-install-recommends google-cloud-cli \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/gke-broker
-COPY gke-broker/package.json ./package.json
+WORKDIR /opt/plugins/gke/broker
+COPY plugins/gke/broker/package.json ./package.json
 RUN npm install --omit=dev
-COPY gke-broker/ ./
-# Broker SDK: build context is the repo root, so ../broker-sdk resolves to
-# /opt/broker-sdk both here and in the source tree (WORKDIR /opt/gke-broker).
+COPY plugins/gke/broker/ ./
+# Broker SDK: build context is the repo root, so ../../../broker-sdk resolves to
+# /opt/broker-sdk both here and in the source tree (WORKDIR /opt/plugins/gke/broker).
 COPY broker-sdk/ /opt/broker-sdk/
 
 ENV AEE_PLUGIN_PORT=4007

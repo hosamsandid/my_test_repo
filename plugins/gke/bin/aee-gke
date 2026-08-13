@@ -6,7 +6,7 @@ seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
 broker endpoint + per-scope token from `.agent-studio/plugins/gke.json` (0600,
 written at seed time by plugin-sync.js).
 
-The broker (gke-broker/server.js) holds the Google OAuth credential, refreshes
+The broker (plugins/gke/broker/server.js) holds the Google OAuth credential, refreshes
 the ~1h access token itself, and runs kubectl against the GCP Connect Gateway.
 This CLI is a privilege-less client: it forwards a read-only kubectl arg-vector
 to the broker and carries the scope token. All security lives in the broker —

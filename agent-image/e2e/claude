@@ -72,16 +72,26 @@ _PLAYBOOK_TIMEOUT_SEC = 120
 
 def _parse_args(argv: list[str]) -> dict:
     """Pull the handful of flags we care about out of the CLI args; ignore the
-    rest (`--verbose`, `--permission-mode`, `--append-system-prompt`, …)."""
-    out: dict = {"prompt": "", "resume": None, "model": None}
+    rest (`--verbose`, `--permission-mode`, `--append-system-prompt`, …).
+
+    The prompt is taken from `-p <value>` when a non-option value follows (the
+    legacy form the fixture tests use). When `--print`/`-p` is a bare boolean —
+    the form the production runtime now uses (#1727), so a prompt beginning with
+    an option-like character is never parsed as a flag — `prompt_from_stdin` is
+    set and `main` reads the prompt off stdin, mirroring the real CLI."""
+    out: dict = {"prompt": "", "resume": None, "model": None,
+                 "prompt_from_stdin": False}
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg in ("-p", "--print"):
-            if i + 1 < len(argv):
+            # Only consume the next token as the prompt if it is a real value,
+            # not another option (`--print --output-format …` = prompt on stdin).
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 out["prompt"] = argv[i + 1]
                 i += 2
                 continue
+            out["prompt_from_stdin"] = True
         elif arg == "--resume":
             if i + 1 < len(argv):
                 out["resume"] = argv[i + 1]
@@ -178,6 +188,11 @@ def _emit(obj: dict) -> None:
 
 def main() -> None:
     args = _parse_args(sys.argv[1:])
+    if args["prompt_from_stdin"]:
+        # Read the whole prompt off stdin, exactly as the real CLI does for a
+        # bare `--print` (#1727). The bytes are treated as prompt text verbatim,
+        # so any leading option-like character is preserved, never parsed.
+        args["prompt"] = sys.stdin.read()
     session_id = (
         os.environ.get("AEE_FAKE_CLAUDE_SESSION_ID")
         or args["resume"]

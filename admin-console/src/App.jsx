@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router';
+import { Routes, Route, Navigate, useParams, useSearchParams, useLocation } from 'react-router';
 import Shell from './components/Shell';
+import { documentTitleForPath } from './route-title';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
@@ -75,6 +76,17 @@ const About = lazy(() => import('./pages/About'));
 const GettingStarted = lazy(() => import('./pages/GettingStarted'));
 const PluginSystemHelp = lazy(() => import('./pages/PluginSystemHelp'));
 
+// Keeps the browser tab title in step with the active route so tabs, history
+// and bookmarks are distinguishable (route-title.js). Renders nothing; lives
+// inside the Router so useLocation is available.
+function DocumentTitle() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    document.title = documentTitleForPath(pathname);
+  }, [pathname]);
+  return null;
+}
+
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
   const [setupComplete, setSetupComplete] = useState(null); // null = loading
@@ -125,6 +137,7 @@ export default function App() {
 
   return (
     <Shell>
+      <DocumentTitle />
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
           <Route path="/"             element={<Navigate to="/chats" replace />} />

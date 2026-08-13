@@ -10,6 +10,10 @@ ARG GIT_COMMIT=unknown
 ARG GIT_DIRTY=""
 ENV VITE_GIT_COMMIT=$GIT_COMMIT
 ENV VITE_GIT_DIRTY=$GIT_DIRTY
+# Contributors list (#1742): the raw `%aN\t%aE` git-log lines, base64-encoded on
+# the host (git is likewise unavailable here). vite.config.js decodes + extracts.
+ARG GIT_CONTRIBUTORS=""
+ENV VITE_CONTRIBUTORS_RAW=$GIT_CONTRIBUTORS
 RUN npm run build
 
 FROM node:22-slim

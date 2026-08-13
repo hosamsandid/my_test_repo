@@ -102,7 +102,7 @@ GIT_COMMIT_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo)
 # would always fall back to "unknown".
 export GIT_COMMIT GIT_DIRTY GIT_CONTRIBUTORS GIT_COMMIT_TIME
 
-.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys
+.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys tour-manifest tour-manifest\:check
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -329,6 +329,21 @@ docs-journeys:
 docs-journeys-check:
 	cd e2e && npm install --no-audit --no-fund --silent && npm run docs:journeys:check
 
+# ── Helper Chat tour manifest (docs/helper-chat-concept.md §4, #1736) ─────────
+# Distil the narrated journeys into admin-console/api/helper-chat/tour-manifest.json
+# — one chapter per narrated journey, voiceover copy + screenshot path per step.
+# Pure Node (js-yaml) — no browser, no podman; reads the same validated journey
+# YAMLs the runner uses so the tour copy can never drift. `:check` regenerates and
+# fails if the committed manifest is stale (ignoring the volatile timestamp), the
+# same freshness guard as journeys:catalog:check.
+#   make tour-manifest         # regenerate + commit the manifest
+#   make tour-manifest:check   # CI: fail if the committed manifest is stale
+tour-manifest:
+	cd e2e && npm install --no-audit --no-fund --silent && npm run journeys:tour
+
+tour-manifest\:check:
+	@cd e2e && npm install --no-audit --no-fund --silent && npm run journeys:tour:check
+
 # ── Journey walkthrough deck (docs/journey-spec-concept.md §3.2 item 2, #708) ──
 # Build one PPTX walkthrough deck from all journeys (ordered by `order`) plus a
 # green run's screenshot artifacts — section slide per journey, one slide per
@@ -360,4 +375,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, e2e-kind, e2e-kind-up, e2e-kind-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"
+	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, e2e-kind, e2e-kind-up, e2e-kind-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys, tour-manifest, tour-manifest:check"

@@ -1,20 +1,55 @@
 #
 # agent-studio stack — Conduwuit + Orchestrator + Admin Console
 #
-# Usage:
+# Run `make help` for the one-line target list. Full reference:
+#
+# ── Stack lifecycle ─────────────────────────────────────────────────────────
 #   make up        # build the agent image + build + start the full stack
 #   make down      # stop the stack
 #   make restart   # down + up
-#   make build     # rebuild orchestrator + admin-console images
-#   make agent-image # build the per-agent container image (as-agent:latest)
-#   make plugin-images # build the plugin broker sidecar images (#1547).
-#                    # Included in `make build`, but NOT in `make up` — these
-#                    # are heavy images and a stack with no plugins installed
-#                    # never needs them. Run it before installing a plugin on
-#                    # the Plugins page, or the broker has no image to start.
-#   make update    # git pull + down + up (pulls latest, restarts with rebuild)
+#   make update    # git pull --ff-only, then down + up (restart with rebuild)
 #   make ps        # show container status
 #   make logs      # follow logs of all stack containers
+#
+# ── Image builds ────────────────────────────────────────────────────────────
+#   make build         # rebuild orchestrator + admin-console + stt images
+#                      # (also builds plugin-images as a dependency)
+#   make agent-image   # build the per-agent container image (as-agent:latest);
+#                      # retries a few times on a transient registry pull failure
+#   make plugin-images # build the plugin broker sidecar images (#1547).
+#                      # Included in `make build`, but NOT in `make up` — these
+#                      # are heavy images and a stack with no plugins installed
+#                      # never needs them. Run it before installing a plugin on
+#                      # the Plugins page, or the broker has no image to start.
+#
+# ── Seeding the skill-pool volume (<project>_claude-workspace) ───────────────
+#   make seed-pool             # run every seed below + seed the pool CLAUDE.md
+#   make seed-skills           # seed the ACE engineering skill (host-side i-sase
+#                              # plugin install); skipped if it isn't present
+#   make seed-memory           # seed the memory templates
+#   make seed-templates        # seed the agent role templates
+#   make seed-process-templates# seed the process / flow templates
+#   make seed-mcp-servers      # seed the reference MCP servers
+#   make seed-plugins          # seed the reference plugins into the registry
+#
+# ── E2E tests — podman lane (docs/e2e-testing-concept.md) ────────────────────
+#   make e2e       # full Playwright suite (F0–F4) on a disposable stack
+#   make e2e-gate  # F0+F1 only — the PR-gate scope
+#   make e2e-up    # bring up the disposable e2e stack for test authoring
+#   make e2e-down  # tear the e2e stack down
+#
+# ── E2E tests — kind / Kubernetes lane (#1319) ───────────────────────────────
+#   make e2e-kind      # journey suite against the dedicated e2e kind cluster
+#   make e2e-kind-up   # bring the e2e kind cluster up
+#   make e2e-kind-down # tear the e2e kind cluster down
+#
+# ── Journey docs & media (docs/journey-spec-concept.md) ──────────────────────
+#   make docs-journeys       # generate the Markdown user guide from journeys
+#   make docs-journeys-check # fail if the committed guide is stale/hand-edited
+#   make docs-deck           # build the PPTX walkthrough deck
+#   make video-journeys      # record + render the walkthrough video
+#
+#   make help      # print the one-line list of all targets
 #
 
 COMPOSE     ?= podman compose
@@ -55,7 +90,7 @@ GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dir
 # back to "unknown".
 export GIT_COMMIT GIT_DIRTY
 
-.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down docs-journeys docs-journeys-check docs-deck video-journeys
+.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -313,4 +348,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"
+	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, e2e-kind, e2e-kind-up, e2e-kind-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys"

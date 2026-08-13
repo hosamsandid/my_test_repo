@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Loader2, AlertCircle, History, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 /**
  * Authored-prompt version history + rollback (#990).
@@ -23,6 +24,7 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
   const [error, setError]     = useState(null);
   const [expanded, setExpanded] = useState({});   // version -> full content
   const [busy, setBusy]       = useState(null);   // version currently reverting
+  const [confirmVersion, setConfirmVersion] = useState(null); // version pending revert-confirm
 
   const load = useCallback(async () => {
     if (!agentId) { setData(null); return; }
@@ -60,7 +62,7 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
   }
 
   async function revert(version) {
-    if (!window.confirm(`Revert the prompt to version ${version}? This records a new version and re-seeds the agent.`)) return;
+    setConfirmVersion(null);
     setBusy(version);
     setError(null);
     try {
@@ -137,7 +139,7 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
               {!isCurrent && (
                 <button
                   type="button"
-                  onClick={() => revert(v.version)}
+                  onClick={() => setConfirmVersion(v.version)}
                   disabled={busy !== null}
                   title={`Revert to v${v.version}`}
                   style={{ ...revertBtn, cursor: busy !== null ? 'wait' : 'pointer' }}
@@ -171,6 +173,17 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
         );
       })}
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+
+      <ConfirmDialog
+        open={confirmVersion !== null}
+        title={`Revert to v${confirmVersion}`}
+        message={`Revert the prompt to version ${confirmVersion}? This records a new version and re-seeds the agent. Your current prompt stays in the history and can be restored the same way.`}
+        variant="warning"
+        confirmLabel="Revert"
+        busy={busy !== null}
+        onConfirm={() => revert(confirmVersion)}
+        onCancel={() => setConfirmVersion(null)}
+      />
     </div>
   );
 }

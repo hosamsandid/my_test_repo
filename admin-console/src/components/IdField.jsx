@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { idFieldNotice, ID_FORMAT_HINT } from './id-field-view.js';
 
 /**
  * IdField — standard ID input paired with a "Reset to auto" affordance.
@@ -29,6 +30,19 @@ export default function IdField({
   label = 'ID',
   required = true,
 }) {
+  // Track the operator's most recent raw keystrokes so we can explain — in
+  // plain language — what the console silently changed to keep the id valid
+  // (uppercase → lowercase, spaces/symbols removed). Without this, characters
+  // just vanish as the user types, which reads as a bug (#651-style pure logic
+  // in id-field-view.js).
+  const [rawInput, setRawInput] = useState('');
+  const notice = disabled ? '' : idFieldNotice(rawInput, value);
+
+  const handleInput = (e) => {
+    setRawInput(e.target.value);
+    onChange?.(e.target.value);
+  };
+
   const inputStyle = {
     width: '100%',
     padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -71,14 +85,21 @@ export default function IdField({
       </div>
       <input
         value={value ?? ''}
-        onChange={e => onChange?.(e.target.value)}
+        onChange={handleInput}
         placeholder={placeholder}
         disabled={disabled}
         style={inputStyle}
       />
-      {helpText && (
+      {/* Fall back to one consistent format phrasing when a caller supplies no
+          help text, so every id field states the rule the same way. */}
+      {(helpText || (!disabled && ID_FORMAT_HINT)) && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
-          {helpText}
+          {helpText || ID_FORMAT_HINT}
+        </div>
+      )}
+      {notice && (
+        <div role="status" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)' }}>
+          {notice}
         </div>
       )}
     </div>

@@ -116,7 +116,7 @@ decision) and a per-scope `quota`. See `podman-sandbox/README.md`.
 Test management (Phase 5, #1521): a granted agent creates test cases, triggers
 test runs (submit→poll) and manages test data in an external test-management
 system (Xray/Zephyr/qTest) with the `aee-test` CLI. Its broker
-(`test-mgmt/broker/`) is built on the Broker SDK (`../broker-sdk/`) — the
+(`test-mgmt/broker/`) is built on the Broker SDK (`../../../broker-sdk/`) — the
 proof a credential-backed broker is thin: the vendor token lives only in the
 sidecar. It is the first plugin to use scope granularity for **authorisation**,
 not just isolation (manifest `policy`: create-case is restricted to the
@@ -135,7 +135,7 @@ Once installed its nav entry is also visible to every authenticated user without
 a per-team grant (opt-in `ui.global: true` in the manifest — a human-UI
 convenience; agent CLI access still requires a team grant). It holds no
 credentials and reaches nothing outside itself (`capabilities: []`,
-`credentials: []`, `scopes: ["team"]`). Its broker (`../patterns-catalog-broker/`)
+`credentials: []`, `scopes: ["team"]`). Its broker (`broker/`)
 is a minimal static-file server: `server.js` serves the catalog pages behind
 `verifyViewerHeaders` and exposes no MCP tools and keeps no state; teardown is a
 no-op. Agents list the available catalogs with the dependency-free `aee-patterns`

@@ -9,6 +9,7 @@ import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { summarizeLoopTrigger } from './agent-chat/trigger-summary.js';
+import { humanizeCron } from './cron-humanize.js';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
 function TypeBadge({ type }) {
@@ -273,7 +274,14 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
       </div>
 
       {form.type === 'cron' && (
-        <FormInput label="Cron expression" value={form.cron} onChange={v => update('cron', v)} placeholder="0 9 * * 1-5" />
+        <div>
+          <FormInput label="Cron expression" value={form.cron} onChange={v => update('cron', v)} placeholder="0 9 * * 1-5" />
+          <div style={fieldHintStyle}>
+            {humanizeCron(form.cron)
+              ? <><strong style={{ color: 'var(--eb-text-secondary)' }}>Runs:</strong> {humanizeCron(form.cron)}</>
+              : <>Five fields: minute, hour, day-of-month, month, day-of-week. Example <code>0 9 * * 1-5</code> = at 09:00, Monday to Friday.</>}
+          </div>
+        </div>
       )}
       {form.type === 'once' && (
         <FormInput label="Run at (ISO timestamp)" value={form.at} onChange={v => update('at', v)} placeholder="2026-05-01T09:00:00Z" />
@@ -512,7 +520,13 @@ export default function ScheduledJobs() {
       if (row.type === 'loop') {
         return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{summarizeLoopTrigger(row)}</span>;
       }
-      return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{row.cron || row.at || '—'}</span>;
+      const human = row.type === 'cron' ? humanizeCron(row.cron) : '';
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{row.cron || row.at || '—'}</span>
+          {human && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{human}</span>}
+        </div>
+      );
     }},
     { key: 'description', label: 'Description', wrap: true },
     { key: 'enabled',     label: 'Enabled', sortable: false, render: (v, row) => (

@@ -9,7 +9,7 @@ import IdField from '../components/IdField';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { summarizeLoopTrigger } from './agent-chat/trigger-summary.js';
-import { humanizeCron } from './cron-humanize.js';
+import { humanizeCron, humanizeOnce } from './cron-humanize.js';
 
 /* ── Type badge ─────────────────────────────────────────────────────── */
 function TypeBadge({ type }) {
@@ -284,7 +284,14 @@ function TriggerForm({ onSave, onCancel, agentOptions, initial, lockAgent }) {
         </div>
       )}
       {form.type === 'once' && (
-        <FormInput label="Run at (ISO timestamp)" value={form.at} onChange={v => update('at', v)} placeholder="2026-05-01T09:00:00Z" />
+        <div>
+          <FormInput label="Run at (ISO timestamp)" value={form.at} onChange={v => update('at', v)} placeholder="2026-05-01T09:00:00Z" />
+          <div style={fieldHintStyle}>
+            {humanizeOnce(form.at)
+              ? <><strong style={{ color: 'var(--eb-text-secondary)' }}>Runs once:</strong> {humanizeOnce(form.at)}</>
+              : <>Date and time in ISO 8601, e.g. <code>2026-05-01T09:00:00Z</code> (append <code>Z</code> for UTC). Fires once, then removes itself.</>}
+          </div>
+        </div>
       )}
       {form.type === 'loop' && (
         <>
@@ -520,7 +527,9 @@ export default function ScheduledJobs() {
       if (row.type === 'loop') {
         return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{summarizeLoopTrigger(row)}</span>;
       }
-      const human = row.type === 'cron' ? humanizeCron(row.cron) : '';
+      const human = row.type === 'cron' ? humanizeCron(row.cron)
+        : row.type === 'once' ? humanizeOnce(row.at)
+        : '';
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{row.cron || row.at || '—'}</span>

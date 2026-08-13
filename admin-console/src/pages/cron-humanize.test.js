@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { humanizeCron } from './cron-humanize.js';
+import { humanizeCron, humanizeOnce } from './cron-humanize.js';
 
 test('fixed time of day, every day', () => {
   assert.equal(humanizeCron('0 9 * * *'), 'At 09:00, every day');
@@ -56,4 +56,41 @@ test('empty / malformed / unsupported → empty string (caller shows raw)', () =
 
 test('whitespace is tolerated', () => {
   assert.equal(humanizeCron('  0   9   *   *   1-5  '), 'At 09:00, on Monday to Friday');
+});
+
+// ── humanizeOnce (one-shot `once` triggers) ──
+
+test('once: UTC timestamp reads as a plain moment with the zone', () => {
+  assert.equal(humanizeOnce('2026-05-01T09:00:00Z'), '1 May 2026 at 09:00 UTC');
+  assert.equal(humanizeOnce('2026-12-25T18:30:00Z'), '25 December 2026 at 18:30 UTC');
+});
+
+test('once: local (no Z) timestamp omits the zone', () => {
+  assert.equal(humanizeOnce('2026-04-25T09:00:00'), '25 April 2026 at 09:00');
+  assert.equal(humanizeOnce('2026-01-02T00:05'), '2 January 2026 at 00:05'); // seconds optional
+});
+
+test('once: fractional seconds and a space separator are tolerated', () => {
+  assert.equal(humanizeOnce('2026-05-01T09:00:00.250Z'), '1 May 2026 at 09:00 UTC');
+  assert.equal(humanizeOnce('2026-05-01 09:00:00'), '1 May 2026 at 09:00');
+});
+
+test('once: date-only value describes just the day', () => {
+  assert.equal(humanizeOnce('2026-05-01'), '1 May 2026');
+});
+
+test('once: leading/trailing whitespace is tolerated', () => {
+  assert.equal(humanizeOnce('  2026-05-01T09:00:00Z  '), '1 May 2026 at 09:00 UTC');
+});
+
+test('once: empty / malformed / out-of-range → empty string (caller shows raw)', () => {
+  assert.equal(humanizeOnce(''), '');
+  assert.equal(humanizeOnce(null), '');
+  assert.equal(humanizeOnce('not a date'), '');
+  assert.equal(humanizeOnce('2026-13-01T09:00:00Z'), ''); // month out of range
+  assert.equal(humanizeOnce('2026-02-30T09:00:00Z'), ''); // day out of range for Feb
+  assert.equal(humanizeOnce('2026-05-01T24:00:00Z'), ''); // hour out of range
+  assert.equal(humanizeOnce('2026-05-01T09:60:00Z'), ''); // minute out of range
+  assert.equal(humanizeOnce('2026-05-01T09:00:00+02:00'), ''); // numeric offset — not mislabelled
+  assert.equal(humanizeOnce('05/01/2026'), '');           // non-ISO shape
 });

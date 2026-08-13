@@ -56,8 +56,8 @@ to the login screen; an expired session (any `401`) does the same automatically.
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
-**Per-user local passwords (#374, interim).** Human users created on the Teams
-page (#308) can be given a local password (Teams → Manage Users → the
+**Per-user local passwords (#374, interim).** Human users created on the Access & Users
+page (#308) can be given a local password (Access & Users → Manage Users → the
 🔑 button), letting more than one person log in before SSO lands. Login then
 resolves in two steps: first the **user store** (match by `subject`, verify a
 salted **scrypt** hash held in the user record and never returned by any API),

@@ -78,6 +78,61 @@ export function canSubmitQuickstart({
   return !!hasLlmEndpoints && !!(displayName || '').trim() && !!selectedLlmId;
 }
 
+// Why is the "Create agent & start chatting" button disabled? This is the SAME
+// gate as canSubmitQuickstart, broken out into the specific unmet requirements
+// so QuickStart.jsx can show a plain-language checklist instead of an
+// unexplained grey button — the "explain a disabled submit button" discipline
+// already applied by model-provider-submit-state.js / submit-hint.js. This
+// matters most here because QuickStart is the first page a new user meets: a
+// button that greys out with no reason reads as "broken", not "one thing left
+// to do".
+//
+// Parity with canSubmitQuickstart is a hard invariant (asserted in the test):
+// reasons.length === 0 iff canSubmitQuickstart returns true — the checklist and
+// the button can never disagree. The reason order follows the form's own
+// top-to-bottom field order so the list reads in the sequence the user fills in.
+export function quickstartSubmitReasons({
+  url,
+  hasTokens,
+  hasSshKeys,
+  hasLlmEndpoints,
+  displayName,
+  selectedLlmId,
+}) {
+  const reasons = [];
+  if (hasRepoUrl(url)) {
+    // Repo path: the backend auto-binds the default model provider, so the gate
+    // is only the two GitHub prerequisites. Field order matches the form — the
+    // SSH-key picker is rendered above the token picker.
+    if (!hasSshKeys) {
+      reasons.push({
+        field: 'ssh-key',
+        message: 'Add an SSH key — the repository is cloned over SSH.',
+      });
+    }
+    if (!hasTokens) {
+      reasons.push({
+        field: 'github-token',
+        message: 'Add a GitHub token — a repository-backed agent needs one for pull requests and event polling.',
+      });
+    }
+  } else {
+    // Repo-less path: a name, and a model provider for the agent to run on.
+    if (!(displayName || '').trim()) {
+      reasons.push({ field: 'name', message: 'Enter a name for your assistant.' });
+    }
+    if (!hasLlmEndpoints) {
+      reasons.push({
+        field: 'provider',
+        message: 'Add a model provider — an agent needs one to run.',
+      });
+    } else if (!selectedLlmId) {
+      reasons.push({ field: 'provider', message: 'Choose a model provider.' });
+    }
+  }
+  return { canSubmit: reasons.length === 0, reasons };
+}
+
 // --- Copy: Phase D framing (#1667, decision D5 — "a single agent is a team of
 // one") ---
 //

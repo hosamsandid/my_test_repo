@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router';
-import { Github, ArrowRight, AlertCircle, CheckCircle } from 'lucide-react';
+import { Github, ArrowRight, AlertCircle, CheckCircle, Info } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import {
   hasRepoUrl,
   quickstartEndpoint,
   quickstartBody,
   showRepoPrerequisites,
-  canSubmitQuickstart,
+  quickstartSubmitReasons,
   QUICKSTART_COPY,
 } from './quickstart-view';
 
@@ -79,7 +79,9 @@ export default function QuickStart() {
 
   // Effective provider selection: honour an explicit pick, else the first one.
   const selectedLlmId = llmEndpointId || (hasLlmEndpoints ? llmEndpoints[0].id : '');
-  const canSubmit = canSubmitQuickstart({
+  // Same submit gate as before, but broken out into the specific unmet
+  // requirements so the disabled button can explain itself (#1302 pattern).
+  const { canSubmit, reasons: submitBlockers } = quickstartSubmitReasons({
     url, hasTokens, hasSshKeys, hasLlmEndpoints, displayName, selectedLlmId,
   });
 
@@ -380,6 +382,31 @@ export default function QuickStart() {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Spell out exactly what is still missing so a first-time user isn't
+              left staring at a greyed-out button with no idea why (the same
+              "explain a disabled submit" discipline as the Model Provider form). */}
+          {!submitting && submitBlockers.length > 0 && (
+            <div style={{
+              display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+              padding: 'var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)',
+              color: 'var(--eb-text-secondary)',
+            }}>
+              <Info size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
+              <span>
+                Before you can start, please:
+                <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+                  {submitBlockers.map(r => (
+                    <li key={r.field}>{r.message}</li>
+                  ))}
+                </ul>
+              </span>
             </div>
           )}
 

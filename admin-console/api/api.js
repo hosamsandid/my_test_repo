@@ -54,6 +54,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
@@ -7630,6 +7631,26 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   if (!aborted) res.end();
 });
+
+/* ─── Helper Chat (#1734, spec docs/helper-chat-concept.md) ──────────────
+ * POST /api/helper/chat — the in-console documentation assistant. Grounds the
+ * model on the vendored docs corpus (#1733, ./helper-chat/corpus.js) and streams
+ * the reply as an NDJSON delta/done stream, the same transport as the Flow
+ * Copilot above. Request-shape / provider errors stay plain JSON (400/403,
+ * headers not yet sent); once the stream opens, `{type:'delta',text}` then
+ * `{type:'done'}` (or `{type:'error',message}`) flow. The handler lives in its
+ * own module for testability (api.js has no isolated harness); the LLM transport
+ * helpers are injected from here. Auth is the global /api gate (auth.js), same as
+ * every other /api route including the copilot route above. */
+const helperChatHandler = createHelperChatHandler({
+  resolveAssistTarget,
+  buildMessagesUrl,
+  httpPostJson,
+  extractMessageText,
+  assistMeta,
+  sendAssistSelectionError,
+});
+app.post('/api/helper/chat', heavyLimiter, helperChatHandler);
 
 /* ─── Process-template registry (#419) ──────────────────────────────────
  * Curated whole-process templates — the process-level analogue of the

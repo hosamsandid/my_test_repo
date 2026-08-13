@@ -25,11 +25,34 @@
   .err { color: #dc2626; font-size: .85rem; }
   .ok { color: #16a34a; font-size: .85rem; }
   details summary { cursor: pointer; font-weight: 600; }
+  .about { background: rgba(37,99,235,.07); border-color: rgba(37,99,235,.35); }
+  .about h2 { font-size: 1rem; margin: 0 0 8px; }
+  .about p { margin: 0 0 10px; }
+  .about p:last-child { margin-bottom: 0; }
+  .about ul { margin: 4px 0 10px; padding-left: 18px; }
+  .about li { margin: 3px 0; }
+  .about .examples { list-style: none; padding: 0; margin: 6px 0 10px; }
+  .about .examples li { margin: 4px 0; }
 </style>
 </head>
 <body>
   <h1>GKE Cluster Access</h1>
   <p class="sub">Read-only kubectl for this team's agents, brokered so the cloud credential never enters an agent container. Sign the broker in to GCP once here (team-admin only).</p>
+
+  <div class="card about">
+    <h2>What this plugin does</h2>
+    <p>It gives this team's agents <b>read-only <code>kubectl</code> access</b> to the team's GKE cluster, reached through the GCP Connect Gateway. Once it is set up here, granted agents can inspect the cluster with the <code>aee-gke</code> CLI — for example:</p>
+    <ul class="examples">
+      <li><code>aee-gke get ns</code></li>
+      <li><code>aee-gke get pods -n platform</code></li>
+      <li><code>aee-gke describe deploy &lt;name&gt; -n &lt;ns&gt;</code></li>
+      <li><code>aee-gke logs &lt;pod&gt; -n &lt;ns&gt;</code></li>
+      <li><code>aee-gke api-resources</code></li>
+    </ul>
+    <p><b>Strictly read-only.</b> Only read verbs are exposed (get / describe / logs / api-resources). There is deliberately no apply, create, edit or delete — an agent cannot change or remove anything in the cluster.</p>
+    <p><b>Why the sign-in — and why this is a plugin.</b> The Google cloud credential is held by the broker and <b>never enters an agent container</b>. A team admin signs in <b>once</b> here; from then on the team's agents read the cluster without ever handling a credential.</p>
+    <p><b>What happens next.</b> After a successful sign-in, the team's granted agents can use the capability straight away. If an agent later reports it is <b>not signed in</b>, this is the page where a team admin re-authenticates.</p>
+  </div>
 
   <div class="card">
     <div class="status"><span id="dot" class="dot"></span><span id="statusText">Checking…</span></div>

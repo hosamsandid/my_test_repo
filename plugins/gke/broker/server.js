@@ -30,7 +30,7 @@ const {
   healthEndpoint,
   teardownScopeEndpoint,
   brokerConfig,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const kube = require('./kubectl-client');
 const auth = require('./gcp-auth');
 const { verifyViewerHeaders, roleAllows } = require('./viewer-headers');

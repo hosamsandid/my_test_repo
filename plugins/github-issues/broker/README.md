@@ -7,7 +7,7 @@ console so releasing work (e.g. a BA applying a `ready` gate) no longer means
 switching to GitHub: **list** a repository's issues, **read** one issue's
 details, and **add / remove a label**.
 
-Built on the **Broker SDK** (`../broker-sdk/`), like `netzplan-broker` and
+Built on the **Broker SDK** (`../../../broker-sdk/`), like `netzplan-broker` and
 `test-mgmt-broker`; `server.js` is wiring.
 
 ## Credential model — pushed, never baked in

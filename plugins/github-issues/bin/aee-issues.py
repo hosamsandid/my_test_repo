@@ -10,7 +10,7 @@ The plugin's main surface is the human console page (list issues, read one, add
 or remove labels). This CLI is the agent-facing, READ-ONLY companion: an agent
 can see which repositories are in its team's scope and browse their issues, but
 label writes are a human action in the console. All privilege lives in the
-broker (github-issues-broker/server.js), which holds the team's GitHub token and
+broker (plugins/github-issues/broker/server.js), which holds the team's GitHub token and
 makes every GitHub call server-side; this CLI is a privilege-less client that
 just carries the scope token.
 

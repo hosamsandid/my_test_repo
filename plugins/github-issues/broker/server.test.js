@@ -24,7 +24,7 @@ process.env.AEE_PLUGIN_SIGNING_SECRET = SECRET;
 process.env.AEE_PLUGIN_STATE_DIR = stateDir;
 process.env.AEE_PLUGIN_AUDIT_DIR = auditDir;
 
-const { mint } = require('../broker-sdk');
+const { mint } = require('../../../broker-sdk');
 const { signViewerHeaders } = require('./viewer-headers');
 
 // ── fake GitHub ──────────────────────────────────────────────────────────────

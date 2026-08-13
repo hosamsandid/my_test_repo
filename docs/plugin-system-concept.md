@@ -722,8 +722,8 @@ before it moves from catalog to roadmap.
   refuse a purely-global viewer. Agent CLI access is unaffected (the grant path
   never reads `ui.global`). Patterns Catalog is the first plugin to opt in.
 - **GitHub Issues plugin** *(shipped — #1637)*: the first plugin that is both
-  UI-bearing **and** credential-holding. `plugins/github-issues/` +
-  `github-issues-broker/` — list a repo's issues, read one, and add/remove a
+  UI-bearing **and** credential-holding. `plugins/github-issues/` (broker at
+  `plugins/github-issues/broker/`) — list a repo's issues, read one, and add/remove a
   label in the console so releasing work (e.g. applying a `ready` gate) no
   longer means switching to GitHub. Manifest: `capabilities: ["egress"]`,
   `credentials: []`, `scopes: ["team"]`, one `ui.route` `/` @ `team-member`,

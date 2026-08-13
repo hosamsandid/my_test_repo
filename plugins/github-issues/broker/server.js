@@ -35,7 +35,7 @@ const {
   healthEndpoint,
   teardownScopeEndpoint,
   brokerConfig,
-} = require('../broker-sdk');
+} = require('../../../broker-sdk');
 const gh = require('./github-client');
 const { ScopeStore } = require('./scope-store');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');

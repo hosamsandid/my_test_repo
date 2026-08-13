@@ -2,7 +2,7 @@
 // (#1296). Everything deterministic — the state machine, segment bookkeeping,
 // transcript assembly, message formatting and the localStorage recovery-record
 // shape — lives here so it can be exercised with `node --test` without React,
-// a DOM or a MediaRecorder (same convention as prompt-badges.js /
+// a DOM or a MediaRecorder (same convention as
 // message-send-keybinding.js). The provider
 // (TranscriptionSessionContext.jsx) is the thin browser adapter that owns the
 // MediaStream, timers and fetch and drives these functions.

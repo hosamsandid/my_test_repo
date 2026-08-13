@@ -1485,23 +1485,6 @@ app.get('/api/agents/:id', (req, res) => {
   res.json({ id, ...cfg, triggers });
 });
 
-// Prompt preview: proxy to the orchestrator, which renders the fully-composed
-// system prompt (seeded CLAUDE.md + runtime append hint) via the same assembly
-// path as workspace seeding. Lets an operator review the composed whole instead
-// of reading the template, the env, and the runtime hint separately.
-app.get('/api/agents/:id/prompt-preview', apiLimiter, async (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-preview`);
-    const body = await r.json().catch(() => ({ error: 'invalid orchestrator response' }));
-    return res.status(r.status).json(body);
-  } catch (err) {
-    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
-  }
-});
-
 // Best-effort: nudge a running agent (SIGUSR2 via the orchestrator) to re-pull
 // its triggers + config + dm-room now instead of waiting for the next 60s sync.
 // No-op if the agent isn't running. (#185 Phase 2)

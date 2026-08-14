@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -10,6 +10,7 @@ import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',
@@ -304,8 +305,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     });
   };
 
-  const reposValid = form.repositories.every(r => r.url.trim());
-  const canSubmit = form.id && form.name && reposValid;
+  const { canSubmit, reasons: submitBlockers } = describeWorkingEnvSubmitState(form);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -571,6 +571,27 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       </div>
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+
+      {/* When the button is disabled (and not merely saving), spell out exactly
+          which requirement is still unmet — most usefully the non-obvious case
+          of an added-but-blank repository row that leaves the form looking
+          complete. */}
+      {!saving && submitBlockers.length > 0 && (
+        <div style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+        }}>
+          <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+          <span>
+            {isEdit ? 'Save changes' : 'Create environment'} is disabled until you:
+            <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+              {submitBlockers.map(r => (
+                <li key={r.field}>{r.message}</li>
+              ))}
+            </ul>
+          </span>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button

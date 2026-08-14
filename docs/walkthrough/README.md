@@ -3,7 +3,7 @@
 **Reading the tour?** Start here and go in order — it follows one realistic story
 end to end:
 
-1. [Team Setup — the wizard](01-team-setup.md)
+1. [Team Setup — the "+ Create" launcher & the wizard](01-team-setup.md)
 2. [Working with agents — the IBAN story](02-working-with-agents.md)
 3. [Triggers — making agents autonomous](03-triggers.md)
 4. [Flows — the visual editor](04-flows.md)
@@ -28,7 +28,7 @@ generated user guide / PPTX deck reproduce it (phases J1–J3, epic #704).
 
 | Chapter | File | Maturity |
 |---|---|---|
-| Team Setup (wizard) | `01-team-setup.md` | mature |
+| Team Setup ("+ Create" launcher & wizard) | `01-team-setup.md` | mature |
 | Working with agents — the IBAN story | `02-working-with-agents.md` | mature |
 | Triggers | `03-triggers.md` | mature |
 | Flows (visual editor) | `04-flows.md` | mature |

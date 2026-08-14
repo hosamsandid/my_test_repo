@@ -2,6 +2,7 @@
   "catalogVersion": 1,
   "generatedFrom": [
     "env",
+    "create",
     "wizard",
     "agents",
     "teardown",
@@ -346,6 +347,34 @@
         }
       ],
       "example": "- action:\n    do: context.uploadFile\n    agentId: ctx-demo-agent\n    dir: specs\n    name: notes.txt\n    content: written through the console"
+    },
+    {
+      "name": "create.expectEntry",
+      "module": "create",
+      "description": "Assert a specific launcher tile is present with its visible heading. Lets a journey spot-check the plainly-labelled wording without clicking through.",
+      "params": [
+        {
+          "name": "entry",
+          "required": true,
+          "type": "string",
+          "description": "Which tile: describe | template | build | chat."
+        }
+      ],
+      "example": "- assert:\n    do: create.expectEntry\n    entry: template"
+    },
+    {
+      "name": "create.open",
+      "module": "create",
+      "description": "Open the unified \"Create\" launcher and confirm all four equally-ranked entry tiles are showing. This is the new single front door for starting something — the capture point for the launcher screenshot.",
+      "params": [],
+      "example": "- action:\n    do: create.open"
+    },
+    {
+      "name": "create.startFromTemplate",
+      "module": "create",
+      "description": "From the launcher, take the \"Start from a ready-made setup\" path: click that tile and wait until the Team-Setup wizard's Process step (the template gallery) has loaded. Replaces the old direct `/team-setup` deep link so the journey exercises the real entry point users now take.",
+      "params": [],
+      "example": "- action:\n    do: create.startFromTemplate"
     },
     {
       "name": "env.createFixtureEnv",

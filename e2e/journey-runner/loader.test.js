@@ -19,10 +19,11 @@ test('the pilot team-setup journey loads and is schema-valid', () => {
   assert.ok(j.steps.length > 0);
 });
 
-test('the pilot captures the five named wizard screenshots', () => {
+test('the pilot captures the launcher then the five named wizard screenshots', () => {
   const j = loadJourney(PILOT);
   const shots = j.steps.map((s) => s.screenshot).filter(Boolean);
   assert.deepEqual(shots, [
+    'create-launcher',
     'process-step-core-sdlc',
     'working-environment-step',
     'team-step',
@@ -36,7 +37,7 @@ test('the pilot only references steps from the known step-library namespaces', (
   const names = referencedStepNames(j);
   assert.ok(names.length > 0);
   for (const n of names) {
-    assert.match(n, /^(wizard|env|agents|teardown)\.[a-zA-Z]+$/, `step name ${n} is namespaced`);
+    assert.match(n, /^(create|wizard|env|agents|teardown)\.[a-zA-Z]+$/, `step name ${n} is namespaced`);
   }
 });
 

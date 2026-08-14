@@ -4,18 +4,23 @@ import react from '@vitejs/plugin-react';
 
 import { extractContributors, encodeContributors } from './src/components/contributors.js';
 
-// Contributors list (#1742), resolved at build time and embedded as
-// import.meta.env.VITE_CONTRIBUTORS (base64 of a JSON string[]).
+// Contributors list (#1742, ranked in #1778), resolved at build time and
+// embedded as import.meta.env.VITE_CONTRIBUTORS (base64 of a JSON string[]).
+// extractContributors filters to human contributors and ranks them by commit
+// count; it accepts either raw per-commit `%aN\t%aE` lines (counted by
+// occurrence) or pre-aggregated `<count>\t%aN\t%aE` lines.
 //
 // Two build contexts, mirroring the GIT_COMMIT handling:
 //   - Docker (`make build`): git is NOT in the build context (it's admin-console/,
-//     not the repo root with .git). The Makefile resolves the raw `%aN\t%aE`
-//     git-log lines on the host and passes them base64-encoded as the
-//     GIT_CONTRIBUTORS build arg -> VITE_CONTRIBUTORS_RAW env; we decode + extract
-//     here, so no git binary is needed inside the image.
+//     not the repo root with .git). The Makefile resolves the aggregated
+//     `<count>\t%aN\t%aE` git-log lines on the host (`sort | uniq -c`, keeping
+//     the count while shrinking the build arg) and passes them base64-encoded as
+//     the GIT_CONTRIBUTORS build arg -> VITE_CONTRIBUTORS_RAW env; we decode +
+//     extract here, so no git binary is needed inside the image.
 //   - Host-direct (`npm run build`, dev, CI admin-console-build): no build arg is
-//     set, so we run git ourselves from the repo.
-// Any failure degrades to an empty list, so the About section simply hides (AC6).
+//     set, so we run git ourselves from the repo — one `%aN\t%aE` line per commit,
+//     which extractContributors counts by occurrence.
+// Any failure degrades to an empty list, so the About section simply hides (AC9).
 function resolveContributors() {
   try {
     let rawLog = '';

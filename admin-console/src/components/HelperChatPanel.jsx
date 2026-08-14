@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Send, HelpCircle, MessageCircle, Compass } from 'lucide-react';
+import { X, Send, HelpCircle, MessageCircle, Compass, Mic, Square, Loader2 } from 'lucide-react';
 import { useHelperChat } from '../context/HelperChatContext';
-import { SafeMarkdown, ensureAgentChatMdCss } from '../pages/agent-chat/Message.jsx';
+import { SafeMarkdown, ensureAgentChatMdCss, ThinkingDots } from '../pages/agent-chat/Message.jsx';
+import useVoiceRecorder from '../hooks/useVoiceRecorder.js';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
 import HelperChatTour from './HelperChatTour.jsx';
 
@@ -34,7 +35,10 @@ function Bubble({ role, content, streaming }) {
           ? (
             <div className="agent-chat-md">
               {content ? <SafeMarkdown body={content} /> : null}
-              {streaming ? <span aria-label="thinking">{content ? ' …' : '…'}</span> : null}
+              {/* Animated "thinking" indicator matching Agent Chat (#1779):
+                  the shared ThinkingDots (staggered pulsing dots) replaces the
+                  former static ellipsis while a reply is streaming. */}
+              {streaming ? <ThinkingDots /> : null}
             </div>
           )
           : <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>}
@@ -168,6 +172,23 @@ export default function HelperChatPanel() {
 
   useEffect(() => { ensureAgentChatMdCss(); }, []);
 
+  // Quick voice dictation (#1779), reusing Agent Chat's shared useVoiceRecorder
+  // hook (mic → record → POST /api/transcribe → text). The transcription is
+  // appended to whatever is already in the composer via a functional update, so
+  // text the user types while a transcription is in flight is never clobbered.
+  const handleTranscription = React.useCallback((text) => {
+    setComposer(prev => (prev.trim() ? prev + ' ' + text : text));
+  }, []);
+  const { state: voiceState, elapsedSeconds, error: voiceError, toggleRecording, clearError } = useVoiceRecorder({
+    onTranscription: handleTranscription,
+  });
+  // Auto-clear a surfaced voice/transcription error after 3s (matches MessageInput).
+  useEffect(() => {
+    if (!voiceError) return undefined;
+    const t = setTimeout(clearError, 3000);
+    return () => clearTimeout(t);
+  }, [voiceError, clearError]);
+
   // Keep the transcript pinned to the newest message as it streams in.
   useEffect(() => {
     if (isOpen && scrollRef.current) {
@@ -274,53 +295,114 @@ export default function HelperChatPanel() {
 
       {/* Input bar */}
       <div style={{
-        display: 'flex',
-        gap: 'var(--eb-space-2)',
-        alignItems: 'flex-end',
-        padding: 'var(--eb-space-3)',
         borderTop: '1px solid var(--eb-border-default)',
+        padding: 'var(--eb-space-3)',
         flexShrink: 0,
       }}>
-        <textarea
-          value={composer}
-          onChange={e => setComposer(e.target.value)}
-          onKeyDown={onKeyDown}
-          disabled={isStreaming}
-          rows={2}
-          placeholder="Ask anything about Agent Studio…"
-          style={{
-            flex: 1,
-            resize: 'none',
-            background: 'var(--eb-bg-surface)',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            color: 'var(--eb-text-primary)',
-            fontFamily: 'inherit',
-            fontSize: 'var(--eb-text-base)',
-            padding: 'var(--eb-space-2)',
-            lineHeight: 1.4,
-          }}
-        />
-        <button
-          onClick={submit}
-          disabled={isStreaming || !composer.trim()}
-          title="Send"
-          aria-label="Send"
-          style={{
-            background: (isStreaming || !composer.trim()) ? 'var(--eb-bg-hover)' : 'var(--eb-accent-primary)',
-            color: (isStreaming || !composer.trim()) ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
-            border: 'none',
-            borderRadius: 'var(--eb-radius-md)',
-            cursor: (isStreaming || !composer.trim()) ? 'default' : 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 'var(--eb-space-2) var(--eb-space-3)',
-            height: 'fit-content',
-          }}
-        >
-          <Send size={16} />
-        </button>
+        {/* Keyframes for the mic's recording pulse + the transcribing spinner.
+            HelperChatPanel is standalone (not a descendant of ChatPanel), so it
+            injects its own — mirrors MessageInput's local <style>. */}
+        <style>{'@keyframes stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } } @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>
+        <div style={{
+          display: 'flex',
+          gap: 'var(--eb-space-2)',
+          alignItems: 'flex-end',
+        }}>
+          <textarea
+            value={composer}
+            onChange={e => setComposer(e.target.value)}
+            onKeyDown={onKeyDown}
+            disabled={isStreaming}
+            rows={2}
+            placeholder="Ask anything about Agent Studio…"
+            style={{
+              flex: 1,
+              resize: 'none',
+              background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              color: 'var(--eb-text-primary)',
+              fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-base)',
+              padding: 'var(--eb-space-2)',
+              lineHeight: 1.4,
+            }}
+          />
+          {/* Recording timer + microphone (quick dictation, #1779). */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, height: 'fit-content' }}>
+            {voiceState === 'recording' && (
+              <span style={{
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-status-error-text, #dc2626)',
+                whiteSpace: 'nowrap',
+                fontVariantNumeric: 'tabular-nums',
+              }}>
+                {Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')}
+              </span>
+            )}
+            <button
+              onClick={toggleRecording}
+              disabled={voiceState === 'transcribing'}
+              aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
+              title={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input (tap to dictate)'}
+              style={{
+                width: 34, height: 34,
+                background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
+                color: voiceState === 'recording'
+                  ? 'var(--eb-status-error-text, #dc2626)'
+                  : voiceState === 'transcribing'
+                    ? 'var(--eb-text-muted)'
+                    : 'var(--eb-text-secondary)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: voiceState === 'transcribing' ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                animation: voiceState === 'recording' ? 'stt-pulse 1.5s ease-in-out infinite' : 'none',
+              }}
+            >
+              {voiceState === 'recording'
+                ? <Square size={15} />
+                : voiceState === 'transcribing'
+                  ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
+                  : <Mic size={15} />}
+            </button>
+          </div>
+          <button
+            onClick={submit}
+            disabled={isStreaming || !composer.trim()}
+            title="Send"
+            aria-label="Send"
+            style={{
+              background: (isStreaming || !composer.trim()) ? 'var(--eb-bg-hover)' : 'var(--eb-accent-primary)',
+              color: (isStreaming || !composer.trim()) ? 'var(--eb-text-muted)' : 'var(--eb-text-inverted)',
+              border: 'none',
+              borderRadius: 'var(--eb-radius-md)',
+              cursor: (isStreaming || !composer.trim()) ? 'default' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 'var(--eb-space-2) var(--eb-space-3)',
+              height: 'fit-content',
+            }}
+          >
+            <Send size={16} />
+          </button>
+        </div>
+        {/* Transcription status / error surface (AC6): errors never break the
+            composer and clear themselves after 3s so the user can retry. */}
+        {(voiceError || voiceState === 'transcribing') && (
+          <div style={{
+            fontSize: 'var(--eb-text-xs)',
+            color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
+            marginTop: 'var(--eb-space-1)',
+            paddingLeft: 'var(--eb-space-1)',
+          }}>
+            {voiceError || 'Transcribing…'}
+          </div>
+        )}
       </div>
       </>
       )}

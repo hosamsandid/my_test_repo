@@ -511,7 +511,33 @@ function Avatar({ isAgent, initials }) {
   );
 }
 
-function ThinkingDots() {
+// The `@keyframes dotPulse` used by ThinkingDots is injected once at the
+// document level (mirrors ensureAgentChatMdCss) so the shared indicator works
+// anywhere it is mounted — Agent Chat (ChatPanel also declares dotPulse locally,
+// a harmless duplicate) and the Help Chat (HelperChatPanel, #1779), which has no
+// page-scoped <style>. A `prefers-reduced-motion` guard freezes the dots at a
+// legible opacity for users who opt out of motion, while keeping the accessible
+// label intact.
+let thinkingDotsCssInjected = false;
+export function ensureThinkingDotsCss() {
+  if (thinkingDotsCssInjected || typeof document === 'undefined') return;
+  if (document.getElementById('agent-chat-thinking-dots-css')) { thinkingDotsCssInjected = true; return; }
+  const el = document.createElement('style');
+  el.id = 'agent-chat-thinking-dots-css';
+  el.textContent = `
+    @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) {
+      .agent-chat-thinking-dot { animation: none !important; opacity: 0.55 !important; }
+    }
+  `;
+  document.head.appendChild(el);
+  thinkingDotsCssInjected = true;
+}
+
+ensureThinkingDotsCss();
+
+export function ThinkingDots() {
+  useEffect(() => { ensureThinkingDotsCss(); }, []);
   const dotStyle = (delay) => ({
     display: 'inline-block',
     width: 6, height: 6,
@@ -522,10 +548,10 @@ function ThinkingDots() {
     animationDelay: delay,
   });
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 0' }} aria-label="Thinking">
-      <span style={dotStyle('0s')} />
-      <span style={dotStyle('0.2s')} />
-      <span style={dotStyle('0.4s')} />
+    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 0' }} aria-label="Thinking" role="status">
+      <span className="agent-chat-thinking-dot" style={dotStyle('0s')} />
+      <span className="agent-chat-thinking-dot" style={dotStyle('0.2s')} />
+      <span className="agent-chat-thinking-dot" style={dotStyle('0.4s')} />
     </span>
   );
 }

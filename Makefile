@@ -84,13 +84,16 @@ SKILL_POOL_VOLUME      = $(COMPOSE_PROJECT_NAME)_claude-workspace
 # a tarball checkout) never fails the build.
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 GIT_DIRTY  := $(shell git status --porcelain 2>/dev/null | grep -q . && echo dirty || echo)
-# About-page contributors (#1742) — same reason: extracted on the host, passed
-# into the Docker build. We ship the unique `<name>\t<email>` git-log identities
-# (sort -u keeps the build arg small) base64-encoded onto a single line, ARG-safe
-# regardless of names containing commas, angle brackets or "[bot]";
-# vite.config.js does the de-dup/extraction. Empty on a missing .git so the
-# About section simply hides (AC6).
-GIT_CONTRIBUTORS := $(shell git log --format='%aN%x09%aE' 2>/dev/null | sort -u | base64 2>/dev/null | tr -d '\n')
+# About-page contributors (#1742, ranked in #1778) — same reason: extracted on
+# the host, passed into the Docker build. We aggregate the git-log identities to
+# `<count>\t<name>\t<email>` lines (`sort | uniq -c` keeps the build arg small —
+# one line per distinct identity, not one per commit — while preserving the
+# per-identity commit count #1778 sorts by; the sed rewrites uniq's leading
+# "  N " into "N\t"), base64-encoded onto a single line, ARG-safe regardless of
+# names containing commas, angle brackets or "[bot]"; vite.config.js /
+# contributors.js do the human-filter, de-dup and count-ranked extraction. Empty
+# on a missing .git so the About section simply hides (AC9).
+GIT_CONTRIBUTORS := $(shell git log --format='%aN%x09%aE' 2>/dev/null | sort | uniq -c | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]/\1\t/' | base64 2>/dev/null | tr -d '\n')
 # The commit's own creation timestamp (committer date, strict ISO-8601 with the
 # authoring timezone offset preserved, e.g. 2026-08-13T17:52:03+02:00), shown in
 # the sidebar About box in place of the hash (#1741). Empty when git is absent —

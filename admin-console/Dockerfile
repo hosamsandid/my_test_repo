@@ -11,8 +11,9 @@ ARG GIT_DIRTY=""
 ARG GIT_COMMIT_TIME=""
 ENV VITE_GIT_COMMIT=$GIT_COMMIT
 ENV VITE_GIT_DIRTY=$GIT_DIRTY
-# Contributors list (#1742): the raw `%aN\t%aE` git-log lines, base64-encoded on
-# the host (git is likewise unavailable here). vite.config.js decodes + extracts.
+# Contributors list (#1742, #1778): the aggregated `<count>\t%aN\t%aE` git-log
+# identity lines, base64-encoded on the host (git is likewise unavailable here).
+# vite.config.js decodes + extracts (human-filter, de-dup, count-ranked).
 ARG GIT_CONTRIBUTORS=""
 ENV VITE_CONTRIBUTORS_RAW=$GIT_CONTRIBUTORS
 ENV VITE_GIT_COMMIT_TIME=$GIT_COMMIT_TIME

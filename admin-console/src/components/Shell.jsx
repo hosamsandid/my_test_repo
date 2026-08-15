@@ -18,7 +18,7 @@ import {
 import {
   PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
 } from './plugin-nav';
-import AccentureLogo from './AccentureLogo';
+import BrandMark from './BrandMark';
 import AssistModelSelector from './AssistModelSelector';
 import TranscriptionOverlay from './TranscriptionOverlay';
 import HelperChatPanel from './HelperChatPanel';
@@ -425,7 +425,7 @@ export default function Shell({ children }) {
           flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <AccentureLogo size={24} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
+            <BrandMark size={28} style={{ flexShrink: 0 }} />
             {!collapsed && (
               <span style={{
                 fontWeight: 'var(--eb-font-semibold)',

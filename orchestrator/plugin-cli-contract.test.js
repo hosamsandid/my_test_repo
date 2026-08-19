@@ -8,7 +8,7 @@
 // the agent-readable docs. Phase 2 is where that contract is *enforced*, so we
 // drive the reference plugin's actual CLI (plugins/dummy-echo) through it —
 // python3 is present in the agent image and the test host — reading its config
-// from the exact `.aee/plugins/<id>.json` shape plugin-sync.js plans.
+// from the exact `.agent-studio/plugins/<id>.json` shape plugin-sync.js plans.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -31,12 +31,12 @@ function run(args, workspace) {
 // A granted workspace: the 0600 config plugin-sync would have written.
 function grantedWorkspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-cli-'));
-  fs.mkdirSync(path.join(dir, '.aee', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
   const cfg = pluginConfigFile({
     pluginId: 'dummy-echo', scopeId: 't1', endpoint: 'http://aee-plugin-dummy-echo:8080',
     token: 'dummy-echo.t1.SIG', cliName: 'aee-echo',
   });
-  fs.writeFileSync(path.join(dir, '.aee', 'plugins', 'dummy-echo.json'), JSON.stringify(cfg), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'dummy-echo.json'), JSON.stringify(cfg), { mode: 0o600 });
   return dir;
 }
 
@@ -98,4 +98,408 @@ test('ungranted (no seeded config) → exit 3 broker-unreachable with not-grante
   const obj = JSON.parse(r.stdout.trim());
   assert.equal(obj.ok, false);
   assert.equal(obj.error, 'not-granted');
+});
+
+// ── plugin #1: podman-sandbox (Phase 3, #1519) ───────────────────────────────
+// The same §4.5 contract, enforced against the real `aee-podman` CLI. Every
+// case here is broker-free: `whoami` reads only the seeded config; the
+// container/compose verbs point at an unroutable endpoint so a call attempt
+// deterministically returns the broker-unreachable exit code (3) rather than
+// depending on a live sidecar.
+const POD_CLI = path.join(__dirname, '..', 'plugins', 'podman-sandbox', 'bin', 'aee-podman.py');
+
+function runPod(args, workspace) {
+  return spawnSync('python3', [POD_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedPodWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-pod-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'podman-sandbox', scopeId: 't1',
+    endpoint: endpoint || 'http://127.0.0.1:59371/',   // reserved, unroutable
+    token: 'podman-sandbox.t1.SIG', cliName: 'aee-podman',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'podman-sandbox.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-podman is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(POD_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-podman: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runPod([], grantedPodWorkspace()).status, 2);
+  const help = runPod(['--help'], grantedPodWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /compose/);
+  assert.match(help.stdout, /ps/);
+});
+
+test('aee-podman: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runPod(['frobnicate'], grantedPodWorkspace()).status, 2);
+});
+
+test('aee-podman: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runPod(['whoami', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 't1');
+});
+
+test('aee-podman: ungranted → exit 3 with not-granted error', () => {
+  const r = runPod(['ps', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-podman: a granted verb against an unreachable broker → exit 3', () => {
+  const r = runPod(['ps', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-podman: compose up with an unreadable file → exit 2 (usage), never a broker call', () => {
+  const r = runPod(['compose', 'up', '-f', '/no/such/compose.yml', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+// ── plugin #1: the `run` verb (CLI sugar over compose_up, #1550) ─────────────
+// `run` is pure CLI-side sugar: it synthesises a one-service compose document
+// and sends it through the existing compose_up tool, so it adds no broker tool
+// (AC5). These cases pin the §4.5 contract (help/usage/exit codes) broker-free,
+// plus one capturing-broker case that proves the synthesised document's shape —
+// the issue's core guarantee that a value can never reshape the document.
+
+test('aee-podman: run --help → 0 and documents the single-service doc + no-egress', () => {
+  const r = runPod(['run', '--help'], grantedPodWorkspace());
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /compose up/);     // points at compose for >1 service
+  assert.match(r.stdout, /internal:true|no outbound|egress/i);  // network constraint
+});
+
+test('aee-podman: run --env without = → exit 2 (usage), never a broker call', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--env', 'NOEQ', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-podman: run ungranted → exit 3 with not-granted error', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-podman: run against an unreachable broker → exit 3 (synthesis then network)', () => {
+  const r = runPod(['run', 'docker.io/library/hello-world', '--json'], grantedPodWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+// A minimal MCP-over-HTTP stub that captures the compose_up arguments so the
+// synthesised document can be asserted. Speaks just enough: 202 for the
+// initialized notification, an SSE `data:` frame for initialize and tools/call.
+// `Connection: close` so no keep-alive socket lingers past `server.close()`.
+function captureBroker() {
+  const http = require('node:http');
+  const state = { lastTool: null, lastArgs: null };
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let msg = {};
+      try { msg = JSON.parse(body); } catch { /* ignore */ }
+      res.setHeader('Connection', 'close');
+      if (msg.method === 'notifications/initialized') { res.statusCode = 202; res.end(); return; }
+      if (msg.method === 'tools/call') {
+        state.lastTool = msg.params && msg.params.name;
+        state.lastArgs = msg.params && msg.params.arguments;
+        const result = { jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'project scope-t1-default up' }] } };
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.end(`data: ${JSON.stringify(result)}\n\n`);
+        return;
+      }
+      // initialize (or anything else): a minimal result frame; the CLI ignores it.
+      const result = { jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: {} } };
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Mcp-Session-Id', 'stub-session');
+      res.end(`data: ${JSON.stringify(result)}\n\n`);
+    });
+  });
+  return { server, state };
+}
+
+// The capturing-broker tests must NOT use spawnSync: it blocks the event loop,
+// so the in-process stub server could never answer and the CLI would time out.
+// Spawn asynchronously so the loop stays free to serve the broker calls.
+function runPodAsync(args, workspace) {
+  const { spawn } = require('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn('python3', [POD_CLI, ...args], {
+      env: { ...process.env, AEE_WORKSPACE: workspace },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+test('aee-podman: run synthesises a single-service compose doc through compose_up', async () => {
+  const { server, state } = captureBroker();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const ws = grantedPodWorkspace(`http://127.0.0.1:${port}`);
+    const r = await runPodAsync(
+      ['run', 'docker.io/library/hello-world', '--name', 'greeter',
+       '-e', 'GREETING=hi there', '-e', 'URL=http://x:8080',
+       '-p', 'demo', '--json', '--', 'sh', '-c', 'echo hi && sleep 1'],
+      ws,
+    );
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.ok, true);
+    assert.equal(obj.container, 'greeter');   // pinned name returned for logs/rm
+
+    // It reached compose_up (no new broker tool) with a well-formed document.
+    assert.equal(state.lastTool, 'compose_up');
+    assert.equal(state.lastArgs.projectName, 'demo');
+    const doc = JSON.parse(state.lastArgs.composeFile);   // JSON ⊂ YAML
+    assert.deepEqual(Object.keys(doc.services), ['greeter']);   // exactly one service
+    const svc = doc.services.greeter;
+    assert.equal(svc.image, 'docker.io/library/hello-world');
+    assert.equal(svc.container_name, 'greeter');
+    assert.deepEqual(svc.environment, { GREETING: 'hi there', URL: 'http://x:8080' });
+    assert.deepEqual(svc.command, ['sh', '-c', 'echo hi && sleep 1']);   // exec-form list, not reshaped
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-podman: run derives the container name from the image when --name is absent', async () => {
+  const { server, state } = captureBroker();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const ws = grantedPodWorkspace(`http://127.0.0.1:${port}`);
+    const r = await runPodAsync(['run', 'docker.io/library/hello-world:latest', '--json'], ws);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.container, 'hello-world');
+    const doc = JSON.parse(state.lastArgs.composeFile);
+    assert.deepEqual(Object.keys(doc.services), ['hello-world']);
+    assert.equal(doc.services['hello-world'].image, 'docker.io/library/hello-world:latest');
+    // No env / no command override → neither key present.
+    assert.equal('environment' in doc.services['hello-world'], false);
+    assert.equal('command' in doc.services['hello-world'], false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// ─── plugin #2: aee-test (Phase 5, #1521) ────────────────────────────────────
+// The same §4.5 contract against the real `aee-test` CLI. Broker-free: `whoami`
+// reads only the seeded config; every broker-touching verb points at an
+// unroutable endpoint so a call attempt deterministically returns exit 3 rather
+// than depending on a live sidecar. `create-case`'s per-scope POLICY (flow-final
+// agent only) is enforced by the broker (broker-sdk/authz.js), not the CLI — the
+// CLI is a privilege-less client — so it is unit-tested there, not here.
+const TEST_CLI = path.join(__dirname, '..', 'plugins', 'test-mgmt', 'bin', 'aee-test.py');
+
+function runTest(args, workspace) {
+  return spawnSync('python3', [TEST_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedTestWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-test-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'test-mgmt', scopeId: 't1',
+    endpoint: endpoint || 'http://127.0.0.1:59372/',   // reserved, unroutable
+    token: 'test-mgmt.t1.SIG', cliName: 'aee-test',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'test-mgmt.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-test is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(TEST_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'time', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-test: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runTest([], grantedTestWorkspace()).status, 2);
+  const help = runTest(['--help'], grantedTestWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /create-case/);
+  assert.match(help.stdout, /trigger/);
+});
+
+test('aee-test: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runTest(['frobnicate'], grantedTestWorkspace()).status, 2);
+});
+
+test('aee-test: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runTest(['whoami', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 't1');
+});
+
+test('aee-test: ungranted → exit 3 with not-granted error', () => {
+  const r = runTest(['trigger', '--plan', 'REGRESSION', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-test: a granted verb against an unreachable broker → exit 3', () => {
+  const r = runTest(['create-case', '--title', 'x', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-test: trigger without --plan/--suite → exit 2 (usage), never a broker call', () => {
+  const r = runTest(['trigger', '--json'], grantedTestWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-test: data with no subcommand → exit 2 (usage)', () => {
+  assert.equal(runTest(['data'], grantedTestWorkspace()).status, 2);
+});
+
+// ─── plugin #3: aee-plan (epic #1554, Phase 3, #1563) ────────────────────────
+// The same §4.5 contract against the real `aee-plan` CLI (entrypoint `bin/aee-plan`,
+// no .py suffix). Broker-free: `whoami` reads only the seeded config; every
+// broker-touching verb points at an unroutable endpoint so a call attempt
+// deterministically returns exit 3 rather than depending on a live sidecar. The
+// autonomy ladder (show=0, tick>=1, edit>=2) is enforced broker-side
+// (plan-doc.js `requiredAutonomy` + broker-sdk/authz.js); the CLI's early
+// refusal reads the level via a `show`, so against an unreachable broker a write
+// surfaces exit 3 (unreachable) before it can reach the level check.
+const PLAN_CLI = path.join(__dirname, '..', 'plugins', 'netzplan', 'bin', 'aee-plan');
+
+function runPlan(args, workspace) {
+  return spawnSync('python3', [PLAN_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedPlanWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-plan-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'netzplan', scopeId: 'team-x',
+    endpoint: endpoint || 'http://127.0.0.1:59373/',   // reserved, unroutable
+    token: 'netzplan.team-x.SIG', cliName: 'aee-plan',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'netzplan.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-plan is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(PLAN_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-plan: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runPlan([], grantedPlanWorkspace()).status, 2);
+  const help = runPlan(['--help'], grantedPlanWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /show/);
+  assert.match(help.stdout, /tick/);
+});
+
+test('aee-plan: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runPlan(['frobnicate'], grantedPlanWorkspace()).status, 2);
+});
+
+test('aee-plan: whoami --json resolves the seeded (team) scope (no broker needed)', () => {
+  const r = runPlan(['whoami', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 'team-x');
+});
+
+test('aee-plan: ungranted → exit 3 with not-granted error', () => {
+  const r = runPlan(['show', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-plan: show against an unreachable broker → exit 3', () => {
+  const r = runPlan(['show', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-plan: tick against an unreachable broker → exit 3 (early level read is a show)', () => {
+  const r = runPlan(['tick', 'lane1-m2', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'broker-unreachable');
+});
+
+test('aee-plan: edit with invalid JSON → exit 2 (usage), never a broker call', () => {
+  const r = runPlan(['edit', 'not-json', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
+});
+
+test('aee-plan: edit with an op missing a type → exit 2 (usage), never a broker call', () => {
+  const r = runPlan(['edit', '{"foo":1}', '--json'], grantedPlanWorkspace());
+  assert.equal(r.status, 2);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.error, 'usage');
 });

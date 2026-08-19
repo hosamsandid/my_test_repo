@@ -4,6 +4,10 @@
 # - orchestrator SA: namespaced pods CRUD + pods/log + pods/exec. Nothing
 #   cluster-scoped, no watch (the spawner polls). pods/exec backs the
 #   context-mount browse/write transport (orchestrator/pod-exec.js, #1319).
+#   Plugin sidecars (#1565) add apps/deployments + services + PVCs (a plugin
+#   broker is a Deployment + Service + state PVC — spawn-kubernetes-plugin.js),
+#   plus networkpolicies for the separable broker-plugin reachability follow-up.
+#   All namespaced — still nothing cluster-scoped.
 # - agent SA: identity only — automountServiceAccountToken: false means agent
 #   pods get NO Kubernetes API access at all.
 apiVersion: v1
@@ -37,6 +41,20 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["get", "create"]
+  # Plugin broker sidecars (#1565): each installed UI-bearing plugin becomes a
+  # Deployment + Service + state PVC (spawn-kubernetes-plugin.js). No watch — the
+  # orchestrator reconciles on install/uninstall and at boot, never streams.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+  # networkpolicies back the separable broker-plugin reachability follow-up (a
+  # UI-only plugin needs none); granted now so that work needs no RBAC change.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -64,7 +64,7 @@ COPY e2e/ /opt/ace/e2e/
 RUN chmod +x /opt/ace/e2e/claude
 
 # `aee-artifact` — register/resolve mission artifacts by logical name via the
-# git-committed manifest (.aee/artifacts.jsonl). On PATH so agents call it
+# git-committed manifest (.agent-studio/artifacts.jsonl). On PATH so agents call it
 # directly to record what they produced and to resolve an upstream's outputs
 # whose physical path varies per run.
 RUN chmod +x /opt/ace/scripts/aee-artifact \
@@ -105,6 +105,21 @@ RUN chmod +x /opt/ace/scripts/aee-emit \
 # (the agent can't read /workspace/usage/ itself). Token counts only, never money.
 RUN chmod +x /opt/ace/scripts/usage \
     && ln -sf /opt/ace/scripts/usage /usr/local/bin/usage
+
+# Plugin CLI facades (#1547). Built-in CLIs above are symlinked into
+# /usr/local/bin at build time; plugin CLIs cannot be, because they are seeded
+# per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED — a live
+# file sync with no respawn. So the image puts a STABLE directory on PATH and the
+# entrypoint points it at this agent's seed dir with a single symlink.
+#
+# Why not append the per-agent path to PATH in the container env instead:
+# setting PATH there REPLACES the image's own PATH rather than extending it,
+# and why not mutate os.environ in the entrypoint: that is invisible to
+# `podman exec`, so a human debugging a granted plugin sees "command not
+# found". This way a plugin granted minutes from now is instantly on PATH for
+# the agent AND for an operator shell, with no respawn either way.
+RUN mkdir -p /opt/aee
+ENV PATH="${PATH}:/opt/aee/plugin-bin"
 
 ENV NODE_ENV=production
 

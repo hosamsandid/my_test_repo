@@ -1,0 +1,31 @@
+{
+  "pluginVersion": 1,
+  "id": "patterns-catalog",
+  "name": "Patterns Catalog",
+  "description": "A read-only reference catalog of engineering patterns, browsable in the console. It covers an SDLC delivery-workflow view and a Mainframe Modernization pattern catalog (COBOL, JCL, DB2, IMS, re-engineering, strangler-fig, microservice extraction, and more). It is off until an operator turns it on: install it, then grant it to a team to make its catalog pages available. It holds no credentials and reaches nothing outside itself — its sidecar only serves the catalog pages, which the console displays inline. Agents can list the available catalogs with the dependency-free `aee-patterns` command-line tool (e.g. `aee-patterns list`).",
+  "sidecar": {
+    "image": "localhost/aee-plugin-patterns-catalog:latest",
+    "capabilities": [],
+    "internalPort": 4007
+  },
+  "cli": {
+    "name": "aee-patterns",
+    "entrypoint": "bin/aee-patterns",
+    "runtime": "python3"
+  },
+  "credentials": [],
+  "platforms": ["podman", "kubernetes"],
+  "scopes": ["team"],
+  "defaultScopeGranularity": "team",
+  "quota": {
+    "maxObjects": 2
+  },
+  "ui": {
+    "title": "Patterns Catalog",
+    "global": true,
+    "routes": [
+      { "path": "/", "minRole": "team-member" }
+    ]
+  },
+  "promptLine": "You can browse the read-only Patterns Catalog (SDLC workflow + Mainframe Modernization patterns) — a human reference surfaced in the console. List the available catalogs with `aee-patterns list` (run `aee-patterns --help`)."
+}

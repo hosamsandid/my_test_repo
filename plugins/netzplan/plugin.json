@@ -1,0 +1,31 @@
+{
+  "pluginVersion": 1,
+  "id": "netzplan",
+  "name": "Project Plan",
+  "description": "An editable planning board for a team. Lay work out as swimlanes with milestones and owners, capture dependencies as a graph, map items to targets, and summarise status in KPI tiles and cards. The board is a single shared document per team, stored on the server, so everyone on the team sees the same plan and every change is kept. You can edit the board directly in the console. Agents can also read it and — when a Team Admin raises the autonomy level — tick milestones or change its structure through the `aee-plan` command-line tool, and every change an agent makes is recorded under its name. Milestone status is tracked by stable identifiers, so inserting or reordering items never disturbs the rest of the plan.",
+  "sidecar": {
+    "image": "localhost/aee-plugin-netzplan:latest",
+    "capabilities": [],
+    "internalPort": 4006
+  },
+  "cli": {
+    "name": "aee-plan",
+    "entrypoint": "bin/aee-plan",
+    "runtime": "python3"
+  },
+  "credentials": [],
+  "platforms": ["podman", "kubernetes"],
+  "scopes": ["team"],
+  "defaultScopeGranularity": "team",
+  "quota": {
+    "maxObjects": 25
+  },
+  "ui": {
+    "title": "Project Plan",
+    "routes": [
+      { "path": "/", "minRole": "team-member" },
+      { "path": "/admin", "minRole": "team-admin" }
+    ]
+  },
+  "promptLine": "You can read — and, if the Team Admin has raised the autonomy level, tick or edit — the team's Project Plan board with `aee-plan` (run `aee-plan --help`). At the default autonomy level 0 you can only read the board; writes are refused until a human raises the level, and every write you make is audited under your agent id."
+}

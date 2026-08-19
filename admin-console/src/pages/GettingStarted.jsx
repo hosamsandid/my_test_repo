@@ -4,6 +4,7 @@ import {
   Compass, MessageCircle, Layers, Building2, GitBranch,
   Boxes, Brain, Sparkles, Rocket, Users2,
 } from 'lucide-react';
+import { useHelperChat } from '../context/HelperChatContext';
 
 /**
  * Getting Started — a persistent, always-reachable concept overview (#1107).
@@ -28,10 +29,10 @@ const CONCEPTS = [
   },
   {
     Icon: Building2,
-    title: 'Teams',
+    title: 'Access & Users',
     to: '/teams',
-    linkLabel: 'Open Teams',
-    body: 'A team is a group of agents that work together on one repository, hand work off to each other, and share a common knowledge base. Team Admins and Members control who can change what.',
+    linkLabel: 'Open Access & Users',
+    body: 'Manage access scopes (Teams — the human tenant every agent, environment and credential is owned by) and the human users in them. Team Admins and Members control who can change what. This is not the Agent Team squad — that lives on the Agents page.',
   },
   {
     Icon: GitBranch,
@@ -73,6 +74,7 @@ const NEXT_STEPS = [
 ];
 
 export default function GettingStarted() {
+  const { openTour } = useHelperChat();
   return (
     <div style={{
       padding: 'var(--eb-space-8) var(--eb-space-6)',
@@ -94,6 +96,26 @@ export default function GettingStarted() {
           A quick tour of the core concepts. Come back here any time you need a refresher —
           the pages you can act on are one click away from each card.
         </p>
+        <button
+          onClick={openTour}
+          style={{
+            marginTop: 'var(--eb-space-4)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 'var(--eb-space-2)',
+            background: 'var(--eb-accent-primary)',
+            color: 'var(--eb-text-inverted)',
+            border: 'none',
+            borderRadius: 'var(--eb-radius-md)',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-semibold)',
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+          }}
+        >
+          <Compass size={16} /> Take the Tour
+        </button>
       </div>
 
       {/* Concept map — one card per core concept */}

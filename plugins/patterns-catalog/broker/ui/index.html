@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Patterns Catalog</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #171a21; --surface-hover: #1d212b;
+    --border: #2a2f3a; --text: #e6e8ec; --text-dim: #9aa2b1;
+    --blue: #3b82f6; --blue-dim: rgba(59,130,246,0.14);
+    --violet: #8b5cf6; --violet-dim: rgba(139,92,246,0.14);
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+    --shadow-lg: 0 10px 24px rgba(0,0,0,0.5);
+  }
+  html[data-theme="light"] {
+    --bg: #f6f7f9; --surface: #ffffff; --surface-hover: #ffffff;
+    --border: #e3e6eb; --text: #1a1d23; --text-dim: #5b6472;
+    --blue-dim: rgba(59,130,246,0.10); --violet-dim: rgba(139,92,246,0.10);
+    --shadow: 0 1px 2px rgba(0,0,0,0.06);
+    --shadow-lg: 0 10px 24px rgba(0,0,0,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+  h1 { margin: 0; font-size: 1.75rem; font-weight: 600; }
+  .sub { margin-top: 8px; color: var(--text-dim); font-size: 1rem; }
+  .grid {
+    margin-top: 32px; display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 24px;
+  }
+  .card {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 16px;
+    padding: 32px; background: var(--surface); color: inherit;
+    border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+    text-align: left; text-decoration: none; cursor: pointer;
+    transition: border-color .15s, background .15s, transform .15s, box-shadow .15s;
+  }
+  .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); background: var(--surface-hover); }
+  .card.sdlc:hover { border-color: var(--blue); background: var(--blue-dim); }
+  .card.mainframe:hover { border-color: var(--violet); background: var(--violet-dim); }
+  .icon { display: flex; align-items: center; justify-content: center; width: 64px; height: 64px; border-radius: 12px; }
+  .card.sdlc .icon { background: var(--blue-dim); color: var(--blue); }
+  .card.mainframe .icon { background: var(--violet-dim); color: var(--violet); }
+  .card h2 { margin: 0; font-size: 1.25rem; font-weight: 600; color: var(--text); }
+  .card p { margin: 0; font-size: .875rem; color: var(--text-dim); line-height: 1.6; flex: 1; }
+  .view { font-size: .875rem; font-weight: 500; margin-top: 8px; }
+  .card.sdlc .view { color: var(--blue); }
+  .card.mainframe .view { color: var(--violet); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Patterns Catalog</h1>
+      <p class="sub">Browse the available pattern catalogs for this agent studio.</p>
+    </header>
+    <div class="grid">
+      <a class="card sdlc" href="./sdlc.html">
+        <span class="icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 6a9 9 0 0 1-9 9"/><circle cx="18" cy="6" r="3"/>
+          </svg>
+        </span>
+        <h2>SDLC Catalog</h2>
+        <p>End-to-end view of the trigger- and label-driven Software Development Lifecycle workflow. Shows how each agent fits into the automated CI/CD pipeline.</p>
+        <span class="view">View catalog →</span>
+      </a>
+      <a class="card mainframe" href="./mainframe.html">
+        <span class="icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/>
+          </svg>
+        </span>
+        <h2>Mainframe Modernization Catalog</h2>
+        <p>Pattern catalog covering COBOL, JCL, DB2, IMS, and related mainframe modernization strategies — re-engineering, strangler-fig, microservice extraction, and more.</p>
+        <span class="view">View catalog →</span>
+      </a>
+    </div>
+  </div>
+<script>
+  // Mirror the console's theme (same-origin parent) onto this iframe page, and
+  // keep it in sync when the user toggles the console theme. The console sets
+  // document.documentElement.dataset.theme to admin-dark/admin-light/high-contrast.
+  (function () {
+    function map(t) { return t === 'admin-light' ? 'light' : 'dark'; }
+    function sync() {
+      try {
+        var p = window.parent;
+        if (p && p !== window && p.document) {
+          var t = p.document.documentElement.dataset.theme;
+          if (t) document.documentElement.setAttribute('data-theme', map(t));
+        }
+      } catch (e) { /* cross-origin (opened standalone) — keep default */ }
+    }
+    sync();
+    try {
+      var p = window.parent;
+      if (p && p !== window && p.document) {
+        new MutationObserver(sync).observe(p.document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      }
+    } catch (e) { /* ignore */ }
+  })();
+</script>
+</body>
+</html>

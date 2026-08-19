@@ -6,6 +6,7 @@
 // once before the steps and their teardown always runs after (even on failure),
 // so a journey leaves no state behind and can re-run on the same stack. They
 // compose the existing #667 step modules (env, teardown) — no duplicate logic.
+const { execFileSync } = require('child_process');
 const env = require('../steps/env');
 const teardown = require('../steps/teardown');
 const gh = require('../steps/gh');
@@ -364,7 +365,132 @@ const contextMountAgent = {
   },
 };
 
-const FIXTURES = { teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam, contextMountAgent };
+// ── usageData helpers (#1505) ───────────────────────────────────────────────
+// The Token Usage figures are read by the admin-console from JSONL day files on
+// the shared /workspace volume (admin-console/api/usage-log.js → /workspace/usage).
+// There is no HTTP ingest on the console side (agents post usage to the
+// orchestrator's internal API, unreachable from the Playwright host), so the
+// fixture seeds the files by exec-ing into the compose admin-console container —
+// the same podman/docker vantage point the context fixture uses for the kind node.
+const USAGE_PROJECT = process.env.E2E_COMPOSE_PROJECT || 'aee-e2e';
+
+// Resolve the running admin-console container (compose sets a fixed
+// container_name `<project>-admin-console`). Probe podman then docker, mirroring
+// the engine fallback the context step uses.
+function usageConsoleContainer() {
+  let lastErr;
+  for (const engine of ['podman', 'docker']) {
+    try {
+      const out = execFileSync(engine, ['ps', '--format', '{{.Names}}'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const name = out.split('\n').map((s) => s.trim())
+        .find((n) => n.startsWith(USAGE_PROJECT) && n.includes('admin-console'));
+      if (name) return { engine, name };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(
+    `usageData fixture: no running ${USAGE_PROJECT}*admin-console container found via podman or docker`
+    + (lastErr ? `: ${lastErr.message}` : ''),
+  );
+}
+
+function execInConsole(argv) {
+  const { engine, name } = usageConsoleContainer();
+  return execFileSync(engine, ['exec', name, ...argv], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+// Two fixed record dates (deliberately historical, so the figures only appear
+// under the "All time" range — insulating them from the default 7-day window
+// and from anything the live stack logs today).
+const USAGE_DAYS = ['2024-06-01', '2024-06-02'];
+
+// Deterministic seed: three invocations across two agents, all under `teamId`.
+// Totals — input 3,900 · output 1,400 · cache-write 600 · cache-read 1,100 ·
+// grand total 7,000 · 3 invocations; per-agent totals alpha 6,000 / beta 1,000.
+function usageSeed(teamId) {
+  const rec = (ts, agentId, input, output, cacheWrite, cacheRead) => JSON.stringify({
+    ts,
+    agentId,
+    teamId,
+    provider: 'anthropic',
+    model: 'claude-sonnet-5',
+    tokens: {
+      input, output, cacheCreationInput: cacheWrite, cacheReadInput: cacheRead,
+    },
+  });
+  return {
+    '2024-06-01': `${rec('2024-06-01T09:00:00.000Z', 'token-usage-alpha', 1000, 500, 200, 300)}\n`,
+    '2024-06-02': `${[
+      rec('2024-06-02T09:00:00.000Z', 'token-usage-alpha', 2000, 800, 400, 800),
+      rec('2024-06-02T10:00:00.000Z', 'token-usage-beta', 900, 100, 0, 0),
+    ].join('\n')}\n`,
+  };
+}
+
+function seedUsageFile(day, content) {
+  // Content is a single argv element (execFileSync — no shell), so its quotes
+  // and newlines pass through untouched; `printf %s` writes them verbatim.
+  execInConsole(['sh', '-c',
+    'mkdir -p /workspace/usage && printf %s "$2" > "/workspace/usage/usage-$1.jsonl"',
+    'sh', day, content]);
+}
+
+function removeUsageFiles() {
+  execInConsole(['sh', '-c',
+    'for d in "$@"; do rm -f "/workspace/usage/usage-$d.jsonl"; done',
+    'sh', ...USAGE_DAYS]);
+}
+
+/**
+ * usageData: the Token Usage journey's precondition (#1505). Seeds deterministic
+ * usage records under a dedicated human Team and creates that Team, so the page's
+ * Team filter can narrow to it and the figures stay stable across re-runs on the
+ * same stack (other usage the stack logs carries a different teamId and is
+ * filtered out). Setup pre-cleans a leftover team + seed files; teardown removes
+ * both — one idempotent, re-runnable surface.
+ *
+ * @param {string} params.teamId - Team slug id to create and tag the seeded records with.
+ * @param {string} params.teamName - Team display name (shown in the page's Team filter).
+ * @example
+ * fixtures:
+ *   - fixture: usageData
+ *     params:
+ *       teamId: token-usage-demo
+ *       teamName: Token Usage Demo
+ */
+const usageData = {
+  async setup(ctx, params = {}) {
+    const { teamId, teamName } = params;
+    if (!teamId || !teamName) {
+      throw new Error('usageData fixture requires { teamId, teamName }');
+    }
+    // Pre-clean: drop leftover seed files and any leftover team from a crashed run.
+    removeUsageFiles();
+    await ctx.request.delete(`/api/admin/teams/${encodeURIComponent(teamId)}`);
+    const res = await ctx.request.post('/api/admin/teams', { data: { id: teamId, name: teamName } });
+    if (!res.ok() && res.status() !== 409) {
+      throw new Error(`usageData: create team ${teamId} failed HTTP ${res.status()}: ${await res.text()}`);
+    }
+    for (const [day, content] of Object.entries(usageSeed(teamId))) {
+      seedUsageFile(day, content);
+    }
+    return { teamId };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId } = params;
+    removeUsageFiles();
+    if (teamId) await ctx.request.delete(`/api/admin/teams/${encodeURIComponent(teamId)}`);
+  },
+};
+
+const FIXTURES = {
+  teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam, contextMountAgent, usageData,
+};
 
 function resolveFixture(name) {
   const fx = FIXTURES[name];

@@ -7,9 +7,8 @@
 ## 1. Problem
 
 Editing an authored system prompt overwrites `AGENT-PROMPT.md` / `config.json`
-immediately and globally, with **no history, no undo, no rollback**. A read-only
-Prompt preview exists (`PromptPreviewPanel.jsx`), byte-identical to what is
-seeded, but there is no way back to a known-good previous version.
+immediately and globally, with **no history, no undo, no rollback**, and there is
+no way back to a known-good previous version.
 
 Blast radius is already contained by the one-team-per-human model, so this is an
 ergonomics/safety improvement, not a multi-tenant emergency.
@@ -21,7 +20,7 @@ Only **authored** prompts (human-written), never derived copies:
 | Construct | Field / file | Edit choke-point (server-side) |
 |---|---|---|
 | Standalone `agent` | `AGENT-PROMPT.md` | `PUT /api/agents/:id/prompt` (`api.js:2913`) |
-| `team-member` (override) | `config.systemPrompt` + `AGENT-PROMPT.md` | `PUT /api/agents/:id` body `systemPrompt` (`api.js:1879-1967`) |
+| `team-member` (override) | `config.systemPrompt` + `AGENT-PROMPT.md` | `PUT /api/agents/:id` body `systemPrompt` (+ `promptMode`, #1511) (`api.js:1879-1967`) |
 | `team` (template) | `config.systemPromptTemplate` | `PUT /api/agents/:id` body `systemPromptTemplate` → proxy to `updateTeamPrompt` (`orchestrator.js:6108`) |
 
 **Verified:** every human edit surface funnels into exactly these three
@@ -39,10 +38,10 @@ Because all three choke-points live in the **admin-console** process — where
 only**. No orchestrator duplication, no actor-forwarding into internal
 endpoints.
 
-## 3. Data model — sidecar `/workspace/agents/<id>/.aee/prompt-history.json`
+## 3. Data model — sidecar `/workspace/agents/<id>/.agent-studio/prompt-history.json`
 
 A per-agent sidecar (not a `config.json` field), consistent with
-`.aee/seeded-skills.json` and the `skill.json` manifest. Avoids contention
+`.agent-studio/seeded-skills.json` and the `skill.json` manifest. Avoids contention
 between the two `config.json` writers (orchestrator non-atomic `saveAgentConfig`
 vs. console atomic `writeJsonAtomic`).
 
@@ -111,7 +110,13 @@ choke-point:
   `cfg.systemPrompt` (or resolved inherited template); stamp, then
   `writeJsonAtomic` + `AGENT-PROMPT.md`. Switching to **inherit**
   (`systemPrompt: null`) is captured as `action:'inherited'` with empty new
-  content — the prior override stays revertable.
+  content — the prior override stays revertable. **System-prompt mode (#1511):**
+  the versioned field is the authored text — the addition in *Additional input*,
+  the full override in *Exclusive overriding input*. A capture fires on an
+  authored-text change **or** a mode switch (`prevMode !== nextMode`, noted as
+  `prompt mode <a> → <b>`), so switching between the three modes is recorded
+  consistently with inherit/edit (AC12); revert preserves the member's current
+  mode when restoring its text.
 - **Choke-point 3** (`api.js:1661`, team template): `oldContent` =
   `cfg.systemPromptTemplate` (already read into `cfg`). **Stamp console-side,
   then** proxy to `updateTeamPrompt`. No `by` forwarding into the orchestrator.
@@ -132,23 +137,17 @@ Never destructive (undo-of-undo works). **AC "rollback goes through the same
 assembly/seed path, preview stays byte-identical"** is satisfied for free, since
 no new seed path is introduced. "Undo" = revert to `currentVersion - 1`.
 
-## 7. Read API + preview reuse
+## 7. Read API
 
 - `GET /api/agents/:id/prompt-history`
   → `{ field, currentVersion, history: [{ version, at, by, action, note, hash, contentPreview }] }`
   (truncated snippets in the list; full content fetched on demand for
   diff/preview).
-- Optional (can slip to a later cut): extend `GET /api/agents/:id/prompt-preview`
-  (`orchestrator.js:8396`) to accept a `promptOverride` so a historical version
-  can be rendered byte-identically through `buildAgentClaudeMd` *before* the
-  revert. A client-side diff against the active prompt may suffice for v1.
 
 ## 8. Frontend
 
 A reusable `PromptHistory` component — version list (`at` / `by` / `action`),
 diff against the active prompt, **Revert** button with confirm — mounted in:
-- the **Prompt tab** `PromptPreviewPanel.jsx` (chat RightRail) — standalone
-  agents & members,
 - the **NodeInspector** Prompt tab (Flow editor) — live teams & members
   (team templates have no chat room).
 
@@ -184,7 +183,6 @@ diff against the active prompt, **Revert** button with confirm — mounted in:
 | `admin-console/api/prompt-history.js` (new) | Pure stamp/read/write module |
 | `admin-console/api/prompt-history.fixture.json` (new) | Golden fixture |
 | `admin-console/api/api.js` | `captureAuthoredPromptEdit` helper; wire into the 3 choke-points; `GET /prompt-history`; `POST /prompt-history/:version/revert` |
-| `admin-console/src/pages/agent-chat/PromptPreviewPanel.jsx` | Mount `PromptHistory` |
 | `admin-console/src/pages/process/NodeInspector.jsx` | Mount `PromptHistory` in the Prompt tab |
 | `admin-console/src/pages/.../PromptHistory.jsx` (new) | Version list + diff + Revert |
 | tests | Unit + integration per §10 |

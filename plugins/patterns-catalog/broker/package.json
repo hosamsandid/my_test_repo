@@ -1,0 +1,10 @@
+{
+  "name": "patterns-catalog-broker",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "description": "Patterns Catalog plugin broker sidecar (UI-only, privilege-less): serves the static pattern-catalog pages on the Broker SDK. No credential, no state, no MCP tool surface.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

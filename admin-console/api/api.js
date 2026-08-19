@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
 const matrix = require('./matrix');
 const auth = require('./auth');
@@ -23,12 +23,14 @@ const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
 const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
+const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canManageEnvironment, visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { buildAssistModelOptions } = require('./assist-model-options');
+const { normalizeDiscoveredModels } = require('./model-discovery');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -44,11 +46,15 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+// Team-member system-prompt modes (#1511): inherit / additional / exclusive.
+const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
 const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
+const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
@@ -58,6 +64,7 @@ const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./o
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
 const promptHistory = require('./prompt-history');
+const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
@@ -70,6 +77,12 @@ const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archiv
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
+const { reposFromEnv, repoVars } = require('./team-repo-resolve');
+const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
+const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
+const { validatePluginManifest } = require('./plugin-manifest');
+const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
+const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -92,21 +105,53 @@ function controlOrAgentPath(...segs) {
   return path.join(AGENTS_DIR, ...segs);
 }
 
+// Per-archive parsed-events cache (#1684). Session-log archives are immutable
+// once rotated, so their parsed rows never change — a file's (size, mtime) is a
+// safe signature. Caching them means GET .../sessions/history re-reads and
+// re-parses only the growing live file on each poll, not the whole archive set,
+// so response time stays flat as rotated history accumulates. Bounded LRU.
+const SESSION_ARCHIVE_CACHE_MAX = 512;
+const _sessionArchiveCache = new Map(); // `path:size:mtimeMs` -> events[]
+
+function _cachedArchiveEvents(fullPath, parse) {
+  let st;
+  try { st = fs.statSync(fullPath); } catch { return null; }
+  const key = `${fullPath}:${st.size}:${st.mtimeMs}`;
+  const hit = _sessionArchiveCache.get(key);
+  if (hit) {
+    // Refresh LRU recency.
+    _sessionArchiveCache.delete(key);
+    _sessionArchiveCache.set(key, hit);
+    return hit;
+  }
+  let raw;
+  try { raw = fs.readFileSync(fullPath, 'utf8'); } catch { return null; }
+  const events = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim()) events.push(parse(line));
+  }
+  if (_sessionArchiveCache.size >= SESSION_ARCHIVE_CACHE_MAX) {
+    const oldest = _sessionArchiveCache.keys().next().value;
+    _sessionArchiveCache.delete(oldest);
+  }
+  _sessionArchiveCache.set(key, events);
+  return events;
+}
+
 // Rotated session-log archives of `roomId` (#673), oldest→newest, parsed to
 // events via `parse`. Archives are immutable and read WHOLESALE, so a finished
 // session's rows survive rotation. The live file is NOT included — callers
 // concatenate it after these. Best-effort: an unreadable archive is skipped.
+// Parsed archives are memoized (see _cachedArchiveEvents) so repeated reads
+// don't re-parse the whole history (#1684).
 function readSessionArchiveEvents(agentId, roomId, parse) {
   const dir = controlOrAgentPath(agentId, 'sessions');
   let names;
   try { names = fs.readdirSync(dir); } catch { return []; }
   const out = [];
   for (const name of orderedArchiveNames(names, roomId)) {
-    let raw;
-    try { raw = fs.readFileSync(path.join(dir, name), 'utf8'); } catch { continue; }
-    for (const line of raw.split('\n')) {
-      if (line.trim()) out.push(parse(line));
-    }
+    const events = _cachedArchiveEvents(path.join(dir, name), parse);
+    if (events) out.push(...events);
   }
   return out;
 }
@@ -270,9 +315,42 @@ auth.registerAuthRoutes(app, {
 });
 app.use('/api', auth.gate);
 
+// Helper Chat guided-tour manifest (#1737, Phase 2.2). Serves the pre-built
+// tour manifest (generated + vendored by #1736) behind the global /api gate
+// above. The loader degrades to an empty { chapters: [] } when the generated
+// file is not present, so this endpoint never fails the API to boot on a
+// checkout where #1736 has not merged yet. Memoized once real chapters load.
+const { readTourManifest: _readTourManifest } = require('./helper-chat/tour-manifest-loader');
+let _tourManifestCache = null;
+app.get('/api/helper/tour-manifest', (req, res) => {
+  if (!_tourManifestCache) {
+    const m = _readTourManifest();
+    // Only cache once the real (non-empty) manifest is present, so the endpoint
+    // self-heals if the generated file appears after startup.
+    if (Array.isArray(m.chapters) && m.chapters.length > 0) _tourManifestCache = m;
+    return res.json(m);
+  }
+  res.json(_tourManifestCache);
+});
+
 // Speech-to-text transcription: proxies audio to the STT service and returns { text }.
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());
+
+// Helper Chat tour screenshots (#1736, Phase 2.1). The tour manifest
+// (admin-console/api/helper-chat/tour-manifest.json) references screenshots by
+// relative path ("team-setup/select-process.png"); the PNGs are written by a
+// green journey run under e2e/artifacts/ and served here as static files.
+// express.static normalizes and rejects "../" traversal internally, so the
+// user-controlled URL sub-path cannot escape the artifacts root. Behind the
+// global /api limiter + auth gate above. Development/monorepo layout by default
+// (Option A in #1736); the admin-console image build context is admin-console/
+// and does NOT contain e2e/artifacts/, so for a production build the CI pipeline
+// must copy e2e/artifacts/ into the image or a sibling volume and point
+// TOUR_ARTIFACTS_DIR at it — the route simply 404s until that directory exists.
+const TOUR_ARTIFACTS_DIR = process.env.TOUR_ARTIFACTS_DIR
+  || path.resolve(__dirname, '..', '..', 'e2e', 'artifacts');
+app.use('/api/helper/tour-screenshot', express.static(TOUR_ARTIFACTS_DIR));
 
 // Read recent audit entries (newest first). Protected by the gate above.
 app.get('/api/audit', (req, res) => {
@@ -580,8 +658,27 @@ function resolveOwnerTeamId(teamId) {
 // (#798). A `system` scope carries an `assignedTeamIds` set (0..n existing
 // teams); any other value is a `team` scope owned by exactly one team. Throws a
 // 400-tagged error for an unknown team. Returns the canonical persisted shape.
-function resolveCredentialOwnership(body) {
+//
+// Personal tier (#1567/epic #1558): a `personal` credential is owned by exactly
+// one human. The owner is ALWAYS the authenticated caller (`actingUserId`) — a
+// body that omits it is filled in, a body that names a DIFFERENT owner is
+// rejected 403 (an agent/human may never register a credential under a foreign
+// identity, edge case + AC2). The owner is validated against a known user record.
+function resolveCredentialOwnership(body, actingUserId) {
   const b = body || {};
+  if (b.scope === 'personal') {
+    if (!actingUserId) {
+      const err = new Error('A personal credential requires an authenticated user'); err.status = 403; throw err;
+    }
+    if (b.userId != null && String(b.userId) !== String(actingUserId)) {
+      const err = new Error('A personal credential can only be owned by yourself'); err.status = 403; throw err;
+    }
+    const users = readJsonFile(USERS_INDEX, []);
+    if (!Array.isArray(users) || !users.some(u => u.id === actingUserId)) {
+      const err = new Error(`Owner '${actingUserId}' is not a known user`); err.status = 400; throw err;
+    }
+    return { scope: 'personal', userId: String(actingUserId), teamId: null, assignedTeamIds: [] };
+  }
   const reqScope = b.scope === 'system' ? 'system' : 'team';
   if (reqScope === 'system') {
     const raw = Array.isArray(b.assignedTeamIds) ? b.assignedTeamIds : [];
@@ -611,6 +708,19 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
   const b = body || {};
   const cur = normalizeCredential(cred);
   const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
+
+  // Personal-tier ownership is immutable (#1567 edge case / AC6): a personal
+  // credential cannot be reassigned into a team/system tier (and vice versa) —
+  // that would move a private secret out of one human's sole control. Renaming a
+  // personal credential is still allowed (`name`-only patch → not `reassigning`);
+  // to change ownership, create a new credential instead.
+  if (reassigning && (cur.scope === 'personal' || b.scope === 'personal')) {
+    res.status(400).json({
+      error: `A personal ${label} cannot be reassigned to or from a team/system tier; create a new credential instead.`,
+      code: 'personal-reassign-unsupported',
+    });
+    return null;
+  }
 
   let next = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
   if (reassigning) {
@@ -1360,9 +1470,14 @@ app.get('/api/agents', (req, res) => {
 // NOTE: must be registered BEFORE `/api/agents/:id` — otherwise Express
 // would match this static path against the parameterized route (with
 // id="statuses") and return 404.
-app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
-  const ids = listAgentDirs();
-
+// Assemble the FULL (unscoped) per-agent status set: list agent dirs, read each
+// config.json exactly once, ask the orchestrator which containers are up, and
+// read status.json / dm-room.json / the session pointer only for an enabled,
+// running agent (a disabled/offline agent needs none of those). Returns
+// `{ cfg, status }` per agent so the caller can apply its own visibility scope
+// against the same config it was built from. Pure shaping lives in
+// buildAgentStatus (agent-statuses.js, #1677).
+async function buildAllAgentStatuses() {
   let runningIds = new Set();
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -1375,24 +1490,65 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     }
   } catch { /* orchestrator unreachable — all agents appear offline */ }
 
-  const statuses = ids.map(id => {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    const displayName = cfg.displayName ?? id;
-    if (cfg.enabled === false) return { id, displayName, activityState: 'disabled', hasSession: false };
-    if (!runningIds.has(id)) return { id, displayName, activityState: 'offline', hasSession: false };
-    const status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
-    const dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
-    const hasSession = !!(dmRoom?.roomId &&
-      fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
-    return {
-      id,
-      displayName,
-      activityState: status?.state === 'busy' ? 'busy' : 'idle',
-      lastResponseAt: status?.lastResponseAt ?? null,
-      hasSession,
-    };
-  });
+  const entries = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue; // corrupt/unreadable config — excluded, as before
+    const running = runningIds.has(id);
+    let status = null, dmRoom = null, sessionFileExists = false;
+    if (cfg.enabled !== false && running) {
+      status = readJsonFile(controlOrAgentPath(id, 'status.json'), null); // pushed copy preferred (#185)
+      dmRoom = readJsonFile(path.join(AGENTS_DIR, id, 'dm-room.json'), null);
+      sessionFileExists = !!(dmRoom?.roomId &&
+        fs.existsSync(controlOrAgentPath(id, 'sessions', dmRoom.roomId + '.current.json'))); // pushed copy preferred (#185)
+    }
+    entries.push({ cfg, status: buildAgentStatus({ id, cfg, running, status, dmRoom, sessionFileExists }) });
+  }
+  return entries;
+}
 
+// Short-TTL single-flight cache over the full status set. Several console
+// surfaces poll this endpoint on a 5s beat (Shell nav badge, Agent-Chat list,
+// Maintenance Mode); the front end now shares one poll (#1677), but multiple
+// tabs/users and scope-varying callers can still land close together — a ~2s
+// TTL collapses those onto one filesystem + orchestrator sweep. Caching the
+// in-flight promise also dedups concurrent rebuilds.
+let _statusCache = null; // { builtAt, promise }
+const STATUS_CACHE_TTL_MS = Number(process.env.AGENT_STATUSES_TTL_MS) || 2000;
+
+function agentStatusEntries() {
+  const now = Date.now();
+  if (_statusCache && statusCacheFresh(_statusCache.builtAt, now, STATUS_CACHE_TTL_MS)) {
+    return _statusCache.promise;
+  }
+  const promise = buildAllAgentStatuses().catch(err => {
+    // Don't cache a failed build — let the next request retry.
+    if (_statusCache && _statusCache.promise === promise) _statusCache = null;
+    throw err;
+  });
+  _statusCache = { builtAt: now, promise };
+  return promise;
+}
+
+app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
+  // Scope the status set to the agents the caller may see, using the SAME
+  // predicate as GET /api/matrix/agents (#1605). The Agent-Chat nav badges in
+  // Shell.jsx aggregate this payload, so an unscoped set leaked the activity of
+  // hidden agents and made the badge disagree with the (already-scoped) list.
+  // getScope(req) respects the caller's scope, so a System Admin / env
+  // single-admin (scope `all`) still sees every agent — the filter is additive,
+  // never a hard global cut (open-question 2). The scope filter is applied
+  // per-request on top of the shared (cached) build (#1677).
+  const scope = getScope(req);
+  let entries;
+  try {
+    entries = await agentStatusEntries();
+  } catch {
+    return res.status(500).json({ error: 'Failed to read agent statuses' });
+  }
+  const statuses = entries
+    .filter(e => visibleAgent(scope, e.cfg))
+    .map(e => e.status);
   res.json(statuses);
 });
 
@@ -1404,23 +1560,6 @@ app.get('/api/agents/:id', (req, res) => {
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
   const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []); // canonical copy (#185)
   res.json({ id, ...cfg, triggers });
-});
-
-// Prompt preview: proxy to the orchestrator, which renders the fully-composed
-// system prompt (seeded CLAUDE.md + runtime append hint) via the same assembly
-// path as workspace seeding. Lets an operator review the composed whole instead
-// of reading the template, the env, and the runtime hint separately.
-app.get('/api/agents/:id/prompt-preview', apiLimiter, async (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/prompt-preview`);
-    const body = await r.json().catch(() => ({ error: 'invalid orchestrator response' }));
-    return res.status(r.status).json(body);
-  } catch (err) {
-    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
-  }
 });
 
 // Best-effort: nudge a running agent (SIGUSR2 via the orchestrator) to re-pull
@@ -1593,8 +1732,13 @@ async function reconcileTeamOutcomes(teamId) {
   for (const { id, cfg } of members) {
     const cfgPath = path.join(AGENTS_DIR, id, 'config.json');
 
-    const hasOwnPrompt = typeof cfg.systemPrompt === 'string';
-    const base = hasOwnPrompt ? cfg.systemPrompt : teamTemplate;
+    // Mode-aware base prompt (#1511): 'exclusive' → the member's own text;
+    // 'additional' → team template + the member's addition (a member in this
+    // mode stores ONLY the addition in cfg.systemPrompt); 'inherit' → the team
+    // template. The derived Outcomes/GitHub blocks are then applied on top.
+    const promptMode = resolvePromptMode(cfg);
+    const ownText = typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '';
+    const base = composeMemberPrompt(promptMode, teamTemplate, ownText);
     const wiring = outcomesWiringContext(id, {
       roles: members,
       humans: (teamCfg && Array.isArray(teamCfg.humans)) ? teamCfg.humans : [],
@@ -1604,11 +1748,14 @@ async function reconcileTeamOutcomes(teamId) {
       github: cfg.github, outcomes: cfg.outcomes, ...(wiring ? { wiring } : {}),
     });
 
-    // Persist the re-rendered block onto an override member's stored prompt so
+    // Persist the re-rendered block onto an EXCLUSIVE member's stored prompt so
     // export (buildProcessTemplate strips it back out) and a later prompt-toggle
-    // stay consistent with what the agent reads. Inheriting members carry no
-    // override — only their AGENT-PROMPT.md is refreshed.
-    if (hasOwnPrompt && cfg.systemPrompt !== nextPrompt) {
+    // stay consistent with what the agent reads. For 'additional' the stored
+    // systemPrompt is only the addition (team + addition is re-composed on every
+    // team-prompt edit), so it must NEVER be overwritten with the composed +
+    // derived output. 'inherit' members carry no override — only their
+    // AGENT-PROMPT.md is refreshed.
+    if (promptMode === PROMPT_MODES.EXCLUSIVE && cfg.systemPrompt !== nextPrompt) {
       cfg.systemPrompt = nextPrompt;
       try { writeJsonAtomic(cfgPath, cfg); } catch { /* best-effort */ }
     }
@@ -1680,6 +1827,24 @@ function notifyEnvCredentialChange(envId, reason) {
   }).catch(() => {});
 }
 
+// Best-effort: after a human SETS or ROTATES their personal credential (#1570,
+// epic #1558 Phase 4), ask the orchestrator to respawn that person's running
+// agents so the new secret takes effect — the personal-tier counterpart of
+// notifyEnvCredentialChange, scoped to the owner instead of an environment. A
+// personal secret is baked into each of the owner's containers at spawn, so
+// without this a rotated key/token would only reach them on a manual
+// disable/enable. `ownerId` is the credential's `userId`; a falsy owner (an
+// env/team/system credential, or the env single-admin) is a no-op.
+function notifyOwnerCredentialChange(ownerId, reason) {
+  if (!ownerId) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/owners/${encodeURIComponent(ownerId)}/respawn-agents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  }).catch(() => {});
+}
+
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -1693,7 +1858,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -2082,11 +2247,36 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (delete the field); a string / array means "set the override".
   let promptOverrideChanged = false;
   if (fresh.role === 'team-member') {
-    if (systemPrompt === null) {
-      delete fresh.systemPrompt;
-      promptOverrideChanged = true;
-    } else if (typeof systemPrompt === 'string') {
-      fresh.systemPrompt = systemPrompt;
+    // System-prompt mode (#1511). An explicit `promptMode` selects one of the
+    // three modes; an older client that sends only `systemPrompt` is mapped the
+    // legacy way (null → inherit, string → exclusive) so nothing regresses (AC7).
+    const modeGiven = promptMode === PROMPT_MODES.INHERIT
+      || promptMode === PROMPT_MODES.ADDITIONAL
+      || promptMode === PROMPT_MODES.EXCLUSIVE;
+    if (modeGiven || systemPrompt !== undefined) {
+      let mode;
+      if (modeGiven) mode = promptMode;
+      else if (systemPrompt === null) mode = PROMPT_MODES.INHERIT;
+      else mode = PROMPT_MODES.EXCLUSIVE;
+
+      if (mode === PROMPT_MODES.INHERIT) {
+        delete fresh.systemPrompt;
+        delete fresh.promptMode;
+      } else if (mode === PROMPT_MODES.ADDITIONAL) {
+        // The agent-specific addition; empty is allowed (composes to the team
+        // template alone, AC8). `promptMode` is persisted because this state
+        // cannot be inferred from systemPrompt presence.
+        fresh.systemPrompt = typeof systemPrompt === 'string' ? systemPrompt : '';
+        fresh.promptMode = PROMPT_MODES.ADDITIONAL;
+      } else {
+        // Exclusive (the renamed "Custom"). Keep the legacy shape — no
+        // `promptMode` field — so an existing custom member stays byte-identical
+        // (AC6/AC7).
+        fresh.systemPrompt = typeof systemPrompt === 'string'
+          ? systemPrompt
+          : (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '');
+        delete fresh.promptMode;
+      }
       promptOverrideChanged = true;
     }
     if (skillsOverride === null) {
@@ -2157,21 +2347,28 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     // override here (fresh was written above; cfg was read before that).
     const prevOverride = (typeof cfg.systemPrompt === 'string') ? cfg.systemPrompt : '';
     const nextOverride = (typeof fresh.systemPrompt === 'string') ? fresh.systemPrompt : '';
-    if (prevOverride !== nextOverride) {
+    // #1511: version on an authored-text change OR a mode switch, so switching
+    // between the three modes is recorded consistently with inherit/edit (AC12).
+    const prevMode = resolvePromptMode(cfg);
+    const nextMode = resolvePromptMode(fresh);
+    if (prevOverride !== nextOverride || prevMode !== nextMode) {
       captureAuthoredPromptEdit(id, {
         field: 'systemPrompt', oldContent: prevOverride, newContent: nextOverride, req,
-        action: typeof fresh.systemPrompt === 'string' ? 'edited' : 'inherited',
+        action: nextMode === PROMPT_MODES.INHERIT ? 'inherited' : 'edited',
+        ...(prevMode !== nextMode ? { note: `prompt mode ${prevMode} → ${nextMode}` } : {}),
       });
     }
-    let resolvedPrompt = '';
-    if (typeof fresh.systemPrompt === 'string') {
-      resolvedPrompt = fresh.systemPrompt;
-    } else if (fresh.parentTeamId) {
+    // Compose the effective prompt from the resolved mode (#1511): inherit → the
+    // team template; additional → team template + delimited addition; exclusive
+    // → the member's own text verbatim.
+    let teamTemplate = '';
+    if (fresh.parentTeamId) {
       const teamCfg = readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null);
       if (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') {
-        resolvedPrompt = teamCfg.systemPromptTemplate;
+        teamTemplate = teamCfg.systemPromptTemplate;
       }
     }
+    const resolvedPrompt = composeMemberPrompt(nextMode, teamTemplate, nextOverride);
     const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
     try {
       const tmp = promptPath + '.tmp';
@@ -2788,18 +2985,18 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
   const envId = teamCfg.environmentId;
   const env = envId ? loadEnvironment(envId) : null;
   if (!env) return { error: `Team '${teamId}' has no Working Environment` };
-  const repos = Array.isArray(env.repositories)
-    ? env.repositories
-    : (env.repository ? [env.repository] : []);
-  const primary = repos[0];
-  if (!primary?.url) return { error: `Team '${teamId}' environment has no repository configured` };
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(primary.url);
-  } catch (err) {
-    return { error: `Team repository URL is not parseable: ${err.message}` };
+  const primary = reposFromEnv(env)[0];
+  // A repo-less team (#1623) resolves empty repo vars rather than erroring, so
+  // roles can still be added to it after materialization.
+  let parsed = null;
+  if (primary?.url) {
+    try {
+      parsed = deriveRepoIdentity(primary.url);
+    } catch (err) {
+      return { error: `Team repository URL is not parseable: ${err.message}` };
+    }
   }
-  const branch = typeof primary.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(primary.branch)
+  const branch = primary?.url && typeof primary.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(primary.branch)
     ? primary.branch
     : 'main';
   const readyLabel = typeof overrides.readyLabel === 'string' && overrides.readyLabel.trim()
@@ -2810,10 +3007,7 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
     vars: {
       teamName: teamCfg.displayName || teamId,
       teamId,
-      repoFullName: `${parsed.org}/${parsed.repo}`,
-      repoOwner: parsed.org,
-      repoName: parsed.repo,
-      repoUrl: primary.url,
+      ...repoVars(parsed, primary?.url),
       branch,
       readyLabel,
       dispatchLabel,
@@ -3065,6 +3259,123 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
+});
+
+/* ─── Extract Agent Template (#1509) ────────────────────────────────── */
+
+// Snapshot a proven live agent — a standalone chat agent OR an individual team
+// member — into a reusable, team-neutral USER-tier Agent Template (the inverse
+// of team materialisation). One-shot: no ongoing link to the source agent, and
+// the source is left completely unchanged (AC-10). Whole team / orchestrator /
+// bp-instance agents are rejected defensively (AC-1) — the action is only
+// offered on standalone / team-member cards in the UI.
+//
+// Field mapping lives in the pure extract-template.js module; here we resolve
+// the impure inputs off disk: the EFFECTIVE prompt (rendered AGENT-PROMPT.md,
+// falling back to the config override — same definition the export path uses),
+// the effective skill grant (member override → own skills[] → parent team's),
+// the effective sessionPolicy, and the live triggers.json.
+app.post('/api/agents/:id/extract-template', (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  // Contain the source id before any fs read (path.resolve + path.relative is
+  // the in-flow sanitiser CodeQL recognises; AGENT_ID_RE alone isn't followed
+  // through the destructure). Every id-derived path is built from srcAgentDir.
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const srcAgentDir = path.resolve(agentsBaseDir, id);
+  const srcRel = path.relative(agentsBaseDir, srcAgentDir);
+  if (srcRel.startsWith('..') || path.isAbsolute(srcRel) || !srcRel) {
+    return res.status(400).json({ error: 'Invalid agent id' });
+  }
+  const srcCfg = readJsonFile(path.join(srcAgentDir, 'config.json'), null);
+  if (!srcCfg) return res.status(404).json({ error: 'Agent not found' });
+
+  // Eligibility (AC-1): only standalone `agent` and `team-member` sources.
+  const srcRole = srcCfg.role || 'agent';
+  if (srcRole !== 'agent' && srcRole !== 'team-member') {
+    return res.status(400).json({
+      error: 'Only standalone agents and team members can be extracted into a template.',
+      code: 'ineligible-role',
+    });
+  }
+
+  // Admin-gated over the source agent's owning team (AC-11), same rule as clone.
+  if (!canManageAgent(getScope(req), agentMetaForScope(srcCfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const nes = (v) => typeof v === 'string' && v.trim() !== '';
+  const { displayName, description, category, patternRole, includeTriggers } = req.body || {};
+  const templateId = typeof (req.body || {}).id === 'string' ? req.body.id.trim() : '';
+  if (!agentTemplateStore.TEMPLATE_ID_RE.test(templateId)) {
+    return res.status(400).json({
+      error: 'id must be a slug: lowercase letters, digits and hyphens, not starting with a hyphen',
+    });
+  }
+
+  // Effective prompt: the rendered AGENT-PROMPT.md (what the agent actually runs
+  // with — for a team member this is the applied override, not the base template
+  // it was assembled from), falling back to the stored override. Same source of
+  // truth as GET /api/process/template.
+  const effectivePrompt = readAgentSystemPrompt(id) || srcCfg.systemPrompt || '';
+
+  // Effective skill grant (orchestrator/skill-grants.js semantics): member
+  // override → own skills[] → parent team's skills[].
+  let parentCfg = null;
+  if (srcRole === 'team-member' && srcCfg.parentTeamId) {
+    const parentDir = path.resolve(agentsBaseDir, String(srcCfg.parentTeamId));
+    const parentRel = path.relative(agentsBaseDir, parentDir);
+    if (!parentRel.startsWith('..') && !path.isAbsolute(parentRel)) {
+      parentCfg = readJsonFile(path.join(parentDir, 'config.json'), null);
+    }
+  }
+  const effectiveSkills = Array.isArray(srcCfg.skillsOverride) ? srcCfg.skillsOverride
+    : Array.isArray(srcCfg.skills) ? srcCfg.skills
+      : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
+        : [];
+
+  const liveTriggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+
+  const template = extractTemplate.buildExtractedTemplate({
+    id: templateId,
+    displayName: nes(displayName) ? displayName.trim() : (srcCfg.displayName || id),
+    description,
+    // category/patternRole are user-editable; fall back to inference if omitted.
+    category: nes(category) ? category
+      : extractTemplate.inferTemplateCategory(srcCfg, liveTriggers),
+    patternRole: nes(patternRole) ? patternRole
+      : extractTemplate.inferPatternRole(srcCfg,
+        extractTemplate.inferTemplateCategory(srcCfg, liveTriggers)),
+    prompt: effectivePrompt,
+    skills: effectiveSkills,
+    sessionPolicy: srcCfg.sessionPolicy || 'persistent',
+    triggers: Array.isArray(liveTriggers) ? liveTriggers : [],
+    includeTriggers: includeTriggers === true,
+  });
+
+  const { valid, errors } = agentTemplateStore.validateTemplate(template, { requireId: true });
+  if (!valid) return res.status(400).json({ error: errors[0], errors });
+
+  // Collision across BOTH tiers — never silently overwrite (AC-9). The UI
+  // re-suggests an id on this code and lets the operator retry.
+  if (readTemplateFile(AGENT_TEMPLATES_DIR, templateId) || readTemplateFile(USER_AGENT_TEMPLATES_DIR, templateId)) {
+    return res.status(409).json({
+      error: `A template with id '${templateId}' already exists — choose a different id.`,
+      code: 'id-conflict',
+      templateId,
+    });
+  }
+
+  const file = agentTemplateStore.safeTemplateFile(USER_AGENT_TEMPLATES_DIR, templateId);
+  if (!file) return res.status(400).json({ error: 'Invalid template id' });
+  try {
+    fs.mkdirSync(USER_AGENT_TEMPLATES_DIR, { recursive: true });
+    writeJsonAtomic(file, template);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to save template: ${err.message}` });
+  }
+  res.status(201).json({ id: templateId, origin: 'user' });
 });
 
 /* ─── Agent Export / Import ─────────────────────────────────────────── */
@@ -3606,13 +3917,26 @@ app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (re
       const fresh = readJsonFile(cfgPath, cfg);
       const prev = resolveAuthoredPrompt(id, cfg);
       captureAuthoredPromptEdit(id, { field: 'systemPrompt', oldContent: prev.content, newContent: targetContent, req, action: 'reverted', note });
-      let resolvedPrompt = targetContent;
+      // #1511: the version-history field is the authored override text. Preserve
+      // the member's current mode when restoring it — an 'additional' member's
+      // restored text is its addition (re-composed with the team template), not a
+      // full override. An empty target always means inherit.
+      const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
+      const teamTemplate = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
+      const curMode = resolvePromptMode(cfg);
+      let resolvedPrompt;
       if (targetContent.length === 0) {
         delete fresh.systemPrompt; // inherit
-        const teamCfg = fresh.parentTeamId ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
-        resolvedPrompt = (teamCfg && typeof teamCfg.systemPromptTemplate === 'string') ? teamCfg.systemPromptTemplate : '';
-      } else {
+        delete fresh.promptMode;
+        resolvedPrompt = teamTemplate;
+      } else if (curMode === PROMPT_MODES.ADDITIONAL) {
         fresh.systemPrompt = targetContent;
+        fresh.promptMode = PROMPT_MODES.ADDITIONAL;
+        resolvedPrompt = composeMemberPrompt(PROMPT_MODES.ADDITIONAL, teamTemplate, targetContent);
+      } else {
+        fresh.systemPrompt = targetContent; // exclusive
+        delete fresh.promptMode;
+        resolvedPrompt = targetContent;
       }
       writeJsonAtomic(cfgPath, fresh);
       const promptPath = path.join(agentDir, 'AGENT-PROMPT.md');
@@ -3687,6 +4011,10 @@ function publicEndpointView(ep) {
   return {
     id: ep.id,
     name: ep.name || ep.id,
+    // System/Team scope so the chat selector can render the same scope badge as
+    // the header assist selector (#1670 AC3). Mirrors maskAssistProvider's rule:
+    // legacy endpoints with no `scope` field are treated as team-owned.
+    scope: ep.scope === 'system' ? 'system' : 'team',
     authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
     baseUrl: ep.baseUrl || '',
     defaultModelId: ep.defaultModelId || null,
@@ -5054,7 +5382,7 @@ async function augmentSkillRoles(graph, teamIds) {
 // (team-owned skills, phase 2): is the skill in the team agent's `skills[]`,
 // and which members actually carry it in their workspace? Member state is read
 // from the seeded-skills manifest the orchestrator maintains
-// (/workspace/agents/<id>/.aee/seeded-skills.json) — the grant list alone
+// (/workspace/agents/<id>/.agent-studio/seeded-skills.json) — the grant list alone
 // can't tell whether a running member was seeded before or after a name was
 // added. Also adds ghost nodes for adopted global skills that the lane filter
 // wouldn't render (active list ∌ origin team). Mutates `graph` in place; no-op
@@ -5074,13 +5402,13 @@ function augmentSkillActivation(graph, parsed) {
   } catch { /* no agents dir */ }
   const manifests = new Map(members.map(m => [
     m.id,
-    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'seeded-skills.json'), {}) || {},
+    readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'seeded-skills.json'), {}) || {},
   ]));
   // #776 §3: per-member auto-reconcile state so a stuck `pending` member surfaces
   // a Retry + the last error/time instead of a silent "Sync now".
   const reconciles = new Map(members.map(m => [
     m.id,
-    readJsonFile(path.join(AGENTS_DIR, m.id, '.aee', 'skill-reconcile.json'), {}) || {},
+    readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, m.id)), 'skill-reconcile.json'), {}) || {},
   ]));
 
   // Ghost nodes for active-list skills the lane filter didn't render
@@ -6079,6 +6407,55 @@ async function proxySkillActivation(req, res, active) {
 app.post('/api/knowledge/activate', apiLimiter, (req, res) => proxySkillActivation(req, res, true));
 app.post('/api/knowledge/deactivate', apiLimiter, (req, res) => proxySkillActivation(req, res, false));
 
+// ── Plugin grant (#1547) ────────────────────────────────────────────────────
+// The plugin sibling of the skill activation above, and routed the same way:
+// the caller names an agent construct, and whether that resolves to the team
+// route or the single-agent route is decided from its role, not by the client.
+// Everything else — granularity grantability, installed-ness, override
+// semantics — is re-enforced by the orchestrator, which owns the grant store.
+async function proxyPluginActivation(req, res, active) {
+  const { agentId, pluginId, scopeGranularity, includeMembers } = req.body || {};
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) {
+    return res.status(400).json({ error: 'agentId (agent or team construct) required' });
+  }
+  if (typeof pluginId !== 'string' || !PLUGIN_ID_RE.test(pluginId)) {
+    return res.status(400).json({ error: 'pluginId required (lowercase slug)' });
+  }
+  const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'agent not found' });
+  const scope = getScope(req);
+  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const route = cfg.role === 'team'
+    ? `/internal/teams/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`
+    : `/internal/agents/${encodeURIComponent(agentId)}/plugins/${active ? 'activate' : 'deactivate'}`;
+  try {
+    const resp = await fetch(`${orchestratorUrl}${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pluginId,
+        ...(typeof scopeGranularity === 'string' ? { scopeGranularity } : {}),
+        ...(Array.isArray(includeMembers) ? { includeMembers } : {}),
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.post('/api/agents/:id/plugins/activate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, true);
+});
+app.post('/api/agents/:id/plugins/deactivate', apiLimiter, (req, res) => {
+  req.body = { ...(req.body || {}), agentId: req.params.id };
+  return proxyPluginActivation(req, res, false);
+});
+
 // ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
 // Deliver the current source content to seeded copies through the orchestrator's
 // drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
@@ -6878,7 +7255,7 @@ app.post('/api/teams/:teamId/hill-climb/cards/:cardId/dismiss', apiLimiter, asyn
 // (#1225, concept §3.3). Runs a card's declared apply path through an existing
 // audited console choke-point *as the acting human* (this endpoint is itself a
 // mutating /api call, so `audit.auditMutations` records it under req.user; for a
-// prompt change the choke-point also stamps `.aee/prompt-history.json`), then
+// prompt change the choke-point also stamps `.agent-studio/prompt-history.json`), then
 // asks the orchestrator to record the applied card (timestamp + config-version
 // reference + baseline snapshot + undo payload) for #1226 to measure.
 //
@@ -7315,6 +7692,26 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   if (!aborted) res.end();
 });
 
+/* ─── Helper Chat (#1734, spec docs/helper-chat-concept.md) ──────────────
+ * POST /api/helper/chat — the in-console documentation assistant. Grounds the
+ * model on the vendored docs corpus (#1733, ./helper-chat/corpus.js) and streams
+ * the reply as an NDJSON delta/done stream, the same transport as the Flow
+ * Copilot above. Request-shape / provider errors stay plain JSON (400/403,
+ * headers not yet sent); once the stream opens, `{type:'delta',text}` then
+ * `{type:'done'}` (or `{type:'error',message}`) flow. The handler lives in its
+ * own module for testability (api.js has no isolated harness); the LLM transport
+ * helpers are injected from here. Auth is the global /api gate (auth.js), same as
+ * every other /api route including the copilot route above. */
+const helperChatHandler = createHelperChatHandler({
+  resolveAssistTarget,
+  buildMessagesUrl,
+  httpPostJson,
+  extractMessageText,
+  assistMeta,
+  sendAssistSelectionError,
+});
+app.post('/api/helper/chat', heavyLimiter, helperChatHandler);
+
 /* ─── Process-template registry (#419) ──────────────────────────────────
  * Curated whole-process templates — the process-level analogue of the
  * agent-template catalog. Seeded from orchestrator/skill-pool/process-templates/
@@ -7330,6 +7727,309 @@ app.get('/api/process-templates/:id', (req, res) => {
   if (!b) return res.status(404).json({ error: 'Process template not found' });
   res.json(b);
 });
+
+/* ─── Plugin registry (#1547) ────────────────────────────────────────────
+ * Reference plugins ship under plugins/<id>/ and are seeded into the pool
+ * (/pool/plugins/) by `make seed-plugins`. INSTALLING copies one into the
+ * operator registry (/workspace/plugins/<id>/), which is what makes the
+ * orchestrator start its broker sidecar.
+ *
+ * Install is a deliberate, System-Admin-only action rather than something the
+ * seed does implicitly: a plugin's sidecar holds real privilege (plugin #1
+ * mounts the host Podman socket), so a human confirms the declared
+ * capabilities before anything privileged runs. Installing still grants
+ * NOTHING to any agent — that is the separate grant step (§4.4). */
+const POOL_PLUGINS_DIR = path.join(POOL_DIR, 'plugins');
+const REGISTRY_PLUGINS_DIR = path.join(WORKSPACE, 'plugins');
+const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+// Read + validate one plugin.json under a base dir. Never throws; an invalid
+// plugin is reported WITH its errors rather than hidden, so an operator can see
+// why something they dropped in isn't installable.
+function readPluginDir(baseDir, id) {
+  if (!PLUGIN_ID_RE.test(id)) return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  const file = path.join(baseDir, id, 'plugin.json');
+  // Containment: id is regex-bounded above (no dots, no slashes), so the join
+  // cannot escape — re-checked here because this path is attacker-adjacent.
+  if (!path.resolve(file).startsWith(path.resolve(baseDir) + path.sep)) {
+    return { id, ok: false, errors: ['invalid plugin id'], manifest: null };
+  }
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (err) { return { id, ok: false, errors: [`cannot read plugin.json: ${err.message}`], manifest: null }; }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) { return { id, ok: false, errors: [`invalid JSON: ${err.message}`], manifest: null }; }
+  const result = validatePluginManifest(parsed);
+  if (result.ok && result.manifest.id !== id) {
+    return { id, ok: false, errors: [`manifest id "${result.manifest.id}" does not match directory "${id}"`], manifest: null };
+  }
+  return { id, ok: result.ok, errors: result.errors, manifest: result.manifest };
+}
+
+function listPluginDirs(baseDir) {
+  try {
+    return fs.readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort();
+  } catch { return []; }
+}
+
+async function notifyPluginReconcile() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins/reconcile`, { method: 'POST' });
+    return resp.ok ? await resp.json() : { error: `orchestrator returned ${resp.status}` };
+  } catch (err) {
+    // The registry write already succeeded; a down orchestrator just means the
+    // sidecar starts at its next boot reconcile. Surfaced, never fatal.
+    return { error: err.message };
+  }
+}
+
+app.get('/api/plugins', apiLimiter, async (req, res) => {
+  const installedIds = listPluginDirs(REGISTRY_PLUGINS_DIR);
+  const installed = installedIds.map((id) => readPluginDir(REGISTRY_PLUGINS_DIR, id));
+  const available = listPluginDirs(POOL_PLUGINS_DIR)
+    .filter((id) => !installedIds.includes(id))
+    .map((id) => readPluginDir(POOL_PLUGINS_DIR, id));
+
+  // Which sidecars are actually up — an installed plugin whose broker is not
+  // running is a real state an operator needs to see, not an error.
+  let running = {};
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
+    if (resp.ok) {
+      const body = await resp.json();
+      for (const p of body.plugins || []) running[p.id] = !!p.sidecarRunning;
+    }
+  } catch { /* orchestrator unreachable — report unknown rather than false */ }
+
+  res.json({
+    installed: installed.map((p) => ({ ...p, installed: true, sidecarRunning: running[p.id] ?? null })),
+    available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
+    canManage: !!getScope(req).all,
+  });
+});
+
+app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  const entry = readPluginDir(POOL_PLUGINS_DIR, id);
+  if (!entry.ok) {
+    return res.status(entry.errors[0] && /cannot read/.test(entry.errors[0]) ? 404 : 400)
+      .json({ error: `plugin '${id}' is not installable`, errors: entry.errors });
+  }
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (fs.existsSync(dest)) return res.status(409).json({ error: `plugin '${id}' is already installed` });
+  try {
+    fs.mkdirSync(REGISTRY_PLUGINS_DIR, { recursive: true });
+    fs.cpSync(path.join(POOL_PLUGINS_DIR, id), dest, { recursive: true });
+  } catch (err) {
+    return res.status(500).json({ error: `install failed: ${err.message}` });
+  }
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: true, manifest: entry.manifest, reconcile });
+});
+
+app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const dest = path.join(REGISTRY_PLUGINS_DIR, id);
+  if (!path.resolve(dest).startsWith(path.resolve(REGISTRY_PLUGINS_DIR) + path.sep)) {
+    return res.status(400).json({ error: 'invalid plugin id' });
+  }
+  if (!fs.existsSync(dest)) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  try {
+    fs.rmSync(dest, { recursive: true, force: true });
+  } catch (err) {
+    return res.status(500).json({ error: `uninstall failed: ${err.message}` });
+  }
+  // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
+  // action on the registry, not a mass revoke. The orchestrator's reconcile
+  // stops the orphaned sidecar, and a grant with no installed manifest seeds
+  // nothing and prompts nothing — so the agent simply stops being told about a
+  // capability whose broker is gone.
+  const reconcile = await notifyPluginReconcile();
+  res.json({ id, installed: false, reconcile });
+});
+
+/* ─── §4.8 live UI-extension stack (Network Plan Phase 2, #1562) ─────────
+ * The console makes the pure primitives in plugin-ui-proxy.js live: it proxies
+ * a UI-bearing plugin's own iframe UI from its sidecar, enforcing ui.routes[]
+ * minRole at the proxy (the plugin re-enforcing it is the SECOND defense line,
+ * §4.8), forwarding the authenticated user + effective role as SIGNED headers,
+ * and exposing the scopes a plugin was granted to. Sidecar truth (address,
+ * running) comes from the orchestrator — the admin-console image copies only
+ * api/*.js and never learns the container-naming rule. */
+
+// The shared plugin scope-token signing secret, written by the orchestrator at
+// /workspace/plugins/_secret (0600). The console only READS it — it must never
+// create one, or the two sides would diverge and every signature would fail to
+// verify at the broker. null when the orchestrator has not booted yet.
+function readPluginSigningSecret() {
+  try {
+    const raw = fs.readFileSync(path.join(REGISTRY_PLUGINS_DIR, '_secret'), 'utf8');
+    const secret = String(raw).trim();
+    return secret || null;
+  } catch { return null; }
+}
+
+async function orchestratorGetJson(pathname) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const resp = await fetch(`${orchestratorUrl}${pathname}`);
+  const body = await resp.json().catch(() => null);
+  return { status: resp.status, ok: resp.ok, body };
+}
+
+// GET /api/plugins/:id/scopes — the scopes the plugin was granted to, derived
+// (in plugin-ui-proxy.deriveScopeList) ONLY from grants that already exist and
+// then narrowed to the scopes the caller can see. Discovery is not a new read
+// privilege, and must not become a cross-team one either.
+app.get('/api/plugins/:id/scopes', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  let granted;
+  try {
+    granted = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/granted-agents`);
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  if (granted.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
+  const all = deriveScopeList(granted.body.grantedAgents, granted.body.directory);
+  res.json({ pluginId: id, scopes: visibleScopes(getScope(req), all) });
+});
+
+// ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
+// the session gate is applied explicitly (a session-less request is refused
+// here, before anything plugin-specific runs). Streamed rather than buffered so
+// document PUTs and future uploads work.
+function pluginUiProxy(req, res) {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+
+  // Installed + UI-bearing, or there is nothing to serve (an uninstalled or
+  // non-UI plugin 404s — AC).
+  const entry = readPluginDir(REGISTRY_PLUGINS_DIR, id);
+  if (!entry.ok || !entry.manifest || !entry.manifest.ui || !Array.isArray(entry.manifest.ui.routes)) {
+    return res.status(404).json({ error: `plugin '${id}' has no UI` });
+  }
+
+  // A globally-visible plugin's general UI is reachable by every authenticated
+  // user without a team grant (#1599). It never bypasses INSTALL (readPluginDir
+  // above already 404s an uninstalled plugin) and never widens agent capability.
+  const globalVisible = isGloballyVisibleUi(entry.manifest);
+
+  (async () => {
+    // Resolve the grant so the proxy stops serving the moment the last grant is
+    // revoked (AC), and so the viewer's effective role is judged only against
+    // teams the plugin is actually granted to.
+    let granted;
+    try {
+      granted = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/granted-agents`);
+    } catch (err) {
+      return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+    }
+    if (!granted.ok || !granted.body) return res.status(502).json({ error: 'could not resolve plugin grants' });
+    const grantedAgents = granted.body.grantedAgents || [];
+    // Without a grant, a non-global plugin has nothing to serve; a global one is
+    // served to every authenticated user (still install-gated, above).
+    if (!grantedAgents.length && !globalVisible) {
+      return res.status(403).json({ error: `plugin '${id}' is not granted to any agent` });
+    }
+    const grantedTeamIds = [...new Set(grantedAgents.map((g) => g.teamId).filter(Boolean))];
+
+    const scope = getScope(req);
+    // Grant-derived role first (so a team-admin/system-admin keeps elevated
+    // access); a purely-global viewer falls back to an ordinary team-member of
+    // the general routes, so an elevated route stays refused by enforceUiRoute.
+    const viewerRole = effectiveViewerRole(scope, grantedTeamIds, { globalVisible });
+    if (!viewerRole) return res.status(403).json({ error: 'you do not have access to this plugin' });
+
+    const subPath = uiSubPath(req.originalUrl || req.url, id);
+    const decision = enforceUiRoute(entry.manifest, subPath, viewerRole);
+    if (!decision.allowed) {
+      // The refusal comes from the CONSOLE proxy, not the sidecar (§4.8 — the
+      // sidecar enforcing it again is the second line, not the first).
+      return res.status(403).json({ error: `refused: ${decision.reason}`, minRole: decision.minRole });
+    }
+
+    // Sidecar address + liveness from the orchestrator.
+    let ep;
+    try {
+      ep = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/ui-endpoint`);
+    } catch (err) {
+      return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+    }
+    if (ep.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+    if (!ep.ok || !ep.body || !ep.body.endpoint) return res.status(502).json({ error: 'no sidecar endpoint' });
+    if (!ep.body.running) return res.status(503).json({ error: `plugin '${id}' broker is not running` });
+
+    const secret = readPluginSigningSecret();
+    if (!secret) return res.status(503).json({ error: 'plugin signing secret unavailable' });
+    const viewer = {
+      sub: (req.user && req.user.username) || '',
+      role: viewerRole,
+      teamIds: scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t)),
+    };
+    const signed = signViewerHeaders(viewer, secret);
+
+    // Stream-proxy to the sidecar's UI mount. The broker serves its UI under
+    // /ui, so the console-relative sub-path maps onto <endpoint>/ui<subPath>.
+    let target;
+    try { target = new URL(`${ep.body.endpoint}/ui${subPath === '/' ? '' : subPath}`); }
+    catch { return res.status(502).json({ error: 'bad sidecar endpoint' }); }
+    // Carry the original query string through unchanged.
+    const qs = (req.originalUrl || req.url).split('?')[1];
+    if (qs) target.search = qs;
+
+    const lib = target.protocol === 'https:' ? require('https') : require('http');
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers || {})) {
+      const lk = k.toLowerCase();
+      // Never forward the console session cookie, and strip any inbound signed
+      // identity header so a client cannot inject its own before we sign.
+      if (lk === 'cookie' || lk === 'content-length' || lk.startsWith('x-aee-plugin-')) continue;
+      headers[k] = v;
+    }
+    Object.assign(headers, signed, { host: target.host });
+
+    // express.json() already consumed a JSON body upstream (it is mounted
+    // globally, before any route). Re-serialise it so a document PUT still
+    // reaches the sidecar; any other content type was left untouched and is
+    // streamed straight through.
+    const parsedBody = req._body === true;
+    let payload = null;
+    if (parsedBody) {
+      payload = Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body == null ? {} : req.body));
+      headers['content-length'] = String(payload.length);
+    }
+
+    const upstream = lib.request(
+      { hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers },
+      (up) => {
+        res.status(up.statusCode || 502);
+        for (const [k, v] of Object.entries(up.headers || {})) {
+          if (k.toLowerCase() === 'transfer-encoding') continue;
+          res.setHeader(k, v);
+        }
+        up.pipe(res);
+      },
+    );
+    upstream.on('error', (err) => {
+      if (!res.headersSent) res.status(502).json({ error: `sidecar proxy failed: ${err.message}` });
+    });
+    if (parsedBody) { upstream.end(payload); }
+    else { req.pipe(upstream); }
+  })();
+}
+
+app.all('/plugins/:id/ui', spaLimiter, auth.requireAuth, pluginUiProxy);
+app.all('/plugins/:id/ui/*', spaLimiter, auth.requireAuth, pluginUiProxy);
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
  * A draft is an editable process-template bundle that exists before any team
@@ -7855,7 +8555,7 @@ function gatherSkillCopies(name, scope) {
     if (drel.startsWith('..') || path.isAbsolute(drel)) continue;
     if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
     lazyStampAgentSkill(dir, agentId);
-    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
+    const seededManifest = readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, agentId)), 'seeded-skills.json'), {}) || {};
     const seeded = seededManifest[name];
     const origin = seeded && seeded.tier
       ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
@@ -7903,9 +8603,9 @@ app.get('/api/skills', (req, res) => {
     if (!visibleAgent(scope, cfg)) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
     // A seeded agent copy anchors its drift on the source hash recorded at seed
-    // time in .aee/seeded-skills.json — NOT on the copy's own skill.json origin
+    // time in .agent-studio/seeded-skills.json — NOT on the copy's own skill.json origin
     // (agent-tier dirs are stamped without one). Build a synthetic origin from it.
-    const seededManifest = readJsonFile(path.join(AGENTS_DIR, agentId, '.aee', 'seeded-skills.json'), {}) || {};
+    const seededManifest = readJsonFile(path.join(resolveAgentStateDir(path.join(AGENTS_DIR, agentId)), 'seeded-skills.json'), {}) || {};
     try {
       fs.readdirSync(agentSkillsDir).forEach(name => {
         const skillMd = path.join(agentSkillsDir, name, 'SKILL.md');
@@ -9375,6 +10075,13 @@ function validateModels(models) {
   if (!Array.isArray(models)) return 'models must be an array';
   for (const m of models) {
     if (!m || typeof m.id !== 'string' || !m.id.trim()) return 'every model needs a non-empty id';
+    // contextWindow is optional (populated by discovery, #1717) but when set it
+    // must be a positive number — a malformed value would surface as a bogus
+    // limit in the chat header.
+    if (m.contextWindow !== undefined && m.contextWindow !== null
+        && !(typeof m.contextWindow === 'number' && m.contextWindow > 0)) {
+      return 'contextWindow must be a positive number when set';
+    }
   }
   return null;
 }
@@ -9772,6 +10479,27 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   res.json({ respawned, skipped });
 });
 
+// Pull a human-readable failure reason out of a proxy's error response body and
+// combine it with the HTTP status. Without this a LiteLLM key whose budget is
+// exhausted answers /v1/models with a 400 whose body says exactly why
+// ("Budget has been exceeded! …") — but the probe used to drop the body and
+// surface a bare "HTTP 400", so the operator had no idea it was a spend cap.
+// Shapes handled: LiteLLM/OpenAI `{ error: { message, type, code } }`, a plain
+// `{ error: "msg" }` or `{ message: "msg" }`, and a non-JSON string body.
+function describeProbeFailure(status, body) {
+  let detail = null;
+  if (body && typeof body === 'object') {
+    const e = body.error;
+    if (e && typeof e === 'object' && typeof e.message === 'string') detail = e.message;
+    else if (typeof e === 'string') detail = e;
+    else if (typeof body.message === 'string') detail = body.message;
+  } else if (typeof body === 'string' && body.trim()) {
+    detail = body.trim();
+  }
+  const base = status ? `HTTP ${status}` : 'request failed';
+  return detail ? `${base} — ${detail}` : base;
+}
+
 // Shared between the stored-endpoint routes (use the persisted token) and the
 // stateless probe routes (use the token from the request body, so the form can
 // test a draft endpoint before saving). Subscription-OAuth endpoints always
@@ -9798,7 +10526,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
     ok,
     url,
     status: result.status,
-    error: result.error || (ok ? null : `HTTP ${result.status}`),
+    error: result.error || (ok ? null : describeProbeFailure(result.status, result.body)),
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
@@ -9809,25 +10537,16 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
-    return { error: result.error || `HTTP ${result.status}`, url, status: result.status };
+    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
-  // model_info on each entry. Normalize to our { id, displayName, kind?, … }.
+  // model_info on each entry. Normalize to our { id, displayName, kind?,
+  // contextWindow? } — capturing the provider-reported input context window
+  // (#1717) so the real limit, not a guessed 200K, drives the chat header.
   const raw = Array.isArray(result.body?.data) ? result.body.data
             : Array.isArray(result.body)       ? result.body
             : [];
-  const models = raw
-    .map(m => {
-      const id = typeof m === 'string' ? m : m?.id;
-      if (!id) return null;
-      const lower = String(id).toLowerCase();
-      let kind;
-      if (lower.includes('opus'))   kind = 'opus';
-      else if (lower.includes('sonnet')) kind = 'sonnet';
-      else if (lower.includes('haiku'))  kind = 'haiku';
-      return { id, displayName: id, ...(kind ? { kind } : {}) };
-    })
-    .filter(Boolean);
+  const models = normalizeDiscoveredModels(raw);
   return { url, count: models.length, models };
 }
 
@@ -11199,6 +11918,76 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   });
 });
 
+// One-shot: create a repo-less Working Environment bound to a chosen Model
+// Provider plus one standalone chat agent — no GitHub URL, SSH key, or token
+// (#1624). The credential-free sibling of POST /api/quickstart; it deliberately
+// leaves that repo-first flow untouched. Pure validation + id derivation live in
+// quickstart-llm.js; this handler resolves the live registry and writes the
+// env / agent.
+app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
+  const { displayName, llmEndpointId } = req.body || {};
+
+  // Resolve the provider against the live registry, then validate purely. An
+  // empty llmEndpointId yields { llmEndpointId: null } (no error), which the
+  // validator rejects as "select a provider".
+  const binding = resolveLlmBinding(llmEndpointId, undefined);
+  const validated = validateQuickstartLlmInput({
+    displayName,
+    binding,
+    endpointCount: listLlmEndpoints().length,
+  });
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error, ...(validated.code ? { code: validated.code } : {}) });
+  }
+  const { name } = validated;
+
+  // One repo-less environment per agent (isolation, matching the repo-first flow).
+  const envId = llmEnvId(name, id => !!loadEnvironment(id));
+  const env = {
+    id: envId,
+    name,
+    description: `LLM-only environment for ${name}`,
+    repositories: [],
+    githubTokenId: null,
+    llmEndpointId: validated.llmEndpointId,
+    defaultModelId: validated.defaultModelId,
+    additionalContext: '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(envId, env);
+
+  const agentId = llmAgentId(name, id => fs.existsSync(path.join(AGENTS_DIR, id)));
+  const systemPrompt = quickstartLlmSystemPrompt(name);
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+
+  let agentResp;
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: agentId,
+        displayName: name,
+        role: 'agent',
+        systemPrompt,
+        environmentId: envId,
+      }),
+    });
+    agentResp = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json(agentResp);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+
+  res.status(201).json({
+    reused: false,
+    mode: 'llm',
+    environment: { id: envId, name: env.name, reused: false },
+    agent: { id: agentId, displayName: name },
+    seed: agentResp,
+  });
+});
+
 /* ─── Team-Setup wizard ────────────────────────────────────────────────
  *
  * One-shot endpoint that materialises an entire team of role-specialised
@@ -11263,15 +12052,6 @@ function loadAgentTemplate(id) {
   if (!agentTemplateStore.TEMPLATE_ID_RE.test(id || '')) return null;
   return readTemplateFile(USER_AGENT_TEMPLATES_DIR, id)
     || readTemplateFile(AGENT_TEMPLATES_DIR, id);
-}
-
-// Substitute `{{varname}}` placeholders. Unknown vars stay literal so a
-// rogue template field doesn't silently disappear into "undefined".
-function applyTemplateVars(s, vars) {
-  if (typeof s !== 'string') return s;
-  return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>
-    vars[k] !== undefined ? String(vars[k]) : `{{${k}}}`,
-  );
 }
 
 // Read-only template summary for the wizard's role-cards step. Strips the
@@ -11422,12 +12202,19 @@ app.delete('/api/agent-templates/:id', (req, res) => {
 // its role-specific prompt; members that don't override inherit this text
 // and pick up edits via /api/agents/:id PUT (systemPromptTemplate).
 function defaultTeamPrompt(vars) {
-  return [
-    `You are a member of the team **${vars.teamName}**, which collaborates on the repository \`${vars.repoFullName}\`.`,
+  // A repo-less team (#1623) has no repository to collaborate on and no GitHub
+  // hand-off surface, so drop the repo sentence and the gh-as-agent line.
+  const lines = [
+    vars.repoFullName
+      ? `You are a member of the team **${vars.teamName}**, which collaborates on the repository \`${vars.repoFullName}\`.`
+      : `You are a member of the team **${vars.teamName}**.`,
     ``,
     `Other team members may have different responsibilities (requirements gathering, implementation, reviews, documentation). Stay in your own role and do not overlap with the others.`,
-    `When you create PRs, issues or comments on GitHub, use \`gh-as-agent\` so your identity is stamped cleanly.`,
-  ].join('\n');
+  ];
+  if (vars.repoFullName) {
+    lines.push(`When you create PRs, issues or comments on GitHub, use \`gh-as-agent\` so your identity is stamped cleanly.`);
+  }
+  return lines.join('\n');
 }
 
 // GitHub label names accept basically anything except they must be 1–50
@@ -11641,43 +12428,51 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // Resolve a reused Working Environment (if any) into the repository +
   // credential inputs the rest of the pipeline expects. The env was validated
   // when it was created, so we trust its stored repo/token here.
+  // A reused env may legitimately carry ZERO repositories (#1623): the team and
+  // its members are then created repo-less — nothing is cloned and GitHub
+  // hand-off channels are unavailable. Only the reused-env path supports this;
+  // the legacy auto-create path still needs a repo to build the env from.
+  let repoLess = false;
   if (environmentId) {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return res.status(400).json({ error: `Working environment '${environmentId}' not found` });
     }
-    const repos = Array.isArray(reusedEnv.repositories)
-      ? reusedEnv.repositories
-      : (reusedEnv.repository ? [reusedEnv.repository] : []);
-    const primary = repos[0];
-    if (!primary?.url) {
-      return res.status(400).json({ error: `Working environment '${environmentId}' has no repository configured` });
+    const primary = reposFromEnv(reusedEnv)[0];
+    if (primary?.url) {
+      repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    } else {
+      repoLess = true;
+      repository = null;
     }
-    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
     githubTokenId = reusedEnv.githubTokenId || null;
   }
 
-  if (!repository?.url) {
-    return res.status(400).json({ error: 'repository.url required' });
+  if (!repoLess) {
+    if (!repository?.url) {
+      return res.status(400).json({ error: 'repository.url required' });
+    }
+    // The legacy path (no environmentId) auto-creates an env from an SSH deploy
+    // key, so sshKeyId stays mandatory there. A reused env may clone over HTTPS
+    // with just a PAT, so sshKeyId is optional in that path.
+    if (!environmentId && !repository.sshKeyId) {
+      return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
+    }
   }
-  // The legacy path (no environmentId) auto-creates an env from an SSH deploy
-  // key, so sshKeyId stays mandatory there. A reused env may clone over HTTPS
-  // with just a PAT, so sshKeyId is optional in that path.
-  if (!environmentId && !repository.sshKeyId) {
-    return res.status(400).json({ error: 'repository.url and repository.sshKeyId required' });
+  let parsed = null;
+  if (!repoLess) {
+    try {
+      parsed = deriveRepoIdentity(repository.url);
+    } catch (err) {
+      return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
+    }
   }
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(repository.url);
-  } catch (err) {
-    return res.status(400).json({ error: `Invalid repository URL: ${err.message}` });
-  }
-  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+  const branch = !repoLess && typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
     ? repository.branch
     : 'main';
 
   // ── 2. Credentials must already exist (Pre-Flight) ────────────────
-  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
   }
   // The auto-created env path requires a GitHub PAT. A reused env may legitimately
@@ -11912,10 +12707,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const vars = {
     teamName,
     teamId,
-    repoFullName: `${parsed.org}/${parsed.repo}`,
-    repoOwner: parsed.org,
-    repoName: parsed.repo,
-    repoUrl: repository.url,
+    ...repoVars(parsed, repository?.url),
     branch,
     readyLabel,
     dispatchLabel: effectiveDispatchLabel,
@@ -11991,7 +12783,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
@@ -12263,39 +13055,45 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
 
   // Reuse an existing Working Environment when environmentId is supplied.
+  // A reused env may carry ZERO repositories (#1623) — the team is then created
+  // repo-less (nothing cloned, no GitHub hand-offs). Mirrors POST /api/teams.
+  let repoLess = false;
   if (environmentId) {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return fail(400, `Working environment '${environmentId}' not found`);
     }
-    const repos = Array.isArray(reusedEnv.repositories)
-      ? reusedEnv.repositories
-      : (reusedEnv.repository ? [reusedEnv.repository] : []);
-    const primary = repos[0];
-    if (!primary?.url) {
-      return fail(400, `Working environment '${environmentId}' has no repository configured`);
+    const primary = reposFromEnv(reusedEnv)[0];
+    if (primary?.url) {
+      repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
+    } else {
+      repoLess = true;
+      repository = null;
     }
-    repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
     githubTokenId = reusedEnv.githubTokenId || null;
   }
 
-  if (!repository?.url) {
-    return fail(400, 'repository.url required');
+  if (!repoLess) {
+    if (!repository?.url) {
+      return fail(400, 'repository.url required');
+    }
+    if (!environmentId && !repository.sshKeyId) {
+      return fail(400, 'repository.url and repository.sshKeyId required');
+    }
   }
-  if (!environmentId && !repository.sshKeyId) {
-    return fail(400, 'repository.url and repository.sshKeyId required');
+  let parsed = null;
+  if (!repoLess) {
+    try {
+      parsed = deriveRepoIdentity(repository.url);
+    } catch (err) {
+      return fail(400, `Invalid repository URL: ${err.message}`);
+    }
   }
-  let parsed;
-  try {
-    parsed = deriveRepoIdentity(repository.url);
-  } catch (err) {
-    return fail(400, `Invalid repository URL: ${err.message}`);
-  }
-  const branch = typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
+  const branch = !repoLess && typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
     ? repository.branch
     : 'main';
 
-  if (repository.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
+  if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
   }
   if (!environmentId) {
@@ -12495,9 +13293,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const effectiveDispatchLabel = hasDispatcher ? dispatchLabel : readyLabel;
   const vars = {
     teamName, teamId,
-    repoFullName: `${parsed.org}/${parsed.repo}`,
-    repoOwner: parsed.org, repoName: parsed.repo,
-    repoUrl: repository.url,
+    ...repoVars(parsed, repository?.url),
     branch, readyLabel,
     dispatchLabel: effectiveDispatchLabel,
     maxParallel,
@@ -12612,7 +13408,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         id: envId,
         name: teamName,
         description: `Working environment for team '${teamName}'.`,
-        repositories: [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }],
+        repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
@@ -12929,7 +13725,7 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -12968,10 +13764,14 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
   res.status(201).json(normalizeCredential(entry));
 });
 
@@ -12984,7 +13784,7 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -13019,10 +13819,14 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
   saveSshKeysIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-ssh-key-set');
   res.status(201).json({ ...normalizeCredential(entry), publicKey: pubText });
 });
 
@@ -13065,6 +13869,65 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// Rotate a PERSONAL SSH key in place (#1568 AC4): replace the stored private key
+// — pasted or server-generated — while keeping the same credential id, name and
+// owner. Personal-tier ONLY: a team/system key is deliberately rotated by
+// creating a new credential and repointing the environment (see the admin page
+// copy), so an in-place secret swap that silently changes what many agents use
+// is refused here. Owner-gated via canManageCredential — the personal tier has
+// no scope.all bypass, so not even a System Admin can rotate someone else's key.
+app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const scope = getScope(req);
+  const keys = listSshKeys();
+  const cred = keys.find(k => k.id === id);
+  if (!cred) return res.status(404).json({ error: 'SSH key not found' });
+  if (normalizeCredential(cred).scope !== 'personal') {
+    return res.status(400).json({
+      error: 'Only a personal SSH key can be rotated in place; rotate a team/system key by creating a new one and repointing the environment.',
+      code: 'rotate-personal-only',
+    });
+  }
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+
+  const { privateKey, generate, comment } = req.body || {};
+  // Re-assert the strict id allowlist directly before the fs sink so CodeQL
+  // recognises the path-injection sanitizer (same pattern as the create routes).
+  if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
+  const keyPath = path.join(SSH_KEYS_DIR, path.basename(id));
+
+  let fingerprint, publicKey;
+  if (generate) {
+    const safeComment = (typeof comment === 'string' && comment.trim()) || `aee-${id}`;
+    const { privateKey: privText, publicKey: pubText, pubBlob } = generateOpensshEd25519Keypair(safeComment);
+    fs.writeFileSync(keyPath, privText, { mode: 0o600 });
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+    fingerprint = sshFingerprintFromPubBlob(pubBlob);
+    publicKey = pubText;
+  } else {
+    if (!privateKey || typeof privateKey !== 'string') {
+      return res.status(400).json({ error: 'privateKey (string) is required, or set generate:true' });
+    }
+    const trimmed = privateKey.trim();
+    if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(trimmed)) {
+      return res.status(400).json({ error: 'privateKey does not look like an SSH private key' });
+    }
+    fs.writeFileSync(keyPath, trimmed.endsWith('\n') ? trimmed : trimmed + '\n', { mode: 0o600 });
+    try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+    fingerprint = sshKeyFingerprint(trimmed);
+  }
+
+  const updated = { ...cred, fingerprint, rotatedAt: new Date().toISOString() };
+  saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
+  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
+  notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
+  const body = normalizeCredential(updated);
+  res.status(200).json(publicKey ? { ...body, publicKey } : body);
+});
+
 /* ─── GitHub Tokens ─────────────────────────────────────────────────── */
 
 app.get('/api/github-tokens', (req, res) => {
@@ -13083,7 +13946,7 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -13120,11 +13983,15 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
   saveGithubTokensIndex([...existing, entry]);
+  // Setting a personal credential also propagates to the owner's running agents
+  // (#1570 Phase 4) — a no-op for a team/system credential (falsy userId).
+  if (entry.scope === 'personal') notifyOwnerCredentialChange(entry.userId, 'personal-github-token-set');
   res.status(201).json(normalizeCredential(entry));
 });
 
@@ -13268,6 +14135,49 @@ app.delete('/api/jira-tokens/:id', apiLimiter, (req, res) => {
   try { fs.unlinkSync(path.join(JIRA_TOKENS_DIR, path.basename(id))); } catch { /* ignore */ }
   saveJiraTokensIndex(tokens.filter(t => t.id !== id));
   res.status(204).end();
+});
+
+// Rotate a PERSONAL GitHub token in place (#1568 AC4) — same model as the SSH
+// rotate above: replace the stored secret, recompute preview + fingerprint, keep
+// the id/name/owner. Personal-tier ONLY and owner-gated (no scope.all bypass).
+app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
+  const { id } = req.params;
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const scope = getScope(req);
+  const tokens = listGithubTokens();
+  const cred = tokens.find(t => t.id === id);
+  if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
+  if (normalizeCredential(cred).scope !== 'personal') {
+    return res.status(400).json({
+      error: 'Only a personal GitHub token can be rotated in place; rotate a team/system token by creating a new one and repointing the environment.',
+      code: 'rotate-personal-only',
+    });
+  }
+  if (!canManageCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  }
+  const { token } = req.body || {};
+  if (!token || typeof token !== 'string') return res.status(400).json({ error: 'token (string) is required' });
+  const trimmed = token.trim();
+  if (!/^(github_pat_|ghp_|gho_|ghs_|ghu_|ghr_)[A-Za-z0-9_]{20,}$/.test(trimmed)) {
+    return res.status(400).json({
+      error: "token does not look like a GitHub token (expected prefix github_pat_, ghp_, gho_, ghs_, ghu_ or ghr_)",
+    });
+  }
+  if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
+  const tokenPath = path.join(GH_TOKENS_DIR, path.basename(id));
+  fs.writeFileSync(tokenPath, trimmed, { mode: 0o600 });
+  try { fs.chmodSync(tokenPath, 0o600); } catch { /* best effort */ }
+  const updated = {
+    ...cred,
+    preview: githubTokenPreview(trimmed),
+    fingerprint: githubTokenFingerprint(trimmed),
+    rotatedAt: new Date().toISOString(),
+  };
+  saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
+  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
+  notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
+  res.status(200).json(normalizeCredential(updated));
 });
 
 /* ─── GitHub repo probe — wizard helper ───────────────────────────────
@@ -13809,9 +14719,20 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
-  const { body } = req.body || {};
+  const { body, extraContent } = req.body || {};
   if (typeof body !== 'string' || !body.trim()) {
     return res.status(400).json({ error: 'body (non-empty string) is required' });
+  }
+
+  // Optional structured payload merged onto the outgoing message content. Only
+  // `io.aee.*` keys are copied through (e.g. the quick-reply answer identifier
+  // `io.aee.ask-answer`, #1663) — this endpoint never lets a caller override
+  // msgtype/body/format or set arbitrary Matrix content fields.
+  const content = { msgtype: 'm.text', body };
+  if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
+    for (const [k, v] of Object.entries(extraContent)) {
+      if (k.startsWith('io.aee.')) content[k] = v;
+    }
   }
 
   const txnId = crypto.randomUUID();
@@ -13820,7 +14741,7 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       {
         method: 'PUT',
-        body: { msgtype: 'm.text', body },
+        body: content,
       });
     if (resp.status >= 400) {
       return res.status(resp.status).json(resp.data);
@@ -14600,65 +15521,93 @@ app.get('/api/agents/:agentId/workspace/tree', apiLimiter, (req, res) => {
   res.json({ path: echoPath, items });
 });
 
-// Git info — branch + dirty status for all git repos in the agent workspace.
-function readGitRepoInfo(repoPath) {
-  let branch = null;
+// Read the checked-out branch from a repo's .git/HEAD — a plain file read, no
+// git process. Returns the branch name, a short SHA for a detached HEAD, or
+// null when HEAD is unreadable / not a recognisable ref.
+function readRepoBranch(repoPath) {
   try {
     const headContent = fs.readFileSync(path.join(repoPath, '.git', 'HEAD'), 'utf8').trim();
     if (headContent.startsWith('ref: refs/heads/')) {
-      branch = headContent.slice('ref: refs/heads/'.length);
-    } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
-      branch = headContent.slice(0, 7); // detached HEAD
+      return headContent.slice('ref: refs/heads/'.length);
     }
-  } catch { return null; }
-
-  let isDirty = false;
-  let changesCount = 0;
-  try {
-    const result = spawnSync('git', ['status', '--porcelain'], {
-      cwd: repoPath, timeout: 5000, encoding: 'utf8',
-    });
-    if (result.status === 0 && result.stdout) {
-      const lines = result.stdout.trim().split('\n').filter(Boolean);
-      changesCount = lines.length;
-      isDirty = changesCount > 0;
+    if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+      return headContent.slice(0, 7); // detached HEAD
     }
-  } catch { /* ignore */ }
-
-  return { branch, isDirty, changesCount };
+  } catch { /* unreadable HEAD → unknown branch */ }
+  return null;
 }
 
-function getAgentGitRepos(agentRoot) {
+// Discover the git repos in an agent workspace using filesystem reads only
+// (readdir + .git/HEAD) — deliberately no `git` spawn, so this stays cheap on
+// the request path (#1683). Returns [{ repoPath, abs, branch }]. Dirty state
+// (which needs an actual `git status`) is computed separately and async by the
+// git-info endpoint, so the repo-resolution and git-status paths never shell
+// out just to enumerate repos.
+function discoverGitRepos(agentRoot) {
   const repos = [];
-  // Check the workspace root itself
+  // The workspace root itself may be a repo.
   if (fs.existsSync(path.join(agentRoot, '.git', 'HEAD'))) {
-    const info = readGitRepoInfo(agentRoot);
-    if (info) repos.push({ repoPath: '.', ...info });
+    repos.push({ repoPath: '.', abs: agentRoot, branch: readRepoBranch(agentRoot) });
   }
-  // Scan first-level subdirectories
+  // Scan first-level subdirectories.
   let entries = [];
   try { entries = fs.readdirSync(agentRoot, { withFileTypes: true }); } catch { return repos; }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const fullPath = path.join(agentRoot, entry.name);
     if (fs.existsSync(path.join(fullPath, '.git', 'HEAD'))) {
-      const info = readGitRepoInfo(fullPath);
-      if (info) repos.push({ repoPath: entry.name, ...info });
+      repos.push({ repoPath: entry.name, abs: fullPath, branch: readRepoBranch(fullPath) });
     }
   }
   return repos;
 }
 
-app.get('/api/agents/:agentId/git-info', (req, res) => {
+// Dirty state (isDirty / changesCount) for one repo. Async so the git-info poll
+// (every 30s per open chat) never blocks the single event loop the console
+// proxies through. `abs` must be a sanitised repo dir (runGitAsync re-validates
+// the cwd). Failures degrade to "clean" rather than throwing.
+async function readGitDirty(abs) {
+  const res = await runGitAsync(['status', '--porcelain'], abs, { maxBuffer: 1024 * 1024 });
+  if (res.error || res.status !== 0) return { isDirty: false, changesCount: 0 };
+  const lines = res.stdout.toString('utf8').trim().split('\n').filter(Boolean);
+  return { isDirty: lines.length > 0, changesCount: lines.length };
+}
+
+// Short-lived cache for git-info dirty results: collapses concurrent pollers
+// (multiple browser tabs on the same agent) onto one `git status` and serves a
+// recently-computed result without re-spawning (#1683). Branch is read fresh
+// from .git/HEAD on every request (cheap) and never cached.
+const gitInfoCache = createTtlCache({
+  ttlMs: Number.parseInt(process.env.AEE_GIT_INFO_TTL_MS, 10) || 5000,
+});
+
+app.get('/api/agents/:agentId/git-info', async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  // getAgentGitRepos expects an absolute, sanitised path (post-#116). Use
-  // safeAgentPath so a bare agentId can't escape the agents tree.
+  // safeAgentPath returns the realpath-validated agent root (post-#116), so a
+  // bare agentId can't escape the agents tree.
   const agentRoot = safeAgentPath(agentId, '');
   if (!agentRoot) {
     return res.status(404).json({ error: 'Agent not found' });
   }
-  res.json({ repos: getAgentGitRepos(agentRoot) });
+  try {
+    const repos = discoverGitRepos(agentRoot);
+    const out = await Promise.all(repos.map(async (r) => {
+      const dirty = await gitInfoCache.getOrCompute(
+        `${agentId}::${r.repoPath}`,
+        () => readGitDirty(r.abs),
+      );
+      return {
+        repoPath: r.repoPath,
+        branch: r.branch,
+        isDirty: dirty.isDirty,
+        changesCount: dirty.changesCount,
+      };
+    }));
+    res.json({ repos: out });
+  } catch {
+    res.status(500).json({ error: 'git-info-failed' });
+  }
 });
 
 // Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
@@ -14999,18 +15948,18 @@ const GIT_UNTRACKED_PROBE  = 1024 * 1024;     // bytes scanned for line/binary c
 // without distinguishing between traversal, missing, and non-repo cases.
 //
 // The user-supplied repoPath is never passed to a path operation directly:
-// it must match one of the repos discovered by getAgentGitRepos(), which
+// it must match one of the repos discovered by discoverGitRepos(), which
 // scans the agent root with stat-only filesystem reads. Once allowlisted,
 // the path is reconstructed through safeAgentPath, the canonical path
 // sanitizer in this module.
 function resolveAgentRepo(agentId, repoPath) {
   const wanted = typeof repoPath === 'string' && repoPath ? repoPath : '.';
-  // getAgentGitRepos expects the sanitised absolute agent root, not the bare
+  // discoverGitRepos expects the sanitised absolute agent root, not the bare
   // id. Without this, the discovery scan operates on a relative path and
   // silently returns []  → every repo lookup misses → diff view is empty.
   const agentRoot = safeAgentPath(agentId, '');
   if (!agentRoot) return null;
-  const repos = getAgentGitRepos(agentRoot);
+  const repos = discoverGitRepos(agentRoot);
   const found = repos.find(r => r.repoPath === wanted);
   if (!found) return null;
   return safeAgentPath(agentId, found.repoPath === '.' ? '' : found.repoPath);
@@ -15066,15 +16015,38 @@ function assertSafeGitCwd(cwd) {
   return realCwd;
 }
 
-function runGit(args, cwd, { maxBuffer = GIT_DIFF_MAX_BUFFER } = {}) {
+// Async git runner (#1683). Mirrors spawnSync's return shape
+// ({ status, stdout, stderr, error }) but uses execFile so a slow git call
+// never blocks the event loop the admin console proxies through. `.status` is
+// the numeric exit code (or null on a spawn/timeout/buffer failure); `.error`
+// is set only for such a non-exit failure — exactly how spawnSync populated
+// `.error`. It never rejects for a non-zero exit (e.g. `diff --no-index` → 1),
+// so callers branch on `.status` just as they did with spawnSync.
+// assertSafeGitCwd() throws synchronously for an invalid cwd (unchanged from
+// runGit); call sites run inside a try/catch that answers 500.
+function runGitAsync(args, cwd, { maxBuffer = GIT_DIFF_MAX_BUFFER } = {}) {
   const safeCwd = assertSafeGitCwd(cwd);
-  return spawnSync('git', args, {
-    cwd: safeCwd,
-    timeout: GIT_SPAWN_TIMEOUT_MS,
-    maxBuffer,
-    encoding: 'buffer',
-    // LC_ALL=C keeps porcelain output stable across host locales.
-    env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+  return new Promise((resolve) => {
+    execFile('git', args, {
+      cwd: safeCwd,
+      timeout: GIT_SPAWN_TIMEOUT_MS,
+      maxBuffer,
+      encoding: 'buffer',
+      // LC_ALL=C keeps porcelain output stable across host locales.
+      env: { ...process.env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+    }, (error, stdout, stderr) => {
+      const outBuf = stdout || Buffer.alloc(0);
+      const errBuf = stderr || Buffer.alloc(0);
+      if (!error) {
+        resolve({ status: 0, stdout: outBuf, stderr: errBuf, error: null });
+      } else if (typeof error.code === 'number') {
+        // git exited non-zero. Not an error to us — surface it via `.status`.
+        resolve({ status: error.code, stdout: outBuf, stderr: errBuf, error: null });
+      } else {
+        // Spawn failure / timeout / maxBuffer exceeded (ENOBUFS surrogate).
+        resolve({ status: null, stdout: outBuf, stderr: errBuf, error });
+      }
+    });
   });
 }
 
@@ -15183,28 +16155,28 @@ function summarizeStatus(X, Y) {
 // Read branch metadata for the Git panel (#648): the local branch list, plus
 // flags the UI uses to hide/disable controls. All commands are local (no
 // network) and read-only. `abs` is the sanitised repo dir from
-// resolveAgentRepo(); runGit() re-validates the cwd.
-function readRepoBranchMeta(abs) {
+// resolveAgentRepo(); runGitAsync() re-validates the cwd.
+async function readRepoBranchMeta(abs) {
   const meta = { currentBranch: null, branches: [], detached: false, hasRemote: false, hasUpstream: false };
-  const cur = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], abs, { maxBuffer: 64 * 1024 });
+  const cur = await runGitAsync(['rev-parse', '--abbrev-ref', 'HEAD'], abs, { maxBuffer: 64 * 1024 });
   const curBranch = cur.status === 0 ? cur.stdout.toString('utf8').trim() : '';
   meta.detached = curBranch === '' || curBranch === 'HEAD';
   meta.currentBranch = meta.detached ? null : curBranch;
-  const br = runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], abs, { maxBuffer: 256 * 1024 });
+  const br = await runGitAsync(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], abs, { maxBuffer: 256 * 1024 });
   if (br.status === 0) {
     meta.branches = br.stdout.toString('utf8').split('\n').map(s => s.trim()).filter(Boolean);
   }
-  const rem = runGit(['remote'], abs, { maxBuffer: 64 * 1024 });
+  const rem = await runGitAsync(['remote'], abs, { maxBuffer: 64 * 1024 });
   meta.hasRemote = rem.status === 0 && rem.stdout.toString('utf8').trim().length > 0;
-  const up = runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], abs, { maxBuffer: 64 * 1024 });
+  const up = await runGitAsync(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], abs, { maxBuffer: 64 * 1024 });
   meta.hasUpstream = up.status === 0;
   return meta;
 }
 
 // GET /api/agents/:agentId/workspace/git-status
 // Lists changed files for every git repo in the agent workspace. Multi-repo
-// support comes for free via getAgentGitRepos().
-app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) => {
+// support comes for free via discoverGitRepos().
+app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   // safeAgentPath returns null for an invalid id or a missing agent dir, and
@@ -15219,20 +16191,21 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
     ? req.query.repo
     : null;
 
-  const repos = getAgentGitRepos(agentRoot);
+  const repos = discoverGitRepos(agentRoot);
   const repoEntries = repoFilter
     ? repos.filter(r => r.repoPath === repoFilter)
     : repos;
 
+  try {
   const result = [];
   for (const repoMeta of repoEntries) {
     const abs = resolveAgentRepo(agentId, repoMeta.repoPath);
     if (!abs) continue;
 
     // 1. Status — file list with X/Y status bytes.
-    const status = runGit(['status', '--porcelain=v1', '-z'], abs);
+    const status = await runGitAsync(['status', '--porcelain=v1', '-z'], abs);
     if (status.error || status.status !== 0) {
-      result.push({ ...repoMeta, error: 'git-status-failed', files: [] });
+      result.push({ repoPath: repoMeta.repoPath, branch: repoMeta.branch, error: 'git-status-failed', files: [] });
       continue;
     }
     const entries = parsePorcelainZ(status.stdout);
@@ -15241,7 +16214,7 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
     // Combines staged + unstaged because `HEAD` (no --cached) compares the
     // working tree against HEAD directly.
     let numstat = new Map();
-    const numstatRun = runGit(['diff', '--numstat', '-z', 'HEAD', '--'], abs);
+    const numstatRun = await runGitAsync(['diff', '--numstat', '-z', 'HEAD', '--'], abs);
     if (numstatRun.status === 0) {
       numstat = parseNumstatZ(numstatRun.stdout);
     }
@@ -15286,11 +16259,14 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, (req, res) =>
       changesCount: files.length,
       dirty: files.length > 0,
       files,
-      ...readRepoBranchMeta(abs),
+      ...(await readRepoBranchMeta(abs)),
     });
   }
 
   res.json({ repos: result });
+  } catch {
+    res.status(500).json({ error: 'git-status-failed' });
+  }
 });
 
 // POST /api/agents/:agentId/workspace/git-action — deterministic Workspace Git
@@ -15336,7 +16312,7 @@ app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, async (req, 
 // GET /api/agents/:agentId/workspace/git-diff?repo=...&path=...&context=3
 // Returns the unified diff for a single file. Untracked files are diffed
 // against /dev/null so the UI sees a uniform `diff --git` envelope.
-app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
+app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -15355,16 +16331,15 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
   if (!Number.isFinite(context) || context < 0) context = 3;
   if (context > 20) context = 20;
 
+  try {
   // Decide which form of `git diff` to invoke. For MVP-1 we always compare
   // working tree against HEAD; staged/branch modes are out of scope.
-  const isUntracked = (() => {
-    const lsFiles = runGit(
-      ['ls-files', '--error-unmatch', '--', pathQ],
-      repoAbs,
-      { maxBuffer: 64 * 1024 },
-    );
-    return lsFiles.status !== 0;
-  })();
+  const lsFiles = await runGitAsync(
+    ['ls-files', '--error-unmatch', '--', pathQ],
+    repoAbs,
+    { maxBuffer: 64 * 1024 },
+  );
+  const isUntracked = lsFiles.status !== 0;
 
   let diffRun;
   if (isUntracked) {
@@ -15372,7 +16347,7 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     // Exit code 1 is the success-with-differences case; status 0 (identical
     // file vs /dev/null can't really happen for an untracked file) is also
     // accepted. Anything else is an error.
-    diffRun = runGit(
+    diffRun = await runGitAsync(
       ['diff', '--no-color', `-U${context}`, '--no-index', '--', '/dev/null', pathQ],
       repoAbs,
     );
@@ -15380,7 +16355,7 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
       return res.status(500).json({ error: 'git-diff-failed' });
     }
   } else {
-    diffRun = runGit(
+    diffRun = await runGitAsync(
       ['diff', '--no-color', `-U${context}`, 'HEAD', '--', pathQ],
       repoAbs,
     );
@@ -15389,10 +16364,9 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     }
   }
 
-  // Detect truncation by spawnSync's ENOBUFS surrogate (signal === null,
-  // status === null, error.code === 'ENOBUFS'). We already returned above,
-  // so if we got here the buffer was large enough — but we still cap the
-  // payload size we send back to the client.
+  // Detect truncation by the ENOBUFS surrogate (maxBuffer exceeded sets
+  // `.error`, handled above), so if we got here the buffer was large enough —
+  // but we still cap the payload size we send back to the client.
   const raw = (diffRun.stdout || Buffer.alloc(0)).toString('utf8');
   const truncated = raw.length >= GIT_DIFF_MAX_BUFFER - 1024; // close to the cap
   const diff = truncated ? raw.slice(0, GIT_DIFF_MAX_BUFFER) : raw;
@@ -15410,6 +16384,9 @@ app.get('/api/agents/:agentId/workspace/git-diff', heavyLimiter, (req, res) => {
     binary,
     diff,
   });
+  } catch {
+    res.status(500).json({ error: 'git-diff-failed' });
+  }
 });
 
 // File upload. Accepts multipart/form-data with:

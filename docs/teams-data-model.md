@@ -17,7 +17,7 @@ In scope:
 - A persistent store for **Teams**, **human users**, and **memberships**
   (user ↔ team ↔ role).
 - A `teamId` ownership field on every agent construct, Working Environment, and
-  credential — each is owned by exactly one Team.
+  credential — each is owned by exactly one Team. *(The `personal` credential tier, epic #1558, is the exception: it carries `userId` and `teamId: null`, owned by one human rather than a team.)*
 - Startup bootstrap of a default team + optional System Admin, and a one-time
   backfill that stamps pre-existing resources with the default team.
 
@@ -61,16 +61,16 @@ The single source of truth for this model is
 
 ## Ownership
 
-Every agent construct, Working Environment, and credential carries a `teamId`:
+Every agent construct, Working Environment, and credential carries a `teamId` *(personal-tier credentials are the exception — they carry `userId` and `teamId: null`; see epic #1558)*:
 
 | Resource | Stamped at | Default |
 |---|---|---|
 | Agent / Agent Team / team-member / orchestrator / bp-instance | orchestrator `createAgent` / `addTeamMember` | `default` (team-members inherit their parent Agent Team's `teamId`) |
 | Working Environment (`environment.json`) | admin-console `POST/PUT /api/environments` | `default` |
-| SSH key, GitHub token, MCP credential, LLM endpoint (index entries) | admin-console credential `POST` handlers | `default` |
+| SSH key, GitHub token, MCP credential, LLM endpoint — `team`/`system` scope | admin-console credential `POST` handlers | `default` |
+| SSH key, GitHub token — `personal` scope (#1567) | same handlers, but forced `scope: 'personal'` | `userId` = the authenticated caller; `teamId: null` |
 
-Creation paths accept an optional `teamId`; when supplied it must reference an
-existing team, otherwise the request is rejected (400). Absent = default team.
+Creation paths for `team`/`system` scopes accept an optional `teamId`; when supplied it must reference an existing team, otherwise the request is rejected (400). Absent = default team. Personal credentials always carry the caller's `userId` as owner; a body naming a different owner is rejected 403.
 
 ### Resolving an agent's tenant
 
@@ -142,7 +142,7 @@ GET    /internal/admin/users        [?subject=]
 POST   /internal/admin/users                        { subject, email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
 GET    /internal/admin/users/:id
 PUT    /internal/admin/users/:id                    { email?, displayName?, systemAdmin?, githubHandle?, chatFontSize? }
-DELETE /internal/admin/users/:id                    (cascades memberships)
+DELETE /internal/admin/users/:id                    (offboards owner first — pause agents + delete personal credentials — then cascades memberships; partial failure leaves user recoverable, #1571)
 
 GET    /internal/admin/memberships  [?userId=&teamId=]
 POST   /internal/admin/memberships                  { userId, teamId, role }   (upsert)
@@ -160,7 +160,7 @@ These are mounted separately from `/internal/teams/*`, which operate on the
 
 - A membership requires both its user and team to exist; `role` must be
   `team-admin` or `team-member`.
-- Deleting a **user** cascades their memberships.
+- Deleting a **user** runs offboarding first (#1571, Phase 5): pauses the person's agents (drain — not wiped) and auto-deletes their **personal** SSH keys + GitHub tokens (index entries + 0600 files; team/system credentials are never touched); then cascades memberships. Offboarding runs before the user record is removed so a partial failure leaves the user recoverable.
 - Deleting a **team** cascades its memberships, refuses the default team, and is
   refused (409) while any agent, environment, or credential still names it as
   owner — reassign those first so nothing is orphaned.

@@ -24,7 +24,7 @@ that still carry `emits` are lifted transparently on read.)
 `POST /api/teams` accepts the bundle under `processTemplate` (or the equivalent
 `customRoles` pseudo-template array). Inline roles are materialised by the same
 env → team → members pipeline (with rollback) the Team-Setup wizard uses; each
-role's `{{vars}}` and the target repo are applied per member.
+role's `{{vars}}` and the target repositories are applied per member.
 
 **`labelSuffix` (optional, `[a-z0-9]{1,8}`).** When two or more teams share one GitHub repository, their label-based hand-offs would collide. Pass a short suffix (e.g. `"abc1"`) to stamp every label token — trigger `labelFilter`, channel `label`, `setLabel` outcome actions, bundle label registry, and prompt text — before any agents are created. `GET /api/teams/suggest-suffix` returns a random 4-char suggestion. In extend mode the suffix must match the stored one (400 on mismatch). Warnings are returned for any label mention in prompt text that could not be stamped automatically (`suffixWarnings` in the stream response). Omit when the team is the sole tenant on its repository.
 
@@ -118,7 +118,7 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
   `outputs` entry connects to a consumer's `inputs` entry when their **names**
   match. The `hint` is an informational path only — agent instances write to
   paths that vary per run, so the physical location is resolved at runtime from
-  the git-committed **artifact manifest** (`.aee/artifacts.jsonl`, written by the
+  the git-committed **artifact manifest** (`.agent-studio/artifacts.jsonl`, written by the
   producer via `aee-artifact add "<name>" <path>` and read by the consumer via
   `aee-artifact path "<name>"`). A port with only a `path` (BriefingPack
   artifacts, legacy ports) still matches by path exactly.

@@ -2,6 +2,8 @@
 #
 # Covered suites (one job each):
 #   orchestrator          — orchestrator/*.test.js            (node --test)
+#   broker-sdk            — broker-sdk/*.test.js              (node --test, dependency-free)
+#   netzplan-broker       — plugins/netzplan/broker/*.test.js (node --test, dependency-free)
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
 #   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
@@ -49,6 +51,36 @@ jobs:
       - name: Run unit tests
         working-directory: orchestrator
         run: npm test
+
+  broker-sdk:
+    name: broker-sdk (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Dependency-free (like the pure modules under admin-console/src) — no install step.
+      - name: Run unit tests
+        working-directory: broker-sdk
+        run: node --test
+
+  netzplan-broker:
+    name: netzplan-broker (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The pure plan-doc / plan-store / viewer-headers modules are dependency-free
+      # (server.js lazy-requires the MCP SDK, so it is never loaded by the test
+      # runner). No install step — same shape as the broker-sdk job.
+      - name: Run unit tests
+        working-directory: plugins/netzplan/broker
+        run: node --test
 
   admin-api:
     name: admin-console api tests
@@ -171,6 +203,9 @@ jobs:
       - name: Catalog freshness
         working-directory: e2e
         run: npm run journeys:catalog:check
+      - name: Tour manifest freshness
+        working-directory: e2e
+        run: npm run journeys:tour:check
       - name: Lint journeys
         working-directory: e2e
         run: npm run journeys:lint

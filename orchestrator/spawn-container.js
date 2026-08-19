@@ -691,4 +691,18 @@ function spawnContainer({ id, env, contextMounts }) {
   return handle;
 }
 
-module.exports = { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume };
+module.exports = {
+  spawnContainer,
+  libpodRequest,
+  removePerAgentVolume,
+  removePerAgentNetwork,
+  reseedPerAgentVolume,
+  // Plugin sidecars attach to the granted agents' per-agent networks (#1547),
+  // so the naming rule has to be shared rather than re-derived there.
+  perAgentNetworkName,
+  PER_AGENT_NETWORK_ENABLED,
+  AGENT_NETWORK,
+  // Plugin broker sidecars are implemented on this runtime only (#1547) — see
+  // the Deliberate differences block in spawn-kubernetes-pod.js.
+  PLUGIN_SIDECARS_SUPPORTED: true,
+};

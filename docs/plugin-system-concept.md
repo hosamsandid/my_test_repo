@@ -124,6 +124,7 @@ the sidecar image.
   "platforms": ["podman"],
   "scopes": ["team", "agent"],
   "requiresApproval": ["compose up", "rm"],
+  "policy": { "create-case": { "scopes": ["agent"], "requiresFlowFinal": true } },
   "ui": {
     "title": "Sandbox Dashboard",
     "routes": [
@@ -141,14 +142,23 @@ the sidecar image.
   `egress`). Install-time review means a System Admin sees exactly what the
   plugin gets; a plugin cannot request arbitrary mounts.
 - `platforms` declares runtime requirements (`podman` = local/compose only,
-  like context mounts); the console shows an honest "not available on this
-  stack" instead of a broken toggle.
+  like context mounts; `kubernetes` = k8s plugin sidecar, the positive mirror
+  of `podman` — a manifest may combine them e.g. `["podman","kubernetes"]`);
+  `any` imposes no special stack requirement. The console shows an honest "not
+  available on this stack" instead of a broken toggle.
 - `scopes` declares which **scope granularities** the broker actually
   implements (§4.6). A broker that cannot separate its resources per agent
   lists `["team"]` and the console offers no agent-level toggle — the
   granularity a grant may choose is bounded by what the plugin can honour.
 - `requiresApproval` names subcommands the broker must hold for human
   confirmation (§4.6).
+- `policy` (optional, shipped #1521) narrows **which** subcommands a caller may
+  run, keyed on the granularity of its scope — the first governance rule only
+  agent granularity can carry (§4.6). Each key is a subcommand; `scopes`
+  restricts the calling granularity (⊆ the plugin's `scopes`) and
+  `requiresFlowFinal` gates on flow position (agent-only — a team-scoped token
+  cannot express it, so a rule with it may not admit team granularity). The
+  broker enforces it via `broker-sdk/authz.js`; the console validates the field.
 - `credentials` are bound at install/bind time from the existing credential
   store; secrets go into the **sidecar's** environment, never into agents.
 - `companionSkill` (optional) names a skill shipped alongside the plugin:
@@ -195,8 +205,12 @@ standalone agents carry their own. Resolution via a sibling of
 install. Working Environments are untouched.
 
 A grant carries one setting beyond on/off: its **scope granularity**
-(`scopeGranularity: "team" | "agent"`, default `team`, offerable only within
-the manifest's `scopes`). It decides whether the granted squad shares one
+(`scopeGranularity: "team" | "agent"`, offerable only within the manifest's
+`scopes`). The default is **per-manifest** (decided with plugin #1, §10): a
+manifest may declare `defaultScopeGranularity` within its `scopes`, and absent
+that the platform default is `team`. The podman sandbox declares `agent`
+because per-agent stacks are its natural reading; a shared expensive backend
+omits the field and keeps `team`. It decides whether the granted squad shares one
 broker-side identity or every member gets its own — see §4.6, where the
 consequences live. It is a property of the grant, not of the plugin, because
 the same plugin is shared infrastructure for one team and per-agent
@@ -217,7 +231,7 @@ built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
 1. **Dependency-free single file** against the runtimes present in the agent
    image (`python3`, `node`, `curl`) — no compiled binaries (arch
    portability), no pip/npm installs.
-2. **Seeded, not baked**: plugin CLIs land in `/workspace/agents/<id>/.aee/bin/`
+2. **Seeded, not baked**: plugin CLIs land in `/workspace/agents/<id>/.agent-studio/bin/`
    (on `PATH` via the entrypoint), synced additively on grant change.
 3. **Discovery**: `--help` carries complete agent-readable documentation;
    CLAUDE.md carries only the gated `promptLine` (lazy context, no tool
@@ -227,7 +241,7 @@ built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
 5. **Long-running operations** use submit → poll (`run --async` → `status
    <id>`), never a blocking call beyond a bounded timeout.
 6. **Config/identity**: endpoint URL + per-agent token in a 0600 file at
-   `.aee/plugins/<id>.json`, written at seed time — file-based, so rotation
+   `.agent-studio/plugins/<id>.json`, written at seed time — file-based, so rotation
    is also a live sync, and the workspace stays the transparent source of
    truth (workspace-transparency principle).
 
@@ -272,8 +286,11 @@ built-in alignment is [`cli-contract.md`](cli-contract.md), Phase 6):
   deleting one member tears down only that member's resources; the squad's
   other scopes are untouched.
 - **Quotas are mandatory manifest/config fields** for resource-creating
-  plugins (max objects, TTL). Rationale: a loop-triggered agent creating one
-  resource per iteration is a runaway the #611 backstop cannot see. Quotas
+  plugins — the manifest `quota` field (`{ maxObjects, ttlSeconds? }`; the
+  podman sandbox ships `maxObjects: 8`). Rationale: a loop-triggered agent
+  creating one resource per iteration is a runaway the #611 backstop cannot
+  see, so the cap lives in the manifest, not a single platform-wide Settings
+  toggle (the #1287 global container cap, now retired). Quotas
   are **per scope**, so agent granularity on an eight-member squad multiplies
   the worst-case footprint eightfold — the grant UI states that resulting
   ceiling before the toggle is flipped, rather than letting an admin discover
@@ -333,6 +350,49 @@ them needs it). Multi-route roles are a manifest field reserved now and
 implemented when a plugin declares more than one route — reserving it costs
 nothing, retrofitting it into a shipped proxy contract would be breaking.
 
+The decidable core of all three landed with plugin #2 (#1521,
+`admin-console/api/plugin-ui-proxy.js`, unit-tested): `deriveScopeList` (the
+grant-derived scope list — a plugin can only enumerate scopes it was granted
+to), `enforceUiRoute` (the console's `minRole` refusal, `ui.routes` longest-
+prefix match), and `signViewerHeaders`/`verifyViewerHeaders` (the signed viewer
+identity + effective role). The live Express proxy, iframe mount and nav entry
+were wired by the Network Plan epic (#1554, Phase 2 / #1562), which needed an
+embedded plugin UI: the console serves `ALL /plugins/:id/ui/*` behind the
+session gate (`enforceUiRoute` on the sub-path, `signViewerHeaders` forwarding
+the authenticated user + effective role), `GET /api/plugins/:id/scopes` returns
+the derived scope list, and dynamic nav entries appear for installed + granted
+UI plugins. The sidecar address comes from the orchestrator
+(`GET /internal/plugins/:id/ui-endpoint`), and each sidecar gets a generic
+`AEE_PLUGIN_STATE_DIR` volume beside its audit volume. test-mgmt's manifest
+declares three routes at two roles to exercise the contract end-to-end.
+
+**Global UI visibility (opt-in, #1599).** By default a UI-bearing plugin's nav
+entry and UI are gated on the plugin being *granted* to a team the caller can
+see — the same team activation that gives that team's agents the plugin's CLI.
+That couples the human-facing UI surface to agent-capability activation, which
+is wrong for a plugin whose UI is a reference surface valuable to *any* user
+independently of any team using its capability (e.g. the **Patterns Catalog**
+reference catalog). A plugin may therefore set the opt-in manifest flag
+`ui.global: true` (validated in `plugin-manifest.js`; **off by default** — an
+absent or `false` value normalizes byte-identically to today, so no existing
+plugin changes behaviour). When it is on **and the plugin is installed**, its
+nav entry shows for **every authenticated user** and its **ordinary-user
+routes** are reachable without any team grant: the console proxy admits a caller
+with no grant-derived role as an ordinary `team-member` viewer
+(`effectiveViewerRole` in `plugin-ui-viewer.js`), so `enforceUiRoute` still
+refuses any **elevated** route (`minRole` above `team-member`, e.g. an `/admin`
+route) to a purely-global viewer — the flag never widens beyond the general UI.
+It is strictly a human-UI concern: **agent capability is untouched** — a
+globally-visible but ungranted plugin grants no CLI to any agent, since the
+grant path (`plugin-grants.js`) never reads `ui.global`. Install remains a
+prerequisite (global visibility never auto-installs), authentication remains
+required (the proxy stays behind the session gate), and a plugin that is *both*
+team-granted and globally visible renders exactly one nav entry (a
+team-admin/system-admin caller keeps their elevated role via `resolveViewerRole`,
+which wins before the global fallback). Patterns Catalog ships with
+`ui.global: true` so, once an operator installs it, all users can open it
+without a team having to activate it first.
+
 ### 4.9 Broker SDK
 
 Every broker owes the same obligations (§4.6): token verification, scope
@@ -342,25 +402,34 @@ plugin. The platform therefore ships a **Broker SDK**: a small,
 dependency-free Node module (mirroring the pure-module discipline of
 `process-template.js` / `prompt-assembly.js`) that a sidecar imports:
 
-- `verifyScopeToken(header)` → `{ pluginId, scopeId }` or 401 — the
-  generalised `podman-token.js`.
+- `verifyScopeToken(reqOrHeader, secret)` → `{ pluginId, scopeId }` or 401 —
+  **granularity-agnostic** (the broker must not branch on `scopeId` shape);
+  byte-identical contract to `orchestrator/plugin-scope-token.js`.
 - `scopeFilter(scopeId)` — ownership-label helpers (stamp on create, filter
-  on list, exact-match on operate; the `owner-scope.js` rules).
-- `auditWriter(dir)` — one JSONL line per call, retention-rotated.
-- `maskSecrets(output, secrets)` — response redaction (the `mask-env.js`
-  lesson: backends echo credentials in verbose output).
-- `healthEndpoint()` / `teardownScopeEndpoint(handler)` — the two routes the
-  orchestrator calls on every broker (registry card health, scope teardown
-  on team/agent deletion).
-- `parkForApproval(op)` — the `requiresApproval` holding pen (v1: DM
-  confirm).
+  on list, exact-match on operate) using the platform label `aee.plugin.owner`.
+- `auditWriter(dir, {retentionMs, now})` — one JSONL line per call,
+  retention-rotated on write.
+- `maskSecrets(output, secrets)` — response redaction: explicit secret values
+  plus the `-e/--env KEY=VALUE` values backends echo verbatim.
+- `healthEndpoint()` / `teardownScopeEndpoint(reap, {secret})` — the two
+  plain-REST routes the orchestrator calls on every broker (health probe, scope
+  teardown on team/agent deletion). Teardown is per `scopeId` — one handler
+  serves both team and single-member deletion; resources are **reaped before
+  the orchestrator invalidates the token**.
+- `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` — the
+  `requiresApproval` holding pen (v1: DM confirm).
+- `authorizeAction(policy, subcommand, caller)` / `isActionPermitted(...)` —
+  per-scope action authorisation (#1521): `policy` is the manifest's normalized
+  policy map; `caller` is `{ kind: 'team'|'agent', flowFinal?, crossChecksPassed? }`;
+  returns `{ allowed }` or `{ allowed: false, code, reason }`. Fails closed on
+  a malformed caller. First rule only agent granularity can carry.
 
-The SDK is extracted from plugin #1's broker, not designed on paper — the
-#1287 modules (`podman-token.js`, `owner-scope.js`, `mask-env.js`, the
-teardown endpoint) are its seed and already adversarially tested. Using the
-SDK is strongly recommended, not enforced (the wire contract is what the
-platform verifies), but the reference plugins all use it, and a broker
-without it must still implement the same routes and checks.
+The SDK is extracted from plugin #1's broker (`podman-mcp/`), not designed on
+paper — `podman-token.js`, `owner-scope.js`, `mask-env.js`, and the teardown
+endpoint were its seeds. Phase 4 (#1520) deleted those copies from `podman-mcp/`
+and moved them into `broker-sdk/`, retrofitting plugin #1 onto the SDK so it
+has a live consumer from day one. Using the SDK is strongly recommended, not
+enforced (the platform verifies the wire contract, not the implementation).
 
 ### 4.10 Versioning
 
@@ -392,7 +461,9 @@ integration layer, not its core.
 
 **Kept nearly unchanged** (becomes the plugin's sidecar): the `podman-mcp/`
 directory — `server.js`, `compose-harden.js`, `compose-validate.js`,
-`owner-scope.js`, `mask-env.js`, teardown endpoint, Dockerfile, tests.
+teardown endpoint, Dockerfile, tests. (`owner-scope.js` and `mask-env.js`
+stayed here through Phase 3 and were extracted to `broker-sdk/` in Phase 4
+#1520, along with `podman-token.js`.)
 
 **Generalised into platform machinery**: `podman-token.js` → plugin scope
 tokens (§4.6); the team/agent tri-state activation + no-respawn file sync →
@@ -556,20 +627,113 @@ before it moves from catalog to roadmap.
 - **Phase 2 — agent surface** *(shipped — #1534)*: CLI contract, workspace seeding/sync, config
   files, prompt-gating block, grant UI (team/agent, tri-state, granularity
   selector bounded by the manifest's `scopes`), audit JSONL.
-- **Phase 3 — plugin #1**: rework PR #1287 onto the machinery per §6; delete
+- **Phase 3 — plugin #1** *(shipped — #1537)*: rework PR #1287 onto the machinery per §6; delete
   the special cases; `aee-podman` domain CLI.
-- **Phase 4 — Broker SDK**: extract the §4.9 module set from plugin #1's
-  broker (token verify, scope filtering, audit writer, secret masking,
-  health/teardown routes, approval pen); retrofit plugin #1 onto it so the
-  SDK has a live consumer from day one.
-- **Phase 5 — plugin #2 (test management)**: built **on the SDK** — the
-  proof that a credential-backed broker is thin; also validates the
-  `requiresApproval` flow and (if the product decision falls that way) the
-  iframe UI.
+- **Phase 4 — Broker SDK** *(shipped — #1520)*: extract the §4.9 module set
+  from plugin #1's broker (token verify, scope filtering, audit writer, secret
+  masking, health/teardown routes, approval pen) into `broker-sdk/`; retrofit
+  plugin #1 (`podman-mcp/`) onto it so the SDK has a live consumer from day one.
+- **Phase 5 — plugin #2 (test management)** *(shipped — #1521)*: built **on the
+  SDK** — the proof that a credential-backed broker is thin (`plugins/test-mgmt/broker/`
+  imports `broker-sdk/` and adds only the credential-holding `vendor-client.js`
+  + the policy glue). Introduces per-scope **authorisation** (`policy` +
+  `broker-sdk/authz.js` — the first rule only agent granularity can carry:
+  create-case = flow-final agent, cross-checks passed), the first real
+  `requiresApproval` flow (destructive test-data ops parked for DM confirm), and
+  the UI-extension surface's decidable core (`admin-console/api/plugin-ui-proxy
+  .js`: scope discovery derived from the grant, `ui.routes` `minRole`
+  enforcement, signed viewer headers) — reserved now; the live iframe proxy +
+  nav were wired by the Network Plan epic (#1554 Phase 2, #1562). The
+  orchestrator live-stack (token mint, scope-registry push, sidecar lifecycle,
+  DM approval round-trip) is the completion step, same "pure core now, live
+  stack next" split as Phases 1–3.
 - **Phase 6 — contract alignment** *(shipped — #1536)*: align built-in CLIs to the
   contract conventions (no mechanism change). Documented in
   [`cli-contract.md`](cli-contract.md); conformance-tested in
   `agent-image/scripts/test_cli_contract.py`.
+- **Phase 7 — live-stack completion** *(shipped — #1547)*: the half every phase
+  above deferred, collected into one vertical slice and proven on plugin #1.
+  Registry reader + System-Admin install (`/plugins` page, capability review
+  before the confirm), the shared signing secret, sidecar lifecycle over libpod
+  (`orchestrator/plugin-runtime.js`), grant → workspace sync with no respawn,
+  `.agent-studio/bin` on the agent PATH, the Plugin Capabilities prompt block actually
+  wired, scope teardown before token invalidation, and the grant UI on the
+  Agents page. Fixed three wiring gaps found while tracing the path end to end:
+  the CLI posted to the sidecar's base URL while the broker only served `/mcp`;
+  `AEE_WORKSPACE` (which every CLI reads to find its config) was set nowhere
+  outside tests; and the per-scope `quota` was unimplemented, with #1287's
+  global cap fetching a `/internal/platform-settings` endpoint that was never
+  merged and failing open. Plugin #1's broker also gained the audit obligation
+  it never had. **Podman-only** — see the Deliberate differences block in
+  `orchestrator/spawn-kubernetes-pod.js`.
+
+- **Kubernetes epic (#1554), Phase 1 — manifest `platforms` widening** *(shipped — #1573)*:
+  `kubernetes` added to the `PLATFORMS` enum as the positive mirror of `podman` —
+  a manifest can now declare `["podman","kubernetes"]` or `["kubernetes"]`;
+  `any` is unchanged. Both `plugin-manifest.js` copies (admin-console/api + orchestrator)
+  updated and two-sided-guard tested.
+- **Kubernetes epic (#1554), Phase 3 — plugin #3 (netzplan)** *(shipped — #1563)*:
+  the first UI-bearing plugin and the first privilege-less plugin (`capabilities: []`,
+  `credentials: []`, `scopes: ["team"]`, `platforms: ["podman","kubernetes"]`).
+  `plugins/netzplan/` (manifest + `aee-plan` CLI facade: `show`/`tick`/`edit` on
+  a 3-rung autonomy ladder) + `plugins/netzplan/broker/` (Broker SDK: pure `plan-doc.js`
+  id-keyed document model, `plan-store.js` state-volume adapter, `viewer-headers.js`
+  §4.8 verifier copy, minimal served board). Completed by Phase 4 (#1564) — see
+  below. See `docs/network-plan-plugin-concept.md`.
+- **Kubernetes epic (#1554), Phase 4 — netzplan full editability** *(shipped — #1564)*:
+  all three remaining §5 primitives — **`graph`** (typed nodes in horizontal bands +
+  typed dependency edges; `graphNeighbors` pure hover-highlight helper), **`bipartite`**
+  (left/right entries + typed, muteable edges), **`blocks`** (cover / KPI-tiles /
+  callout / cards as flexible typed blocks) — added to `plan-doc.js` alongside the
+  existing `swimlane`, each with id-keyed normalize/mutate/referential repair. Panel
+  composition ops (`add-panel` / `delete-panel` / `reorder-panels` / `set-panel-title`)
+  complete the §5 document shape. Every new mutation is structural → `requiredAutonomy`
+  2, gated by the one existing `plan-store.js` path (no primitive gets its own
+  authorisation path). The served board renders all four primitives and, in **Edit**
+  mode, adds/edits/reorders/removes panels and their contents through a new human-write
+  `/api/mutate` route (role-gated by viewer headers, **not** autonomy-gated — autonomy
+  governs the agent path; `set-autonomy` stays the `/admin`-only `/api/settings`
+  route). The direct-manipulation polish (drag reorder, colour pickers,
+  requirement-target-by-click, undo/redo) is a UI refinement over these same mutations.
+- **Kubernetes epic (#1554), Phase 5 — plugin sidecars on Kubernetes** *(shipped — #1565)*:
+  flips `PLUGIN_SIDECARS_SUPPORTED` for **UI-bearing** plugins.
+  `orchestrator/spawn-kubernetes-plugin.js` — a sibling behind the
+  `container-runtime.js` seam, same raw-HTTPS `k8sRequest` style as
+  `spawn-kubernetes-pod.js` — creates a **Deployment + Service + state PVC** per
+  installed plugin; `plugin-runtime.js` delegates `reconcilePluginSidecars` /
+  `reconcilePluginAttachments` / `listLiveSidecars` to it on k8s (the rest of the
+  surface is runtime-agnostic — the Service is named identically to the Podman
+  container, so `brokerBaseUrl` resolves on both). State is a **PVC not
+  `emptyDir`** (audit stays an `emptyDir` — a per-plugin audit PVC is a separable
+  follow-up); RBAC (`deploy/k8s/base/core/10-rbac.yaml`) gains namespaced
+  `apps/deployments` + `services` + `persistentvolumeclaims` + `networkpolicies`.
+  The grant-driven per-agent-network reachability a **broker** plugin needs
+  becomes per-grant `NetworkPolicy` objects — a larger, separable mechanism split
+  out of this phase: a UI-only plugin needs none, so `reconcilePluginAttachments`
+  is a no-op on k8s and a broker plugin's CLI stays at exit 3 there.
+  `capabilities: ["podman-socket"]` has no k8s equivalent, so
+  `plugins/podman-sandbox/` is permanently `platforms: ["podman"]`. See
+  `docs/network-plan-plugin-concept.md` §9.
+- **Opt-in global UI visibility** *(shipped — #1599)*: `ui.global: true` in a
+  plugin manifest (off by default) makes the plugin's nav entry and general UI
+  routes visible to every authenticated user once the plugin is installed,
+  without requiring a team grant — decoupling the human-facing reference UI from
+  agent-capability activation. Elevated routes (`minRole > team-member`) still
+  refuse a purely-global viewer. Agent CLI access is unaffected (the grant path
+  never reads `ui.global`). Patterns Catalog is the first plugin to opt in.
+- **GitHub Issues plugin** *(shipped — #1637)*: the first plugin that is both
+  UI-bearing **and** credential-holding. `plugins/github-issues/` (broker at
+  `plugins/github-issues/broker/`) — list a repo's issues, read one, and add/remove a
+  label in the console so releasing work (e.g. applying a `ready` gate) no
+  longer means switching to GitHub. Manifest: `capabilities: ["egress"]`,
+  `credentials: []`, `scopes: ["team"]`, one `ui.route` `/` @ `team-member`,
+  **not** `ui.global`. Credential delivery is **pushed, not baked in**: the
+  orchestrator resolves each granted team's `environment → { token, repos }`
+  (`orchestrator/plugin-github-creds.js`, pure + unit-tested) and pushes a
+  per-scope map to the broker's `PUT /internal/scope-credentials` via
+  `plugin-runtime.pushScopeCredentials`; the raw token stays in the broker's
+  memory and never reaches the browser or an agent (AC10). Read-only `aee-issues`
+  CLI (`repos`/`list`/`show`); label writes are the human console action.
 
 ## 10. Open questions
 
@@ -581,12 +745,18 @@ before it moves from catalog to roadmap.
   most maintenance-prone building block; defer until a real user insists.
 - **Approval UX**: DM-based confirm (v1) vs. wiring into the flow human-gate
   registry — revisit when the first `requiresApproval` plugin ships.
-- **Default scope granularity per plugin**: `team` is the safe default for
+- ~~**Default scope granularity per plugin**: `team` is the safe default for
   shared, expensive backends, but for a sandbox-style plugin agent granularity
   may be the *expected* behaviour and a team default the surprising one. Let
   each manifest declare its own default within `scopes`, or keep one
   platform-wide default? Decide with plugin #1, which is exactly the case
-  where agent granularity is the natural reading.
+  where agent granularity is the natural reading.~~ **Decided (Phase 3, #1519,
+  plugin #1): per-manifest.** A manifest may declare `defaultScopeGranularity`
+  (validated to be within its own `scopes`); absent, the platform default
+  stays `team`. The podman sandbox declares `agent`, so a grant defaults to
+  per-agent stacks — the natural reading for a container sandbox — while a
+  shared, expensive backend simply omits the field and keeps the `team`
+  default. See §4.4.
 - **Claude Code plugins as "agent plugins"**: worth adopting the CLI's own
   marketplace format as a distribution channel for agent-side content
   (skills, commands, hooks)? It solves a different problem than this

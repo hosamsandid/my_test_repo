@@ -64,6 +64,12 @@ services:
     environment:
       TZ: Europe/Berlin
       PODMAN_SOCK_PATH: /var/run/podman.sock
+      # The same socket as the mount above, but named as the HOST sees it.
+      # Needed when the orchestrator bind-mounts the socket into a SIBLING
+      # container (plugin broker sidecars, #1547): libpod resolves a bind
+      # source on the host, not inside this container, so PODMAN_SOCK_PATH
+      # (/var/run/podman.sock) would point at nothing there.
+      PODMAN_HOST_SOCKET: ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       # Conduwuit admin (for auto-creating Matrix users).
@@ -131,6 +137,10 @@ services:
         # still succeeds without git metadata.
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_DIRTY: ${GIT_DIRTY:-}
+        # Base64 of the raw `<name>\t<email>` git-log lines for the About-page
+        # contributors list (#1742); empty default keeps a bare compose build green.
+        GIT_CONTRIBUTORS: ${GIT_CONTRIBUTORS:-}
+        GIT_COMMIT_TIME: ${GIT_COMMIT_TIME:-}
     container_name: ${COMPOSE_PROJECT_NAME}-admin-console
     restart: unless-stopped
     # Required for podman socket access on SELinux-enforcing hosts (Fedora CoreOS).

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Brain, RefreshCw, Archive, Sparkles, ArrowUpRight } from 'lucide-react';
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 /**
  * Agent-chat "Knowledge" tab: the CONCRETE facts this agent has learned, not a
@@ -32,6 +33,7 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
   const [teamId, setTeamId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState({}); // itemId -> { state: 'busy'|'proposed'|'error', msg? }
+  const [retireTarget, setRetireTarget] = useState(null); // item pending retire-confirm
 
   const load = useCallback(() => {
     if (!agentId) { setItems([]); return; }
@@ -75,7 +77,7 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
   }, [agentId]);
 
   const retire = useCallback((item) => {
-    if (!window.confirm(`Retire this learning from the shared KB?\n\n“${item.text}”\n\nIt stays in git for audit and can be un-retired on the Knowledge page.`)) return;
+    setRetireTarget(null);
     setAction(a => ({ ...a, [item.id]: { state: 'busy' } }));
     fetch(`/api/knowledge/item/${encodeURIComponent(item.id)}/archive`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -175,7 +177,7 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
                     {st?.state === 'busy' ? '…' : st?.state === 'proposed' ? 'Proposed ✓' : 'Propose as skill'}
                   </button>
                   <button
-                    onClick={() => retire(it)}
+                    onClick={() => setRetireTarget(it)}
                     disabled={st?.state === 'busy'}
                     title="Retire this learning from the shared KB (non-destructive; kept in git)"
                     style={{ ...miniBtn, display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--eb-status-warning)', borderColor: 'var(--eb-status-warning)' }}>
@@ -192,6 +194,30 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
           })
         )}
       </div>
+
+      <ConfirmDialog
+        open={!!retireTarget}
+        title="Retire this learning?"
+        message={
+          <>
+            <p style={{ margin: 0 }}>
+              Retire this learning from the shared knowledge base?
+            </p>
+            {retireTarget?.text && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', fontStyle: 'italic', color: 'var(--eb-text-primary)' }}>
+                “{retireTarget.text}”
+              </p>
+            )}
+            <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+              It stays in git for audit and can be un-retired on the Knowledge page.
+            </p>
+          </>
+        }
+        variant="warning"
+        confirmLabel="Retire"
+        onConfirm={() => retire(retireTarget)}
+        onCancel={() => setRetireTarget(null)}
+      />
     </div>
   );
 }

@@ -1,16 +1,10 @@
 import { useCallback, useRef } from 'react';
+// Single source of truth for the id slug rules lives in the pure, React-free
+// id-field-view module (so it unit-tests under node --test). Re-exported here
+// for the existing import sites (e.g. Agents.jsx imports `sanitizeId`).
+import { deriveIdFromName, sanitizeId } from '../components/id-field-view.js';
 
-export function deriveIdFromName(name) {
-  return String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-z0-9-]/g, '');
-}
-
-export function sanitizeId(value) {
-  return String(value || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
-}
+export { deriveIdFromName, sanitizeId };
 
 /**
  * useAutoDerivedId — keeps an ID field in sync with a display-name field

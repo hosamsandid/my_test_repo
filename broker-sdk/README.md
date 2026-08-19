@@ -1,0 +1,31 @@
+# Broker SDK
+
+The obligations every plugin **broker sidecar** owes (`docs/plugin-system-concept.md` §4.6/§4.9), packaged as one small dependency-free Node module so each plugin author doesn't re-implement — and re-break — them.
+
+Extracted from plugin #1's broker (`podman-mcp/`), not designed on paper: its `podman-token.js`, `owner-scope.js`, `mask-env.js` and teardown endpoint are the adversarially-tested seeds. Plugin #1 is retrofitted onto this SDK, so it has a live consumer from day one.
+
+Using the SDK is **strongly recommended, not enforced** — the platform verifies the wire contract, not the implementation.
+
+## API
+
+```js
+const sdk = require('broker-sdk');
+```
+
+| Export | Obligation |
+|---|---|
+| `verifyScopeToken(reqOrHeader, secret)` → `{pluginId, scopeId}` \| `null` | Verify the per-scope bearer token. **Granularity-agnostic** — the broker never learns whether `scopeId` is a team or a single agent, and must not branch on it. (`mint` / `verify` also exported for tests.) |
+| `scopeFilter(scopeId)` → `{labelArg, owns, filter}` | Ownership-label helpers: stamp on create (`labelArg`), filter on list (`filter`), exact-match on operate (`owns`). Uses the platform owner label `aee.plugin.owner`. |
+| `auditWriter(dir, {retentionMs, now})` → `{write, read, rotate}` | One JSONL line per call, retention-rotated on write. Wraps the pure `buildPluginAuditLine` core (byte-identical to `orchestrator/plugin-audit.js`). |
+| `maskSecrets(output, secrets)` | Response redaction — masks explicit secret values plus the `-e/--env KEY=VALUE` values backends echo verbatim. |
+| `healthEndpoint(extra?)` → `(req,res)` | The registry card's health probe (no auth). |
+| `teardownScopeEndpoint(reap, {secret})` → `(req,res)` | Scope teardown on team/agent deletion, per `scopeId` (one implementation serves both). Resources are **reaped before the orchestrator invalidates the token**. |
+| `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` | The `requiresApproval` holding pen (v1: DM confirm). |
+
+## Granularity opacity
+
+`scopeId` is an opaque string. Every helper treats a team scope (`team-abc`, shared by all members) and an agent scope (`agent-aaaa`, one member) identically — that opacity is what keeps agent granularity from doubling every broker's code path. The tests exercise member-vs-member isolation alongside team-vs-team.
+
+## Build-context note
+
+A broker's Docker build context can't require across directories (the `podman-token.js` convention), so a broker either builds from a context that includes `broker-sdk/` (podman-mcp copies it into the image) or vendors a byte-identical copy. The token/audit cores here move together with `orchestrator/plugin-scope-token.js` / `orchestrator/plugin-audit.js`.

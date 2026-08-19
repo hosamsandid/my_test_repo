@@ -3,8 +3,11 @@ import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
+import VirtualList from '../../components/VirtualList.jsx';
 import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 import { mergeThinkingTokens } from './system-event.js';
+import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
+import { annotateTaskRows } from './task-todo.js';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -58,7 +61,7 @@ import { mergeThinkingTokens } from './system-event.js';
  *     a session boundary occurs elsewhere in the UI (new message sent, Reset
  *     Session clicked, or a trigger-started run's first message arrives, see
  *     ChatPanel's `onTodoBoundary`) so the pinned To-Do panel from the
- *     *previous* session is dismissed even though no new TodoWrite has
+ *     *previous* session is dismissed even though no new task-list change has
  *     arrived yet (#273). Default 0 = "never fired" so mount doesn't dismiss.
  */
 export default function SessionLogPanel({
@@ -217,15 +220,24 @@ export default function SessionLogPanel({
 
   // Collapse each run's stream of thinking_tokens ticks into one live row
   // (#870) before pairing tool_use/tool_result. Runs on every recompute, so it
-  // applies to live SSE appends and backfilled/legacy logs alike.
-  const renderable = useMemo(
-    () => mergeToolPairs(mergeThinkingTokens(scopedEvents)),
+  // applies to live SSE appends and backfilled/legacy logs alike. Then fold the
+  // incremental task-tracking events (TaskCreate/TaskUpdate/…, #1662) into a
+  // running list: `annotated.rows` carry a per-row `taskSnapshot` for the
+  // inline checklist/summary, and `annotated.{todos,lastToolId,…}` drive the
+  // pinned TODO panel below.
+  const annotated = useMemo(
+    () => annotateTaskRows(mergeToolPairs(mergeThinkingTokens(scopedEvents))),
     [scopedEvents],
   );
+  const renderable = annotated.rows;
 
   /* ─── 5. Session cost aggregation ──────────────────────────────────── */
   const costTotals = useMemo(() => {
     let usd = 0, tokIn = 0, tokOut = 0;
+    // #1718: the header info popover shows a per-class token breakdown, so keep
+    // the four raw classes separate here in addition to the #494 "tokens in"
+    // sum. cacheCreationInput = cache-write, cacheReadInput = cache-read.
+    let input = 0, output = 0, cacheWrite = 0, cacheRead = 0;
     for (const ev of scopedEvents) {
       if (ev.type === 'result' && typeof ev.costUsd === 'number') {
         usd += ev.costUsd;
@@ -233,13 +245,17 @@ export default function SessionLogPanel({
         // must include cache-creation/-read tokens, not just input_tokens.
         tokIn  += sumContextTokens(ev.tokens) ?? 0;
         tokOut += ev.tokens?.output ?? 0;
+        input      += ev.tokens?.input ?? 0;
+        output     += ev.tokens?.output ?? 0;
+        cacheWrite += ev.tokens?.cacheCreationInput ?? 0;
+        cacheRead  += ev.tokens?.cacheReadInput ?? 0;
       }
     }
-    return { usd, tokIn, tokOut };
+    return { usd, tokIn, tokOut, breakdown: { input, output, cacheWrite, cacheRead } };
   }, [scopedEvents]);
 
   useEffect(() => {
-    if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut);
+    if (onCostUpdate) onCostUpdate(costTotals.usd, costTotals.tokIn, costTotals.tokOut, costTotals.breakdown);
   }, [costTotals, onCostUpdate]);
 
   /* ─── 5b. Last-request context-window snapshot (#471, #509) ────────────
@@ -275,30 +291,23 @@ export default function SessionLogPanel({
     if (onContextUpdate) onContextUpdate(lastContext);
   }, [lastContext, onContextUpdate]);
 
-  /* ─── 6. Latest TodoWrite for the pinned panel ─────────────────────────
-   * Walk events tail-first to find the most recent `tool_use` whose tool
-   * is `TodoWrite`. "Latest wins" — no merging across calls. The pinned
-   * panel re-renders in place as new TodoWrites arrive.
-   */
-  const latestTodoWrite = useMemo(() => {
-    for (let i = scopedEvents.length - 1; i >= 0; i--) {
-      const ev = scopedEvents[i];
-      if (
-        ev?.type === 'tool_use' &&
-        ev?.tool === 'TodoWrite' &&
-        Array.isArray(ev?.input?.todos)
-      ) {
-        return ev;
-      }
-    }
-    return null;
-  }, [scopedEvents]);
+  /* ─── 6. Current task list for the pinned panel (#255, #1662) ───────────
+   * The agent no longer emits a single `TodoWrite` snapshot; it tracks tasks
+   * incrementally with `TaskCreate` / `TaskUpdate` (legacy `TodoWrite` is still
+   * folded as a full-list replace). `annotateTaskRows` (above) assembles the
+   * current list over the run — `annotated.todos` is the live list and
+   * `annotated.lastToolId` identifies the last list-CHANGING event, which
+   * drives the dismiss-until-next-change contract below. "Latest state wins":
+   * the fold recomputes from `scopedEvents` on every change, so a burst of
+   * updates in one batch never leaves the panel on a stale intermediate. */
+  const taskTodos = annotated.todos;
+  const taskLastToolId = annotated.lastToolId;
 
   /* User-controlled dismissal. The panel is hidden only after the user
-   * clicks ×; it re-appears automatically when the next TodoWrite arrives
-   * (i.e. once the latest entry's toolId differs from the dismissed one).
-   * Switching agents/rooms drops the events array and resets the marker
-   * via the agent/room-change effect below. */
+   * clicks ×; it re-appears automatically when the next task-list change
+   * arrives (i.e. once the last changing event's toolId differs from the
+   * dismissed one). Switching agents/rooms drops the events array and resets
+   * the marker via the agent/room-change effect below. */
   const [dismissedTodoId, setDismissedTodoId] = useState(null);
   useEffect(() => {
     setDismissedTodoId(null);
@@ -306,7 +315,7 @@ export default function SessionLogPanel({
 
   // Session-boundary dismissal (#273): a new message, a session reset, or a
   // trigger-started run's first message all mean the previous session has
-  // ended, so the pinned panel must close even though no new TodoWrite has
+  // ended, so the pinned panel must close even though no new task change has
   // arrived yet. Skip the initial 0 so mounting doesn't dismiss anything.
   const firstTodoSignalRef = useRef(true);
   useEffect(() => {
@@ -314,11 +323,11 @@ export default function SessionLogPanel({
       firstTodoSignalRef.current = false;
       return;
     }
-    setDismissedTodoId(latestTodoWrite?.toolId || '__session_boundary__');
+    setDismissedTodoId(taskLastToolId || '__session_boundary__');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [todoCloseSignal]);
 
-  const todoVisible = !!latestTodoWrite && latestTodoWrite.toolId !== dismissedTodoId;
+  const todoVisible = taskTodos.length > 0 && taskLastToolId !== dismissedTodoId;
 
   /* ─── Render ────────────────────────────────────────────────────────── */
   return (
@@ -428,6 +437,7 @@ export default function SessionLogPanel({
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        data-hover-scope="log"
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -473,42 +483,52 @@ export default function SessionLogPanel({
           </div>
         )}
 
-        {renderable.map((ev, i) => {
-          const cid = ev.correlationId || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          // In single-session (scoped) mode every row is the same session, so
-          // the per-correlation colour adds no information — drop the border.
-          const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
-          return (
-            <div
-              key={ev._key ?? i}
-              style={{
-                borderLeft: `2px solid ${accentColor}`,
-                marginLeft: 'var(--eb-space-1)',
-              }}
-            >
-              <LogEvent
-                event={ev}
-                dimmed={dimmed}
+        {/* Virtualized timeline (#1685): only the visible window of tool-event
+            rows is mounted, keeping the DOM bounded for a long-running session.
+            The scroller above owns auto-scroll; VirtualList reads its geometry.
+            Each row carries a stable data-cid for the CSS-driven cross-panel
+            hover dim (#1676). */}
+        <VirtualList
+          items={renderable}
+          scrollerRef={scrollerRef}
+          keyOf={(ev, i) => ev._key ?? `e${i}`}
+          estimateHeight={44}
+          overscan={10}
+          renderItem={(ev) => {
+            const cid = ev.correlationId || null;
+            // In single-session (scoped) mode every row is the same session, so
+            // the per-correlation colour adds no information — drop the border.
+            const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
+            return (
+              <div
+                data-cid={cid || ''}
                 onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
                 onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              />
-            </div>
-          );
-        })}
+                style={{
+                  borderLeft: `2px solid ${accentColor}`,
+                  marginLeft: 'var(--eb-space-1)',
+                }}
+              >
+                <LogEvent event={ev} />
+              </div>
+            );
+          }}
+        />
       </div>
 
       {todoVisible && (
         <PinnedTodoPanel
-          todos={latestTodoWrite.input.todos}
-          correlationId={latestTodoWrite.correlationId || null}
-          onClose={() => setDismissedTodoId(latestTodoWrite.toolId || '__dismissed__')}
+          todos={taskTodos}
+          correlationId={annotated.lastCorrelationId || null}
+          onClose={() => setDismissedTodoId(taskLastToolId || '__dismissed__')}
           onHoverCorrelation={onHoverCorrelation}
         />
       )}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        ${hoverBaseCss('log')}
+        ${hoverDimCss('log', hoveredCorrelationId)}
       `}</style>
     </div>
   );

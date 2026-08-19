@@ -276,7 +276,7 @@ CI's tag-pinned apply cannot do for Secret-only changes).
 
 **Wire IAP single login (`IAP_AUDIENCE`)** — after the environment's ingress
 exists. Silent login is issued only for IAP identities registered as Agent
-Studio users (Teams page) or matching `ADMIN_USERNAME` (#1415); everyone else
+Studio users (Access & Users page) or matching `ADMIN_USERNAME` (#1415); everyone else
 gets the console login form. The audience embeds the environment's **own**
 backend-service id, so test and preprod each need their own (never copy it):
 
@@ -308,4 +308,5 @@ kubectl -n <ns> get deploy -o wide     # image tags = deployed version
 ```
 
 The console footer (bottom-left, under *About*) shows the deployed commit's
-short SHA.
+creation timestamp (e.g. `2026-08-13 17:52 +0200`); clicking it opens the
+About page, which still shows the commit's short SHA.

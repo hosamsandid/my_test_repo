@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SDLC Catalog — Patterns Catalog</title>
+<style>
+  :root { --bg: #0f1117; --surface: #171a21; --border: #2a2f3a; --text: #e6e8ec; --text-dim: #9aa2b1; --content-bg: #f8f9fb; }
+  html[data-theme="light"] { --bg: #f6f7f9; --surface: #ffffff; --border: #e3e6eb; --text: #1a1d23; --text-dim: #5b6472; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { display: flex; align-items: flex-start; gap: 16px; padding: 16px 20px; flex-shrink: 0; }
+  .back, .open {
+    display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; white-space: nowrap;
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim);
+    font-size: .875rem; text-decoration: none; background: transparent; cursor: pointer;
+  }
+  .back:hover, .open:hover { color: var(--text); }
+  .titles { flex: 1; }
+  .titles h1 { margin: 0; font-size: 1.25rem; font-weight: 600; color: var(--text); }
+  .titles p { margin: 4px 0 0; font-size: .875rem; color: var(--text-dim); line-height: 1.4; }
+  .frame { flex: 1; min-height: 0; margin: 0 20px 20px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  iframe { width: 100%; height: 100%; border: none; background: var(--content-bg); }
+</style>
+</head>
+<body>
+  <header>
+    <a class="back" href="./" title="Back to catalogs">← Catalogs</a>
+    <div class="titles">
+      <h1>SDLC Catalog</h1>
+      <p>End-to-end view of the trigger- and label-driven team — pick agents based on which lanes you want to staff.</p>
+    </div>
+    <a class="open" href="./sdlc-content.html" target="_blank" rel="noopener noreferrer" title="Open in a new tab">Open in new tab ↗</a>
+  </header>
+  <div class="frame">
+    <iframe src="./sdlc-content.html" title="AEE Agent Workflow Diagram"></iframe>
+  </div>
+<script>
+  (function () {
+    function map(t) { return t === 'admin-light' ? 'light' : 'dark'; }
+    function sync() {
+      try {
+        var p = window.parent;
+        if (p && p !== window && p.document) {
+          var t = p.document.documentElement.dataset.theme;
+          if (t) document.documentElement.setAttribute('data-theme', map(t));
+        }
+      } catch (e) { /* standalone tab — keep default */ }
+    }
+    sync();
+    try {
+      var p = window.parent;
+      if (p && p !== window && p.document) {
+        new MutationObserver(sync).observe(p.document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      }
+    } catch (e) { /* ignore */ }
+  })();
+</script>
+</body>
+</html>

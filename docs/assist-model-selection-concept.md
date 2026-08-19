@@ -40,7 +40,7 @@ Three orchestrator-side autonomous synthesis features (`_synthesizeSkillMd`, `or
 
 | # | Feature | UI entry | Route | Fallback on LLM failure |
 |---|---------|----------|-------|-------------------------|
-| 1 | Flow Copilot | `FlowCopilotPanel.jsx`, wizard `StepProcess.jsx` | `POST /api/process/copilot` (`api.js:6047`) | none (hard 400) |
+| 1 | Flow Copilot | `FlowCopilotPanel.jsx` (the wizard `StepProcess.jsx` inline copilot branch was removed in #1703) | `POST /api/process/copilot` (`api.js:6047`) | none (hard 400) |
 | 2 | Generate agent prompt | Add-role dialog (`ProcessCanvas.jsx`) | `POST /api/agent-prompt/generate` (`api.js:8734`) | none (400) |
 | 3 | Port/wiring suggestion | wizard composer | `POST /api/agent-ports/suggest` (`api.js:8767`) | heuristic |
 | 4 | Outcome suggestion | Routing tab | `POST /api/agent-outcomes/suggest` (`api.js:8800`) | heuristic |
@@ -141,7 +141,7 @@ function assistSelectableEndpoint(scope, ep) {
 
 ### 4.5 Transport and server-side enforcement
 
-**Transport.** The central wrapper `apiCall()` (`admin-console/src/hooks/useApi.js:48`) gains one line: if a selection is set (module-level getter, fed by `ModelSelectionProvider`), add header `X-Assist-Model: <endpointId>:<modelId>` to every request. The few raw streaming `fetch` call sites (Flow Copilot NDJSON in `StepProcess.jsx` / `FlowCopilotPanel.jsx`) add the same header explicitly. Non-assist routes ignore the header — zero cost, and any *future* assist route inherits the selection for free.
+**Transport.** The central wrapper `apiCall()` (`admin-console/src/hooks/useApi.js:48`) gains one line: if a selection is set (module-level getter, fed by `ModelSelectionProvider`), add header `X-Assist-Model: <endpointId>:<modelId>` to every request. The few raw streaming `fetch` call sites (Flow Copilot NDJSON in `FlowCopilotPanel.jsx`) add the same header explicitly. Non-assist routes ignore the header — zero cost, and any *future* assist route inherits the selection for free.
 
 **Server.** New `resolveAssistTarget(req, { requireSelection = true } = {})` in `api.js`, replacing the bare `resolveGenerationTarget(req.body.llmEndpointId)` call in all nine Family-A routes:
 

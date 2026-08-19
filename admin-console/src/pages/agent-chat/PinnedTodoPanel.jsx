@@ -4,19 +4,20 @@ import { TodoList } from './ToolBlock';
 
 /**
  * Pinned status panel docked to the bottom of the Log tab, always showing
- * the agent's most recent TodoWrite for the active (agent, room).
+ * the agent's current task list for the active (agent, room).
  *
- * The host (SessionLogPanel) owns the dismissal-vs-new-TodoWrite logic:
- * if this component renders, it is meant to be visible. Internal state is
- * limited to the collapse toggle.
+ * The host (SessionLogPanel) folds the incremental task events
+ * (TaskCreate/TaskUpdate/…, #1662) into the list and owns the
+ * dismissal-vs-next-change logic: if this component renders, it is meant to be
+ * visible. Internal state is limited to the collapse toggle.
  *
  * Props:
- *   todos:               array of { content, activeForm?, status } from the
- *                        latest TodoWrite tool_use input.
- *   correlationId:       correlationId of the originating TodoWrite event,
- *                        used for cross-panel hover dimming.
+ *   todos:               array of { content, activeForm?, status } — the
+ *                        current folded task list.
+ *   correlationId:       correlationId of the last list-changing event, used
+ *                        for cross-panel hover dimming.
  *   onClose():           user clicked the × button; the host should hide the
- *                        panel until the next TodoWrite arrives.
+ *                        panel until the next task-list change arrives.
  *   onHoverCorrelation:  same hover-correlation callback as the log rows.
  */
 export default function PinnedTodoPanel({ todos, correlationId, onClose, onHoverCorrelation }) {

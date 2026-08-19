@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { LogIn } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import AccentureLogo from '../components/AccentureLogo';
+import PasswordField from '../components/PasswordField';
 
 // Full-screen login gate (#276). Rendered instead of the console whenever there
 // is no active session. On success the AuthProvider flips to authenticated and
@@ -86,9 +87,8 @@ export default function Login() {
 
         <div style={{ marginBottom: 'var(--eb-space-4)' }}>
           <label htmlFor="login-password" style={labelStyle}>Password</label>
-          <input
+          <PasswordField
             id="login-password"
-            type="password"
             autoComplete="current-password"
             value={password}
             onChange={e => setPassword(e.target.value)}

@@ -136,3 +136,74 @@ test('applyBatchClassification: unusable response → null (heuristic fallback s
   assert.equal(R.applyBatchClassification('not json at all', [cand('c1', 'x')], DOMAINS), null);
   assert.equal(R.applyBatchClassification(null, [cand('c1', 'x')], DOMAINS), null);
 });
+
+// ── reconcileDomainProposal (FIX-A: singleton new-domain proposal) ────────────
+
+const proposal = (canonicalIds) => ({
+  unrouted: canonicalIds.map((id) => ({ canonicalId: id, entryIds: [id] })),
+  budgetBlocked: false,
+  reason: 'mass-threshold',
+});
+
+test('domainProposalId is a stable per-team id', () => {
+  assert.equal(R.domainProposalId('payments'), 'dp-payments');
+  assert.equal(R.domainProposalId(''), 'dp-team');
+  assert.equal(R.domainProposalId(undefined), 'dp-team');
+});
+
+test('reconcileDomainProposal creates exactly one open proposal card', () => {
+  const rows = R.reconcileDomainProposal([], {
+    proposal: proposal(['a', 'b', 'c']), teamId: 'payments', teamSegment: 'payments', now: NOW,
+  });
+  const props = rows.filter((r) => r.source === 'domain-proposal');
+  assert.equal(props.length, 1);
+  assert.equal(props[0].id, 'dp-payments');
+  assert.equal(props[0].status, 'open');
+  assert.deepEqual(props[0].unroutedIds, ['a', 'b', 'c']);
+});
+
+test('reconcileDomainProposal: shifting unrouted set upserts the SAME card, never a second', () => {
+  let rows = R.reconcileDomainProposal([], {
+    proposal: proposal(['a', 'b']), teamId: 't', teamSegment: 't', now: '2026-07-20T00:00:00Z',
+  });
+  rows = R.reconcileDomainProposal(rows, {
+    proposal: proposal(['a', 'b', 'c']), teamId: 't', teamSegment: 't', now: NOW,
+  });
+  const props = rows.filter((r) => r.source === 'domain-proposal');
+  assert.equal(props.length, 1);
+  assert.deepEqual(props[0].unroutedIds, ['a', 'b', 'c']);
+  assert.equal(props[0].raisedAt, NOW); // bumped
+});
+
+test('reconcileDomainProposal respects a dismissed singleton (raises nothing)', () => {
+  const existing = [{ id: 'dp-t', source: 'domain-proposal', status: 'dismissed', teamId: 't' }];
+  const rows = R.reconcileDomainProposal(existing, {
+    proposal: proposal(['a', 'b', 'c']), teamId: 't', teamSegment: 't', now: NOW,
+  });
+  const props = rows.filter((r) => r.source === 'domain-proposal');
+  assert.equal(props.length, 1);
+  assert.equal(props[0].status, 'dismissed');
+});
+
+test('reconcileDomainProposal collapses a legacy dp-<hash> pile to one open card', () => {
+  const legacy = [
+    { id: 'dp-1111', source: 'domain-proposal', status: 'open', raisedAt: '2026-07-01T00:00:00Z' },
+    { id: 'dp-2222', source: 'domain-proposal', status: 'open', raisedAt: '2026-07-10T00:00:00Z' },
+    { id: 'dp-3333', source: 'domain-proposal', status: 'open', raisedAt: '2026-07-05T00:00:00Z' },
+    { id: 'x', source: 'convergence', status: 'open' },
+  ];
+  const rows = R.reconcileDomainProposal(legacy, { teamId: 't', teamSegment: 't', now: NOW }); // no new proposal this pass
+  const props = rows.filter((r) => r.source === 'domain-proposal' && r.status === 'open');
+  assert.equal(props.length, 1);
+  assert.equal(props[0].id, 'dp-2222'); // newest raisedAt kept
+  assert.ok(rows.some((r) => r.id === 'x')); // non-proposal rows untouched
+});
+
+test('reconcileDomainProposal leaves non-proposal rows untouched', () => {
+  const rows = R.reconcileDomainProposal(
+    [{ id: 'c1', source: 'convergence', status: 'open' }, { id: 'c2', source: 'related', status: 'open' }],
+    { proposal: proposal(['a', 'b']), teamId: 't', teamSegment: 't', now: NOW },
+  );
+  assert.ok(rows.find((r) => r.id === 'c1'));
+  assert.ok(rows.find((r) => r.id === 'c2'));
+});

@@ -1,10 +1,54 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypePrettyCode from 'rehype-pretty-code';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, Zap } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
+import AskQuestionCard from './AskQuestionCard';
+import { normalizeAskQuestion } from './ask-question-view.js';
+
+/**
+ * The actual react-markdown render. Memoized on `body` alone (#1676): the
+ * remark-gfm + rehype-pretty-code (Shiki) + rehype-sanitize pipeline is the
+ * expensive part, and its output depends only on the source text — the dual
+ * Shiki themes are both emitted and the active one is picked by CSS keyed off
+ * `<html data-theme>`, so a theme switch never re-tokenizes. Wrapping this in
+ * React.memo means an unrelated re-render of the surrounding bubble (e.g. a
+ * cross-panel hover) cannot re-run Shiki.
+ */
+const MarkdownFull = React.memo(function MarkdownFull({ body }) {
+  useAgentChatMdCss();
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      // IMPORTANT: rehype-sanitize must run *after* rehype-pretty-code so
+      // the syntax-highlighting markup (spans with style + data-* attrs)
+      // survives into the rendered output. The custom schema below
+      // explicitly allow-lists those attributes.
+      rehypePlugins={[
+        [rehypePrettyCode, PRETTY_CODE_OPTIONS],
+        [rehypeSanitize, SANITIZE_SCHEMA],
+      ]}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {body}
+    </ReactMarkdown>
+  );
+});
+
+const MarkdownGfmOnly = React.memo(function MarkdownGfmOnly({ body }) {
+  useAgentChatMdCss();
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {body}
+    </ReactMarkdown>
+  );
+});
 
 /**
  * Defensive markdown wrapper.
@@ -13,9 +57,11 @@ import LoopRecordCard from './LoopRecordCard';
  * unified synchronously. In some setups this combination throws ("Expected
  * sync transformer") on first render. To avoid taking down the whole chat
  * if that happens, we fall back to GFM-only rendering (with sanitize) and
- * surface a one-line notice in the dev console.
+ * surface a one-line notice in the dev console. The inner renders are
+ * memoized (see above) so the error boundary re-rendering never re-runs the
+ * markdown pipeline for unchanged text.
  */
-class SafeMarkdown extends React.Component {
+export class SafeMarkdown extends React.Component {
   constructor(props) {
     super(props);
     this.state = { fallback: false };
@@ -30,45 +76,14 @@ class SafeMarkdown extends React.Component {
   render() {
     const { body } = this.props;
     if (this.state.fallback) {
-      return (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
-          components={MARKDOWN_COMPONENTS}
-        >
-          {body}
-        </ReactMarkdown>
-      );
+      return <MarkdownGfmOnly body={body} />;
     }
     try {
-      return (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          // IMPORTANT: rehype-sanitize must run *after* rehype-pretty-code so
-          // the syntax-highlighting markup (spans with style + data-* attrs)
-          // survives into the rendered output. The custom schema below
-          // explicitly allow-lists those attributes.
-          rehypePlugins={[
-            [rehypePrettyCode, PRETTY_CODE_OPTIONS],
-            [rehypeSanitize, SANITIZE_SCHEMA],
-          ]}
-          components={MARKDOWN_COMPONENTS}
-        >
-          {body}
-        </ReactMarkdown>
-      );
+      return <MarkdownFull body={body} />;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn('[agent-chat] rehype-pretty-code threw synchronously; using GFM-only fallback:', err?.message || err);
-      return (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
-          components={MARKDOWN_COMPONENTS}
-        >
-          {body}
-        </ReactMarkdown>
-      );
+      return <MarkdownGfmOnly body={body} />;
     }
   }
 }
@@ -172,6 +187,34 @@ const AGENT_CHAT_MD_CSS = `
   .agent-chat-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
   .agent-chat-md a { color: var(--eb-accent-primary); }
 `;
+
+/**
+ * Inject the shared `.agent-chat-md` stylesheet exactly once (#1676).
+ *
+ * Previously every Message/NoticeMessage/LoopRecordCard rendered its own
+ * `<style>{AGENT_CHAT_MD_CSS}</style>`, so a long transcript accumulated N
+ * duplicate style nodes. The CSS is identical everywhere, so a single
+ * document-level node is enough; the hook is idempotent and safe to call from
+ * every markdown render.
+ */
+let mdCssInjected = false;
+export function ensureAgentChatMdCss() {
+  if (mdCssInjected || typeof document === 'undefined') return;
+  if (document.getElementById('agent-chat-md-css')) { mdCssInjected = true; return; }
+  const el = document.createElement('style');
+  el.id = 'agent-chat-md-css';
+  el.textContent = AGENT_CHAT_MD_CSS;
+  document.head.appendChild(el);
+  mdCssInjected = true;
+}
+
+// Inject eagerly at module load (before the first bubble renders) to avoid a
+// one-frame unstyled flash; the hook re-asserts it on mount as a fallback.
+ensureAgentChatMdCss();
+
+function useAgentChatMdCss() {
+  useEffect(() => { ensureAgentChatMdCss(); }, []);
+}
 
 const TIME_FORMAT = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
 const DATE_TIME_FORMAT = new Intl.DateTimeFormat('de-DE', {
@@ -327,12 +370,33 @@ function NoticeMessage({ message }) {
           {message.sender} · {time}
         </div>
       </div>
-      <style>{AGENT_CHAT_MD_CSS}</style>
     </div>
   );
 }
 
-export default function Message({ message, agentUserId, thinking, onRelaunchLoop }) {
+function Message({
+  message, agentUserId, thinking, onRelaunchLoop,
+  onAnswerQuestion, questionAnswerable, questionAnswer,
+}) {
+  // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
+  // carries a structured `io.aee.ask-question` payload — render it as clickable
+  // option controls beneath the question. The plain Markdown `body` is what
+  // other Matrix clients show (AC8); we render the structured version here.
+  if (message.sender === agentUserId && message['io.aee.ask-question']) {
+    const q = normalizeAskQuestion(message['io.aee.ask-question']);
+    if (q) {
+      return (
+        <AskQuestionCard
+          question={q}
+          answerable={!!questionAnswerable}
+          answeredOptionId={questionAnswer?.answeredOptionId ?? null}
+          answeredLabel={questionAnswer?.answeredLabel ?? null}
+          onAnswer={(opt) => onAnswerQuestion?.(message.event_id, opt, q)}
+          time={formatMessageTime(message.ts)}
+        />
+      );
+    }
+  }
   // Finished-loop record (#1231): a persistent, re-runnable card that replaces
   // the plain terminal-outcome bubble in the Admin Console. The full narrative
   // stays available as the message `body` (shown in the card's "Run details").
@@ -344,7 +408,7 @@ export default function Message({ message, agentUserId, thinking, onRelaunchLoop
         time={formatMessageTime(message.ts)}
         details={
           message.body
-            ? <div className="agent-chat-md"><SafeMarkdown body={message.body} /><style>{AGENT_CHAT_MD_CSS}</style></div>
+            ? <div className="agent-chat-md"><SafeMarkdown body={message.body} /></div>
             : null
         }
       />
@@ -416,11 +480,18 @@ export default function Message({ message, agentUserId, thinking, onRelaunchLoop
           {thinking ? 'thinking…' : (message.isOptimistic ? `${time} · sending…` : time)}
         </div>
       </div>
-
-      <style>{AGENT_CHAT_MD_CSS}</style>
     </div>
   );
 }
+
+/**
+ * Memoized (#1676): a cross-panel hover changes shared state in the parent,
+ * which re-renders ChatPanel; without this every bubble would re-render (and
+ * re-run Shiki). The props are a stable message object, a stable agent id, and
+ * a stable (useCallback'd) relaunch handler, so an unrelated hover skips the
+ * whole bubble.
+ */
+export default React.memo(Message);
 
 function Avatar({ isAgent, initials }) {
   return (
@@ -440,7 +511,33 @@ function Avatar({ isAgent, initials }) {
   );
 }
 
-function ThinkingDots() {
+// The `@keyframes dotPulse` used by ThinkingDots is injected once at the
+// document level (mirrors ensureAgentChatMdCss) so the shared indicator works
+// anywhere it is mounted — Agent Chat (ChatPanel also declares dotPulse locally,
+// a harmless duplicate) and the Help Chat (HelperChatPanel, #1779), which has no
+// page-scoped <style>. A `prefers-reduced-motion` guard freezes the dots at a
+// legible opacity for users who opt out of motion, while keeping the accessible
+// label intact.
+let thinkingDotsCssInjected = false;
+export function ensureThinkingDotsCss() {
+  if (thinkingDotsCssInjected || typeof document === 'undefined') return;
+  if (document.getElementById('agent-chat-thinking-dots-css')) { thinkingDotsCssInjected = true; return; }
+  const el = document.createElement('style');
+  el.id = 'agent-chat-thinking-dots-css';
+  el.textContent = `
+    @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) {
+      .agent-chat-thinking-dot { animation: none !important; opacity: 0.55 !important; }
+    }
+  `;
+  document.head.appendChild(el);
+  thinkingDotsCssInjected = true;
+}
+
+ensureThinkingDotsCss();
+
+export function ThinkingDots() {
+  useEffect(() => { ensureThinkingDotsCss(); }, []);
   const dotStyle = (delay) => ({
     display: 'inline-block',
     width: 6, height: 6,
@@ -451,10 +548,10 @@ function ThinkingDots() {
     animationDelay: delay,
   });
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 0' }} aria-label="Thinking">
-      <span style={dotStyle('0s')} />
-      <span style={dotStyle('0.2s')} />
-      <span style={dotStyle('0.4s')} />
+    <span style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 0' }} aria-label="Thinking" role="status">
+      <span className="agent-chat-thinking-dot" style={dotStyle('0s')} />
+      <span className="agent-chat-thinking-dot" style={dotStyle('0.2s')} />
+      <span className="agent-chat-thinking-dot" style={dotStyle('0.4s')} />
     </span>
   );
 }

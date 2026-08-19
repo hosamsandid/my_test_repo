@@ -1,0 +1,105 @@
+{
+  "generated": "2026-08-14T13:07:36.933Z",
+  "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
+  "chapters": [
+    {
+      "id": "team-setup",
+      "order": 10,
+      "title": "Team Setup",
+      "route": "/team-setup",
+      "steps": [
+        {
+          "id": "process-step",
+          "voiceover": "The wizard lands on the Process step — the template gallery. It comes first on purpose, because it's the central decision. For the demo we pick a ready-made template, the Core SDLC flow. It gives us four agents that cover a full build-and-review loop: a Business Analyst who writes issues, a Developer who implements them, a Code Reviewer, and a Reworker. The live preview on the right confirms the hand-offs connect.",
+          "screenshotPath": "team-setup/process-step-core-sdlc.png"
+        },
+        {
+          "id": "working-environment",
+          "voiceover": "Next, the working environment — where the team operates. It bundles the repository, the branch, and the credentials into one reusable template, so we just pick one from the grid.",
+          "screenshotPath": "team-setup/working-environment-step.png"
+        },
+        {
+          "id": "team-step",
+          "voiceover": "Step three gives the team its identity: a name and an ID, both pre-filled from the environment. The ID becomes the prefix for every agent the team creates, like agentic-demos-developer.",
+          "screenshotPath": "team-setup/team-step.png"
+        },
+        {
+          "id": "knowledge-step",
+          "voiceover": "Knowledge is optional. Here we choose the skills every member inherits, the sources it can query at runtime, and how learnings are shared across the team. We accept the defaults.",
+          "screenshotPath": "team-setup/knowledge-step.png"
+        },
+        {
+          "id": "review-step",
+          "voiceover": "Finally, review — everything in one place. When we hit create, the wizard builds the whole team in one atomic transaction, each member with its own chat identity, ready for the first issue.",
+          "screenshotPath": "team-setup/review-step.png"
+        }
+      ]
+    },
+    {
+      "id": "triggers",
+      "order": 30,
+      "title": "Triggers",
+      "route": "/jobs",
+      "steps": [
+        {
+          "id": "cron",
+          "voiceover": "The most intuitive kind is a scheduled trigger. I pick Cron, choose Daily at 07:00 — the platform confirms it in plain language and shows the cron expression — and write the prompt the agent runs every morning, unattended.",
+          "screenshotPath": "triggers/trigger-cron.png"
+        },
+        {
+          "id": "once",
+          "voiceover": "The simplest type is Once — a one-shot that fires a single time at a moment you pick, then removes itself. Here it delivers a personal reminder.",
+          "screenshotPath": "triggers/trigger-once.png"
+        },
+        {
+          "id": "http",
+          "voiceover": "An HTTP webhook lets an external system fire the trigger. The panel generates a dedicated endpoint and a required secret — copy it once into your calling system; there's no open, unauthenticated mode.",
+          "screenshotPath": "triggers/trigger-http.png"
+        },
+        {
+          "id": "github-event",
+          "voiceover": "This is the type doing the real work in a flow. I pick the repository and one event from the full catalog — here Issue labeled — and narrow it to a single label, \"ready\", so the agent reacts to precisely the signal it cares about.",
+          "screenshotPath": "triggers/trigger-github-event.png"
+        },
+        {
+          "id": "data-flow",
+          "voiceover": "The subtlest type is a data-flow dependency. It reframes a push as a hand-off between teammates: an upstream agent committed its work, so now it's your turn. The woken agent pulls, checks relevance, and continues — or replies PASS.",
+          "screenshotPath": "triggers/trigger-data-flow.png"
+        }
+      ]
+    },
+    {
+      "id": "flows-draft",
+      "order": 40,
+      "title": "Flows",
+      "route": "/flows",
+      "steps": [
+        {
+          "id": "empty-draft",
+          "voiceover": "A draft is an editable process that exists before any team is created — nothing is live, nothing spawned. Here's a fresh, empty one called Simple SDLC. Let's add our first agent.",
+          "screenshotPath": "flows-draft/flow-empty-draft.png"
+        },
+        {
+          "id": "add-agent",
+          "voiceover": "I click Add agent and choose \"From scratch\". Instead of writing a system prompt by hand, I give the agent a name and jot down one line of intent: take requirements and create a GitHub issue.",
+          "screenshotPath": "flows-draft/flow-add-agent.png"
+        },
+        {
+          "id": "two-agents",
+          "voiceover": "Here's where we are: two agents on the canvas, each with its generated prompt — but standing side by side, unconnected. Two agents that don't hand work to each other aren't a process yet. The next step makes it a flow.",
+          "screenshotPath": "flows-draft/flow-two-agents.png"
+        },
+        {
+          "id": "issue-channel",
+          "voiceover": "I drag from the Business Analyst's port onto the Developer and choose an Issue channel: the BA opens an issue that wakes the Developer. I add a routing label, \"ready\", and tick the human approval gate — so the Developer only starts once a person applies that label. And there it is: a working, human-gated flow.",
+          "screenshotPath": "flows-draft/flow-issue-channel.png"
+        },
+        {
+          "id": "stages",
+          "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
+          "screenshotPath": "flows-draft/flow-stages.png"
+        }
+      ]
+    }
+  ]
+}

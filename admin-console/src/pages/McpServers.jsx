@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
-import { Trash2, Plus, KeyRound, Server } from 'lucide-react';
+import { Trash2, Plus, KeyRound, Server, Info } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import InfoTip from '../components/InfoTip';
+import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
 
 const inputStyle = {
   width: '100%',
@@ -24,6 +27,27 @@ const inputStyle = {
 };
 
 const monoStyle = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' };
+
+// When a Save button is disabled (and not merely mid-save), spell out exactly
+// which required field is still empty so a user new to the console isn't left
+// guessing why the form looks broken. Mirrors the AgentCreateForm hint (#1773).
+function SubmitBlockers({ label, reasons }) {
+  if (reasons.length === 0) return null;
+  return (
+    <div style={{
+      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+    }}>
+      <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+      <span>
+        {label} is disabled until you:
+        <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+          {reasons.map(r => <li key={r.field}>{r.message}</li>)}
+        </ul>
+      </span>
+    </div>
+  );
+}
 
 function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [id, setId] = useState('');
@@ -59,7 +83,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
     return out;
   }
 
-  const canSave = id.trim() && name.trim() && (isHttp ? url.trim() : command.trim());
+  const { canSave, reasons: submitBlockers } = describeServerSubmitState({ id, name, transport, command, url });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -79,7 +103,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="wiki"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits, dashes. Used as the key in <code>.claude/settings.json</code> <code>mcpServers</code>.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the key in <code>.claude/settings.json</code> <code>mcpServers</code>.</>}
       />
 
       <FormInput label="Description" value={description} onChange={setDescription} placeholder="What agents use this server for" />
@@ -133,7 +157,9 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {!saving && <SubmitBlockers label="Save server" reasons={submitBlockers} />}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button
           onClick={() => onSave({
             id: id.trim(),
@@ -166,6 +192,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
           borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
           cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
         }}>Cancel</button>
+        </div>
       </div>
     </div>
   );
@@ -182,7 +209,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
     getName: () => name,
   });
 
-  const canSave = name.trim() && secret.trim();
+  const { canSave, reasons: submitBlockers } = describeCredentialSubmitState({ name, secret });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -202,7 +229,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="confluence-team-a"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored secret.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored secret.</>}
       />
 
       <div>
@@ -235,7 +262,9 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {!saving && <SubmitBlockers label="Save credential" reasons={submitBlockers} />}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button
           onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, serverId: serverId || null, secret: secret.trim() })}
           disabled={saving || !canSave}
@@ -256,6 +285,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
           borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
           cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
         }}>Cancel</button>
+        </div>
       </div>
     </div>
   );
@@ -340,7 +370,7 @@ export default function McpServers() {
     { key: 'name', label: 'Name' },
     { key: 'serverId', label: 'Default server', render: v => v ? <span style={monoStyle}>{v}</span> : '—' },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ ...monoStyle, color: 'var(--eb-text-secondary)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteCred(row)} /></div>
     )},
@@ -388,7 +418,7 @@ export default function McpServers() {
             <Plus size={15} /> New server
           </button>
         </div>
-        <DataTable columns={SERVER_COLUMNS} data={servers ?? []} emptyText="No MCP servers configured yet." />
+        <DataTable columns={SERVER_COLUMNS} data={servers ?? []} emptyText="No MCP servers configured yet. Click 'New server' to add one." />
       </section>
 
       <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -403,7 +433,7 @@ export default function McpServers() {
             <Plus size={15} /> New credential
           </button>
         </div>
-        <DataTable columns={CRED_COLUMNS} data={credentials ?? []} emptyText="No credentials stored yet." />
+        <DataTable columns={CRED_COLUMNS} data={credentials ?? []} emptyText="No credentials stored yet. Click 'New credential' to add one." />
       </section>
 
       <SidePanel

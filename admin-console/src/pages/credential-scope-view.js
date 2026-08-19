@@ -14,8 +14,16 @@ const DEFAULT_TEAM_ID = 'default';
 
 // Normalize a credential entry to an explicit scope shape (backward-compatible
 // with pre-#798 entries that only carry `teamId`). Mirrors scope.js.
+//
+// Personal tier (#1568/epic #1558): a `personal` credential is owned by exactly
+// one human (`userId`) and carries neither a team nor system assignments. It
+// round-trips its owner reference; every other (team/system/legacy) entry
+// normalizes exactly as before — personal is strictly additive.
 export function normalizeCredential(cred) {
   const c = cred || {};
+  if (c.scope === 'personal') {
+    return { ...c, scope: 'personal', userId: c.userId || null, teamId: null, assignedTeamIds: [] };
+  }
   const scope = c.scope === 'system' ? 'system' : 'team';
   if (scope === 'system') {
     const assignedTeamIds = Array.isArray(c.assignedTeamIds)
@@ -24,6 +32,12 @@ export function normalizeCredential(cred) {
     return { ...c, scope, teamId: null, assignedTeamIds };
   }
   return { ...c, scope: 'team', teamId: c.teamId || DEFAULT_TEAM_ID, assignedTeamIds: [] };
+}
+
+// Is this a personal-tier credential? (helper so pages can split the personal
+// self-service surface from the admin team/system tables without re-deriving.)
+export function isPersonalCredential(cred) {
+  return normalizeCredential(cred).scope === 'personal';
 }
 
 // Map a teams array (`[{id, name}]`) to an id→name lookup.
@@ -41,6 +55,9 @@ export function teamsById(teams) {
 //   team                → { scope:'team',   label:'Team',   teams:[name], detail:'name' }
 export function credentialScopeLabel(cred, names = {}) {
   const c = normalizeCredential(cred);
+  if (c.scope === 'personal') {
+    return { scope: 'personal', label: 'Personal', teams: [], detail: 'Private to you' };
+  }
   if (c.scope === 'system') {
     const teamNames = c.assignedTeamIds.map(id => names[id] || id);
     return {
@@ -79,9 +96,13 @@ export function ownershipPayload(own) {
 // May the caller edit/delete THIS existing credential? Mirrors
 // scope.canManageCredential: System Admins → all; a Team Admin → only
 // team-scoped credentials of a team they administer.
-export function canManageCredentialClient(cred, { isSysAdmin, adminTeamIds = [] }) {
-  if (isSysAdmin) return true;
+export function canManageCredentialClient(cred, { isSysAdmin, adminTeamIds = [], userId = null }) {
   const c = normalizeCredential(cred);
+  // Personal tier first, ahead of the sys-admin shortcut (mirrors scope.js /
+  // D2): only the owner may manage their own personal credential — not even a
+  // System Admin. Fail-closed when either side lacks an identity.
+  if (c.scope === 'personal') return !!(userId && c.userId && c.userId === userId);
+  if (isSysAdmin) return true;
   if (c.scope === 'system') return false;
   return adminTeamIds.includes(c.teamId);
 }

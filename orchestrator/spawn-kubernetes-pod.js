@@ -36,6 +36,24 @@
 //     AEE_K8S_CONTEXT_HOSTPATH=1, never on hosted GKE.
 //   - SIGUSR1/SIGUSR2: k8s cannot forward per-process signals through the pod
 //     API — see the kill() handler for the mapping.
+//   - plugin broker sidecars (#1547/#1565): now IMPLEMENTED for UI-bearing
+//     plugins — PLUGIN_SIDECARS_SUPPORTED is true and plugin-runtime.js delegates
+//     the runtime-divergent entry points to spawn-kubernetes-plugin.js, which
+//     creates a Deployment + Service + state PVC per installed plugin through the
+//     k8s API (same raw-HTTPS style as this file). On Podman a broker is a sibling
+//     container plus per-agent network attachments; the k8s equivalent replaces
+//     the sibling container with the Deployment+Service and the state named-volume
+//     with a PVC (an emptyDir would silently lose the board on pod restart).
+//     STILL DIFFERENT — the grant-driven per-agent-network reachability that a
+//     BROKER plugin needs becomes per-grant NetworkPolicy objects, which is a
+//     larger, separable mechanism: a UI-only plugin (netzplan) needs NO
+//     NetworkPolicy because the console reaches its Service in-namespace and no
+//     agent talks to it, so reconcilePluginAttachments is a no-op here and a
+//     broker plugin's CLI stays at exit 3 on a hosted stack until that split-out
+//     work lands (the Plugins page states this via `platforms`).
+//   - podman-socket capability: no k8s equivalent — a host container socket
+//     cannot be mounted into a pod. plugins/podman-sandbox stays
+//     platforms: ["podman"] permanently and is gated out of a k8s stack.
 //
 // RBAC needed by the orchestrator's ServiceAccount (namespaced Role):
 //   pods [get, list, create, delete] + pods/log [get] + pods/exec [create]
@@ -583,6 +601,15 @@ module.exports = {
   // k8s-runtime-internal extra (NOT part of the five-function seam): pod-exec.js
   // resolves an agent's running pod through the same instance-scoped selector.
   listAgentPods,
+  // Plugin sidecars (#1547/#1565) — see the Deliberate differences block above.
+  // UI-bearing plugins now run as a Deployment + Service + PVC via
+  // spawn-kubernetes-plugin.js (plugin-runtime.js delegates to it on this
+  // runtime). perAgentNetworkName still has no k8s counterpart (agent pods share
+  // the cluster network), so it returns null: per-agent-network reachability for
+  // broker plugins is the separable NetworkPolicy follow-up, not implemented here.
+  PLUGIN_SIDECARS_SUPPORTED: true,
+  perAgentNetworkName: () => null,
+  AGENT_NETWORK: null,
   // Pure helpers exposed for unit tests only — not part of the runtime seam.
   _internal: {
     safeName,

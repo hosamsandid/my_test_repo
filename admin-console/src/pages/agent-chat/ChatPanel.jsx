@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, DollarSign, Cpu, Gauge, Trash2, GitBranch, ArrowRight, Zap, ChevronDown, Ticket, ExternalLink, X, Plus, Minus, Type } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Server, Gauge, Trash2, GitBranch, ArrowRight, Plus, Minus, Type } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -12,14 +11,24 @@ import SidePanel from '../../components/SidePanel';
 import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
+import ChatModelSelector from './ChatModelSelector.jsx';
+import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
+import { isAtBottom, isNearTop } from './chat-scroll.js';
 import { latestLoopProgress } from './loop-run-view.js';
+import {
+  ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
+  buildAnswerContent, indexAskAnswers, questionState,
+} from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
-import { resolveContextWindowTokens, computeContextFillLevel, formatTokenCountK } from './context-window';
+import VirtualList from '../../components/VirtualList.jsx';
+import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
+import { headerContextIndicator } from './session-info.js';
+import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
-import { describeTicket, NO_TICKET_LABEL, parseIssueRefInput } from './ticket-view.js';
+import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import {
   MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
   resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
@@ -87,10 +96,15 @@ const LEARN_PROMPT =
  *        to the Full-Learn prompt (which may have added KB entries), so the
  *        right rail's Knowledge tab refreshes and the user sees the button
  *        feeding the pipeline.
+ * @param {?{ref:string, ts:number}} [insertRefRequest] Cross-panel request to
+ *        splice a `@<ref>` file reference into the composer draft, forwarded
+ *        straight to MessageInput (#1699 — the workspace browser's "Reference in
+ *        chat" button).
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
+  insertRefRequest,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -181,6 +195,22 @@ export default function ChatPanel({
     if (!contextFill || contextWindowTokens == null) return null;
     return computeContextFillLevel(contextFill.tokensIn, contextWindowTokens);
   }, [contextFill, contextWindowTokens]);
+  // #1718: the compact header context-usage indicator model — "used / window · %"
+  // when the window is known, else the used count alone (consistent with #1717).
+  const contextIndicator = useMemo(
+    () => (contextFill ? headerContextIndicator(contextFill.tokensIn, contextWindowTokens, contextFillLevel) : null),
+    [contextFill, contextWindowTokens, contextFillLevel],
+  );
+  // #1718: the currently *selected* (effective) model — its context window and,
+  // when discovery captured it, its max-output tokens — drives the info popover's
+  // Model section. Distinct from contextFill.model (the last completed run's).
+  const selectedModelInfo = useMemo(() => {
+    const modelId = (modelOptions?.override) || (modelOptions?.defaultModelId) || null;
+    const entry = modelId ? (modelOptions?.models || []).find(m => m.id === modelId) : null;
+    const windowTokens = entry ? resolveContextWindowTokens(entry) : (modelId ? resolveContextWindowTokens({ id: modelId }) : null);
+    const maxOutput = typeof entry?.maxOutputTokens === 'number' && entry.maxOutputTokens > 0 ? entry.maxOutputTokens : null;
+    return { windowTokens, maxOutput };
+  }, [modelOptions]);
   // Wall-clock at the moment the user clicked "Save & Learn". The
   // post-message effect uses it to decide which agent reply to treat as
   // "the response to the learn prompt" — namely, the next agent message
@@ -189,12 +219,6 @@ export default function ChatPanel({
 
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
-
-  // Parent-ticket binding (#1383): the GitHub issue this room is about.
-  const [ticket, setTicket] = useState(null);
-  const [ticketOpen, setTicketOpen] = useState(false);
-  const [ticketBusy, setTicketBusy] = useState(false);
-  const [ticketError, setTicketError] = useState(null);
 
   // Per-user transcript font size (#1437). Default 12px (was 14px). Seeded from
   // the user's server-stored preference (authoritative, cross-device) with a
@@ -262,54 +286,16 @@ export default function ChatPanel({
     return () => { cancelled = true; clearInterval(timer); };
   }, [agent?.id]);
 
-  /* ─── 1c. Parent-ticket binding (#1383) ─────────────────────────── */
-  // Room-scoped: it survives Reset Session (AC4), so it is keyed on the room,
-  // not the Claude session pointer.
-  const refreshTicket = useCallback(() => {
-    if (!agent?.id || !roomId) { setTicket(null); return; }
-    apiCall('GET', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`)
-      .then(d => setTicket(d?.ticket ?? null))
-      .catch(() => { /* leave the last-known binding on a transient error */ });
-  }, [agent?.id, roomId]);
-
-  useEffect(() => { setTicket(null); setTicketOpen(false); refreshTicket(); }, [refreshTicket]);
-
-  const bindTicket = useCallback(async (body) => {
-    if (!agent?.id || !roomId) return;
-    setTicketBusy(true);
-    setTicketError(null);
-    try {
-      const d = await apiCall('PUT', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`, body);
-      setTicket(d?.ticket ?? null);
-      setTicketOpen(false);
-    } catch (e) {
-      setTicketError(e.message);
-    } finally {
-      setTicketBusy(false);
-    }
-  }, [agent?.id, roomId]);
-
-  const unbindTicket = useCallback(async () => {
-    if (!agent?.id || !roomId) return;
-    setTicketBusy(true);
-    setTicketError(null);
-    try {
-      await apiCall('DELETE', `/api/agents/${agent.id}/session/${encodeURIComponent(roomId)}/ticket`);
-      setTicket(null);
-      setTicketOpen(false);
-    } catch (e) {
-      setTicketError(e.message);
-    } finally {
-      setTicketBusy(false);
-    }
-  }, [agent?.id, roomId]);
-
   /* ─── 2. Backfill on roomId change ──────────────────────────────── */
   useEffect(() => {
     setMessages([]);
     setUnread(0);
     setEndToken(null);
     setOlderExhausted(false);
+    // Switching into a chat must land at the newest message regardless of where
+    // the previously-open chat was scrolled (#1710, AC2) — re-arm stick-to-
+    // bottom so the freshly loaded history pins to the bottom.
+    setAtBottom(true);
     if (!roomId) return;
     let cancelled = false;
     setLoading(true);
@@ -337,6 +323,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+            [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -383,6 +371,9 @@ export default function ChatPanel({
           body:     ev.content?.body || '',
           msgtype:  ev.content?.msgtype || 'm.text',
           'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
+          'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+          [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+          [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
         }));
 
       const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -429,6 +420,8 @@ export default function ChatPanel({
       msgtype:  ev.content?.msgtype || 'm.text',
       'io.aee.trigger':  triggerMeta,
       'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+      [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+      [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
     };
 
     // A trigger-started run always posts this notice before invoking Claude
@@ -471,11 +464,13 @@ export default function ChatPanel({
   });
 
   /* ─── 4. Auto-scroll behaviour ───────────────────────────────────── */
+  // The actual "pin to the bottom" is owned by VirtualList via `stickToBottom`
+  // (below): with the transcript windowed, off-screen rows are estimated, so a
+  // one-shot `scrollTop = scrollHeight` here would land short of the real bottom
+  // (#1710). This effect only maintains the unread counter on a new message —
+  // reset it while pinned, bump it while the user is reading older history.
   useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
     if (atBottom) {
-      el.scrollTop = el.scrollHeight;
       setUnread(0);
     } else {
       // Count of messages the user hasn't scrolled to yet.
@@ -487,14 +482,13 @@ export default function ChatPanel({
 
   function handleScroll(e) {
     const el = e.currentTarget;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const isAtBottom = distance < 100;
-    setAtBottom(isAtBottom);
-    if (isAtBottom) setUnread(0);
+    const atBottomNow = isAtBottom(el);
+    setAtBottom(atBottomNow);
+    if (atBottomNow) setUnread(0);
 
     // Top-edge backfill: when the user scrolls within 100 px of the top and
     // we still have an `endToken`, fetch the next-older 50 messages.
-    if (el.scrollTop < 100 && endToken && !loadingOlder && !olderExhausted) {
+    if (isNearTop(el) && endToken && !loadingOlder && !olderExhausted) {
       loadOlder();
     }
   }
@@ -502,6 +496,8 @@ export default function ChatPanel({
   function scrollToBottom() {
     const el = scrollerRef.current;
     if (!el) return;
+    // Immediate nudge to the estimated bottom; re-arming stick-to-bottom lets
+    // VirtualList converge on the true bottom as the off-screen rows settle.
     el.scrollTop = el.scrollHeight;
     setAtBottom(true);
     setUnread(0);
@@ -539,6 +535,8 @@ export default function ChatPanel({
             msgtype:  ev.content?.msgtype || 'm.text',
             'io.aee.trigger':  ev.content?.['io.aee.trigger'] || null,
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
+            [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
+            [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -704,13 +702,13 @@ export default function ChatPanel({
     }
   }, [agent?.id]);
 
+  // Switch the agent's model within the current provider (live, no respawn).
+  // A null id clears the per-agent override → back to the environment default.
   async function handleModelChange(newId) {
     if (!agent?.id || modelSwitching) return;
     setModelSwitching(true);
     setError(null);
     try {
-      // Empty string from the <select> means "back to env default" — send
-      // null so the API clears the override.
       const payload = { modelId: newId ? newId : null };
       const resp = await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/model`, payload);
       setModelOptions(prev => prev ? { ...prev, override: resp.override } : prev);
@@ -721,16 +719,22 @@ export default function ChatPanel({
     }
   }
 
-  async function handleProviderChange(newEndpointId) {
+  // Switch the agent's provider (respawns the container). A null endpointId means
+  // "back to the environment default". Because the shared popover lets the user
+  // pick a specific model under the new provider group, an optional non-default
+  // modelId is applied with a follow-up model PATCH once the provider is set
+  // (PATCH /provider itself only sets the endpoint and prunes an incompatible
+  // model pin). Either way we refetch the full snapshot — the provider change
+  // clears the old override and swaps the whole catalogue.
+  async function handleProviderSwitch(newEndpointId, modelId) {
     if (!agent?.id || providerSwitching) return;
     setProviderSwitching(true);
     setError(null);
     try {
-      // Empty string means "back to the environment default" → send null.
-      const payload = { endpointId: newEndpointId ? newEndpointId : null };
-      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, payload);
-      // The provider change may have cleared the model override and swapped the
-      // whole catalog — refetch the full snapshot rather than patching locally.
+      await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/provider`, { endpointId: newEndpointId ? newEndpointId : null });
+      if (modelId) {
+        await apiCall('PATCH', `/api/agents/${encodeURIComponent(agent.id)}/model`, { modelId });
+      }
       const fresh = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.id)}/model-options`);
       setModelOptions(fresh);
     } catch (err) {
@@ -738,6 +742,16 @@ export default function ChatPanel({
     } finally {
       setProviderSwitching(false);
     }
+  }
+
+  // Reset to the environment default: clear a provider override through the
+  // provider endpoint (respawns, also prunes the model pin) or a lone model
+  // override through the model endpoint (live). Decided by chatResetAction.
+  async function handleModelReset() {
+    if (!agent?.id) return;
+    const act = chatResetAction(modelOptions);
+    if (act.kind === 'provider') await handleProviderSwitch(null, null);
+    else if (act.kind === 'model') await handleModelChange(null);
   }
 
   async function handleFullLearn() {
@@ -819,14 +833,16 @@ export default function ChatPanel({
   // confirms/edits in the dialog, exactly like a fresh launch. If a loop is
   // already running the launcher can't open (the composer control is in Stop
   // mode), so surface that rather than silently doing nothing.
-  function handleRelaunchLoop(values) {
+  // Stable identity (#1676) so the memoized transcript rows don't re-render
+  // when this component re-renders for an unrelated reason (e.g. a hover).
+  const handleRelaunchLoop = useCallback((values) => {
     if (activeLoop) {
       setError('A loop is already running for this agent — stop it before starting another.');
       return;
     }
     setRelaunchValues(values || null);
     setLoopDialogOpen(true);
-  }
+  }, [activeLoop]);
 
   function closeLoopDialog() {
     setLoopDialogOpen(false);
@@ -912,7 +928,7 @@ export default function ChatPanel({
     }
   }
 
-  async function handleSend(text) {
+  async function handleSend(text, extraContent = null) {
     if (!roomId) return;
     const body = text.trim();
     if (!body) return;
@@ -927,12 +943,18 @@ export default function ChatPanel({
       ts,
       body,
       isOptimistic: true,
+      // Carry any structured payload (e.g. the quick-reply `io.aee.ask-answer`,
+      // #1663) onto the optimistic stub so the answered-question state reflects
+      // immediately, before the canonical event round-trips.
+      ...(extraContent && typeof extraContent === 'object' ? extraContent : {}),
     };
     setMessages(prev => [...prev, optimistic]);
     setSending(true);
     setError(null);
     try {
-      const resp = await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, { body });
+      const payload = { body };
+      if (extraContent && typeof extraContent === 'object') payload.extraContent = extraContent;
+      const resp = await apiCall('POST', `/api/matrix/rooms/${encodeURIComponent(roomId)}/messages`, payload);
       // Stamp the assigned Matrix event_id onto the optimistic stub so the
       // SSE handler can reconcile by exact id rather than a fuzzy body
       // match. If SSE already delivered the canonical event (stream faster
@@ -953,6 +975,25 @@ export default function ChatPanel({
     } finally {
       setSending(false);
     }
+  }
+
+  /* ─── 5a′. Quick-reply answer (#1663) ────────────────────────────────
+   * Clicking an AskUserQuestion option sends its label as the user's reply
+   * (the normal reply path, so the agent resumes exactly as if it were typed)
+   * plus a structured `io.aee.ask-answer` identifier referencing the question
+   * message. Selection is final (AC5): the optimistic reply lands after the
+   * question, so `questionState` immediately marks the buttons inert — and a
+   * guard here rejects a click once an answer already references this question,
+   * covering the rapid/duplicate-click case.
+   */
+  function handleAnswerQuestion(questionEventId, option) {
+    if (!questionEventId || !option?.label) return;
+    if (sending) return;
+    // Ignore a duplicate/late click for a question already answered.
+    const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
+    if (already) return;
+    const extra = buildAnswerContent(questionEventId, option);
+    handleSend(option.label, extra);
   }
 
   /* ─── 5b. Attach files ───────────────────────────────────────────────
@@ -1012,6 +1053,11 @@ export default function ChatPanel({
     return map;
   }, [messages, agent.userId]);
 
+  // Quick-reply answers (#1663): map each answered question's event_id to the
+  // answer record, so a rendered AskUserQuestion can show which option was
+  // chosen and render its buttons inert (AC5 / AC6).
+  const askAnswersByQuestion = useMemo(() => indexAskAnswers(messages), [messages]);
+
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
   const lastMsg = messages[messages.length - 1];
   const showThinking =
@@ -1030,6 +1076,7 @@ export default function ChatPanel({
   const disabled = agent.enabled === false;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+
   // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
   // only needs to kick a session off for this agent and know whether one is
   // already running (to disable the entry point + quick dictation).
@@ -1088,11 +1135,6 @@ export default function ChatPanel({
               refreshKey={sessionUpdatedAt}
               onClick={onOpenKnowledge}
               title="Show what this agent has learned (Knowledge tab)"
-            />
-            <TicketChip
-              ticket={ticket}
-              disabled={!roomId || disabled}
-              onManage={() => { setTicketError(null); setTicketOpen(true); }}
             />
           </div>
           {gitInfo && gitInfo.length > 0 && (
@@ -1201,73 +1243,48 @@ export default function ChatPanel({
             Hand-off
           </button>
         )}
-        <ProviderChip
+        <ChatModelSelector
           options={modelOptions}
-          switching={providerSwitching}
           disabled={disabled}
-          onChange={handleProviderChange}
+          busy={providerSwitching || modelSwitching}
+          onModel={handleModelChange}
+          onProvider={handleProviderSwitch}
+          onReset={handleModelReset}
           onOpen={refreshModelOptions}
-        />
-        <ModelPicker
-          options={modelOptions}
-          switching={modelSwitching}
-          disabled={disabled}
-          onChange={handleModelChange}
         />
         <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
-        {sessionCost !== null && sessionCost.usd > 0 && (
+        {/* #1718: compact context-usage indicator (used / real window · %, or the
+            used count alone when the window is unknown). The session id, price and
+            per-class token breakdown moved into the info popover below. */}
+        {contextIndicator && (
           <span
-            title={`Session total: $${sessionCost.usd.toFixed(4)} · ${sessionCost.tokIn.toLocaleString()} tokens in / ${sessionCost.tokOut.toLocaleString()} tokens out`}
+            title={contextWindowTokens != null
+              ? `${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`
+              : `${contextFill.tokensIn.toLocaleString()} tokens · ${contextFill.model}`}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               gap: 3,
               fontFamily: 'var(--eb-font-mono)',
               fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <DollarSign size={10} />
-            {sessionCost.usd.toFixed(4)}
-          </span>
-        )}
-        {contextFillLevel && (
-          <span
-            title={`${contextFill.tokensIn.toLocaleString()} / ${contextWindowTokens.toLocaleString()} tokens · ${contextFill.model}`}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              fontFamily: 'var(--eb-font-mono)',
-              fontSize: 'var(--eb-text-xs)',
-              color: contextFillLevel.level === 'critical' ? 'var(--eb-status-error)'
-                : contextFillLevel.level === 'warning' ? 'var(--eb-status-warning)'
+              color: contextIndicator.level === 'critical' ? 'var(--eb-status-error)'
+                : contextIndicator.level === 'warning' ? 'var(--eb-status-warning)'
                 : 'var(--eb-text-muted)',
               whiteSpace: 'nowrap',
             }}
           >
             <Gauge size={10} />
-            {formatTokenCountK(contextFill.tokensIn)} / {formatTokenCountK(contextWindowTokens)}
+            {contextIndicator.text}
           </span>
         )}
-        {sessionId && (
-          <span
-            title={`Session ID: ${sessionId}${sessionUpdatedAt ? ` (updated ${sessionUpdatedAt})` : ''}`}
-            style={{
-              fontFamily: 'var(--eb-font-mono)',
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              maxWidth: 120,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {sessionId.slice(0, 8)}…
-          </span>
-        )}
+        <SessionInfoPopover
+          sessionId={sessionId}
+          sessionUpdatedAt={sessionUpdatedAt}
+          sessionCost={sessionCost}
+          contextWindowTokens={selectedModelInfo.windowTokens}
+          maxOutputTokens={selectedModelInfo.maxOutput}
+        />
       </div>
 
       {disabled && (
@@ -1339,6 +1356,7 @@ export default function ChatPanel({
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        data-hover-scope="chat"
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -1421,29 +1439,58 @@ export default function ChatPanel({
           </div>
         )}
 
-        {messages.map(msg => {
-          if (msg.type === 'context-reset') {
-            return <ContextResetSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          if (msg.type === 'user-stop') {
-            return <UserStopSeparator key={msg.event_id} ts={msg.ts} />;
-          }
-          const cid = correlationByEvent.get(msg.event_id) || null;
-          const dimmed = !!hoveredCorrelationId && cid !== hoveredCorrelationId;
-          return (
-            <div
-              key={msg.event_id}
-              onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-              onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              style={{
-                opacity: dimmed ? 0.35 : 1,
-                transition: 'opacity 0.15s',
-              }}
-            >
-              <Message message={msg} agentUserId={agent.userId} onRelaunchLoop={handleRelaunchLoop} />
-            </div>
-          );
-        })}
+        {/* Virtualized transcript (#1685): only the visible window of bubbles is
+            mounted, so a very long session keeps a bounded DOM. The scroller is
+            the div above; VirtualList reads its geometry via scrollerRef and the
+            auto-scroll / load-older / unread logic keeps owning scroll. Each row
+            carries a stable data-cid for the CSS-driven cross-panel hover dim
+            (#1676) and rides the quick-reply question state (#1663). */}
+        <VirtualList
+          items={messages}
+          scrollerRef={scrollerRef}
+          keyOf={msg => msg.event_id}
+          estimateHeight={90}
+          overscan={8}
+          gap={12}
+          stickToBottom={atBottom}
+          renderItem={(msg, i) => {
+            if (msg.type === 'context-reset') {
+              return <ContextResetSeparator ts={msg.ts} />;
+            }
+            if (msg.type === 'user-stop') {
+              return <UserStopSeparator ts={msg.ts} />;
+            }
+            const cid = correlationByEvent.get(msg.event_id) || null;
+            // Quick-reply state (#1663): a question is answerable only while it
+            // is the newest message and no answer references it; a disabled
+            // composer (offline / mid-send / maintenance) blocks a click either way.
+            const isQuestion = !!msg[ASK_QUESTION_FIELD];
+            const qState = isQuestion
+              ? questionState({
+                  index: i,
+                  messageCount: messages.length,
+                  answer: askAnswersByQuestion.get(msg.event_id),
+                  disabled: disabled || !roomId || sending || maintenance.active,
+                })
+              : null;
+            return (
+              <div
+                data-cid={cid || ''}
+                onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+                onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+              >
+                <Message
+                  message={msg}
+                  agentUserId={agent.userId}
+                  onRelaunchLoop={handleRelaunchLoop}
+                  onAnswerQuestion={handleAnswerQuestion}
+                  questionAnswerable={qState?.answerable}
+                  questionAnswer={qState}
+                />
+              </div>
+            );
+          }}
+        />
 
         {(showSendingDots || showThinking) && (
           <Message
@@ -1497,12 +1544,17 @@ export default function ChatPanel({
         stopBusy={stopping || loopBusy}
         onStartMeeting={transcription ? () => transcription.startSession({ agentId: agent.id, agentName: agent.displayName || agent.id }) : undefined}
         meetingActive={!!transcription?.active}
+        insertRefRequest={insertRefRequest}
       />
 
-      {/* Local keyframes for the spinner; scoped to this page render. */}
+      {/* Local keyframes for the spinner; scoped to this page render. The
+          cross-panel hover dim (#1676) is CSS-driven off `data-cid` so it
+          never re-renders the transcript — only this <style> updates. */}
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+        ${hoverBaseCss('chat')}
+        ${hoverDimCss('chat', hoveredCorrelationId)}
       `}</style>
 
       <ConfirmDialog
@@ -1575,220 +1627,9 @@ export default function ChatPanel({
         onConfirm={handleStopLoop}
         onCancel={() => setShowStopLoopConfirm(false)}
       />
-      {ticketOpen && (
-        <TicketDialog
-          ticket={ticket}
-          agentName={agent.displayName || agent.id}
-          busy={ticketBusy}
-          error={ticketError}
-          onBind={bindTicket}
-          onUnbind={unbindTicket}
-          onClose={() => setTicketOpen(false)}
-        />
-      )}
     </div>
   );
 }
-
-// Compact header chip: the bound parent issue (link + optional "closed") or the
-// "No parent ticket" placeholder, plus a button to open the manage dialog (#1383).
-function TicketChip({ ticket, disabled, onManage }) {
-  const d = describeTicket(ticket);
-  return (
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, flex: '0 1 auto' }}>
-      <Ticket size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
-      {d ? (
-        <a
-          href={d.href}
-          target="_blank"
-          rel="noreferrer"
-          title={`${d.repo} #${d.number}${d.title ? ' — ' + d.title : ''}${d.closed ? ' (closed)' : ''}`}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 3, minWidth: 0,
-            fontSize: 'var(--eb-text-xs)',
-            color: d.closed ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)',
-            textDecoration: 'none', overflow: 'hidden',
-          }}
-        >
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {d.label}{d.closed ? ' (closed)' : ''}
-          </span>
-          <ExternalLink size={9} style={{ flexShrink: 0 }} />
-        </a>
-      ) : (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', whiteSpace: 'nowrap' }}>
-          {NO_TICKET_LABEL}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={onManage}
-        disabled={disabled}
-        title={d ? 'Manage the parent ticket' : 'Bind a parent GitHub issue to this conversation'}
-        style={{
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          border: 'none', background: 'transparent', cursor: disabled ? 'not-allowed' : 'pointer',
-          color: 'var(--eb-text-muted)', padding: 2, opacity: disabled ? 0.5 : 1, flexShrink: 0,
-        }}
-      >
-        {d ? <ChevronDown size={11} /> : <Plus size={11} />}
-      </button>
-    </div>
-  );
-}
-
-// Modal to bind a parent GitHub issue: "New issue" (create) or "Attach existing"
-// (by number or URL), plus Unbind when a binding already exists (#1383).
-function TicketDialog({ ticket, agentName, busy, error, onBind, onUnbind, onClose }) {
-  const bound = describeTicket(ticket);
-  const [mode, setMode] = useState(bound ? 'attach' : 'create');
-  const [title, setTitle] = useState(agentName ? `${agentName}: ` : '');
-  const [issueBody, setIssueBody] = useState('');
-  const [ref, setRef] = useState('');
-  const [repo, setRepo] = useState('');
-
-  useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') onClose?.(); }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  const refValid = !!parseIssueRefInput(ref);
-  const canSubmit = !busy && (mode === 'create' ? title.trim().length > 0 : refValid);
-
-  const submit = () => {
-    if (!canSubmit) return;
-    const repoTrim = repo.trim();
-    if (mode === 'create') {
-      onBind({
-        mode: 'create',
-        title: title.trim(),
-        ...(issueBody.trim() ? { issueBody: issueBody.trim() } : {}),
-        ...(repoTrim ? { repo: repoTrim } : {}),
-      });
-    } else {
-      onBind({ mode: 'attach', ref: ref.trim(), ...(repoTrim ? { repo: repoTrim } : {}) });
-    }
-  };
-
-  const tabStyle = (active) => ({
-    padding: 'var(--eb-space-2) var(--eb-space-3)',
-    background: active ? 'var(--eb-bg-surface)' : 'transparent',
-    border: '1px solid var(--eb-border-default)',
-    borderBottom: active ? '1px solid var(--eb-bg-surface)' : '1px solid var(--eb-border-default)',
-    borderRadius: 'var(--eb-radius-md) var(--eb-radius-md) 0 0',
-    color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
-    fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
-    fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-  });
-  const inputStyle = {
-    width: '100%', boxSizing: 'border-box',
-    padding: 'var(--eb-space-2)',
-    background: 'var(--eb-bg-elevated)',
-    border: '1px solid var(--eb-border-default)',
-    borderRadius: 'var(--eb-radius-md)',
-    color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
-  };
-  const labelStyle = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 3, display: 'block' };
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Parent ticket" style={ticketOverlayStyle}>
-      <div style={ticketDialogStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)' }}>
-          <Ticket size={16} style={{ color: 'var(--eb-accent-primary)' }} />
-          <h3 style={{ margin: 0, flex: 1, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-            Parent ticket
-          </h3>
-          <button type="button" onClick={onClose} title="Close" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--eb-text-muted)', padding: 2 }}>
-            <X size={16} />
-          </button>
-        </div>
-
-        {bound && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-            padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-          }}>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              Bound to <a href={bound.href} target="_blank" rel="noreferrer" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>{bound.repo} #{bound.number}</a>
-              {bound.title ? ` — ${bound.title}` : ''}{bound.closed ? ' (closed)' : ''}
-            </span>
-            <button type="button" onClick={onUnbind} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>
-              Unbind
-            </button>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 4, marginBottom: -1 }}>
-          <button type="button" onClick={() => setMode('create')} style={tabStyle(mode === 'create')}>+ New issue</button>
-          <button type="button" onClick={() => setMode('attach')} style={tabStyle(mode === 'attach')}>Attach existing</button>
-        </div>
-        <div style={{ border: '1px solid var(--eb-border-default)', borderRadius: '0 var(--eb-radius-md) var(--eb-radius-md) var(--eb-radius-md)', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-          {mode === 'create' ? (
-            <>
-              <div>
-                <label style={labelStyle}>Issue title</label>
-                <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Short summary of the work" style={inputStyle} />
-              </div>
-              <div>
-                <label style={labelStyle}>Description (optional)</label>
-                <textarea value={issueBody} onChange={e => setIssueBody(e.target.value)} rows={3} placeholder="Optional issue body" style={{ ...inputStyle, resize: 'vertical' }} />
-              </div>
-            </>
-          ) : (
-            <div>
-              <label style={labelStyle}>Issue number or GitHub URL</label>
-              <input autoFocus value={ref} onChange={e => setRef(e.target.value)} placeholder="e.g. 1383 or https://github.com/owner/repo/issues/1383" style={inputStyle} />
-              {ref.trim() && !refValid && (
-                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 3 }}>
-                  Enter a positive issue number or a GitHub issue URL.
-                </div>
-              )}
-            </div>
-          )}
-          <div>
-            <label style={labelStyle}>Repository (owner/name, optional — defaults to the environment&apos;s repo)</label>
-            <input value={repo} onChange={e => setRepo(e.target.value)} placeholder="owner/name" style={inputStyle} />
-          </div>
-        </div>
-
-        {error && (
-          <div style={{ marginTop: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</div>
-        )}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
-          <button type="button" onClick={onClose} disabled={busy} style={{ ...ticketSecondaryBtn, ...(busy ? { opacity: 0.6, cursor: 'not-allowed' } : null) }}>Cancel</button>
-          <button type="button" onClick={submit} disabled={!canSubmit} style={{ ...ticketPrimaryBtn, ...(!canSubmit ? { opacity: 0.5, cursor: 'not-allowed' } : null) }}>
-            {busy ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : (mode === 'create' ? 'Create & bind' : 'Attach')}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const ticketOverlayStyle = {
-  position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
-};
-const ticketDialogStyle = {
-  background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5, 20px)',
-  maxWidth: 520, width: '92%', boxShadow: 'var(--eb-shadow-xl)',
-};
-const ticketPrimaryBtn = {
-  display: 'inline-flex', alignItems: 'center', gap: 6,
-  padding: 'var(--eb-space-2) var(--eb-space-4)',
-  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-  borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-  cursor: 'pointer', fontFamily: 'inherit',
-};
-const ticketSecondaryBtn = {
-  padding: 'var(--eb-space-2) var(--eb-space-4)',
-  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
-  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-  fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
-};
 
 function ContextResetSeparator({ ts }) {
   const label = ts
@@ -1855,313 +1696,6 @@ function UserStopSeparator({ ts }) {
   );
 }
 
-// Human label for an auth type. `null` (no endpoint) → the .env fallback.
-function authTypeLabel(authType) {
-  if (!authType) return 'Default (.env)';
-  return authType === 'oauth-token' ? 'Subscription' : 'API key';
-}
-
-// Width of the provider popover. The popover is rendered into document.body
-// via a portal with position: fixed, so it is never clipped by the narrow
-// Chat column's overflow nor trapped beneath a neighbouring panel's stacking
-// context — it stays fully visible and on top at any column width (#1280).
-const PROVIDER_POP_WIDTH = 300;
-
-// Compact, always-visible Model-Provider indicator next to the model picker.
-// Shows which LLM endpoint + auth type the agent actually runs on (transparency)
-// and, on click, a popover with the full binding plus a per-agent provider
-// switcher restricted to the agent team's curated, usable providers.
-function ProviderChip({ options, switching, disabled, onChange, onOpen }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
-  const triggerRef = useRef(null);
-  const popRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  // Refetch the resolved model options each time the popover opens (#1305), so
-  // a provider added or (un)assigned to this agent's team elsewhere in the app
-  // is reflected without a full page reload. Bounded to the user's open action
-  // — no polling, no per-render fetch. A ref keeps the effect keyed only on
-  // `open` while always calling the latest callback.
-  const onOpenRef = useRef(onOpen);
-  onOpenRef.current = onOpen;
-  useEffect(() => {
-    if (open) onOpenRef.current?.();
-  }, [open]);
-
-  // Anchor the fixed popover below the trigger, right-aligned to it, then clamp
-  // to the viewport so it can never overflow off-screen when the chat column is
-  // narrow or the trigger sits near the left edge.
-  const place = useCallback(() => {
-    const r = triggerRef.current?.getBoundingClientRect();
-    if (!r) return;
-    const maxLeft = window.innerWidth - PROVIDER_POP_WIDTH - 8;
-    const left = Math.max(8, Math.min(r.right - PROVIDER_POP_WIDTH, maxLeft));
-    setPos({ top: r.bottom + 4, left });
-  }, []);
-
-  // Close on outside click / Escape. The popover is portaled out of rootRef, so
-  // a click inside it must NOT count as "outside" — check popRef too.
-  useEffect(() => {
-    if (!open) return undefined;
-    function onDocClick(e) {
-      const inTrigger = rootRef.current && rootRef.current.contains(e.target);
-      const inPop = popRef.current && popRef.current.contains(e.target);
-      if (!inTrigger && !inPop) setOpen(false);
-    }
-    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  // Keep the fixed popover glued to the trigger while it's open, across window
-  // resizes and scrolls (either would otherwise leave it stranded).
-  useEffect(() => {
-    if (!open) { setPos(null); return undefined; }
-    place();
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
-    return () => {
-      window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
-    };
-  }, [open, place]);
-
-  if (!options) return null;
-
-  const endpoints = options.endpoints || [];
-  const overridden = !!options.endpointOverride;
-  const hasEndpoint = !!options.endpointId;
-  const effectiveModel = options.override || options.defaultModelId || null;
-  // Any-role team members may switch, but only within the curated team set.
-  const canSwitch = !!options.canSwitch && endpoints.length > 0 && !disabled;
-  // The <select> reflects the current binding: the override if set, else the
-  // env endpoint (empty string = "use the environment default").
-  const selectValue = options.endpointOverride || '';
-
-  const chipColor = overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
-  const label = hasEndpoint ? (options.endpointName || options.endpointId) : 'Default (.env)';
-
-  return (
-    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        title="This agent's Model Provider — click for details & switch"
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 4,
-          padding: '3px 8px',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'inherit',
-          color: chipColor,
-          background: 'transparent',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: 'pointer',
-          maxWidth: 240,
-        }}
-      >
-        {switching
-          ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-          : <Zap size={11} />}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {hasEndpoint ? `${label} · ${authTypeLabel(options.authType)}` : label}
-        </span>
-        {overridden && <span style={{ fontSize: '0.9em' }}>•</span>}
-        <ChevronDown size={11} />
-      </button>
-
-      {open && pos && createPortal(
-        <div
-          ref={popRef}
-          style={{
-            position: 'fixed',
-            top: pos.top,
-            left: pos.left,
-            zIndex: 1000,
-            width: PROVIDER_POP_WIDTH,
-            boxSizing: 'border-box',
-            padding: 12,
-            background: 'var(--eb-bg-elevated)',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            boxShadow: 'var(--eb-shadow-lg)',
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-primary)',
-            cursor: 'default',
-          }}
-        >
-          <ProviderInfoRow label="Provider" value={options.endpointName || (hasEndpoint ? options.endpointId : '— .env fallback —')} />
-          <ProviderInfoRow label="Auth" value={authTypeLabel(options.authType)} />
-          {options.baseUrl && <ProviderInfoRow label="Endpoint" value={options.baseUrl} mono />}
-          <ProviderInfoRow label="Model" value={effectiveModel || '(provider default)'} mono />
-          {overridden && (
-            <div style={{ marginTop: 2, color: 'var(--eb-accent-primary)' }}>
-              Override active — environment default:{' '}
-              {options.envEndpointId || '(none)'}
-            </div>
-          )}
-
-          <div style={{ height: 1, background: 'var(--eb-border-default)', margin: '10px 0' }} />
-
-          <div style={{ marginBottom: 4, color: 'var(--eb-text-secondary)' }}>Switch provider</div>
-          {canSwitch ? (
-            <select
-              value={selectValue}
-              disabled={switching}
-              onChange={(e) => onChange(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '4px 6px',
-                fontSize: 'var(--eb-text-xs)',
-                fontFamily: 'inherit',
-                color: 'inherit',
-                background: 'var(--eb-bg-surface)',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-sm)',
-                cursor: switching ? 'not-allowed' : 'pointer',
-              }}
-            >
-              <option value="">
-                {options.envEndpointId ? 'Environment default' : '— Environment default (no provider) —'}
-              </option>
-              {endpoints.map(ep => (
-                <option key={ep.id} value={ep.id}>
-                  {ep.name} · {authTypeLabel(ep.authType)}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <div style={{ color: 'var(--eb-text-muted)' }}>
-              {endpoints.length === 0
-                ? 'No providers are available for this team.'
-                : 'You are not allowed to switch the provider.'}
-            </div>
-          )}
-          {canSwitch && (
-            <div style={{ marginTop: 8, color: 'var(--eb-text-muted)', lineHeight: 1.4 }}>
-              Switching briefly restarts the agent container; the chat session
-              is preserved.
-              {switching && ' Restarting…'}
-            </div>
-          )}
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
-
-function ProviderInfoRow({ label, value, mono }) {
-  return (
-    <div style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
-      <span style={{ color: 'var(--eb-text-muted)', minWidth: 68 }}>{label}</span>
-      <span style={{
-        flex: 1,
-        wordBreak: 'break-all',
-        fontFamily: mono ? 'var(--eb-font-mono, monospace)' : 'inherit',
-        color: 'var(--eb-text-primary)',
-      }}>{value}</span>
-    </div>
-  );
-}
-
-function ModelPicker({ options, switching, disabled, onChange }) {
-  // Render a stable empty placeholder while the options are loading so the
-  // toolbar layout doesn't jump.
-  if (!options) return null;
-
-  const hasEndpoint = !!options.endpointId;
-  const hasModels   = (options.models || []).length > 0;
-  const effective   = options.override || options.defaultModelId || '';
-  const overridden  = !!options.override;
-  const interactionDisabled = disabled || switching || !hasEndpoint || !hasModels;
-
-  // Build a tooltip that explains the binding in one line — useful when the
-  // dropdown shows "(no endpoint)" or "(no models)" so the user knows where
-  // to fix it.
-  const tooltip = !hasEndpoint
-    ? 'No model provider bound to this environment — set one in Working Environments.'
-    : !hasModels
-      ? `Provider "${options.endpointName}" has no models in its catalog.`
-      : overridden
-        ? `Override active. Environment default: ${options.defaultModelId || '(none)'}.`
-        : `Environment default. Provider: ${options.endpointName}.`;
-
-  return (
-    <div
-      title={tooltip}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-        fontSize: 'var(--eb-text-xs)',
-        color: overridden ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-      }}
-    >
-      <Cpu size={11} />
-      <select
-        value={effective}
-        disabled={interactionDisabled}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: '2px 6px',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'inherit',
-          color: 'inherit',
-          background: 'transparent',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-sm)',
-          cursor: interactionDisabled ? 'not-allowed' : 'pointer',
-          opacity: interactionDisabled ? 0.6 : 1,
-          maxWidth: 220,
-        }}
-      >
-        {!hasEndpoint && <option value="">(no endpoint)</option>}
-        {hasEndpoint && !hasModels && <option value="">(no models)</option>}
-        {hasModels && (
-          <option value="">
-            {options.defaultModelId
-              ? `Default: ${options.defaultModelId}`
-              : '— pick a model —'}
-          </option>
-        )}
-        {options.models?.map(m => (
-          <option key={m.id} value={m.id}>
-            {(m.displayName || m.id) + (m.kind ? ` · ${m.kind}` : '')}
-          </option>
-        ))}
-      </select>
-      {overridden && (
-        <button
-          type="button"
-          onClick={() => onChange('')}
-          disabled={switching || disabled}
-          title="Clear override and fall back to the environment default"
-          style={{
-            background: 'transparent',
-            border: 'none',
-            padding: 0,
-            color: 'var(--eb-accent-primary)',
-            cursor: switching || disabled ? 'not-allowed' : 'pointer',
-            fontSize: 'var(--eb-text-xs)',
-            textDecoration: 'underline',
-          }}
-        >
-          reset
-        </button>
-      )}
-      {switching && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
-    </div>
-  );
-}
 
 function sessionBtnStyle(isDisabled) {
   return {

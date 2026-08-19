@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 
 // Auth state for the whole console (#276). Backed by an HttpOnly session cookie
 // the server sets on login, so a browser refresh re-validates via
@@ -64,8 +64,17 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  // Memoized so a provider re-render with unchanged inputs keeps a stable
+  // `value` identity and doesn't invalidate every consumer's bailout. `state`
+  // is replaced (never mutated) on each change, so depending on it is correct;
+  // login/logout/refresh are already useCallback-stable.
+  const value = useMemo(
+    () => ({ ...state, login, logout, refresh }),
+    [state, login, logout, refresh],
+  );
+
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refresh }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

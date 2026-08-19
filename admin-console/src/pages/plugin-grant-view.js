@@ -13,6 +13,47 @@
 
 export const DEFAULT_GRANULARITY = 'team';
 
+// Client-side mirror of plugin-grants.js `normalizeGrantList` (#1547). A grant
+// entry is `{ id, scopeGranularity }`; a bare string is the team-granularity
+// shorthand. Needed here because the console bundle cannot require the
+// orchestrator's CommonJS module, and the picker has to render a stored grant
+// in either shape. The SERVER remains the authority — this only decides how an
+// existing grant is displayed.
+export function normalizeGrantEntries(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const entry of list) {
+    let id = null;
+    let granularity = DEFAULT_GRANULARITY;
+    if (typeof entry === 'string') {
+      id = entry.trim();
+    } else if (entry && typeof entry === 'object' && typeof entry.id === 'string') {
+      id = entry.id.trim();
+      if (entry.scopeGranularity === 'agent' || entry.scopeGranularity === 'team') {
+        granularity = entry.scopeGranularity;
+      }
+    }
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, scopeGranularity: granularity });
+  }
+  return out;
+}
+
+// The grant an agent construct actually carries, following the same inheritance
+// rule as effectivePlugins(): a team-member with its own `pluginsOverride`
+// REPLACES the team's set; absent means inherit. Everything else carries its
+// own `plugins[]`.
+export function effectiveGrantFor(agent, parentTeam) {
+  if (!agent) return [];
+  if (agent.role === 'team-member') {
+    if (Array.isArray(agent.pluginsOverride)) return normalizeGrantEntries(agent.pluginsOverride);
+    return normalizeGrantEntries(parentTeam && parentTeam.plugins);
+  }
+  return normalizeGrantEntries(agent.plugins);
+}
+
 // Which granularities a manifest's broker honours (mirror of plugin-manifest.js
 // grantableGranularities, duplicated here so the console bundle needs no
 // server module — the two are asserted equivalent by the shared enum).

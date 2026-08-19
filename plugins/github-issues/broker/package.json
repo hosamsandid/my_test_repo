@@ -1,0 +1,10 @@
+{
+  "name": "github-issues-broker",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "description": "GitHub Issues plugin broker sidecar (issue #1633): server-side list/read issues + add/remove labels using a team's Working-Environment GitHub token, on the Broker SDK.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

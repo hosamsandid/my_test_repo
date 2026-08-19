@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Project Plan — Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* /admin is a plain settings page, not the canvas — override the canvas
+       body layout to a scrolling column. Uses the shared theme variables. */
+    body { display: block; overflow: auto; padding: 24px; }
+    .admin-wrap { max-width: 660px; margin: 0 auto; }
+    h1 { font-size: 19px; margin: 0 0 4px; }
+    .sub { color: var(--ink-soft); font-size: 13px; margin: 0 0 20px; }
+    fieldset {
+      border: 1px solid var(--line); border-radius: 12px;
+      background: var(--surface); box-shadow: var(--shadow-sm);
+      padding: 14px 18px; margin: 0 0 18px;
+    }
+    legend { font-weight: 650; font-size: 13px; padding: 0 6px; }
+    label.row { display: block; margin: 10px 0; font-size: 14px; }
+    label.row b { font-weight: 650; }
+    .hint { color: var(--ink-soft); font-size: 12.5px; line-height: 1.5; }
+    code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; font-size: 12px; }
+    .ok { color: var(--st-done); font-size: 13px; min-height: 16px; }
+    .err { color: var(--danger); font-size: 13px; min-height: 16px; }
+    textarea {
+      width: 100%; box-sizing: border-box; border-radius: 8px;
+      border: 1px solid var(--line-strong); background: var(--surface-2);
+      color: var(--ink); padding: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    }
+    input[type="file"] { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="admin-wrap">
+    <h1>Project Plan — Admin</h1>
+    <p class="sub">Team-Admin settings for this board.</p>
+
+    <fieldset>
+      <legend>Agent autonomy</legend>
+      <p class="hint">How much the team's agents may do to this board through <code>aee-plan</code>. Off by default; every agent write is audited under the agent's id.</p>
+      <label class="row"><input type="radio" name="autonomy" value="0" /> <b>0 — Read only</b> (default): agents can <code>show</code> the board but not change it.</label>
+      <label class="row"><input type="radio" name="autonomy" value="1" /> <b>1 — Tick</b>: agents may additionally mark milestones done / not-done.</label>
+      <label class="row"><input type="radio" name="autonomy" value="2" /> <b>2 — Edit structure</b>: agents may additionally add / rename / reorder / delete milestones, phases, owners and dependencies.</label>
+      <p class="ok" id="ok"></p>
+      <p class="err" id="err"></p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Import a plan</legend>
+      <p class="hint">
+        Replace this board with an imported <code>PlanDoc</code> (content migration).
+        Choose a <code>.json</code> file exported from any board, or paste one below,
+        then <b>Import</b>. This <b>overwrites</b> the current board; the autonomy level
+        above is governance and is kept unchanged. Team-Admin only.
+      </p>
+      <label class="row">
+        <input type="file" id="importFile" accept="application/json,.json" />
+      </label>
+      <label class="row">
+        <textarea id="importText" rows="6" placeholder="…or paste a PlanDoc JSON here"></textarea>
+      </label>
+      <button class="btn primary" id="importBtn">Import (replace board)</button>
+      <p class="ok" id="importOk"></p>
+      <p class="err" id="importErr"></p>
+    </fieldset>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

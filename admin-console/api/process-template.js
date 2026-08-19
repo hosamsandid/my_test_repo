@@ -1249,7 +1249,7 @@ function liftTriggerEmits(bundle) {
 // an agent instance may write "the Functional Design" to a different path each
 // run (or a whole directory, or something it couldn't predict). The path becomes
 // an optional `hint`; the real location is resolved at runtime from the git-
-// committed artifact manifest (`.aee/artifacts.jsonl`, written via `aee-artifact
+// committed artifact manifest (`.agent-studio/artifacts.jsonl`, written via `aee-artifact
 // add`). A port with only a `path` (BriefingPack artifacts + legacy team ports)
 // still matches by path — unchanged.
 
@@ -1279,7 +1279,7 @@ function dataFlowPrompt(upstreamName, artifacts) {
   if (named.length) {
     const desc = named.map(a => `**${a.key}**${a.hint ? ` (usually under \`${a.hint}\`)` : ''}`).join(', ');
     lines.push(`It may have produced the artifact(s) you consume: ${desc}.`);
-    lines.push('The exact path can vary per run, so resolve it from the artifact manifest instead of guessing — run `aee-artifact list "<artifact name>"` (or read `.aee/artifacts.jsonl`) to get the path the upstream registered.');
+    lines.push('The exact path can vary per run, so resolve it from the artifact manifest instead of guessing — run `aee-artifact list "<artifact name>"` (or read `.agent-studio/artifacts.jsonl`) to get the path the upstream registered.');
   } else if (legacy.length) {
     lines.push(`Your declared inputs from it: ${legacy.map(a => `\`${a.key}\``).join(', ')}.`);
   } else {
@@ -1379,8 +1379,8 @@ function expandDataFlowSteps(bundle) {
 }
 
 // Substitute `{{varname}}` placeholders. Unknown vars stay literal so a rogue
-// template field doesn't silently disappear into "undefined" — mirrors
-// api.js's applyTemplateVars (kept local so this module stays dependency-free).
+// template field doesn't silently disappear into "undefined". Kept local so
+// this module stays dependency-free.
 function substituteVars(s, vars) {
   if (typeof s !== 'string') return s;
   return s.replace(/\{\{(\w+)\}\}/g, (_m, k) =>

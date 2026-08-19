@@ -3,10 +3,13 @@ import { Link } from 'react-router';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
+import GithubTokenHint from '../components/GithubTokenHint';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -16,6 +19,7 @@ import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
+import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
 
 const inputStyle = {
@@ -209,7 +213,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
         isAutoDerived={isAutoDerived()}
         onResetAuto={resetAutoDerive}
         placeholder="e.g. accenture-pat"
-        helpText={<>Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens only. Used as the filename of the stored token.</>}
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} Used as the filename of the stored token.</>}
       />
 
       <CredentialOwnership
@@ -241,6 +245,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
             fontSize: 'var(--eb-text-xs)',
           }}
         />
+        <GithubTokenHint value={token} />
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>
           Paste the full token value. Fine-grained tokens start with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>github_pat_</code>,
           classic tokens with <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ghp_</code>.
@@ -293,6 +298,9 @@ export default function GithubTokens() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
+  // Admin-managed (team/system) tokens only; personal tokens (#1568) are managed
+  // on the self-service "My Credentials" page and filtered out here.
+  const adminTokens = adminManagedCredentials(tokens ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
@@ -325,7 +333,7 @@ export default function GithubTokens() {
     },
     { key: 'preview', label: 'Token', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span> },
     { key: 'fingerprint', label: 'Fingerprint', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{v}</span> },
-    { key: 'createdAt', label: 'Added', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'createdAt', label: 'Added', render: v => <WhenCell iso={v} /> },
     {
       key: '_usedBy', label: 'Used by', sortable: false,
       render: (_, row) => {
@@ -447,7 +455,7 @@ export default function GithubTokens() {
 
       <DataTable
         columns={COLUMNS}
-        data={tokens ?? []}
+        data={adminTokens}
         emptyText="No GitHub tokens stored yet. Click 'New Token' to add one."
       />
 

@@ -1,0 +1,40 @@
+{
+  "pluginVersion": 1,
+  "id": "test-mgmt",
+  "name": "Test Management",
+  "description": "Lets a granted agent create test cases, trigger test runs and manage test data in an external test-management system (Xray, Zephyr or qTest) without ever handling the vendor API token. A credential-holding broker sidecar keeps the token on the agent's behalf, so it never reaches the agent, and stamps every test artifact it creates with the caller's scope — one team's cases and runs stay invisible to another's. Authorisation is enforced per action and per scope: some commands (for example creating a case) are restricted to a single agent, and destructive operations such as deleting test data are held for a human's confirmation before they run. Agents drive it with the dependency-free `aee-test` command-line tool — for example `aee-test create-case ...` to add a case, or `aee-test trigger --plan REGRESSION --wait` to start a run and wait for the result. Requires network egress to reach the test-management system.",
+  "sidecar": {
+    "image": "localhost/aee-plugin-test-mgmt:latest",
+    "capabilities": ["egress"],
+    "internalPort": 4005
+  },
+  "cli": {
+    "name": "aee-test",
+    "entrypoint": "bin/aee-test.py",
+    "runtime": "python3"
+  },
+  "credentials": [
+    { "key": "api-token", "description": "Test-management system API token (held only by the broker)", "required": true }
+  ],
+  "platforms": ["any"],
+  "scopes": ["team", "agent"],
+  "defaultScopeGranularity": "agent",
+  "quota": {
+    "maxObjects": 500,
+    "ttlSeconds": 604800
+  },
+  "requiresApproval": ["data-delete"],
+  "policy": {
+    "create-case": { "scopes": ["agent"], "requiresFlowFinal": true },
+    "data-delete": { "scopes": ["agent"] }
+  },
+  "ui": {
+    "title": "Test Management",
+    "routes": [
+      { "path": "/", "minRole": "team-member" },
+      { "path": "/runs", "minRole": "team-member" },
+      { "path": "/admin", "minRole": "team-admin" }
+    ]
+  },
+  "promptLine": "You can create test cases, trigger test runs and manage test data in the team's test-management system with `aee-test` — run `aee-test --help`. The broker holds the vendor credential and enforces per-scope policy: creating test cases is restricted to the final agent in the flow once its cross-checks have passed, and destructive test-data operations wait for a human's confirmation."
+}

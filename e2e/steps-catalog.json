@@ -2,6 +2,7 @@
   "catalogVersion": 1,
   "generatedFrom": [
     "env",
+    "create",
     "wizard",
     "agents",
     "teardown",
@@ -11,7 +12,8 @@
     "shell",
     "triggers",
     "flows",
-    "context"
+    "context",
+    "usage"
   ],
   "steps": [
     {
@@ -345,6 +347,34 @@
         }
       ],
       "example": "- action:\n    do: context.uploadFile\n    agentId: ctx-demo-agent\n    dir: specs\n    name: notes.txt\n    content: written through the console"
+    },
+    {
+      "name": "create.expectEntry",
+      "module": "create",
+      "description": "Assert a specific launcher tile is present with its visible heading. Lets a journey spot-check the plainly-labelled wording without clicking through.",
+      "params": [
+        {
+          "name": "entry",
+          "required": true,
+          "type": "string",
+          "description": "Which tile: describe | template | build | chat."
+        }
+      ],
+      "example": "- assert:\n    do: create.expectEntry\n    entry: template"
+    },
+    {
+      "name": "create.open",
+      "module": "create",
+      "description": "Open the unified \"Create\" launcher and confirm all four equally-ranked entry tiles are showing. This is the new single front door for starting something — the capture point for the launcher screenshot.",
+      "params": [],
+      "example": "- action:\n    do: create.open"
+    },
+    {
+      "name": "create.startFromTemplate",
+      "module": "create",
+      "description": "From the launcher, take the \"Start from a ready-made setup\" path: click that tile and wait until the Team-Setup wizard's Process step (the template gallery) has loaded. Replaces the old direct `/team-setup` deep link so the journey exercises the real entry point users now take.",
+      "params": [],
+      "example": "- action:\n    do: create.startFromTemplate"
     },
     {
       "name": "env.createFixtureEnv",
@@ -1880,6 +1910,107 @@
       "example": "- action:\n    do: triggers.submit"
     },
     {
+      "name": "usage.expectGroupRow",
+      "module": "usage",
+      "description": "Assert the breakdown table carries a specific group row after a grouping change — the row's key and its formatted Total both visible.",
+      "params": [
+        {
+          "name": "key",
+          "required": true,
+          "type": "string",
+          "description": "The group key expected in the first column (e.g. a team id)."
+        },
+        {
+          "name": "total",
+          "required": true,
+          "type": "string",
+          "description": "The formatted Total for that row (e.g. \"7,000\")."
+        }
+      ],
+      "example": "- assert:\n    do: usage.expectGroupRow\n    key: token-usage-demo\n    total: \"7,000\""
+    },
+    {
+      "name": "usage.expectStatistics",
+      "module": "usage",
+      "description": "Assert the Statistics tab rendered real usage data (not an empty/error state, AC2): the summary totals, the class split, the per-day chart (not its empty placeholder), and a breakdown row for each expected group key.",
+      "params": [
+        {
+          "name": "totalTokens",
+          "required": true,
+          "type": "string",
+          "description": "Formatted \"Total tokens\" value (e.g. \"7,000\")."
+        },
+        {
+          "name": "inputTokens",
+          "required": true,
+          "type": "string",
+          "description": "Formatted \"Input\" class value (e.g. \"3,900\")."
+        },
+        {
+          "name": "primaryKey",
+          "required": true,
+          "type": "string",
+          "description": "A breakdown row key that must be present (e.g. an agent id)."
+        },
+        {
+          "name": "secondaryKey",
+          "required": false,
+          "type": "string",
+          "description": "A second breakdown row key that must be present."
+        }
+      ],
+      "example": "- assert:\n    do: usage.expectStatistics\n    totalTokens: \"7,000\"\n    inputTokens: \"3,900\"\n    primaryKey: token-usage-alpha\n    secondaryKey: token-usage-beta"
+    },
+    {
+      "name": "usage.openTokenUsagePage",
+      "module": "usage",
+      "description": "Open the Token Usage page and confirm its chrome rendered: the <h1>, both tabs (Statistics / Work items) and the tokens-only cost caveat.",
+      "params": [],
+      "example": "- action:\n    do: usage.openTokenUsagePage"
+    },
+    {
+      "name": "usage.selectGrouping",
+      "module": "usage",
+      "description": "Change the Statistics \"Group by\" dimension (Agent | Team | Model | Provider | Day) and re-key the breakdown table. A second primary interaction (AC3).",
+      "params": [
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Grouping label to select."
+        }
+      ],
+      "example": "- action:\n    do: usage.selectGrouping\n    label: Team"
+    },
+    {
+      "name": "usage.selectTeamFilter",
+      "module": "usage",
+      "description": "Narrow the page-level Team filter to a seeded team so the figures are deterministic (the fixture logged usage only under this team). Selecting by the option's visible label waits for /api/admin/teams to populate the dropdown.",
+      "params": [
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "The team's display name as shown in the filter."
+        }
+      ],
+      "example": "- action:\n    do: usage.selectTeamFilter\n    teamName: Token Usage Demo"
+    },
+    {
+      "name": "usage.selectTimeRange",
+      "module": "usage",
+      "description": "Change the Statistics time-range preset (e.g. to \"All time\" so the seeded historical records fall in range). One of the page's primary interactive controls (AC3).",
+      "params": [
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "Preset label: \"Last 7 days\" | \"Last 24 hours\" | \"Last 30 days\" | \"All time\"."
+        }
+      ],
+      "example": "- action:\n    do: usage.selectTimeRange\n    label: All time"
+    },
+    {
       "name": "wizard.createTeamAndExpectProgress",
       "module": "wizard",
       "description": "Journey-friendly wrapper: submit the wizard and assert the per-step NDJSON progress (plan lists team+members+dms, every step reaches `done`, complete carries the teamId + all members). Encapsulates the F1 inline assertions so a journey can express \"create and verify\" as a single step-library call. Accepts { teamId, memberIds } or { teamId, roleIds }.",
@@ -2289,6 +2420,25 @@
         }
       ],
       "example": "fixtures:\n  - fixture: triggerAgent\n    params:\n      teamId: triggers-demo\n      envId: triggers-demo-env\n      envName: Triggers Demo\n      repoUrl: \"https://github.com/aee-e2e/triggers-demo.git\""
+    },
+    {
+      "name": "usageData",
+      "description": "usageData: the Token Usage journey's precondition (#1505). Seeds deterministic usage records under a dedicated human Team and creates that Team, so the page's Team filter can narrow to it and the figures stay stable across re-runs on the same stack (other usage the stack logs carries a different teamId and is filtered out). Setup pre-cleans a leftover team + seed files; teardown removes both — one idempotent, re-runnable surface.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to create and tag the seeded records with."
+        },
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Team display name (shown in the page's Team filter)."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: usageData\n    params:\n      teamId: token-usage-demo\n      teamName: Token Usage Demo"
     }
   ]
 }

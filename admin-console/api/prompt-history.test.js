@@ -88,14 +88,36 @@ test('summarize drops full content and adds a preview', () => {
   assert.equal(s.history[0].content, undefined);
 });
 
-test('IO round-trip through the .aee sidecar', () => {
+test('IO round-trip through the .agent-studio sidecar', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prompthist-'));
   try {
     assert.equal(m.readPromptHistory(dir), null);
     const obj = m.stampPromptHistory(null, { oldContent: 'o', newContent: 'n', at: 'a', by: 'x', action: 'edited' });
     m.writePromptHistory(dir, obj);
-    assert.ok(fs.existsSync(path.join(dir, '.aee', 'prompt-history.json')));
+    assert.ok(fs.existsSync(path.join(dir, '.agent-studio', 'prompt-history.json')));
     assert.deepEqual(m.readPromptHistory(dir), obj);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a legacy .aee/ sidecar is migrated to .agent-studio/ on first touch (#1549)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prompthist-mig-'));
+  try {
+    // An upgraded agent whose history still lives under the legacy name.
+    const obj = m.stampPromptHistory(null, { oldContent: 'o', newContent: 'n', at: 'a', by: 'x', action: 'edited' });
+    fs.mkdirSync(path.join(dir, '.aee'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.aee', 'prompt-history.json'), JSON.stringify(obj));
+
+    // First read migrates the dir and returns the existing state — no data loss.
+    assert.deepEqual(m.readPromptHistory(dir), obj);
+    assert.ok(fs.existsSync(path.join(dir, '.agent-studio', 'prompt-history.json')));
+    assert.ok(!fs.existsSync(path.join(dir, '.aee')));
+
+    // A subsequent write lands under the new name.
+    const next = m.stampPromptHistory(obj, { newContent: 'n2', at: 'b', by: 'y', action: 'edited' });
+    m.writePromptHistory(dir, next);
+    assert.deepEqual(m.readPromptHistory(dir), next);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

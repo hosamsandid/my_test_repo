@@ -1,0 +1,30 @@
+{
+  "pluginVersion": 1,
+  "id": "github-issues",
+  "name": "GitHub Issues",
+  "description": "Brings the everyday GitHub issue actions into the console so releasing work no longer means switching to GitHub. Pick a team you are on, then one of the repositories from its Working Environment, and you can list that repository's issues, open one to read its full description and labels, and add or remove a label — including the flow's gate labels, which are suggested one click away, or any label you type. The plugin reuses the single GitHub token already bound to the team's Working Environment: the broker sidecar holds it and makes every call server-side, so the token never reaches your browser or an agent. It appears only for the teams it is granted to, and any member of such a team can use it. Agents can also browse issues read-only with the `aee-issues` command-line tool (`aee-issues repos`, `aee-issues list --repo owner/name`). Pull requests are not covered yet.",
+  "sidecar": {
+    "image": "localhost/aee-plugin-github-issues:latest",
+    "capabilities": ["egress"],
+    "internalPort": 4008
+  },
+  "cli": {
+    "name": "aee-issues",
+    "entrypoint": "bin/aee-issues.py",
+    "runtime": "python3"
+  },
+  "credentials": [],
+  "platforms": ["podman", "kubernetes"],
+  "scopes": ["team"],
+  "defaultScopeGranularity": "team",
+  "quota": {
+    "maxObjects": 200
+  },
+  "ui": {
+    "title": "GitHub Issues",
+    "routes": [
+      { "path": "/", "minRole": "team-member" }
+    ]
+  },
+  "promptLine": "You can browse the issues of your team's repositories read-only with `aee-issues` — `aee-issues repos` lists the repositories in scope, `aee-issues list --repo owner/name` lists open issues, `aee-issues show --repo owner/name --number N` reads one (run `aee-issues --help`). Adding or removing labels is done by a human in the console GitHub Issues page; the broker holds the team's GitHub token and you never see it."
+}

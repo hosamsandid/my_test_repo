@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""aee-plan — Network Plan plugin CLI facade (plugin system, epic #1554 Phase 3, #1563).
+
+Dependency-free single file (concept §4.5): stdlib only, no pip installs. It is
+seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
+broker endpoint + per-scope token from `.agent-studio/plugins/netzplan.json`
+(0600, written at seed time by plugin-sync.js).
+
+The board is one server-side document per team; agents never edit a file, they
+speak domain verbs to the broker, which holds the document store and enforces
+the autonomy ladder:
+
+    aee-plan show                          # read the board (always allowed)
+    aee-plan tick lane1-m2                 # mark a milestone done (autonomy >= 1)
+    aee-plan tick lane1-m2 --undone        # mark it not-done
+    aee-plan edit '{"type":"add-lane","title":"QA"}'   # structural (autonomy >= 2)
+
+Autonomy ladder (§8), stored on the document, set by a Team Admin on the /admin
+route:  0 = read only (default) · 1 = tick milestones · 2 = edit structure.
+
+Enforcement is **broker-side** (broker-sdk/authz.js + the document's current
+level). This CLI adds a *second* defense line: before a write it reads the
+board's current level (a `show`) and refuses early with a clear message when the
+level is too low — so an agent gets "autonomy 0 forbids tick" rather than an
+opaque broker error. The broker re-checks authoritatively, so the refusal holds
+even when this CLI is bypassed and the broker is called directly.
+
+Contract (§4.5): `--json` on every subcommand; exit codes 0 ok / 1 domain error
+/ 2 usage / 3 broker unreachable; `--help` carries the full agent-readable docs.
+All operations are synchronous — no submit→poll verb.
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+PLUGIN_ID = "netzplan"
+
+EXIT_OK = 0
+EXIT_DOMAIN_ERROR = 1
+EXIT_USAGE = 2
+EXIT_BROKER_UNREACHABLE = 3
+
+# Domain verb → broker MCP tool name. The broker's tool vocabulary is the only
+# place the document store is named; agents never see it.
+_TOOLS = {
+    "show": "plan_show",
+    "tick": "plan_tick",
+    "edit": "plan_mutate",
+}
+
+# The autonomy level each write verb needs, mirrored from plan-doc.js
+# `requiredAutonomy` so the CLI's early refusal matches the broker's decision.
+_VERB_LEVEL = {"tick": 1, "edit": 2}
+
+
+def _config_path():
+    """Path to this agent's plugin config, seeded at grant time.
+
+    Resolves the current `.agent-studio/` state dir, falling back to the legacy
+    `.aee/` (renamed in #1549) so a config seeded before the workspace was
+    migrated is still found.
+    """
+    ws = os.environ.get("AEE_WORKSPACE", os.path.expanduser("~"))
+    new = os.path.join(ws, ".agent-studio", "plugins", f"{PLUGIN_ID}.json")
+    legacy = os.path.join(ws, ".aee", "plugins", f"{PLUGIN_ID}.json")
+    if os.path.exists(new) or not os.path.exists(legacy):
+        return new
+    return legacy
+
+
+CONFIG_PATH = _config_path()
+
+
+def load_config():
+    """Endpoint + scope token written at seed time. Absent until granted."""
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+def emit(payload, as_json):
+    if as_json:
+        print(json.dumps(payload))
+    else:
+        if payload.get("ok"):
+            body = payload.get("result", payload.get("message", ""))
+            print(body if isinstance(body, str) else json.dumps(body, indent=2))
+        else:
+            print(payload.get("message", payload.get("error", "error")), file=sys.stderr)
+
+
+class BrokerUnreachable(Exception):
+    pass
+
+
+class BrokerDomainError(Exception):
+    pass
+
+
+def _call_broker(cfg, tool, arguments):
+    """Run one MCP tool call against the broker over Streamable-HTTP.
+
+    initialize → notifications/initialized → tools/call, parsing the SSE
+    `data:` frames the transport emits. Connection-level failures raise
+    BrokerUnreachable (exit 3); a reachable broker returning an error — including
+    an autonomy refusal — raises BrokerDomainError (exit 1).
+    """
+    url = cfg.get("endpoint")
+    token = cfg.get("token")
+    if not url:
+        raise BrokerUnreachable("no broker endpoint in config")
+
+    session = {"id": None}
+
+    def post(payload):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if token:
+            headers["Authorization"] = "Bearer %s" % token
+        if session["id"]:
+            headers["Mcp-Session-Id"] = session["id"]
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                sid = resp.headers.get("Mcp-Session-Id")
+                if sid:
+                    session["id"] = sid
+                if resp.status == 202:
+                    return None
+                for raw in resp:
+                    line = raw.decode(errors="replace").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data:
+                            return json.loads(data)
+                return None
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            # A reachable broker that refuses (401 forged token, 403 autonomy /
+            # out-of-scope) is a domain error, not unreachability.
+            raise BrokerDomainError("broker HTTP %s: %s" % (e.code, body[:400])) from e
+        except (urllib.error.URLError, OSError) as e:
+            raise BrokerUnreachable("cannot reach broker at %s: %s" % (url, e)) from e
+
+    post({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "aee-plan", "version": "1.0"}},
+    })
+    post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    resp = post({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    })
+
+    if resp is None:
+        raise BrokerDomainError("no response from broker for tool '%s'" % tool)
+    if "error" in resp:
+        err = resp["error"]
+        raise BrokerDomainError("broker error %s: %s" % (err.get("code"), err.get("message")))
+
+    result = resp.get("result", resp)
+    if isinstance(result, dict) and result.get("isError"):
+        raise BrokerDomainError(_unwrap_text(result))
+    return _unwrap_text(result)
+
+
+def _unwrap_text(result):
+    """MCP tool results wrap text in a content[] array — unwrap to a string."""
+    if isinstance(result, dict) and isinstance(result.get("content"), list):
+        parts = []
+        for item in result["content"]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+        return "\n".join(parts)
+    return json.dumps(result)
+
+
+def _run(cfg, tool, arguments, as_json):
+    try:
+        text = _call_broker(cfg, tool, arguments)
+    except BrokerUnreachable as e:
+        emit({"ok": False, "error": "broker-unreachable", "message": str(e)}, as_json)
+        return EXIT_BROKER_UNREACHABLE
+    except BrokerDomainError as e:
+        emit({"ok": False, "error": "broker-error", "message": str(e)}, as_json)
+        return EXIT_DOMAIN_ERROR
+    emit({"ok": True, "result": text, "scopeId": cfg.get("scopeId")}, as_json)
+    return EXIT_OK
+
+
+def _current_autonomy(cfg):
+    """Read the board's current autonomy level via a `show` (the early-refusal
+    defense line). Returns the int level; propagates broker exceptions."""
+    text = _call_broker(cfg, _TOOLS["show"], {})
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        return 0
+    settings = doc.get("settings") if isinstance(doc, dict) else None
+    level = settings.get("agentAutonomy") if isinstance(settings, dict) else 0
+    return level if isinstance(level, int) else 0
+
+
+def _guarded_write(cfg, verb, tool, arguments, as_json):
+    """Refuse a write early if the board's autonomy level is below the verb's
+    requirement, then run it (the broker re-checks authoritatively)."""
+    need = _VERB_LEVEL[verb]
+    try:
+        level = _current_autonomy(cfg)
+    except BrokerUnreachable as e:
+        emit({"ok": False, "error": "broker-unreachable", "message": str(e)}, as_json)
+        return EXIT_BROKER_UNREACHABLE
+    except BrokerDomainError as e:
+        emit({"ok": False, "error": "broker-error", "message": str(e)}, as_json)
+        return EXIT_DOMAIN_ERROR
+    if level < need:
+        emit({
+            "ok": False, "error": "autonomy-forbidden",
+            "message": "agent autonomy is %d; `%s` needs level %d — a Team Admin "
+                       "raises it on the board's /admin page" % (level, verb, need),
+            "autonomy": level, "requiredAutonomy": need,
+        }, as_json)
+        return EXIT_DOMAIN_ERROR
+    return _run(cfg, tool, arguments, as_json)
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+
+    parser = argparse.ArgumentParser(
+        prog="aee-plan",
+        description="Project Plan plugin CLI — read the team's planning board and, "
+                    "when the Team Admin has raised the autonomy level, tick "
+                    "milestones or edit structure. Reads are always allowed.",
+    )
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("whoami", parents=[common], help="print the resolved scope identity")
+    sub.add_parser("show", parents=[common], help="read the board (always allowed, autonomy 0)")
+
+    p_tick = sub.add_parser("tick", parents=[common],
+                            help="mark a milestone done / not-done (autonomy >= 1)")
+    p_tick.add_argument("milestone_id", help="the milestone id (see `aee-plan show`)")
+    p_tick.add_argument("--lane", help="lane id, to disambiguate a shared milestone id")
+    p_tick.add_argument("--undone", action="store_true", help="mark it not-done instead of done")
+
+    p_edit = sub.add_parser(
+        "edit", parents=[common],
+        help="apply one structural mutation as a JSON op (autonomy >= 2)")
+    p_edit.add_argument("op", help='a mutation op, e.g. \'{"type":"add-lane","title":"QA"}\'')
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    as_json = getattr(args, "json", False)
+
+    if args.cmd is None:
+        parser.print_help()
+        return EXIT_USAGE
+
+    cfg = load_config()
+    if cfg is None:
+        emit(
+            {"ok": False, "error": "not-granted",
+             "message": "netzplan is not granted to this agent (no config at %s)" % CONFIG_PATH},
+            as_json,
+        )
+        return EXIT_BROKER_UNREACHABLE
+
+    if args.cmd == "whoami":
+        emit({"ok": True, "scopeId": cfg.get("scopeId"), "endpoint": cfg.get("endpoint")}, as_json)
+        return EXIT_OK
+
+    if args.cmd == "show":
+        return _run(cfg, _TOOLS["show"], {}, as_json)
+
+    if args.cmd == "tick":
+        payload = {"milestoneId": args.milestone_id, "done": not args.undone}
+        if args.lane:
+            payload["laneId"] = args.lane
+        return _guarded_write(cfg, "tick", _TOOLS["tick"], payload, as_json)
+
+    if args.cmd == "edit":
+        try:
+            op = json.loads(args.op)
+        except (ValueError, TypeError) as e:
+            emit({"ok": False, "error": "usage", "message": "op is not valid JSON: %s" % e}, as_json)
+            return EXIT_USAGE
+        if not isinstance(op, dict) or not op.get("type"):
+            emit({"ok": False, "error": "usage", "message": "op must be a JSON object with a \"type\""}, as_json)
+            return EXIT_USAGE
+        return _guarded_write(cfg, "edit", _TOOLS["edit"], {"op": op}, as_json)
+
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

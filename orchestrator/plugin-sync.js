@@ -18,8 +18,8 @@
 // the network — the same reconciliation that makes a grant additive.
 //
 // Per-agent workspace layout (§4.5):
-//   .aee/bin/<cli.name>              — the dependency-free CLI facade, on PATH
-//   .aee/plugins/<pluginId>.json     — endpoint + per-scope token, mode 0600
+//   .agent-studio/bin/<cli.name>              — the dependency-free CLI facade, on PATH
+//   .agent-studio/plugins/<pluginId>.json     — endpoint + per-scope token, mode 0600
 //
 // The config the CLI reads (see plugins/dummy-echo/bin/aee-echo.py load_config):
 //   { pluginId, scopeId, endpoint, token, cliName }
@@ -28,9 +28,10 @@
 
 const path = require('path');
 
-const AEE_DIR = '.aee';
-const BIN_DIR = path.posix.join(AEE_DIR, 'bin');
-const PLUGINS_DIR = path.posix.join(AEE_DIR, 'plugins');
+// The per-agent state directory, renamed from the legacy `.aee` (#1549).
+const STATE_DIR = '.agent-studio';
+const BIN_DIR = path.posix.join(STATE_DIR, 'bin');
+const PLUGINS_DIR = path.posix.join(STATE_DIR, 'plugins');
 const CONFIG_MODE = 0o600; // token lives here — never group/other readable
 const BIN_MODE = 0o755;
 
@@ -51,7 +52,7 @@ function sidecarEndpoint(manifest) {
   return `http://aee-plugin-${manifest.id}:${port}`;
 }
 
-// The per-agent config object written to `.aee/plugins/<id>.json`.
+// The per-agent config object written to `.agent-studio/plugins/<id>.json`.
 function pluginConfigFile({ pluginId, scopeId, endpoint, token, cliName }) {
   return { pluginId, scopeId, endpoint, token, cliName };
 }
@@ -144,7 +145,7 @@ function planWorkspaceSync({
 }
 
 module.exports = {
-  AEE_DIR,
+  STATE_DIR,
   BIN_DIR,
   PLUGINS_DIR,
   CONFIG_MODE,

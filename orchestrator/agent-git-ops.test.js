@@ -180,6 +180,48 @@ test("buildRepoGitEnv injects PAT extraheader + GH_TOKEN for https github URLs",
   assert.equal(gitEnv.GIT_SSH_COMMAND, undefined);
 });
 
+// Regression: an SSH remote still needs the PAT for `gh`. Gating GH_TOKEN on the
+// URL scheme broke PR creation on the recommended setup (SSH URL + deploy key) —
+// `git push` succeeded over SSH, then `gh pr create` died with "run gh auth
+// login", because `gh` talks to the REST API and never to the git remote.
+test("buildRepoGitEnv injects GH_TOKEN for an SSH remote too (gh needs the PAT regardless of scheme)", () => {
+  const fs = {
+    existsSync: () => true,
+    chmodSync: () => {},
+    readFileSync: () => "ghp_secrettoken\n",
+  };
+  const gitEnv = buildRepoGitEnv({
+    env: { githubTokenId: "t1" },
+    repoUrl: "git@github.com:acme/svc.git",
+    sshKeyId: "k1",
+    baseEnv: {},
+    sshKeysDir: "/keys",
+    ghTokensDir: "/tokens",
+    fs,
+  });
+  assert.equal(gitEnv.GH_TOKEN, "ghp_secrettoken", "gh pr create must be authenticated");
+  assert.equal(gitEnv.GITHUB_TOKEN, "ghp_secrettoken");
+  // The SSH identity still carries git I/O …
+  assert.match(gitEnv.GIT_SSH_COMMAND, /ssh -i \/keys\/k1/);
+  // … and the https-only extraheader must NOT appear for an SSH remote.
+  assert.equal(gitEnv.GIT_CONFIG_COUNT, undefined);
+});
+
+test("buildRepoGitEnv sets no gh credential when no token is configured", () => {
+  const fs = { existsSync: () => true, chmodSync: () => {}, readFileSync: () => "ghp_x" };
+  const gitEnv = buildRepoGitEnv({
+    env: {},
+    repoUrl: "git@github.com:acme/svc.git",
+    sshKeyId: "k1",
+    baseEnv: {},
+    sshKeysDir: "/keys",
+    ghTokensDir: "/tokens",
+    fs,
+  });
+  assert.equal(gitEnv.GH_TOKEN, undefined);
+  assert.equal(gitEnv.GITHUB_TOKEN, undefined);
+});
+
 test("buildRepoGitEnv never leaks the token when the key file is outside the dir", () => {
   const fs = { existsSync: () => true, chmodSync: () => {}, readFileSync: () => "x" };
   const gitEnv = buildRepoGitEnv({

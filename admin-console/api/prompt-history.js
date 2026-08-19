@@ -21,12 +21,15 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { STATE_DIR, resolveAgentStateDir } = require('./agent-state-dir');
 
 const HISTORY_V = 1;
 const HISTORY_LIMIT = 20;
 const HASH_LEN = 12; // 12-hex prefix of the SHA-256
 const HISTORY_FILENAME = 'prompt-history.json';
-const HISTORY_SUBDIR = '.aee';
+// The per-agent state directory (`.agent-studio`, migrated from the legacy
+// `.aee` on first touch, #1549). Kept as a named export for back-compat.
+const HISTORY_SUBDIR = STATE_DIR;
 
 // The closed set of history actions. `baseline` = the pre-existing prompt seeded
 // on the first capture; `edited` = a normal edit; `inherited` = a team-member
@@ -127,7 +130,9 @@ function summarize(existing, previewLen = 160) {
 
 function historyPath(agentDir, io = {}) {
   const pathImpl = io.path || path;
-  return pathImpl.join(agentDir, HISTORY_SUBDIR, HISTORY_FILENAME);
+  // Resolve `.agent-studio/` — migrating a legacy `.aee/` on first touch — so an
+  // upgraded agent's history is read/written under the new name (#1549).
+  return pathImpl.join(resolveAgentStateDir(agentDir, io), HISTORY_FILENAME);
 }
 
 // Read an agent's prompt-history sidecar, or null when absent/unparseable.
@@ -145,7 +150,7 @@ function readPromptHistory(agentDir, io = {}) {
 function writePromptHistory(agentDir, obj, io = {}) {
   const fsImpl = io.fs || fs;
   const pathImpl = io.path || path;
-  const dir = pathImpl.join(agentDir, HISTORY_SUBDIR);
+  const dir = resolveAgentStateDir(agentDir, io);
   fsImpl.mkdirSync(dir, { recursive: true });
   const file = pathImpl.join(dir, HISTORY_FILENAME);
   const tmp = file + '.tmp';

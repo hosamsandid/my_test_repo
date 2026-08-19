@@ -44,7 +44,11 @@ export function entryDetail(entry) {
   switch (entry.kind) {
     case 'github': {
       const parts = [];
-      if (entry.event) parts.push(entry.event);
+      // For a *.labeled / *.unlabeled event, append the carried label in the
+      // same `event (label)` form the Processed events tab uses (#1649). Absent
+      // label → unchanged, no empty artifact.
+      if (entry.event) parts.push(entry.label ? `${entry.event} (${entry.label})` : entry.event);
+      else if (entry.label) parts.push(`(${entry.label})`);
       if (entry.repo) parts.push(entry.repo);
       if (entry.actor) parts.push(`@${entry.actor}`);
       if (entry.eventId) parts.push(`#${entry.eventId}`);

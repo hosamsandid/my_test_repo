@@ -62,6 +62,49 @@ Because a Jira project key (e.g. `ENG`) is not globally unique the way a GitHub 
 
 See [docs/jira-integration-concept.md](./jira-integration-concept.md) for the full design rationale.
 
+## Operational note: host clock skew (Podman machine)
+
+On macOS/Windows the stack runs inside a Podman VM, and containers inherit **that
+VM's clock**, not the host's. If the host sleeps, the VM clock stops with it. It
+is supposed to be corrected by `chronyd` inside the VM on resume — but chronyd
+needs a reachable NTP server, and UDP/123 is blocked on many corporate networks.
+When that happens chronyd reports itself as perfectly in sync (its own estimate,
+based on its last successful poll) while every source shows `Reach 0`, and the
+skew simply persists. Observed in practice: **68 minutes behind the host**, with
+containers matching the VM exactly.
+
+Check it:
+
+```bash
+date -u                                    # host
+podman machine ssh date -u                 # the VM — the clock containers see
+podman exec <orchestrator-ctr> date -u     # should equal the VM
+podman machine ssh chronyc sources         # 'Reach 0' everywhere ⇒ no NTP
+```
+
+Fix it (one-shot step from the host clock):
+
+```bash
+podman machine ssh "sudo date -u -s '$(date -u '+%Y-%m-%d %H:%M:%S')'"
+```
+
+Why it matters for triggers:
+
+- **`cron` / `once`** fire on the container clock, so they run late by the skew.
+  Before stepping the clock, check which triggers fall inside the jump — a
+  forward step fires any `once` whose `at` it passes, and a `cron` whose time it
+  crosses.
+- **Flow anomaly detection** compares GitHub timestamps (real time) against the
+  container clock, so a behind clock **under-reports** every age by the skew and
+  `claim-stalled` / `gate-idle` trip late.
+- The **GitHub poller** itself is unaffected in its delivery decision: freshness
+  is per-event-id set membership, not a clock comparison. The per-subscriber
+  history horizon is a clock comparison, but a behind clock only makes it more
+  permissive (it can admit pre-activation backlog, never drop live events).
+
+`podman machine stop && podman machine start` also resyncs, but it recreates
+every container — prefer the one-shot step on a running stack.
+
 ## Loop Triggers
 
 A **loop** trigger runs the agent's prompt repeatedly. Each try starts with a fresh context window; anything the next try needs must be written to disk (e.g. `memory/` files or a worklist) and re-read at the start of every run.

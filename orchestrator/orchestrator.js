@@ -54,8 +54,13 @@ const knowledgeDecay = require("./knowledge-decay");
 const knowledgeEmbeddings = require("./knowledge-embeddings");
 const knowledgeHygiene = require("./knowledge-hygiene");
 const skillReconcile = require("./skill-reconcile");
+// #1511: three-way team-member prompt modes. Byte-identical twin of
+// admin-console/api/prompt-modes.js — the team-prompt propagation path
+// (updateTeamPrompt) re-composes inheriting AND additional members through it.
+const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prompt-modes");
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
+const credentialResolution = require("./credential-resolution");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
@@ -94,6 +99,17 @@ const { buildTar } = require("./tar-single");
 // pods/exec on kubernetes — selected the same way as container-runtime.
 const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
 const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+// Plugin system (#1516). The grant is the sibling of the skill grant — it lives
+// on the agent construct, never on the environment — and (de)activation is the
+// same additive live file sync, no respawn (#1547).
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
+const { planWorkspaceSync } = require("./plugin-sync");
+const { resolveAgentStateDir } = require("./agent-state-dir");
+const { resolveScopeId } = require("./plugin-scope");
+const pluginRegistry = require("./plugin-registry");
+const pluginRuntime = require("./plugin-runtime");
+const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
+const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
@@ -372,7 +388,7 @@ function resolveAssistBindingFromSelection(endpointId, modelId) {
 const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
-const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume } = require("./container-runtime");
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume, perAgentNetworkName } = require("./container-runtime");
 // Host-folder context mounts (#1283) are a LOCAL/self-hosted-only feature. On
 // the podman runtime they are always available; on Kubernetes they are an
 // EXPLICIT opt-in (#1319, AEE_K8S_CONTEXT_HOSTPATH=1): the mount renders as a
@@ -424,12 +440,26 @@ function startAgentProcess(config) {
   const childEnv = {
     ...process.env,
     AGENT_ID: id,
+    // #1547: every plugin CLI facade resolves its own
+    // `.agent-studio/plugins/<id>.json` (endpoint + scope token) relative to this,
+    // falling back to the home directory. Set on the CONTAINER rather than
+    // only inside the entrypoint process so it is also there for anyone who
+    // `podman exec`s in to debug — an env the entrypoint mutates is invisible
+    // to a fresh exec, which is exactly how a granted CLI came to report
+    // itself ungranted.
+    AEE_WORKSPACE: `/workspace/agents/${id}`,
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
     MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,
     ORCHESTRATOR_INTERNAL_URL: process.env.ORCHESTRATOR_INTERNAL_URL || 'http://orchestrator:4002',
     AEE_ORCHESTRATOR_URL: process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002',
   };
+  // The spread above copies THIS container's PATH into the agent container,
+  // where it silently overrides the agent image's own PATH — so anything the
+  // image puts on PATH (the /opt/aee/plugin-bin entry granted plugin CLIs
+  // resolve through, #1547) never takes effect. The orchestrator's PATH has no
+  // business travelling; drop it and let the image's own value stand.
+  delete childEnv.PATH;
 
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave
@@ -737,10 +767,6 @@ const LEGACY_ROLE_MAP = {
   "expert-group": "team",
   "expert-instance": "team-member",
 };
-
-function normalizeRole(role) {
-  return LEGACY_ROLE_MAP[role] || role;
-}
 
 function normalizeAgentConfig(cfg) {
   if (!cfg) return cfg;
@@ -1102,10 +1128,13 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // from, so the prompt can never claim a folder the container doesn't have —
   // each entry carries its in-container target and read/write mode (#1289).
   const contextMounts = resolveContextMounts(cfg || {});
+  // #1547: same discipline as skills — resolve the plugin grant from the config
+  // here rather than threading it through every caller.
+  const plugins = agentPluginDisplays(cfg);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
 }
 
@@ -1118,7 +1147,7 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
 // and mirrors it into an isolated agent's volume — but ONLY when the state
 // actually flipped, so a no-op edit (e.g. adding a 2nd trigger) never churns
 // (AC4). Reconstructs prompt/env/blueprintId exactly like the skill-sync
-// rebuild + prompt-preview. Best-effort: a rebuild failure never fails the
+// rebuild. Best-effort: a rebuild failure never fails the
 // (already-persisted) trigger write.
 async function reconcileAgentAutonomyPrompt(id, wasAutonomous) {
   try {
@@ -1505,7 +1534,7 @@ async function computeTeamHillClimbMetrics(teamId, { now = Date.now() } = {}) {
     })) runs.push(r);
     let promptHistory = null;
     try {
-      promptHistory = JSON.parse(fs.readFileSync(agentStatePath(m.id, ".aee", "prompt-history.json"), "utf8"));
+      promptHistory = JSON.parse(fs.readFileSync(path.join(agentStateDir(m.id), "prompt-history.json"), "utf8"));
     } catch { /* no prompt-history — audit fallback */ }
     configBoundaries[m.id] = hillClimbSweep.configBoundariesForAgent(promptHistory, auditEntries, m.id);
   }
@@ -1932,10 +1961,141 @@ function agentSkillDescriptions(id, teamId, skills) {
   return out;
 }
 
+// The display data the gated "Plugin Capabilities" CLAUDE.md block is built
+// from (#1547): the agent's RESOLVED plugin grant joined with each plugin's
+// installed manifest. Built from the grant, never from the seeded config file's
+// contents (§4.7) — and a granted-but-uninstalled plugin contributes nothing,
+// so the prompt can't advertise a CLI the workspace doesn't have.
+function agentPluginDisplays(cfg) {
+  if (!cfg) return [];
+  let grant;
+  try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { return []; }
+  if (!Array.isArray(grant) || grant.length === 0) return [];
+  let manifests;
+  try { manifests = pluginRegistry.installedManifests(); } catch { return []; }
+  return grant
+    .map((g) => pluginRegistry.promptDisplayFor(manifests[g.id], g.scopeGranularity))
+    .filter(Boolean);
+}
+
+// Full plugin reconcile (#1547): sidecars first (so a newly-installed plugin
+// has something to attach), then grant-driven network attachment for every
+// installed plugin. Used at boot and after an install/uninstall — idempotent,
+// so calling it more often than necessary is harmless.
+async function reconcilePluginsAndAttachments() {
+  const sidecars = await pluginRuntime.reconcilePluginSidecars();
+  if (sidecars.supported === false) return { sidecars, networks: [] };
+  let networks = [];
+  if (orchestratorSingleton) {
+    try {
+      networks = await orchestratorSingleton._reconcilePluginNetworks(
+        Object.keys(pluginRegistry.installedManifests()),
+      );
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin network reconcile failed: ${err.message}`);
+    }
+  }
+  // github-issues (#1633): hand each granted team's env GitHub token + repo list
+  // to its broker (best-effort — the token never reaches a browser or an agent).
+  try { await pushGithubIssueScopeCredentials(); } catch (err) {
+    console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+  }
+  return { sidecars, networks };
+}
+
+// Resolve, per team the github-issues plugin is granted to, that team's Working-
+// Environment GitHub token + repository list, and push the map to the plugin's
+// broker (orchestrator/plugin-github-creds.js + plugin-runtime.pushScopeCredentials).
+// A no-op when the plugin isn't installed. Best-effort; never throws into a
+// reconcile. This is the plugin's live-wiring completion step (the resolver +
+// broker map handling are the unit-tested pure cores).
+async function pushGithubIssueScopeCredentials() {
+  const PLUGIN = "github-issues";
+  let entry;
+  try { entry = pluginRegistry.readPluginManifest(PLUGIN); } catch { return; }
+  if (!entry || !entry.ok || !entry.manifest) return; // not installed / invalid
+
+  // Which team scopes the plugin is granted to (team granularity → scopeId is the
+  // team id, matching the broker's viewer/agent scope key).
+  const scopeIds = new Set();
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg || !cfg.token) continue; // a stub has no running surface
+    let grant = null;
+    try { grant = pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), PLUGIN); } catch { grant = null; }
+    if (!grant) continue;
+    const scopeId = resolveScopeId(cfg, grant.scopeGranularity);
+    if (scopeId) scopeIds.add(scopeId);
+  }
+
+  // Even a fully-revoked plugin gets an (empty) push so the broker clears any
+  // stale team it still holds.
+  const allowNonGithubHost = String(process.env.AEE_ALLOW_NON_GITHUB_REPO_HOST || "") === "1";
+  const envForScope = (sid) => {
+    const teamCfg = loadAgentConfig(sid);
+    return teamCfg && teamCfg.environmentId ? loadEnvironment(teamCfg.environmentId) : null;
+  };
+  const readToken = (tokenId) => {
+    try { return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8"); } catch { return null; }
+  };
+  const scopes = resolveScopeGithubCredentials([...scopeIds], {
+    envForScope,
+    readToken,
+    parseRepoFullName: (url) => ghParseRepoFullName(url, { allowNonGithubHost }),
+  });
+  // Enrich each entry with the team's display name (for the UI's team selector)
+  // and its FLOW labels + per-repo label→agent trigger preview (#1642, Item 2):
+  // the gate/outcome labels the team's flow uses, suggested ahead of the repo's
+  // raw label list, each previewing which agent(s) it wakes. Derived here (I/O)
+  // and folded by the pure `buildTeamFlowLabels`.
+  for (const sid of Object.keys(scopes)) {
+    const teamCfg = loadAgentConfig(sid);
+    scopes[sid].teamName = (teamCfg && (teamCfg.displayName || teamCfg.name)) || sid;
+    const { flowLabels, labelAgents, labelUsage } = buildTeamFlowLabels({
+      teamLabels: teamCfg && Array.isArray(teamCfg.labels) ? teamCfg.labels : [],
+      members: teamFlowMembers(sid),
+    });
+    scopes[sid].flowLabels = flowLabels;
+    scopes[sid].labelAgents = labelAgents;
+    // Per-label usage classification (#1730) so the plugin can colour-code the
+    // workflow-trigger buttons (human-set gate vs. agent-emitted label).
+    scopes[sid].labelUsage = labelUsage;
+  }
+  await pluginRuntime.pushScopeCredentials(entry.manifest, scopes);
+}
+
+// The enabled members of a team, each shaped `{ displayName, enabled, triggers,
+// emits }` for `buildTeamFlowLabels`. Mirrors the member+triggers.json read the
+// flow-anomaly sweep does; a team with no members yields []. Best-effort per id.
+function teamFlowMembers(teamId) {
+  const out = [];
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { continue; }
+    if (!cfg || cfg.role === "team") continue;
+    if ((cfg.parentTeamId || null) !== teamId) continue;
+    let triggers = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(agentStatePath(id, "triggers.json"), "utf8"));
+      if (Array.isArray(raw)) triggers = raw;
+    } catch { /* no triggers yet */ }
+    out.push({
+      displayName: cfg.displayName || id,
+      enabled: cfg.enabled !== false,
+      triggers,
+      emits: _flowLiftEmits(cfg.emits, triggers),
+    });
+  }
+  return out;
+}
+
 // Compose an agent's CLAUDE.md. The base template is read here (I/O); the
 // ordering / conditional-gating / de-duplication rules live in the pure,
-// unit-tested `prompt-assembly` module, which the prompt-preview endpoint also
-// calls so the preview is byte-identical to what gets seeded.
+// unit-tested `prompt-assembly` module.
 function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {}) {
   const candidates = [
     path.join(TEMPLATE_WORKSPACE, "CLAUDE.md"),
@@ -1961,10 +2121,13 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     env,
     skills: Array.isArray(opts.skills) ? opts.skills : [],
     skillDescriptions: opts.skillDescriptions && typeof opts.skillDescriptions === "object" ? opts.skillDescriptions : {},
+    // Resolved plugin grant → the gated Plugin Capabilities section (#1547).
+    // Empty → the section is absent entirely, like Skills.
+    plugins: Array.isArray(opts.plugins) ? opts.plugins : [],
     blueprintId,
     autonomous: !!opts.autonomous,
-    // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; the
-    // prompt-preview endpoint omits it to render the fully-resolved prompt.
+    // Seeding passes promptRef so CLAUDE.md references AGENT-PROMPT.md; a
+    // caller may omit it to inline the fully-resolved prompt instead.
     promptRef: opts.promptRef || null,
     // Set only when the agent has a provisioned KB checkout (see
     // saveAgentPrompt) — gates the Team Knowledge digest `@`-import.
@@ -1979,24 +2142,31 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
 
 // ── Seeded-skills manifest ──────────────────────────────────────────────────
 // Records which skills actually landed in an agent's workspace, with tier and
-// timestamp: /workspace/agents/<id>/.aee/seeded-skills.json →
+// timestamp: /workspace/agents/<id>/.agent-studio/seeded-skills.json →
 //   { "<skillName>": { "tier": "agent"|"team"|"global", "seededAt": "<ISO>" } }
 // This is THE truth for "is this skill active for this member" — the grant
 // list alone can't tell whether a running member was seeded before or after a
 // name was added (docs/knowledge-skill-activation-concept.md §4.1). Written by
 // every seed and by the activation sync; read by the admin console's
-// knowledge-graph activation block.
-const SEEDED_SKILLS_REL = path.join(".aee", "seeded-skills.json");
+// knowledge-graph activation block. `agentStateDir` migrates a legacy `.aee/`
+// to `.agent-studio/` on first touch (#1549).
+const SEEDED_SKILLS_FILE = "seeded-skills.json";
+
+// The migrating state-dir choke-point (#1549): resolves `.agent-studio/`, moving
+// a legacy `.aee/` over exactly once so an upgraded agent keeps all state.
+function agentStateDir(id) {
+  return resolveAgentStateDir(agentDir(id));
+}
 
 function readSeededSkills(id) {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SEEDED_SKILLS_REL), "utf8"));
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SEEDED_SKILLS_FILE), "utf8"));
     return m && typeof m === "object" ? m : {};
   } catch { return {}; }
 }
 
 function writeSeededSkills(id, manifest) {
-  const p = path.join(agentDir(id), SEEDED_SKILLS_REL);
+  const p = path.join(agentStateDir(id), SEEDED_SKILLS_FILE);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
 }
@@ -2005,17 +2175,17 @@ function writeSeededSkills(id, manifest) {
 // the last error + timestamp for a pending skill the auto-reconcile loop is
 // trying to heal. Keyed by skill name. Read by the admin-console graph overlay so
 // a stuck member surfaces a Retry + the reason instead of a silent "pending".
-const SKILL_RECONCILE_REL = path.join(".aee", "skill-reconcile.json");
+const SKILL_RECONCILE_FILE = "skill-reconcile.json";
 
 function readSkillReconcileState(id) {
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(agentDir(id), SKILL_RECONCILE_REL), "utf8"));
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SKILL_RECONCILE_FILE), "utf8"));
     return m && typeof m === "object" ? m : {};
   } catch { return {}; }
 }
 
 function writeSkillReconcileState(id, map) {
-  const p = path.join(agentDir(id), SKILL_RECONCILE_REL);
+  const p = path.join(agentStateDir(id), SKILL_RECONCILE_FILE);
   try {
     const clean = map && typeof map === "object" ? map : {};
     // An empty map means every skill reconciled — drop the file so it leaves no
@@ -3017,16 +3187,75 @@ function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force =
 // The orchestrator shares the workspace volume, so it sees the agent's commits
 // and pushes them with the environment's own credentials. See agent-git-ops.js.
 
-function _buildAgentGitEnv(id, repo, env) {
+function _buildAgentGitEnv(id, repo, env, overrides = {}) {
   return agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: repo.url,
-    sshKeyId: repo.sshKeyId,
-    githubTokenId: env?.githubTokenId,
+    // Personal-credential resolution (#1569) may override the env's shared
+    // ssh key / PAT with the owner's personal one for an attributed write.
+    // Absent overrides ⇒ byte-identical to the pre-#1569 env-only behaviour.
+    sshKeyId: overrides.sshKeyId || repo.sshKeyId,
+    githubTokenId: overrides.githubTokenId || env?.githubTokenId,
     baseEnv: process.env,
     sshKeysDir: SSH_KEYS_DIR,
     ghTokensDir: GH_TOKENS_DIR,
   });
+}
+
+// Read the GitHub-token credential index (metadata only — scope/userId, never
+// the secret). Used to resolve an owner's personal PAT for an attributed write
+// (#1569). Best-effort: an unreadable/absent index yields [] so resolution
+// falls through to the shared credential exactly as today.
+function loadGithubTokenIndex() {
+  try {
+    const raw = fs.readFileSync(path.join(GH_TOKENS_DIR, "index.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Read the SSH-key credential index (metadata only — scope/userId/fingerprint,
+// never the private key). Sibling of `loadGithubTokenIndex`; used by offboarding
+// (#1571) to find a departing human's personal SSH keys. Best-effort: an
+// unreadable/absent index yields [].
+function loadSshKeyIndex() {
+  try {
+    const raw = fs.readFileSync(SSH_KEYS_INDEX, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Resolve the GitHub-token id an attributed write (PR/HTTPS push) should run
+// under, applying the personal → team → system order with refuse-on-missing
+// (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
+// env's shared id when the personal tier does not apply) or throws a
+// `personalCredentialRequired`-tagged Error the caller surfaces as a distinct,
+// actionable failure. Gated on `config.ownerId`: an agent with no owner (every
+// agent until ownerId population lands — AC8) takes the shared id unchanged and
+// never refuses.
+function resolveAttributedGithubToken(id, env, operation) {
+  const cfg = loadAgentConfig(id) || {};
+  const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
+  const personal = credentialResolution.findPersonalCredential(loadGithubTokenIndex(), ownerId);
+  const decision = credentialResolution.resolveCredential({
+    operation,
+    ownerId,
+    personalCredential: personal,
+    sharedCredentialId: env?.githubTokenId || null,
+    kind: "GitHub token",
+  });
+  if (decision.refuse) {
+    const e = new Error(decision.refuse.message);
+    e.personalCredentialRequired = true;
+    e.refusalCode = decision.refuse.code;
+    throw e;
+  }
+  return { githubTokenId: decision.credentialId };
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -4719,6 +4948,15 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     }
   }
 
+  // FIX-D step 1: the theme (related-aggregation) path historically ran over the
+  // UNFILTERED eligibleClusters, so a cluster already claimed by domain routing
+  // re-entered as a brand-new lesson-slug theme micro-skill — the main reason the team
+  // accumulated dozens of skills over its ~12 budget. Exclude domain-routed clusters
+  // from the theme inputs so that knowledge stays owned by its domain amendment card.
+  const themeClusters = domainRoutedCanonicalIds.size > 0
+    ? eligibleClusters.filter((c) => c && !domainRoutedCanonicalIds.has(c.canonicalId))
+    : eligibleClusters;
+
   if (level >= 3) {
     // #779: the per-pass cap is shared across auto-extend + convergence promotions +
     // theme promotions. Auto-extend runs FIRST and claims its matched clusters so
@@ -4779,7 +5017,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
       console.warn(`[Orchestrator] theme domain resolver for '${teamId}' failed: ${err.message}`);
     }
     try {
-      const n = autoPromoteThemesStep(teamId, env, eligibleClusters, readKnowledgeCandidates(teamId), {
+      const n = autoPromoteThemesStep(teamId, env, themeClusters, readKnowledgeCandidates(teamId), {
         relatedThreshold, now, capRemaining: maxAutoPromotionsPerPass - capUsed, resolveDomain: resolveThemeDomain,
       });
       capUsed += (n || 0);
@@ -4791,7 +5029,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     // skill needs judgment. raiseRelatedSuggestions raises only the remainder
     // (planRelatedSuggestions excludes the clusters just auto-promoted above).
     try {
-      raiseRelatedSuggestions(teamId, eligibleClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
+      raiseRelatedSuggestions(teamId, themeClusters, readKnowledgeCandidates(teamId), { relatedThreshold, now });
     } catch (err) {
       console.warn(`[Orchestrator] related-theme suggestions for '${teamId}' failed: ${err.message}`);
     }
@@ -4806,8 +5044,8 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     try {
       // Themes first: a lesson bundled into a raised theme card must not also
       // raise its own single-lesson convergence card (one decision, not two).
-      const afterThemes = raiseRelatedSuggestions(teamId, eligibleClusters, curCandidates, { relatedThreshold, now });
-      const covered = knowledgeConvergence.clustersCoveredByThemes(eligibleClusters, afterThemes);
+      const afterThemes = raiseRelatedSuggestions(teamId, themeClusters, curCandidates, { relatedThreshold, now });
+      const covered = knowledgeConvergence.clustersCoveredByThemes(themeClusters, afterThemes);
       // #779: single-cluster candidates are raised only for digest-routed
       // candidateClusters (digest-only clusters excluded), minus theme-covered ones.
       const singles = covered.size === 0
@@ -4835,18 +5073,44 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // existing backlog keeps healing even after the dial is lowered.
   try {
     const staleWeeks = Math.max(1, Number(process.env.KNOWLEDGE_SUGGESTION_STALE_WEEKS) || 4);
+    const maxOpen = Math.max(1, Number(process.env.KNOWLEDGE_MAX_OPEN_SUGGESTIONS) || knowledgeHygiene.DEFAULT_MAX_OPEN_SUGGESTIONS);
     const observedIds = new Set(
       (Array.isArray(proj.clusters) ? proj.clusters : []).map((c) => knowledgeConvergence.stableSuggestionId(c)),
     );
-    const plan = knowledgeHygiene.planStaleTransitions(readKnowledgeCandidates(teamId), {
-      now, maxWeeks: staleWeeks, observedIds,
-    });
-    if (plan.changed) {
-      writeKnowledgeCandidates(teamId, plan.next);
-      const evts = [
-        ...plan.stale.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })),
-        ...plan.revive.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: true })),
-      ];
+    let store = readKnowledgeCandidates(teamId);
+    const evts = [];
+    let changed = false;
+
+    // 1) quiet-decay open→stale (+ stale→open revive on fresh evidence).
+    const stalePlan = knowledgeHygiene.planStaleTransitions(store, { now, maxWeeks: staleWeeks, observedIds });
+    if (stalePlan.changed) {
+      store = stalePlan.next;
+      changed = true;
+      evts.push(...stalePlan.stale.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+      evts.push(...stalePlan.revive.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: true })));
+    }
+
+    // 2) FIX-B: retire grown-cluster duplicates immediately (a card whose lesson set is
+    // a strict subset of a larger open card of the same kind+source → `superseded`),
+    // instead of waiting out the multi-week stale window.
+    const supPlan = knowledgeHygiene.planSupersessions(store, { now });
+    if (supPlan.changed) {
+      store = supPlan.next;
+      changed = true;
+      evts.push(...supPlan.superseded.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+    }
+
+    // 3) FIX-C: hard backstop — if still over the open-card cap, evict the
+    // lowest-evidence cards to `stale` (never the domain-proposal singleton/amendments).
+    const capPlan = knowledgeHygiene.planOpenCap(store, { now, maxOpen });
+    if (capPlan.changed) {
+      store = capPlan.next;
+      changed = true;
+      evts.push(...capPlan.evicted.map((c) => knowledgeFeed.buildStaleEvent({ teamId, suggestionId: c.id, text: c.text, revived: false })));
+    }
+
+    if (changed) {
+      writeKnowledgeCandidates(teamId, store);
       if (evts.length) appendKnowledgeEvents(evts);
     }
   } catch (err) {
@@ -5401,26 +5665,17 @@ function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, n
     // new-domain proposal; keyed by the same stable id so a grown set re-evaluates.
     byId.set(c.id, { ...c, status: 'unrouted', routedAt: now });
   }
-  if (plan.newDomainProposal) {
-    const ids = plan.newDomainProposal.unrouted.map((c) => c.canonicalId).filter(Boolean).sort();
-    const propId = `dp-${crypto.createHash('sha1').update(ids.join(',')).digest('hex').slice(0, 12)}`;
-    if (!tracked(propId)) {
-      byId.set(propId, {
-        id: propId,
-        teamId,
-        source: 'domain-proposal',
-        status: 'open',
-        budgetBlocked: plan.newDomainProposal.budgetBlocked,
-        reason: plan.newDomainProposal.reason,
-        entryIds: plan.newDomainProposal.unrouted.flatMap((c) => c.entryIds || []),
-        unroutedIds: ids,
-        text: `${plan.newDomainProposal.unrouted.length} unrouted lesson(s) may warrant a new domain`,
-        raisedAt: now,
-      });
-    }
-  }
+  // FIX-A: keep at most ONE open new-domain proposal card (a singleton per team,
+  // upserted; operator dismissal respected; legacy dp-<hash> pile collapsed). The
+  // decision is a pure, unit-tested helper in knowledge-routing.
+  const reconciledRows = knowledgeRouting.reconcileDomainProposal([...byId.values()], {
+    proposal: plan.newDomainProposal,
+    teamId,
+    teamSegment: knowledgeFeed.safeTeamSegment(teamId),
+    now,
+  });
 
-  writeKnowledgeCandidates(teamId, [...byId.values()]);
+  writeKnowledgeCandidates(teamId, reconciledRows);
   if (plan.batch) appendKnowledgeEvents([plan.batch]);
   return claimed;
 }
@@ -5915,11 +6170,17 @@ async function agentCreatePr(id, env, body = {}) {
     throw new Error(`invalid base branch: ${base}`);
   }
 
-  const gitEnv = _buildAgentGitEnv(id, repo, env);
-  return _repoGitQueue(repo.repoPath, () => _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body));
+  // #1569: opening a PR is an attributed write — resolve the owner's personal
+  // PAT (personal → team → system), refusing rather than acting under a shared
+  // identity when an owner is set but has no usable personal token. No owner
+  // (AC8) ⇒ the env's shared token, unchanged.
+  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr");
+  const gitEnv = _buildAgentGitEnv(id, repo, env, { githubTokenId });
+  return _repoGitQueue(repo.repoPath, () =>
+    _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId));
 }
 
-async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
+async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId = null) {
   const run = (args, timeout = 30_000) =>
     _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
 
@@ -5950,7 +6211,13 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
   // missing/unresolvable token surfaces as a distinct, actionable error rather
   // than an opaque `gh` auth failure indistinguishable from a real git reject.
   // Note this gate is only on the PR step — SSH `push` never reaches here.
-  const tokenStatus = agentGitOps.githubTokenStatus({ env, ghTokensDir: GH_TOKENS_DIR });
+  // Validate the token that will ACTUALLY be used — the personal one when
+  // #1569 resolution overrode the env's shared id — not merely env.githubTokenId.
+  const tokenStatus = agentGitOps.githubTokenStatus({
+    env,
+    githubTokenId: githubTokenId || undefined,
+    ghTokensDir: GH_TOKENS_DIR,
+  });
   if (!tokenStatus.resolvable) {
     const e = new Error(
       `no GitHub token available to open a PR for agent '${id}' ` +
@@ -5966,7 +6233,7 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body) {
   const marker = `<!-- agent: ${id} -->`;
   let prBody = typeof body.body === "string" ? body.body : "";
   if (!prBody.includes(marker)) prBody = `${prBody.trimEnd()}\n\n${marker}\n`;
-  const tmp = path.join(repo.repoPath, `.aee-pr-body-${Date.now()}.md`);
+  const tmp = path.join(repo.repoPath, `.agent-studio-pr-body-${Date.now()}.md`);
   fs.writeFileSync(tmp, prBody);
 
   try {
@@ -7489,9 +7756,17 @@ class Orchestrator {
     for (const id of listAgentIds()) {
       const cfg = loadAgentConfig(id);
       if (!cfg || cfg.role !== "team-member" || cfg.parentTeamId !== teamId) continue;
-      // Skip members with their own prompt override.
-      if (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) continue;
-      saveAgentPrompt(id, teamCfg.systemPromptTemplate, "team-member", env);
+      // #1511 (AC5): re-compose inheriting AND additional members; an EXCLUSIVE
+      // member (its own full override) is never re-composed. An additional member
+      // stores ONLY its addition in cfg.systemPrompt — composeMemberPrompt re-applies
+      // the team template on top at read time here, so its stored config is untouched
+      // (saveAgentPrompt writes only AGENT-PROMPT.md/CLAUDE.md, never config.systemPrompt),
+      // and a later re-compose can't double the team text.
+      const mode = resolvePromptMode(cfg);
+      if (mode === PROMPT_MODES.EXCLUSIVE) continue;
+      const ownText = typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '';
+      const composed = composeMemberPrompt(mode, teamCfg.systemPromptTemplate, ownText);
+      saveAgentPrompt(id, composed, "team-member", env);
       reseeded.push(id);
       propagated++;
     }
@@ -7507,7 +7782,7 @@ class Orchestrator {
         reseedAgent(id, ['AGENT-PROMPT.md', 'CLAUDE.md'])));
     }
     console.log(
-      `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting member(s)`
+      `[Orchestrator] Team ${teamId} prompt updated; pushed to ${propagated} inheriting/additional member(s)`
     );
     return { teamId, propagated };
   }
@@ -7700,7 +7975,7 @@ class Orchestrator {
   // attempt cap + exponential backoff, so a persistent failure (e.g. a deleted
   // source file) records its error and stops rather than looping hot. Idempotent:
   // a fully-synced team does zero work and writes nothing. The per-target outcome
-  // is folded into each member's `.aee/skill-reconcile.json` so the Rollout tab
+  // is folded into each member's `.agent-studio/skill-reconcile.json` so the Rollout tab
   // can turn a stuck member's action into a Retry with the last error + time.
   async reconcilePendingSkills({ now = new Date().toISOString() } = {}) {
     const teamIds = listAgentIds()
@@ -7883,6 +8158,259 @@ class Orchestrator {
       total: 1,
     }]);
     return { agentId: id, skillName: name, active, result };
+  }
+
+  // ── Plugin activation (#1547) ─────────────────────────────────────────────
+  // The plugin sibling of the skill activation above, and deliberately the same
+  // shape: an idempotent grant edit on the agent construct, then an ADDITIVE
+  // FILE SYNC into the live workspace — no respawn. A plugin CLI is a static
+  // file read per invocation, exactly like a skill, and `.agent-studio/bin` is on the
+  // agent's PATH from container start, so a grant becomes usable immediately
+  // (docs/plugin-system-concept.md §4.5).
+  //
+  // What a plugin adds over a skill is the NETWORK and the TOKEN: the sidecar
+  // must be reachable from this agent's per-agent network, and the workspace
+  // gets a 0600 config carrying a scope token minted for the grant's
+  // granularity. Both are handled by planWorkspaceSync + the runtime adapter.
+
+  // Apply one agent's move from prevGrant to nextGrant.
+  async _syncPluginIntoWorkspace(id, cfg, prevGrant, nextGrant) {
+    const manifests = pluginRegistry.installedManifests();
+    const plan = planWorkspaceSync({
+      agentCfg: cfg,
+      prevGrant,
+      nextGrant,
+      manifests,
+      resolveScopeId,
+      mintToken: (pluginId, scopeId) => pluginRuntime.mintScopeToken(pluginId, scopeId),
+      networkNameFor: perAgentNetworkName,
+    });
+
+    const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` before the plan's relative
+    // paths (`.agent-studio/bin`, `.agent-studio/plugins`) are written, so an
+    // upgraded agent's plugin CLIs/grants move with the rename instead of
+    // splitting across two dirs (#1549).
+    resolveAgentStateDir(dir);
+    const written = [];
+    const removed = [];
+    const errors = [];
+
+    for (const item of plan.write) {
+      const dest = path.join(dir, item.path);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        if (item.copyFrom) {
+          // `copyFrom` is the manifest's registry-relative cli.entrypoint.
+          // Match on entrypoint AND cli name so two plugins shipping the same
+          // relative path can't be confused for one another, and resolve the
+          // absolute source through the registry so the containment check
+          // happens in exactly one place.
+          const cliName = path.basename(item.path);
+          const manifest = Object.values(manifests).find(
+            (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+          );
+          const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+          if (!src) { errors.push({ path: item.path, error: 'CLI entrypoint not resolvable' }); continue; }
+          fs.copyFileSync(src, dest);
+        } else {
+          fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+        }
+        // chmod AFTER write: writeFileSync's mode option is masked by umask,
+        // and the token config must be 0600 exactly.
+        fs.chmodSync(dest, item.mode);
+        written.push(item.path);
+      } catch (err) {
+        errors.push({ path: item.path, error: err.message });
+      }
+    }
+
+    for (const rel of plan.remove) {
+      try {
+        fs.rmSync(path.join(dir, rel), { force: true });
+        removed.push(rel);
+      } catch (err) {
+        errors.push({ path: rel, error: err.message });
+      }
+    }
+
+    // Rebuild CLAUDE.md so the Plugin Capabilities gate + lines match the new
+    // grant (the config is already saved by the caller, as for skills).
+    try {
+      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+      const promptPath = path.join(dir, AGENT_PROMPT_FILENAME);
+      const prompt = fs.existsSync(promptPath)
+        ? fs.readFileSync(promptPath, "utf8")
+        : (cfg.systemPrompt || cfg.systemPromptTemplate || "");
+      saveAgentPrompt(id, prompt, cfg.role, env, cfg.blueprintId || null);
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
+    }
+
+    await reseedAgent(id, ["CLAUDE.md", ".agent-studio"]);
+    return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
+  }
+
+  // Reconnect every touched plugin's sidecar to exactly the per-agent networks
+  // its current grant implies. Reconciled from truth rather than applied as a
+  // delta, so a missed event or a manual disconnect self-heals on the next
+  // grant edit.
+  async _reconcilePluginNetworks(pluginIds) {
+    const results = [];
+    const configs = listAgentIds().map((id) => loadAgentConfig(id)).filter(Boolean);
+    for (const pluginId of new Set(pluginIds)) {
+      const granted = configs
+        .filter((c) => c.token) // a stub has no container, so no network
+        .filter((c) => {
+          try { return !!pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
+          catch { return false; }
+        })
+        .map((c) => c.id);
+      results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
+    }
+    // A github-issues grant/revoke changes which teams the broker must hold a
+    // token for — re-push its per-scope credential map (best-effort, #1633).
+    if (new Set(pluginIds).has("github-issues")) {
+      try { await pushGithubIssueScopeCredentials(); } catch (err) {
+        console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+      }
+    }
+    return results;
+  }
+
+  // Validate that a plugin may be granted at the requested granularity. The UI
+  // bounds the choice too, but the server is the authority (§4.4).
+  _resolvePluginGrant(pluginId, scopeGranularity) {
+    const id = typeof pluginId === "string" ? pluginId.trim() : "";
+    if (!id) throw new Error("pluginId required");
+    const entry = pluginRegistry.readPluginManifest(id);
+    if (!entry.ok) throw new Error(`Plugin '${id}' is not installed or its manifest is invalid`);
+    const granularity = scopeGranularity || defaultGranularity(entry.manifest);
+    const problem = assertGranularityGrantable(entry.manifest, granularity);
+    if (problem) throw new Error(problem);
+    return { manifest: entry.manifest, granularity };
+  }
+
+  // (De)activate a plugin for a whole team: the grant edit lands on the team
+  // agent, the file sync fans out to every materialized member — the same
+  // override semantics as skills (a member with its own pluginsOverride is
+  // skipped unless explicitly opted in).
+  async setTeamPluginActive(teamId, pluginId, { active = true, includeMembers = [], scopeGranularity = null } = {}) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const id = pluginId.trim();
+
+    const before = Array.isArray(teamCfg.plugins) ? teamCfg.plugins.slice() : [];
+    const { field, list } = planAgentPluginGrantEdit(teamCfg, { id, scopeGranularity: granularity }, active, loadAgentConfig);
+    teamCfg[field] = list;
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = listAgentIds()
+      .map((mid) => loadAgentConfig(mid))
+      .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+    const plan = planPluginSync({ members, grant: { id, scopeGranularity: granularity }, includeMembers });
+
+    const results = [];
+    for (const step of plan) {
+      if (step.action === "stub") {
+        // Consistent by construction: the team list already carries (or no
+        // longer carries) the grant; the normal seed path applies it at enable.
+        results.push({ agentId: step.agentId, status: "stub" });
+        continue;
+      }
+      if (step.action === "skip-override") {
+        results.push({ agentId: step.agentId, status: "skipped-override" });
+        continue;
+      }
+      const cfg = members.find((m) => m.id === step.agentId);
+      if (!cfg) continue;
+      // The member's grant BEFORE this edit — resolved against the team's
+      // pre-edit list, so a member that inherits sees the real transition.
+      const prev = effectivePlugins(cfg, (wanted) => (wanted === teamId ? { ...teamCfg, plugins: before } : loadAgentConfig(wanted)));
+
+      if (step.action === "sync-override") {
+        // Explicit opt-in: persist the grant on the member's OWN list, exactly
+        // as the skill path does. Without this the sync would seed files the
+        // next full re-seed silently drops, because an override member's own
+        // list — not the team's — is its grant.
+        const edit = planAgentPluginGrantEdit(cfg, { id, scopeGranularity: granularity }, active, loadAgentConfig);
+        cfg[edit.field] = edit.list;
+        saveAgentConfig(step.agentId, cfg);
+        this.agentConfigs.set(step.agentId, { config: cfg });
+      }
+
+      const next = effectivePlugins(cfg, loadAgentConfig);
+      results.push(await this._syncPluginIntoWorkspace(step.agentId, cfg, prev, next));
+    }
+
+    const networks = await this._reconcilePluginNetworks([id]);
+    console.log(`[Orchestrator] Team ${teamId}: plugin '${id}' ${active ? "activated" : "deactivated"} (${granularity}) on ${results.length} member(s)`);
+    return { teamId, pluginId: id, scopeGranularity: granularity, active, members: results, networks };
+  }
+
+  // Same for a single non-member agent (standalone / orchestrator) or for one
+  // team-member overriding its team's grant.
+  async setAgentPluginActive(id, pluginId, { active = true, scopeGranularity = null } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+    if (cfg.role === "team") throw new Error(`Agent '${id}' is a team — use the team route`);
+    const { granularity } = this._resolvePluginGrant(pluginId, scopeGranularity);
+    const pid = pluginId.trim();
+
+    const prev = effectivePlugins(cfg, loadAgentConfig);
+    const { field, list } = planAgentPluginGrantEdit(cfg, { id: pid, scopeGranularity: granularity }, active, loadAgentConfig);
+    cfg[field] = list;
+    saveAgentConfig(id, cfg);
+    this.agentConfigs.set(id, { config: cfg });
+    const next = effectivePlugins(cfg, loadAgentConfig);
+
+    const result = cfg.token
+      ? await this._syncPluginIntoWorkspace(id, cfg, prev, next)
+      : { agentId: id, status: "stub" };
+    const networks = await this._reconcilePluginNetworks([pid]);
+    console.log(`[Orchestrator] Agent ${id}: plugin '${pid}' ${active ? "activated" : "deactivated"} (${granularity}) — ${result.status}`);
+    return { agentId: id, pluginId: pid, scopeGranularity: granularity, active, result, networks };
+  }
+
+  // Reap a deleting agent's plugin-owned resources BEFORE its token stops being
+  // honoured (§4.9). At `team` granularity the scopeId is shared, so a member's
+  // deletion must NOT tear down the squad's pool — only the last holder does.
+  // Best-effort throughout: an unreachable broker never blocks a deletion.
+  async teardownAgentPluginScopes(id, cfg) {
+    if (!cfg || !cfg.token) return [];
+    let grant;
+    try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { return []; }
+    if (!Array.isArray(grant) || grant.length === 0) return [];
+    const manifests = pluginRegistry.installedManifests();
+
+    const siblings = listAgentIds()
+      .filter((other) => other !== id)
+      .map((other) => loadAgentConfig(other))
+      .filter(Boolean);
+
+    const out = [];
+    for (const g of grant) {
+      const manifest = manifests[g.id];
+      if (!manifest) continue;
+      const scopeId = resolveScopeId(cfg, g.scopeGranularity);
+      if (!scopeId) continue;
+      const stillHeld = siblings.some((s) => {
+        try {
+          const sg = pluginGrantFor(effectivePlugins(s, loadAgentConfig), g.id);
+          return sg && resolveScopeId(s, sg.scopeGranularity) === scopeId;
+        } catch { return false; }
+      });
+      if (stillHeld) {
+        out.push({ pluginId: g.id, scopeId, skipped: "scope-still-held" });
+        continue;
+      }
+      try { out.push(await pluginRuntime.teardownScope(manifest, scopeId)); }
+      catch (err) { out.push({ pluginId: g.id, scopeId, ok: false, error: err.message }); }
+    }
+    return out;
   }
 
   // Scan an orchestrator agent's briefings directory and ensure a disabled
@@ -8790,6 +9318,125 @@ class Orchestrator {
     return { envId, respawned, skipped };
   }
 
+  // Re-inject a rotated/newly-set PERSONAL credential into its owner's running
+  // agents (#1570, epic #1558 Phase 4). Fired by the admin-console after a human
+  // sets or rotates their personal SSH key or GitHub token. Owner-scoped sibling
+  // of respawnAgentsForEnvironment: instead of matching an environment id, it
+  // matches each agent's RESOLVED human owner (credential-resolution's
+  // resolveAgentOwnerId — the exact Phase-3 rule, so a team-member is respawned
+  // via its parent team's owner). Personal credentials are unique per (owner,
+  // kind), so every one of that human's running agents is exactly the set whose
+  // resolved credential is the one that changed — including an agent that only
+  // uses it for attributed writes (edge case). Same skip rules as the env path:
+  // disabled / not-running / tokenless agents are left for their next enable.
+  // Other humans' agents and unrelated environments are never touched (AC1/AC2/
+  // AC6). Best-effort and idempotent.
+  async respawnAgentsForOwner(ownerId, { reason } = {}) {
+    const target = ownerId != null && String(ownerId) !== '' ? String(ownerId) : null;
+    if (!target) return { ownerId: null, respawned: [], skipped: [] };
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owned = credentialResolution.selectAgentIdsForOwner(agents, target, loadAgentConfig);
+    const respawned = [];
+    const skipped = [];
+    for (const id of owned) {
+      const cfg = loadAgentConfig(id); // fresh read — canonical on-disk config
+      if (!cfg || cfg.enabled === false || !cfg.token) { skipped.push(id); continue; }
+      if (!agentProcesses.has(id)) { skipped.push(id); continue; }
+      try {
+        this.agentConfigs.set(id, { config: cfg });
+        startAgentProcess(cfg); // stops old container, recreates with fresh env
+        respawned.push(id);
+      } catch (err) {
+        console.error(`[Orchestrator] respawn for owner ${target} failed for ${id}: ${err.message}`);
+        skipped.push(id);
+      }
+    }
+    if (respawned.length) {
+      console.log(`[Orchestrator] owner ${target} personal-credential change (${reason || 'update'}) → respawned ${respawned.length} agent(s): ${respawned.join(', ')}`);
+    }
+    return { ownerId: target, respawned, skipped };
+  }
+
+  // Offboarding (#1571, epic #1558 Phase 5; concept §8, decision D6). When a
+  // human is deactivated/removed we (1) PAUSE the agents that were acting under
+  // that person's personal identity, then (2) auto-DELETE that person's personal
+  // credentials — both the index entries and the 0600 secret files.
+  //
+  // Order matters for AC5 (atomic-enough): agents are paused FIRST, so no run is
+  // started under the identity after this point; any in-flight attributed write
+  // that outlives the pause refuses (Phase 3 refuse-on-missing) rather than act
+  // under a now-deleted credential — it never silently drops to a shared one. A
+  // paused agent is DRAINED (disabled in place), never wiped (AC2), and does not
+  // auto-resume: re-enabling it is an explicit human decision, and with the
+  // personal credential gone it refuses until a present human re-owns it.
+  //
+  // Only PERSONAL credentials owned by this `userId` are deleted; the person's
+  // team/system credentials are shared infrastructure and are left untouched
+  // (AC3). There is deliberately no break-glass read/transfer before deletion —
+  // the secret is simply removed (AC4/D2). Best-effort per item so one failure
+  // does not abort the rest; a summary is returned for the caller to log.
+  async offboardOwner(ownerId) {
+    const target = ownerId != null && String(ownerId) !== '' ? String(ownerId) : null;
+    if (!target) return { ownerId: null, paused: [], skipped: [], deletedCredentials: [] };
+
+    // (1) Pause the departing human's agents (disable in place, no wipe).
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owned = credentialResolution.selectAgentIdsForOwner(agents, target, loadAgentConfig);
+    const paused = [];
+    const skipped = [];
+    for (const id of owned) {
+      try {
+        // bypassTeamLock: offboarding is a system action — a team-locked member
+        // owned by the departing human must still be pausable.
+        await this.disableAgent(id, { mode: 'drain', bypassTeamLock: true });
+        paused.push(id);
+      } catch (err) {
+        console.error(`[Orchestrator] offboarding: could not pause ${id} for owner ${target}: ${err.message}`);
+        skipped.push(id);
+      }
+    }
+
+    // (2) Delete the departing human's PERSONAL SSH keys and GitHub tokens.
+    const deletedCredentials = [
+      ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
+      ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
+    ];
+
+    if (paused.length || deletedCredentials.length) {
+      console.log(`[Orchestrator] offboarded owner ${target}: paused ${paused.length} agent(s), deleted ${deletedCredentials.length} personal credential(s)`);
+    }
+    return { ownerId: target, paused, skipped, deletedCredentials };
+  }
+
+  // Delete every PERSONAL credential owned by `ownerId` from one credential
+  // store: unlink the 0600 secret file (named by id) and rewrite the metadata
+  // index without those entries. Pure selection is delegated to
+  // `credential-resolution.selectPersonalCredentialIds` so a team/system entry
+  // is never matched even if its `userId` coincides (AC3). Returns the ids
+  // removed (each tagged with `kind`). Best-effort — a missing file is fine
+  // (the point is that no residual copy remains, AC1/AC4).
+  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind) {
+    const ids = credentialResolution.selectPersonalCredentialIds(index, ownerId);
+    if (!ids.length) return [];
+    const doomed = new Set(ids);
+    for (const id of ids) {
+      try {
+        fs.unlinkSync(path.join(secretDir, path.basename(id)));
+      } catch (err) {
+        if (err && err.code !== 'ENOENT') {
+          console.error(`[Orchestrator] offboarding: could not unlink ${kind} '${id}': ${err.message}`);
+        }
+      }
+    }
+    try {
+      const remaining = index.filter(e => !(e && e.id && doomed.has(String(e.id))));
+      fs.writeFileSync(indexPath, JSON.stringify(remaining, null, 2));
+    } catch (err) {
+      console.error(`[Orchestrator] offboarding: could not rewrite ${kind} index: ${err.message}`);
+    }
+    return ids.map(id => ({ id, kind }));
+  }
+
   // Recreate a single running agent's container so a spawn-time change (e.g. a
   // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
   // left untouched — it picks up the new binding on its next enable. Fresh-reads
@@ -9485,7 +10132,19 @@ async function handleTeamsAdminApi(req, res) {
         return sendJson(res, 200, clean(teamsStore.updateUser(resourceId, body))), true;
       }
       if (req.method === 'DELETE' && resourceId) {
-        return sendJson(res, 200, teamsStore.deleteUser(resourceId)), true;
+        // Offboarding (#1571, Phase 5): pause the departing human's agents and
+        // auto-delete their personal credentials BEFORE removing the user
+        // record, so a partial failure leaves the user recoverable rather than
+        // a deleted user with lingering personal secrets (AC5). Best-effort —
+        // the user removal is what the caller contracted for and still proceeds.
+        let offboarding = null;
+        try {
+          offboarding = await orchestrator.offboardOwner(resourceId);
+        } catch (err) {
+          console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+        }
+        const deleted = teamsStore.deleteUser(resourceId);
+        return sendJson(res, 200, { ...deleted, offboarding }), true;
       }
     }
 
@@ -9542,6 +10201,14 @@ async function main() {
   // runs after init and must never block or break the boot.
   try { migrateUnifiedAgentsMemory(); }
   catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
+
+  // Plugin broker sidecars (#1547): bring the live set in line with the
+  // installed registry — start what is installed, stop orphans of anything
+  // uninstalled while we were down. Best-effort and non-blocking: a broken
+  // plugin image must never stop the stack from booting. Inert on the
+  // kubernetes runtime (see spawn-kubernetes-pod.js Deliberate differences).
+  reconcilePluginsAndAttachments()
+    .catch((err) => console.warn(`[Orchestrator] plugin reconcile at boot failed: ${err.message}`));
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
@@ -9737,12 +10404,28 @@ async function main() {
               res.end(JSON.stringify({ ok: true, branch }));
               return;
             }
+            // `git ls-remote --exit-code` returns 2 when the connection
+            // succeeded but no refs matched — i.e. an empty repository (no
+            // commits/branches/HEAD yet). That is reachable-and-authorized, not
+            // a failure, so report it as OK-but-empty rather than surfacing the
+            // benign SSH known-hosts warning as an error (fatal errors use 128).
+            if (err.code === 2) {
+              res.end(JSON.stringify({ ok: true, branch: null, empty: true }));
+              return;
+            }
             const detail = (stderr || err.message || '').toString().trim();
             // Strip any Authorization header line that may have leaked into the
             // error output before returning it to the caller. Match to end-of-line
             // so the full "Basic <base64>" value is covered, not just the first word.
             const sanitized = detail.replace(/Authorization:[^\r\n]*/gi, 'Authorization: [redacted]');
-            const firstLine = sanitized.split('\n').find(l => l.trim()) || 'git ls-remote failed';
+            // Skip benign SSH notices (first-connection known-hosts warnings)
+            // so the real failure — "Permission denied", "Repository not found",
+            // a timeout — surfaces instead of being masked by the warning line.
+            const isNoise = (l) =>
+              /^Warning:\s/i.test(l) || /Permanently added/i.test(l);
+            const lines = sanitized.split('\n').map(l => l.trim()).filter(Boolean);
+            const firstLine =
+              lines.find(l => !isNoise(l)) || lines[0] || 'git ls-remote failed';
             res.end(JSON.stringify({ ok: false, error: firstLine.slice(0, 300) }));
           },
         );
@@ -9929,68 +10612,6 @@ async function main() {
     }
 
     // ── End blueprint routes ───────────────────────────────────────────────
-
-    // Prompt preview: render the fully-composed system prompt an agent actually
-    // receives — the seeded CLAUDE.md plus the runtime `--append-system-prompt`
-    // memory hint — using the SAME assembly path as workspace seeding, so what
-    // the operator sees is what the agent gets. Recomputed live from the agent's
-    // current AGENT-PROMPT.md + role + environment + triggers.
-    const promptPreviewMatch = req.method === 'GET' &&
-      req.url.match(/^\/internal\/agents\/([^/]+)\/prompt-preview$/);
-    if (promptPreviewMatch) {
-      const id = decodeURIComponent(promptPreviewMatch[1]);
-      try {
-        const cfg = loadAgentConfig(id);
-        if (!cfg) return sendJson(res, 404, { error: 'agent not found' });
-        let prompt = '';
-        try {
-          prompt = fs.readFileSync(path.join(agentDir(id), 'AGENT-PROMPT.md'), 'utf8');
-        } catch {
-          prompt = cfg.systemPrompt || cfg.systemPromptTemplate || '';
-        }
-        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-        const blueprintId = cfg.blueprintId || null;
-        const autonomous = agentIsAutonomous(id, cfg.role);
-        // Team-owned skills: resolve the same grant the seed path uses, so the
-        // preview's Skills gate is byte-identical to what gets seeded.
-        const skills = effectiveSkills(cfg, loadAgentConfig);
-        // #617: same skill-description enrichment (and same source resolution)
-        // as the seed path, so the preview's Skills section is byte-identical.
-        const skillDescriptions = agentSkillDescriptions(id, agentKnowledgeTeamId(cfg || {}), skills);
-        // Same live gate as saveAgentPrompt (autonomy >= 1 + provisioned
-        // checkout): digest import, unified Memory System section AND the
-        // unified memory hint all flip together — byte-identical to what the
-        // runtime resolves via _memory_model_unified().
-        const knowledgeDigestRef = agentKnowledgeDigestRef(id, env);
-        // Same gate as the seed path (#1286): the section appears iff the agent
-        // actually carries mount(s). Resolved list (#1290) carries each folder's
-        // target + access mode (#1289), so preview is byte-identical to seeded.
-        const contextMounts = resolveContextMounts(cfg);
-        const claudeMd = buildAgentClaudeMd(prompt, cfg.role, env, blueprintId, { autonomous, skills, skillDescriptions, knowledgeDigestRef, contextMounts });
-        const appendSystemPrompt = buildMemoryHint(blueprintId, { unified: !!knowledgeDigestRef });
-        return sendJson(res, 200, {
-          agentId: id,
-          role: cfg.role || null,
-          claudeMd,
-          appendSystemPrompt,
-          agentPrompt: prompt,
-          meta: {
-            autonomous,
-            sessionPolicy: cfg.sessionPolicy || 'persistent',
-            blueprintInstance: !!blueprintId,
-            hasRepository: !!(env && Array.isArray(env.repositories) && env.repositories.length > 0),
-            hasSkills: skills.length > 0,
-            hasKnowledgeDigest: !!knowledgeDigestRef,
-            hasContextMount: contextMounts.length > 0,
-            environmentId: cfg.environmentId || null,
-            environmentName: (env && env.name) || null,
-          },
-        });
-      } catch (err) {
-        console.error(`[Orchestrator] prompt-preview error for ${id}: ${err.message}`);
-        return sendJson(res, 500, { error: err.message });
-      }
-    }
 
     // Rebuild an agent's CLAUDE.md after a config change the prompt is gated on
     // (#1286: setting/clearing the context mount). Idempotent and best-effort —
@@ -10310,6 +10931,13 @@ async function main() {
                     // Materialized child — best-effort Matrix cleanup.
                     await orchestrator.deactivateMatrixUser(childId);
                   }
+                  // Reap plugin-owned resources BEFORE the config (and with it
+                  // the grant this scope is derived from) is deleted — §4.9
+                  // requires the reap to precede token invalidation. Deleting
+                  // members one at a time is safe: each checks whether a
+                  // sibling still holds the same scopeId, so at `team`
+                  // granularity only the last one actually tears down.
+                  await orchestrator.teardownAgentPluginScopes(childId, childCfg);
                   deleteAgentFiles(childId);
                   if (PER_AGENT_VOLUME) await removePerAgentVolume(childId).catch(e =>
                     console.warn(`[Orchestrator] volume teardown ${childId}: ${e.message}`));
@@ -10330,6 +10958,11 @@ async function main() {
           }
 
           stopAgentProcess(id);
+          // Same ordering rule as the cascade above: reap first, delete after.
+          if (parentCfg) {
+            await orchestrator.teardownAgentPluginScopes(id, parentCfg).catch(e =>
+              console.warn(`[Orchestrator] plugin teardown ${id}: ${e.message}`));
+          }
           deleteAgentFiles(id);
           if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
             console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
@@ -11450,6 +12083,34 @@ async function main() {
       return;
     }
 
+    // ── Re-inject a human's personal credential into their running agents ──
+    // Fired by the admin-console after a person SETS or ROTATES their personal
+    // SSH key / GitHub token (#1570), so already-running containers pick up the
+    // new secret by being recreated. Owner-scoped (only that human's agents).
+    // Best-effort on the caller's side.
+    const respawnOwnerMatch = req.method === 'POST' && req.url.match(/^\/internal\/owners\/([^/]+)\/respawn-agents$/);
+    if (respawnOwnerMatch) {
+      const ownerId = decodeURIComponent(respawnOwnerMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        (async () => {
+          try {
+            const result = await orchestrator.respawnAgentsForOwner(ownerId, { reason: parsed.reason });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            console.error(`[Orchestrator] respawnAgentsForOwner error for ${ownerId}: ${err.message}`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        })();
+      });
+      return;
+    }
+
     // ── Create GitHub labels for a team (label-suffix provisioning, #902) ─────
     // Called best-effort after materialisation: creates any missing labels in the
     // target repo via the env's PAT. 422 (already-exists) is silently ignored.
@@ -11711,7 +12372,15 @@ async function main() {
           // auth, etc.); 400 for request/config problems.
           const payload = { ok: false, error: msg };
           let status = 400;
-          if (err && err.noGithubToken) {
+          if (err && err.personalCredentialRequired) {
+            // #1569 refuse-on-missing: the agent's owner has no usable personal
+            // credential for this attributed write, and there is deliberately no
+            // team/system fallback. 424 (Failed Dependency) + stable code so the
+            // agent surfaces the actionable message rather than retrying a shared
+            // push. Nothing was pushed/opened.
+            status = 424;
+            payload.code = err.refusalCode || 'personal-credential-required';
+          } else if (err && err.noGithubToken) {
             status = 424;
             payload.code = 'no-github-token';
             if (err.branchPushed) payload.branchPushed = err.branchPushed;
@@ -12591,60 +13260,73 @@ async function main() {
     const resetReposMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/reset-repos$/);
     if (resetReposMatch) {
       const agentId = decodeURIComponent(resetReposMatch[1]);
-      const cfg = loadAgentConfig(agentId);
-      if (!cfg) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Agent not found' }));
-        return;
-      }
-      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-      const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-      const workspace = agentDir(agentId);
-      const results = [];
-      for (const repo of repos) {
-        if (!repo?.url) continue;
-        const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
-        const repoPath = path.join(workspace, repoName);
-        let branch = repo.branch || null;
-        if (!fs.existsSync(path.join(repoPath, '.git'))) {
-          results.push({ repo: repoName, skipped: 'not-a-git-repo' });
-          continue;
+      // Git here is network-bound (fetch, up to a 30s timeout per repo) and the
+      // orchestrator runs on a single event loop the admin console proxies
+      // through — a synchronous fetch froze every in-flight console request for
+      // its whole duration (#1683). Run the whole reset asynchronously so the
+      // loop stays responsive while a slow fetch is in flight.
+      (async () => {
+        const cfg = loadAgentConfig(agentId);
+        if (!cfg) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Agent not found' }));
+          return;
         }
-        const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-        if (repo.sshKeyId) {
-          const keyPath = path.join(SSH_KEYS_DIR, repo.sshKeyId);
-          if (fs.existsSync(keyPath)) {
-            try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
-            gitEnv.GIT_SSH_COMMAND =
-              `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
-              ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
+        const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+        const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+        const workspace = agentDir(agentId);
+        const results = [];
+        for (const repo of repos) {
+          if (!repo?.url) continue;
+          const repoName = (repo.url.split('/').pop() || 'repo').replace(/\.git$/, '');
+          const repoPath = path.join(workspace, repoName);
+          let branch = repo.branch || null;
+          if (!fs.existsSync(path.join(repoPath, '.git'))) {
+            results.push({ repo: repoName, skipped: 'not-a-git-repo' });
+            continue;
           }
-        }
-        try {
-          execFileSync('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 30_000 });
-          if (!branch) {
-            // No branch configured — resolve the remote's HEAD so we don't
-            // assume 'main'. Falls back to the locally checked-out branch if
-            // the remote HEAD ref isn't available (e.g. older git servers).
-            try {
-              execFileSync('git', ['remote', 'set-head', 'origin', '--auto'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-              branch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 })
-                .toString().trim().replace(/^origin\//, '');
-            } catch {
-              branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 5_000 }).toString().trim();
+          const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+          if (repo.sshKeyId) {
+            const keyPath = path.join(SSH_KEYS_DIR, repo.sshKeyId);
+            if (fs.existsSync(keyPath)) {
+              try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
+              gitEnv.GIT_SSH_COMMAND =
+                `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` +
+                ` -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
             }
           }
-          execFileSync('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-          execFileSync('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, stdio: 'pipe', timeout: 10_000 });
-          results.push({ repo: repoName, branch, reset: true });
-        } catch (err) {
-          const detail = (err.stderr || err.stdout || err.message || '').toString().trim().slice(0, 200);
-          console.warn(`[Orchestrator] reset-repos ${agentId}/${repoName}: ${detail}`);
-          results.push({ repo: repoName, branch, failed: true, detail });
+          try {
+            await execFileP('git', ['fetch', 'origin'], { cwd: repoPath, env: gitEnv, timeout: 30_000 });
+            if (!branch) {
+              // No branch configured — resolve the remote's HEAD so we don't
+              // assume 'main'. Falls back to the locally checked-out branch if
+              // the remote HEAD ref isn't available (e.g. older git servers).
+              try {
+                await execFileP('git', ['remote', 'set-head', 'origin', '--auto'], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+                branch = (await execFileP('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: repoPath, env: gitEnv, timeout: 5_000 }))
+                  .stdout.toString().trim().replace(/^origin\//, '');
+              } catch {
+                branch = (await execFileP('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath, env: gitEnv, timeout: 5_000 })).stdout.toString().trim();
+              }
+            }
+            await execFileP('git', ['checkout', branch], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+            await execFileP('git', ['reset', '--hard', `origin/${branch}`], { cwd: repoPath, env: gitEnv, timeout: 10_000 });
+            results.push({ repo: repoName, branch, reset: true });
+          } catch (err) {
+            const detail = (err.stderr || err.stdout || err.message || '').toString().trim().slice(0, 200);
+            console.warn(`[Orchestrator] reset-repos ${agentId}/${repoName}: ${detail}`);
+            results.push({ repo: repoName, branch, failed: true, detail });
+          }
         }
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, results }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, results }));
+      })().catch((err) => {
+        console.warn(`[Orchestrator] reset-repos ${agentId}: ${err.message}`);
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'reset-repos-failed' }));
+        } catch { /* response already started */ }
+      });
       return;
     }
 
@@ -13117,6 +13799,196 @@ async function main() {
             : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Plugin grant + registry routes (#1547) ────────────────────────────
+    // Deliberately mirroring the skill routes above: the plugin grant is their
+    // sibling and (de)activation is the same additive live sync, no respawn.
+
+    // POST /internal/plugins/reconcile — start sidecars for installed plugins,
+    // stop orphans of uninstalled ones. Called by the console after an
+    // install/uninstall and once at orchestrator startup. Idempotent.
+    if (req.method === 'POST' && req.url === '/internal/plugins/reconcile') {
+      (async () => {
+        try {
+          const result = await reconcilePluginsAndAttachments();
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] plugin reconcile error: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/plugins — the installed registry as the orchestrator sees
+    // it, including which sidecars are actually running. The console has its
+    // own view of the registry directory; this one answers "what is LIVE".
+    if (req.method === 'GET' && req.url === '/internal/plugins') {
+      (async () => {
+        try {
+          const entries = pluginRegistry.listPlugins();
+          let live = [];
+          try { live = await pluginRuntime.listLiveSidecars(); } catch { /* runtime down: report none */ }
+          const running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean));
+          return sendJson(res, 200, {
+            plugins: entries.map((e) => ({
+              id: e.id,
+              ok: e.ok,
+              errors: e.errors,
+              manifest: e.manifest,
+              sidecarRunning: running.has(e.id),
+            })),
+          });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/plugins/:id/ui-endpoint — the sidecar's base URL for the
+    // console's §4.8 UI proxy. The orchestrator owns sidecar truth because it
+    // starts them; on Kubernetes the address is a Service name rather than a
+    // container name, so a lookup is the only form that survives that phase, and
+    // the admin-console image (which copies only api/*.js) never learns the
+    // naming rule. 404 when the plugin is not installed / its manifest is
+    // invalid; `running` tells the caller whether a broker is actually up.
+    const uiEndpointMatch = req.method === 'GET' &&
+      req.url.split('?')[0].match(/^\/internal\/plugins\/([^/]+)\/ui-endpoint$/);
+    if (uiEndpointMatch) {
+      (async () => {
+        try {
+          const pluginId = decodeURIComponent(uiEndpointMatch[1]);
+          const entry = pluginRegistry.readPluginManifest(pluginId);
+          if (!entry.ok || !entry.manifest) {
+            return sendJson(res, 404, { error: `Plugin '${pluginId}' is not installed or its manifest is invalid` });
+          }
+          let running = false;
+          try {
+            const live = await pluginRuntime.listLiveSidecars();
+            running = new Set(live.map((c) => (c.Labels || {})['aee.plugin.id']).filter(Boolean)).has(pluginId);
+          } catch { /* runtime down: report not running */ }
+          return sendJson(res, 200, {
+            pluginId,
+            endpoint: pluginRuntime.brokerBaseUrl(entry.manifest),
+            hasUi: !!(entry.manifest.ui && Array.isArray(entry.manifest.ui.routes)),
+            running,
+          });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/plugins/:id/granted-agents — the resolved grant enumeration
+    // the console feeds to plugin-ui-proxy.deriveScopeList: every materialised
+    // agent whose effective grant includes this plugin, shaped
+    // { agentId, parentTeamId?, scopeGranularity }, plus a display-name
+    // directory. Discovery is not a new read privilege — the list is derived
+    // ONLY from grants that already exist.
+    const grantedAgentsMatch = req.method === 'GET' &&
+      req.url.split('?')[0].match(/^\/internal\/plugins\/([^/]+)\/granted-agents$/);
+    if (grantedAgentsMatch) {
+      (async () => {
+        try {
+          const pluginId = decodeURIComponent(grantedAgentsMatch[1]);
+          const entry = pluginRegistry.readPluginManifest(pluginId);
+          if (!entry.ok || !entry.manifest) {
+            return sendJson(res, 404, { error: `Plugin '${pluginId}' is not installed or its manifest is invalid` });
+          }
+          const configs = listAgentIds().map((id) => loadAgentConfig(id)).filter(Boolean);
+          const teams = {};
+          const agents = {};
+          for (const c of configs) {
+            const name = c.displayName || c.name || c.id;
+            agents[c.id] = name;
+            if (c.role === 'team') teams[c.id] = name;
+          }
+          const grantedAgents = [];
+          for (const c of configs) {
+            if (!c.token) continue; // a stub has no running surface
+            let grant = null;
+            try { grant = pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
+            catch { grant = null; }
+            if (!grant) continue;
+            grantedAgents.push({
+              agentId: c.id,
+              parentTeamId: c.parentTeamId || null,
+              teamId: c.role === 'team' ? c.id : (c.parentTeamId || null),
+              scopeGranularity: grant.scopeGranularity === 'agent' ? 'agent' : 'team',
+              agentName: agents[c.id],
+              teamName: teams[c.parentTeamId] || (c.role === 'team' ? teams[c.id] : undefined),
+            });
+          }
+          return sendJson(res, 200, { pluginId, grantedAgents, directory: { teams, agents } });
+        } catch (err) {
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/plugins/{activate,deactivate}
+    // Body: { pluginId, scopeGranularity?, includeMembers? }
+    const teamPluginMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/plugins\/(activate|deactivate)$/);
+    if (teamPluginMatch) {
+      const teamId = decodeURIComponent(teamPluginMatch[1]);
+      const active = teamPluginMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) { return sendJson(res, 400, { error: `Invalid JSON body: ${err.message}` }); }
+        try {
+          const result = await orchestrator.setTeamPluginActive(teamId, payload?.pluginId, {
+            active,
+            scopeGranularity: payload?.scopeGranularity || null,
+            includeMembers: Array.isArray(payload?.includeMembers) ? payload.includeMembers : [],
+          });
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] setTeamPluginActive error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team|required|not installed|does not honour|unknown scope/i.test(err.message) ? 400
+            : 500;
+          return sendJson(res, status, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/agents/:id/plugins/{activate,deactivate}
+    // Body: { pluginId, scopeGranularity? }
+    const agentPluginMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/agents\/([^/]+)\/plugins\/(activate|deactivate)$/);
+    if (agentPluginMatch) {
+      const agentId = decodeURIComponent(agentPluginMatch[1]);
+      const active = agentPluginMatch[2] === 'activate';
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) { return sendJson(res, 400, { error: `Invalid JSON body: ${err.message}` }); }
+        try {
+          const result = await orchestrator.setAgentPluginActive(agentId, payload?.pluginId, {
+            active,
+            scopeGranularity: payload?.scopeGranularity || null,
+          });
+          return sendJson(res, 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] setAgentPluginActive error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /is a team|required|not installed|does not honour|unknown scope/i.test(err.message) ? 400
+            : 500;
+          return sendJson(res, status, { error: err.message });
         }
       });
       return;

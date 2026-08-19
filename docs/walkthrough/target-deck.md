@@ -19,7 +19,7 @@ Let's go through the steps one by one.
 **Speaker notes:**
 
 The first step is the Process step — and it comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
-Here you have three ways to start: you can use a curated template, you can compose a process from stages yourself, or you can start with a blank canvas and design it free-form in the Flow editor. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+The step lands directly on the template gallery: you pick a curated template or one of your saved drafts. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow. (Describing a flow in plain language or starting blank in the canvas now lives in the "+ Create" launcher; the wizard keeps a small pointer to it.)
 Core SDLC gives us four agents that cover a complete build-and-review loop:
 - The Business Analyst is the team's front door. You talk to it in chat, bring it ideas or bug reports, and it turns them into well-defined GitHub issues — precise enough that they can be implemented without guesswork. It doesn't write code; it defines what needs to be built and why.
 - The Developer implements the work. As soon as a human marks an issue as "ready", the Developer wakes up, creates a feature branch, writes the code and the tests, and opens a pull request.

@@ -304,7 +304,7 @@ Prioritised. Earlier items unblock or de-risk later ones.
 4. **Authorization layer: scope-aware filtering across all `/api/*` routes** (`system` / `team:<id>` / `private:<userId>`); enforce §3 role boundaries. (§3, §6)
 5. **Close the Workspace Browser and session-log exposure** — team-scoped access checks on `/api/agents/:id/workspace/*` and session-log endpoints. *Security-priority; can land alongside #4.* (§6)
 6. **Per-human-per-agent DM rooms** — migrate `dm-room.json` → per-user room map; update chat UI room resolution and trigger output routing. (§4)
-7. **Credential scoping + `credential owner` concept** across SSH keys, GitHub tokens, MCP credentials. (§3, §6)
+7. **Credential scoping + `credential owner` concept** across SSH keys, GitHub tokens, MCP credentials. (§3, §6) — the per-human personal tier is fully specified in [personal-credentials-concept.md](personal-credentials-concept.md). *(Phase 1 — data model & RBAC shipped — #1576)*
 8. **Environment + team ownership scoping.** (§6)
 9. **Audit log (append-only JSONL) + audit middleware on all mutating actions.** (§7)
 10. **Migration tooling**: bootstrap-admin adoption of the legacy Matrix identity + one-time default-scope assignment; documented activation runbook. (§8)

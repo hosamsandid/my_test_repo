@@ -98,6 +98,39 @@ function capabilityAttachments(capabilities) {
   return { socket, egress, hostMounts };
 }
 
+// The plugin-neutral env contract a broker reads through broker-config.js
+// (§4.6/§4.8), built from its manifest. Pure so BOTH container runtimes derive
+// an identical set of AEE_PLUGIN_* variables from the same manifest — the k8s
+// Deployment (spawn-kubernetes-plugin.js) and the Podman create body
+// (plugin-runtime.js sidecarCreateBody) must not drift on which variables the
+// platform sets or how it defends them.
+//
+// Three invariants baked in here (all asserted in plugin-runtime.test.js):
+//   1. Plugin-authored `sidecar.env` goes in FIRST so the platform contract
+//      below always wins — a manifest cannot take its broker off the platform's
+//      token authority or lift its own quota by pre-declaring these names.
+//   2. Quota is deleted then re-set from the manifest, so an author cannot
+//      manufacture the "no cap declared" state by supplying the variable.
+//   3. `auditDir`/`stateDir` are the platform-chosen mount paths, not the
+//      manifest's to override.
+function brokerEnvContract(manifest, { signingSecret, auditDir, stateDir }) {
+  const sidecar = (manifest && manifest.sidecar) || {};
+  const quota = (manifest && manifest.quota) || {};
+  const env = {
+    ...(sidecar.env || {}),
+    AEE_PLUGIN_ID: manifest.id,
+    AEE_PLUGIN_PORT: String(sidecar.internalPort),
+    AEE_PLUGIN_SIGNING_SECRET: signingSecret,
+    AEE_PLUGIN_AUDIT_DIR: auditDir,
+    AEE_PLUGIN_STATE_DIR: stateDir,
+  };
+  delete env.AEE_PLUGIN_QUOTA_MAX_OBJECTS;
+  delete env.AEE_PLUGIN_QUOTA_TTL_SECONDS;
+  if (Number.isInteger(quota.maxObjects)) env.AEE_PLUGIN_QUOTA_MAX_OBJECTS = String(quota.maxObjects);
+  if (Number.isInteger(quota.ttlSeconds)) env.AEE_PLUGIN_QUOTA_TTL_SECONDS = String(quota.ttlSeconds);
+  return env;
+}
+
 module.exports = {
   SIDECAR_NAME_PREFIX,
   sidecarContainerName,
@@ -106,4 +139,5 @@ module.exports = {
   reconcileSidecars,
   reconcileAttachments,
   capabilityAttachments,
+  brokerEnvContract,
 };

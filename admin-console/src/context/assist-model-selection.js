@@ -5,6 +5,8 @@
 // flow-copilot-view.js / lint-view.js). The provider (ModelSelectionContext)
 // and the transport glue (assist-transport.js) import these.
 
+import { plainModelLabel } from '../components/model-selector-view.js';
+
 // Per-user localStorage key — same per-user shape as `flows.lastSelected.<user>`
 // (Briefings.jsx). The stored value is `{ endpointId, modelId }`.
 export const STORAGE_PREFIX = 'assistModel';
@@ -87,4 +89,28 @@ export function selectionLabel(sel, providers) {
   const model = models.find(m => m.id === sel.modelId);
   const modelName = (model && (model.displayName || model.id)) || sel.modelId;
   return `${providerName} · ${modelName}`;
+}
+
+// Normalise the assist providers into the shared ModelSelectorPopover group shape
+// (#1670). Each provider becomes one group; the header shows no per-provider
+// detail rows (only chat does), and model labels are the plain display name / id
+// with no family/kind suffix (AC9).
+export function assistGroups(providers) {
+  const list = Array.isArray(providers) ? providers : [];
+  return list.map(p => {
+    const models = Array.isArray(p.models) ? p.models : [];
+    return {
+      id: p.id,
+      name: p.name || p.id,
+      scope: p.scope === 'system' ? 'system' : 'team',
+      details: [],
+      defaultModelId: p.defaultModelId || null,
+      models: models.map(m => ({
+        id: m.id,
+        label: plainModelLabel(m),
+        isDefault: m.id === p.defaultModelId,
+      })),
+      emptyText: 'No models configured',
+    };
+  });
 }

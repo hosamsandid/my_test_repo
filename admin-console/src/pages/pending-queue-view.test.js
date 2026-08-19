@@ -29,6 +29,15 @@ test('entryDetail tolerates missing GitHub fields', () => {
   assert.equal(entryDetail({ kind: 'github' }), '');
 });
 
+test('entryDetail shows the carried label in event (label) form for a labeled event (#1649)', () => {
+  const d = entryDetail({ kind: 'github', event: 'issues.labeled', repo: 'o/r', actor: 'alice', eventId: '9', label: 'ready-2' });
+  assert.equal(d, 'issues.labeled (ready-2) · o/r · @alice · #9');
+});
+
+test('entryDetail shows no label artifact for a non-label github entry (AC2)', () => {
+  assert.equal(entryDetail({ kind: 'github', event: 'pull_request.opened', eventId: '42' }), 'pull_request.opened · #42');
+});
+
 test('entryDetail summarises non-GitHub kinds', () => {
   assert.equal(entryDetail({ kind: 'github-digest', count: 5, convKey: 'pr:1' }), '5 events · pr:1');
   assert.equal(entryDetail({ kind: 'session-set', roomId: '!r:x' }), 'room !r:x');

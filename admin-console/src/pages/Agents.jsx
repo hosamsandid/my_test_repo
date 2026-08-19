@@ -5,19 +5,35 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus,
+  User, Users, Workflow, Info, Download, Upload, Copy, UserPlus, BookmarkPlus,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { inferMissingRoles } from './missing-roles-view.js';
+import {
+  PROMPT_MODES,
+  PROMPT_MODE_LABELS,
+  resolvePromptMode,
+  composeMemberPrompt,
+} from './prompt-mode-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { notifyPluginsChanged } from '../components/plugin-nav';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import SkillPicker from '../components/SkillPicker';
+import PluginGrantPicker from '../components/PluginGrantPicker';
+import { effectiveGrantFor } from './plugin-grant-view.js';
+import {
+  AGENTS_PAGE_COPY,
+  EMPTY_STATE_PRIMARY_CTA,
+  AGENT_ROLE_CREATE_LINK,
+} from './agents-view.js';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
+import { describeAgentSubmitState } from './agent-create-submit-state.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -475,7 +491,7 @@ const ROLE_INFO = {
     body: (
       <>
         A squad of agents working a repo — <em>not</em> the same thing as a <strong>Team</strong> on the
-        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Teams</Link> page (which is a human tenant / access scope).
+        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Access &amp; Users</Link> page (which is a human tenant / access scope).
         This construct stores a system-prompt template without creating an agent itself. Instead you click
         <strong> Add Member</strong> on the team card to spawn one or more agents that all
         share the same prompt and Working Environment, but each gets its own workspace and
@@ -812,10 +828,12 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.role, form.environmentId, repoDirs]);
 
-  // System prompt is optional for teams: members can be given their own
-  // per-role prompts later, so a team can be created without a default.
-  const canSubmit = form.id && form.displayName && form.environmentId &&
-    (form.role === 'orchestrator' || form.role === 'team' || form.systemPrompt);
+  // System prompt is optional for teams and orchestrators: members can be given
+  // their own per-role prompts later, so a team can be created without a
+  // default. The pure helper derives the gate AND the ordered list of unmet
+  // requirements from one place, so the disabled button and the "why" hint
+  // below can never disagree.
+  const { canSubmit, reasons: submitBlockers } = describeAgentSubmitState(form);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -841,7 +859,7 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
         helpText={
           <>
             Auto-derived from Display Name; edit to override.
-            Lowercase letters, digits and hyphens only. Used as the agent's URL
+            {' '}{ID_FORMAT_HINT} Used as the agent's URL
             (<code>/chats/{form.id || 'id'}</code>) and the workspace folder name.
             <strong> Cannot be changed after creation.</strong>
           </>
@@ -978,11 +996,32 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
       )}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
-          {saving ? 'Creating…' : 'Create Agent'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        {/* When the button is disabled (and not merely saving), spell out
+            exactly which required field is still empty so a user new to the
+            console isn't left guessing why the form looks broken. */}
+        {!saving && submitBlockers.length > 0 && (
+          <div style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+          }}>
+            <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+            <span>
+              Create Agent is disabled until you:
+              <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+                {submitBlockers.map(r => (
+                  <li key={r.field}>{r.message}</li>
+                ))}
+              </ul>
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <PrimaryBtn onClick={() => onSave(form)} saving={saving} disabled={!canSubmit}>
+            {saving ? 'Creating…' : 'Create Agent'}
+          </PrimaryBtn>
+          <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+        </div>
       </div>
     </div>
   );
@@ -1184,8 +1223,281 @@ function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
   );
 }
 
+/* ── Extract Template Form (#1509) ──────────────────────────────────── */
+// "Save as template" — snapshot a live agent (standalone or team member) into
+// a reusable, team-neutral user-tier Agent Template. Mirrors CloneAgentForm:
+// a suggested unique id, a review/confirm dialog, and 409 id-conflict handling.
+// The server is the source of truth for the mapping (effective prompt / skills /
+// sessionPolicy / triggers) and for id uniqueness across both template tiers.
+
+// Derive a slug-valid template id (lowercase letters/digits/hyphens) from an
+// agent id, unique across the supplied existing-id set. Server still enforces.
+function suggestTemplateId(sourceId, existingIds) {
+  const base = String(sourceId || '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-{2,}/g, '-')
+    .replace(/^-+/, '').replace(/-+$/, '') || 'agent-template';
+  if (!existingIds.has(base)) return base;
+  let n = 2;
+  while (existingIds.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel }) {
+  // Client-side pre-fill of the editable category/patternRole (AC-2); the
+  // server re-infers if either is omitted. A team member or a per-invocation
+  // agent reads as event-driven ("reactive"); otherwise a "chat" companion.
+  const reactive = agent.role === 'team-member' || agent.sessionPolicy === 'per-invocation';
+  const [templateId, setTemplateId] = useState(() => suggestTemplateId(agent.id, existingTemplateIds));
+  const [displayName, setDisplayName] = useState(agent.displayName || agent.id);
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState(reactive ? 'reactive' : 'chat');
+  const [patternRole, setPatternRole] = useState(reactive ? 'author' : 'companion');
+  const [includeTriggers, setIncludeTriggers] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null); // created template id
+
+  const trimmedId = templateId.trim();
+  const idError = trimmedId && !TEMPLATE_ID_RE.test(trimmedId)
+    ? 'Lowercase letters, digits and hyphens only; must not start with a hyphen.'
+    : null;
+  const canSubmit = trimmedId && !idError && displayName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({
+        id: trimmedId,
+        displayName: displayName.trim(),
+        description: description.trim() || undefined,
+        category,
+        patternRole,
+        includeTriggers,
+      });
+      if (ok) {
+        setDone(data?.id || trimmedId);
+      } else {
+        if (data?.code === 'id-conflict') {
+          setTemplateId(suggestTemplateId(trimmedId, existingTemplateIds));
+        }
+        setError(data?.error || 'Could not save template.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+          Saved <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> as the
+          Agent Template <strong style={{ color: 'var(--eb-text-primary)' }}>{done}</strong>. It now appears on the
+          Agent Templates page with a <em>Custom</em> badge, ready to create new agents from.
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <Link
+            to="/role-templates"
+            style={{
+              display: 'inline-flex', alignItems: 'center', padding: '8px 16px',
+              borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-accent-primary)',
+              color: 'var(--eb-text-inverted)', fontWeight: 600, textDecoration: 'none',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            Open Agent Templates
+          </Link>
+          <SecondaryBtn onClick={onCancel}>Close</SecondaryBtn>
+        </div>
+      </div>
+    );
+  }
+
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {error && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
+        Captures <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id})
+        — its effective prompt, skills and configuration — as a reusable, team-neutral Agent
+        Template. This is a one-shot snapshot: the agent is left unchanged and stays independent
+        of the template. The template appears on the <em>Agent Templates</em> page.
+      </div>
+
+      <FormInput
+        label="Template ID"
+        required
+        value={templateId}
+        onChange={v => setTemplateId(v)}
+        error={idError}
+        placeholder="e.g. tuned-developer"
+      />
+
+      <FormInput
+        label="Display Name"
+        required
+        value={displayName}
+        onChange={setDisplayName}
+        placeholder="e.g. Tuned Developer"
+      />
+
+      <FormInput
+        label="Description"
+        value={description}
+        onChange={setDescription}
+        placeholder="What this template is for (optional)"
+      />
+
+      <div>
+        <div style={labelStyle}>Role type</div>
+        <select value={category} onChange={e => setCategory(e.target.value)} style={inputStyle}>
+          <option value="chat">chat — always-on companion; responds to direct messages</option>
+          <option value="reactive">reactive — event-driven; wakes on GitHub / label triggers</option>
+          <option value="pattern">pattern — scaffold role</option>
+        </select>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Pattern role</div>
+        <select value={patternRole} onChange={e => setPatternRole(e.target.value)} style={inputStyle}>
+          {['scout', 'author', 'companion', 'intake', 'standalone'].map(r => (
+            <option key={r} value={r}>{r}</option>
+          ))}
+        </select>
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={includeTriggers}
+          onChange={e => setIncludeTriggers(e.target.checked)}
+          style={{ marginTop: 3 }}
+        />
+        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+          <strong style={{ color: 'var(--eb-text-primary)' }}>Include triggers</strong> — carry the agent's
+          triggers into the template. Off by default; leave off for a prompt-and-skills-only template.
+        </span>
+      </label>
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Saving…' : 'Save as template'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 // Host-folder context mount(s) (#1283, multiple folders #1290). A self-contained
+// Plugin grant (#1547). Like ContextMountControl below — and unlike the rest of
+// the edit form, which batches into one PUT on Save — this saves IMMEDIATELY
+// through its own endpoint. A plugin grant is not just a config field: it seeds
+// the CLI + a scope token into the live workspace and reconnects the broker's
+// network, all without a respawn. Batching it into the form's PUT would make
+// "Save" mean two very different things.
+function PluginGrantSection({ agent, parentTeam }) {
+  const { data, refetch } = useApi('/api/plugins');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const [notice, setNotice] = React.useState('');
+
+  // Optimistic local grant so the row reflects the click before the refetch;
+  // reset from props whenever the server view changes.
+  const serverGrant = React.useMemo(
+    () => effectiveGrantFor(agent, parentTeam),
+    [agent, parentTeam],
+  );
+  const [grant, setGrant] = React.useState(serverGrant);
+  React.useEffect(() => { setGrant(serverGrant); }, [serverGrant]);
+
+  const installed = (data && data.installed) || [];
+
+  // The quota ceiling for "per agent" granularity is only honest if it counts
+  // the members that would actually carry the grant, so a team's members are
+  // counted for real rather than assumed to be one.
+  const { data: allAgents } = useApi(agent.role === 'team' ? '/api/agents' : null);
+  const memberCount = React.useMemo(() => {
+    if (agent.role !== 'team') return 1;
+    const list = Array.isArray(allAgents) ? allAgents : (allAgents && allAgents.agents) || [];
+    const n = list.filter(a => a && a.parentTeamId === agent.id).length;
+    return n > 0 ? n : 1;
+  }, [agent.role, agent.id, allAgents]);
+
+  async function apply(pluginId, active, scopeGranularity) {
+    setBusy(true); setErr(''); setNotice('');
+    const verb = active ? 'activate' : 'deactivate';
+    try {
+      await apiCall('POST', `/api/agents/${encodeURIComponent(agent.id)}/plugins/${verb}`, {
+        pluginId, scopeGranularity,
+      });
+      setNotice(active
+        ? `${pluginId} activated — its CLI is available to the agent now, no restart needed.`
+        : `${pluginId} deactivated.`);
+      await refetch();
+      // A grant change can add/remove a scope the caller can see — refresh the
+      // sidebar's plugin nav, which no longer refetches on navigation (#1679).
+      notifyPluginsChanged();
+    } catch (e) {
+      setErr(e.message || `Could not ${verb} ${pluginId}`);
+      setGrant(serverGrant); // roll the optimistic toggle back
+    } finally { setBusy(false); }
+  }
+
+  function onToggle(pluginId, active, granularity) {
+    setGrant(active
+      ? [...grant.filter(g => g.id !== pluginId), { id: pluginId, scopeGranularity: granularity }]
+      : grant.filter(g => g.id !== pluginId));
+    apply(pluginId, active, granularity);
+  }
+
+  function onGranularity(pluginId, granularity) {
+    setGrant(grant.map(g => (g.id === pluginId ? { ...g, scopeGranularity: granularity } : g)));
+    // A granularity flip is re-activation at the new scope: the server re-mints
+    // the token and rewrites the config, additively.
+    apply(pluginId, true, granularity);
+  }
+
+  if (installed.length === 0) return null;
+
+  return (
+    <div>
+      <div style={labelStyle}>Plugins</div>
+      <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+        Governed capabilities beyond the container, reached through a broker that holds the
+        privilege so the agent never does. Changes apply immediately — no save, no restart.
+        {agent.role === 'team' && ' For a team agent this is the whole squad\'s grant; members inherit it.'}
+        {agent.role === 'team-member' && ' Changing this here creates a per-member override that replaces the team\'s set.'}
+      </div>
+      {err && (
+        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)' }}>{err}</div>
+      )}
+      {notice && !err && (
+        <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)', marginBottom: 'var(--eb-space-2)' }}>{notice}</div>
+      )}
+      <PluginGrantPicker
+        plugins={installed}
+        grants={grant}
+        onToggle={onToggle}
+        onGranularity={onGranularity}
+        memberCount={memberCount}
+        disabled={busy}
+      />
+    </div>
+  );
+}
+
 // control: unlike the rest of the edit form (one PUT on Save), a mount change is
 // baked at container spawn time and re-provisions the agent, so it saves
 // immediately via its own PATCH endpoint and reports the respawn outcome. Each
@@ -1352,8 +1664,11 @@ function ContextMountControl({ agent }) {
 function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
   // Initial values for the inheritance toggles. `agent.systemPrompt` /
   // `agent.skillsOverride` absent === inheriting from the parent team.
-  const initialInheritPrompt = agent.role === 'team-member'
-    && !(typeof agent.systemPrompt === 'string' && agent.systemPrompt.length > 0);
+  // System-prompt mode (#1511): resolve the three-way mode from the config
+  // (explicit `promptMode`, else legacy systemPrompt-presence inference — AC7).
+  const initialPromptMode = agent.role === 'team-member'
+    ? resolvePromptMode(agent)
+    : PROMPT_MODES.INHERIT;
   const initialInheritSkills = agent.role === 'team-member'
     && !Array.isArray(agent.skillsOverride);
   const initialInheritMcp = agent.role === 'team-member'
@@ -1374,8 +1689,11 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
     skills: Array.isArray(agent.skills) ? agent.skills : [],
     // team-only field
     systemPromptTemplate: agent.systemPromptTemplate || '',
-    // team-member override fields
-    inheritPrompt: initialInheritPrompt,
+    // team-member override fields. `promptMode` is one of inherit/additional/
+    // exclusive (#1511); `promptOverride` holds the agent-specific text — the
+    // addition (additional mode) or the full override (exclusive). One shared
+    // text field so switching between additional/exclusive keeps typed text.
+    promptMode: initialPromptMode,
     promptOverride: agent.systemPrompt || '',
     inheritSkills: initialInheritSkills,
     skillsOverride: Array.isArray(agent.skillsOverride)
@@ -1431,8 +1749,13 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
       submit.systemPromptTemplate = form.systemPromptTemplate;
     }
     if (agent.role === 'team-member') {
-      // null = clear override (= switch to inherit). The API knows the convention.
-      submit.systemPrompt = form.inheritPrompt ? null : form.promptOverride;
+      // System-prompt mode (#1511). `promptMode` selects one of the three modes;
+      // `systemPrompt` carries the agent-specific text (null = inherit → clear
+      // the override). The API composes the effective prompt from the two.
+      submit.promptMode = form.promptMode;
+      submit.systemPrompt = form.promptMode === PROMPT_MODES.INHERIT
+        ? null
+        : form.promptOverride;
       submit.skillsOverride = form.inheritSkills
         ? null
         : form.skillsOverride;
@@ -1501,6 +1824,8 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
         </div>
       )}
 
+      <PluginGrantSection agent={agent} parentTeam={parentTeam} />
+
       {agent.role === 'orchestrator' && (
         <MissionDirectoryField
           value={form.briefingsPath}
@@ -1563,15 +1888,12 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
             </div>
           </div>
 
-          <InheritOrCustom
-            label="System Prompt"
-            inherit={form.inheritPrompt}
-            onToggle={v => update('inheritPrompt', v)}
-            inheritedPreview={parentTeamPrompt}
-            inheritedLabel="Inherited from team"
-            customValue={form.promptOverride}
-            onCustomChange={v => update('promptOverride', v)}
-            customMultiline
+          <PromptModeControl
+            mode={form.promptMode}
+            onModeChange={v => update('promptMode', v)}
+            teamPrompt={parentTeamPrompt}
+            text={form.promptOverride}
+            onTextChange={v => update('promptOverride', v)}
           />
           <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Prompt changes take effect from this agent's next session.
@@ -1644,6 +1966,80 @@ function AgentEditForm({ agent, onSave, onCancel, saving, error }) {
 // Reusable inherit/override widget for team-member fields. Single source
 // of truth for the toggle styling so the prompt and skills sections look
 // identical.
+// Three-mode system-prompt selector for team-members (#1511): Inherit from team
+// / Additional input / Exclusive overriding input. Skills and MCP keep the
+// two-way InheritOrCustom widget below (unchanged, AC10).
+//
+//   - inherit    → the team prompt only; shown read-only (AC2).
+//   - additional → an agent-specific addition appended AFTER the team prompt in a
+//                  clearly delimited section; the box previews the COMBINED
+//                  effective prompt (team + addition), not the addition alone
+//                  (AC9).
+//   - exclusive  → the agent-specific text fully replaces the team prompt (AC6).
+//
+// One shared text field backs both additional and exclusive, so switching
+// between them keeps whatever the user typed (edge case: no silent text loss).
+const readonlyPromptBoxStyle = {
+  ...inputStyle,
+  background: 'var(--eb-bg-app)',
+  color: 'var(--eb-text-muted)',
+  fontFamily: 'var(--eb-font-mono)',
+  fontSize: 'var(--eb-text-sm)',
+  minHeight: 100,
+  whiteSpace: 'pre-wrap',
+  maxHeight: 260,
+  overflow: 'auto',
+};
+
+function PromptModeControl({ mode, onModeChange, teamPrompt, text, onTextChange }) {
+  const modes = [PROMPT_MODES.INHERIT, PROMPT_MODES.ADDITIONAL, PROMPT_MODES.EXCLUSIVE];
+  return (
+    <div>
+      <div style={labelStyle}>System Prompt</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
+        {modes.map(m => (
+          <label key={m} style={radioLabelStyle}>
+            <input type="radio" checked={mode === m} onChange={() => onModeChange(m)} />
+            {' '}{PROMPT_MODE_LABELS[m]}
+          </label>
+        ))}
+      </div>
+
+      {mode === PROMPT_MODES.INHERIT && (
+        <div style={readonlyPromptBoxStyle}>
+          {teamPrompt ? teamPrompt : <em>(inheriting the team prompt)</em>}
+        </div>
+      )}
+
+      {mode === PROMPT_MODES.ADDITIONAL && (
+        <>
+          <textarea
+            value={text}
+            onChange={e => onTextChange(e.target.value)}
+            placeholder="Agent-specific instructions to append after the team prompt…"
+            style={{ ...inputStyle, minHeight: 120, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+          />
+          <div style={{ marginTop: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Effective prompt preview (team prompt + your addition):
+          </div>
+          <div style={readonlyPromptBoxStyle}>
+            {composeMemberPrompt(PROMPT_MODES.ADDITIONAL, teamPrompt, text) || <em>(the team prompt is empty)</em>}
+          </div>
+        </>
+      )}
+
+      {mode === PROMPT_MODES.EXCLUSIVE && (
+        <textarea
+          value={text}
+          onChange={e => onTextChange(e.target.value)}
+          placeholder="Full system prompt that replaces the team prompt…"
+          style={{ ...inputStyle, minHeight: 140, fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' }}
+        />
+      )}
+    </div>
+  );
+}
+
 function InheritOrCustom({
   label, inherit, onToggle,
   inheritedPreview, inheritedLabel,
@@ -1705,7 +2101,7 @@ const radioLabelStyle = {
 };
 
 /* ── Agent Row ──────────────────────────────────────────────────────── */
-function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, navigate, tree, busy, locked = false }) {
+function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, onDelete, onOpenBrief, onExport, onClone, onExtractTemplate, navigate, tree, busy, locked = false }) {
   const state = agentState(agent);
   const isStub = state === 'stub';
   const t = tree || {
@@ -1798,6 +2194,9 @@ function AgentRow({ agent, onActivate, onDeactivate, onToggleEnabled, onEdit, on
         )}
         {onClone && (
           <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+        )}
+        {onExtractTemplate && !isStub && (
+          <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent's prompt, skills and config as a reusable Agent Template" onClick={() => onExtractTemplate(agent)} />
         )}
         <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
       </div>
@@ -2018,7 +2417,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onExtractTemplateChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -2144,6 +2543,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
               onDelete={onDeleteChild}
               onExport={onExport}
               onClone={onCloneChild}
+              onExtractTemplate={onExtractTemplateChild}
             />
           ))
         )
@@ -2192,7 +2592,7 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
 }
 
 /* ── Leaf Agent Card ────────────────────────────────────────────────── */
-function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, navigate, busy }) {
+function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate, onExport, onClone, onExtractTemplate, navigate, busy }) {
   const state = agentState(agent);
 
   return (
@@ -2237,6 +2637,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
           <IconButton icon={Download} label="Export" title="Export agent as ZIP" onClick={() => onExport(agent.id)} />
           {onClone && (
             <IconButton icon={Copy} label="Clone" title="Clone this agent" onClick={() => onClone(agent)} />
+          )}
+          {onExtractTemplate && (
+            <IconButton icon={BookmarkPlus} label="Save as template" title="Save this agent's prompt, skills and config as a reusable Agent Template" onClick={() => onExtractTemplate(agent)} />
           )}
           <IconButton icon={Trash2} label="Delete" danger onClick={() => onDelete(agent)} />
         </div>
@@ -2309,6 +2712,9 @@ export default function Agents() {
   const [importSuccess, setImportSuccess] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const importFileRef = useRef(null);
+  // Existing template ids (both tiers) for the "Save as template" unique-id
+  // suggestion (#1509), fetched lazily when the dialog opens.
+  const [extractTemplateIds, setExtractTemplateIds] = useState(() => new Set());
 
   const agents = rawAgents || [];
   const existingAgentIds = useMemo(() => new Set(agents.map(a => a.id)), [agents]);
@@ -2428,6 +2834,32 @@ export default function Agents() {
       closePanel();
       refetch();
     }
+    return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // "Save as template" (#1509). Fetch the existing template ids first (both
+  // tiers) so the dialog can seed a unique id suggestion, then open the panel.
+  // Best-effort: an unreachable list just yields an empty set (server still
+  // enforces uniqueness with a 409).
+  async function openExtractPanel(agent) {
+    let ids = new Set();
+    try {
+      const { templates } = await apiCall('GET', '/api/agent-templates');
+      ids = new Set((Array.isArray(templates) ? templates : []).map(t => t.id));
+    } catch { /* list unreachable — empty set, server still guards uniqueness */ }
+    setExtractTemplateIds(ids);
+    openPanel('extract', agent);
+  }
+
+  // Extract dialog submitted. Returns the parsed response so the form can react
+  // to a 409 id-conflict (re-suggest an id) without closing.
+  async function handleExtractSubmit(form) {
+    const resp = await fetch(`/api/agents/${encodeURIComponent(selectedAgent.id)}/extract-template`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form),
+    });
+    const data = await resp.json().catch(() => ({}));
     return { ok: resp.ok, status: resp.status, data };
   }
 
@@ -2696,9 +3128,18 @@ export default function Agents() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agents</h1>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
+        <div>
+          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>{AGENTS_PAGE_COPY.heading}</h1>
+          <p style={{ margin: '4px 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {AGENTS_PAGE_COPY.subtitle}
+          </p>
+        </div>
+        {/* Creation actions are demoted to secondary/advanced affordances (AC2):
+            the launcher is the primary "create" door, so neither "Import Agent"
+            nor "+ New Agent" is styled as the page's primary action. Both stay
+            fully available for power users (AC5). */}
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexShrink: 0 }}>
           <input
             ref={importFileRef}
             type="file"
@@ -2717,9 +3158,9 @@ export default function Agents() {
           >
             <Upload size={14} /> Import Agent
           </button>
-          <PrimaryBtn onClick={() => openPanel('create', null)}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Agent</span>
-          </PrimaryBtn>
+          <SecondaryBtn onClick={() => openPanel('create', null)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}>
+            <Plus size={15} /> New Agent
+          </SecondaryBtn>
         </div>
       </div>
       {importSuccess && (
@@ -2746,12 +3187,14 @@ export default function Agents() {
         lineHeight: 1.55,
       }}>
         <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-          What is an agent?
+          {AGENTS_PAGE_COPY.introLead}
         </p>
         <p style={{ margin: 0 }}>
           An <strong>Agent</strong> is a long-running Claude Code instance with its own workspace and session history.
-          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is for advanced and custom
-          configurations — for most use cases, the guided paths below are faster:
+          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is where you <strong>manage</strong> the
+          agents and teams you already have — you can also create or import one here for advanced or custom setups, but the
+          guided <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> is
+          the fastest way to start something new:
         </p>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-xs)' }}>
           <thead>
@@ -2763,11 +3206,11 @@ export default function Agents() {
           <tbody>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent</strong></td>
-              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Use <Link to="/quickstart" style={{ color: 'var(--eb-accent-primary)' }}>Single Agent</Link> for the fastest setup.</td>
+              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Create one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> for the fastest setup.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent Team / member</strong></td>
-              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Use the <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
+              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Start one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
             </tr>
             <tr>
               <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
@@ -2810,10 +3253,10 @@ export default function Agents() {
           borderRadius: 'var(--eb-radius-lg)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--eb-space-4)',
         }}>
-          <p style={{ margin: 0 }}>No agents yet. Start with one of the guided paths:</p>
+          <p style={{ margin: 0 }}>{AGENTS_PAGE_COPY.emptyLead} Start something new from the Create launcher:</p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', justifyContent: 'center' }}>
             <Link
-              to="/quickstart"
+              to={EMPTY_STATE_PRIMARY_CTA.to}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
@@ -2821,23 +3264,11 @@ export default function Agents() {
                 fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
               }}
             >
-              Create a single agent
-            </Link>
-            <Link
-              to="/team-setup"
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                padding: '8px 16px', borderRadius: 'var(--eb-radius-md)',
-                background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
-                border: '1px solid var(--eb-border-default)',
-                fontWeight: 600, textDecoration: 'none', fontSize: 'var(--eb-text-sm)',
-              }}
-            >
-              Set up a team
+              {EMPTY_STATE_PRIMARY_CTA.label}
             </Link>
           </div>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)' }}>
-            Prefer full control? <strong>+ New Agent</strong> above is the advanced path.
+            {AGENTS_PAGE_COPY.emptyAdvancedHint}
           </p>
         </div>
       ) : (
@@ -2881,6 +3312,7 @@ export default function Agents() {
               onDeleteChild={a => setDeleteTarget(a)}
               onExport={handleExport}
               onCloneChild={a => openPanel('clone', a)}
+              onExtractTemplateChild={a => openExtractPanel(a)}
             />
           ))}
           {leaves.map(a => (
@@ -2895,6 +3327,7 @@ export default function Agents() {
               onToggleEnabled={handleToggleEnabled}
               onExport={handleExport}
               onClone={ag => openPanel('clone', ag)}
+              onExtractTemplate={ag => openExtractPanel(ag)}
             />
           ))}
           {orphans.length > 0 && (
@@ -2955,6 +3388,22 @@ export default function Agents() {
             teams={teams}
             existingIds={existingAgentIds}
             onSubmit={handleCloneSubmit}
+            onCancel={closePanel}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'extract' && !!selectedAgent}
+        onClose={closePanel}
+        title={`Save as template — ${selectedAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {selectedAgent && panelMode === 'extract' && (
+          <ExtractTemplateForm
+            agent={selectedAgent}
+            existingTemplateIds={extractTemplateIds}
+            onSubmit={handleExtractSubmit}
             onCancel={closePanel}
           />
         )}

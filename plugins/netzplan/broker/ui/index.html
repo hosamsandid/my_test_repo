@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Project Plan</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- toolbar: title, palette (drag a milestone / add a phase), export, autonomy -->
+  <div class="toolbar">
+    <div class="title">
+      <h1 id="name">Project Plan</h1>
+      <span class="sub" id="sub"></span>
+    </div>
+    <span class="palette-chip" id="paletteMilestone" draggable="true" title="Drag onto a phase to add a milestone">
+      <span class="glyph"></span> Milestone
+    </span>
+    <button class="btn" id="addPhaseBtn" title="Add a phase band">+ Phase</button>
+    <span class="spacer"></span>
+    <button class="btn" id="exportBtn" title="Download this board as a portable JSON document">Export</button>
+  </div>
+
+  <!-- owners bar: colored chips rendered on nodes -->
+  <div class="owners-bar" id="owners"></div>
+
+  <!-- the graph canvas -->
+  <div class="viewport" id="viewport">
+    <div class="canvas" id="canvas"></div>
+
+    <div class="empty-state hidden" id="emptyState">
+      <div class="big">Drag a Milestone onto the canvas to begin</div>
+      <div class="small">Milestones are cards, phases are bands, and arrows mean "feeds / depends on". The layout is automatic.</div>
+    </div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="zoombar">
+      <button class="btn icon ghost" id="zoomFit" title="Fit to view">⤢</button>
+      <button class="btn icon ghost" id="zoomOut" title="Zoom out">−</button>
+      <span class="pct" id="zoomPct">100%</span>
+      <button class="btn icon ghost" id="zoomIn" title="Zoom in">+</button>
+    </div>
+  </div>
+
+  <div class="err hidden" id="err"></div>
+
+  <script src="graph-layout.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

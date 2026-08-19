@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GKE Access — Sign in</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; line-height: 1.5; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  .sub { color: #6b7280; font-size: .9rem; margin: 0 0 20px; }
+  .card { border: 1px solid #d1d5db; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .status { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
+  .dot.on { background: #16a34a; } .dot.off { background: #dc2626; }
+  .muted { color: #6b7280; font-size: .85rem; }
+  code { background: rgba(127,127,127,.15); padding: 1px 5px; border-radius: 4px; font-size: .85em; word-break: break-all; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #2563eb; background: #2563eb; color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: #2563eb; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, textarea { font: inherit; width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #9ca3af; background: transparent; color: inherit; margin: 6px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .step { margin-top: 10px; }
+  a { color: #2563eb; word-break: break-all; }
+  .err { color: #dc2626; font-size: .85rem; }
+  .ok { color: #16a34a; font-size: .85rem; }
+  details summary { cursor: pointer; font-weight: 600; }
+  .about { background: rgba(37,99,235,.07); border-color: rgba(37,99,235,.35); }
+  .about h2 { font-size: 1rem; margin: 0 0 8px; }
+  .about p { margin: 0 0 10px; }
+  .about p:last-child { margin-bottom: 0; }
+  .about ul { margin: 4px 0 10px; padding-left: 18px; }
+  .about li { margin: 3px 0; }
+  .about .examples { list-style: none; padding: 0; margin: 6px 0 10px; }
+  .about .examples li { margin: 4px 0; }
+</style>
+</head>
+<body>
+  <h1>GKE Cluster Access</h1>
+  <p class="sub">Read-only kubectl for this team's agents, brokered so the cloud credential never enters an agent container. Sign the broker in to GCP once here (team-admin only).</p>
+
+  <div class="card about">
+    <h2>What this plugin does</h2>
+    <p>It gives this team's agents <b>read-only <code>kubectl</code> access</b> to the team's GKE cluster, reached through the GCP Connect Gateway. Once it is set up here, granted agents can inspect the cluster with the <code>aee-gke</code> CLI — for example:</p>
+    <ul class="examples">
+      <li><code>aee-gke get ns</code></li>
+      <li><code>aee-gke get pods -n platform</code></li>
+      <li><code>aee-gke describe deploy &lt;name&gt; -n &lt;ns&gt;</code></li>
+      <li><code>aee-gke logs &lt;pod&gt; -n &lt;ns&gt;</code></li>
+      <li><code>aee-gke api-resources</code></li>
+    </ul>
+    <p><b>Strictly read-only.</b> Only read verbs are exposed (get / describe / logs / api-resources). There is deliberately no apply, create, edit or delete — an agent cannot change or remove anything in the cluster.</p>
+    <p><b>Why the sign-in — and why this is a plugin.</b> The Google cloud credential is held by the broker and <b>never enters an agent container</b>. A team admin signs in <b>once</b> here; from then on the team's agents read the cluster without ever handling a credential.</p>
+    <p><b>What happens next.</b> After a successful sign-in, the team's granted agents can use the capability straight away. If an agent later reports it is <b>not signed in</b>, this is the page where a team admin re-authenticates.</p>
+  </div>
+
+  <div class="card">
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">Checking…</span></div>
+    <p class="muted" id="statusDetail"></p>
+    <div class="row"><button id="signout" class="secondary" style="display:none">Sign out</button></div>
+  </div>
+
+  <div class="card" id="signinCard">
+    <details open>
+      <summary>Option A — Sign in with Google (recommended, self-refreshing)</summary>
+      <p class="muted">The broker starts a Google device sign-in. Open the link, approve with your Accenture account, then paste the verification code back here. The broker keeps a refresh token, so agents keep working without re-auth.</p>
+      <div class="row"><button id="beginBtn">Start Google sign-in</button></div>
+      <div class="step" id="deviceStep" style="display:none">
+        <p>1. Open this URL and approve:<br><a id="deviceUrl" target="_blank" rel="noopener"></a></p>
+        <p class="step">2. Paste the verification code:</p>
+        <input id="codeInput" placeholder="4/0Axxxx…" autocomplete="off" />
+        <div class="row"><button id="codeBtn">Submit code</button></div>
+        <p id="deviceMsg" class="muted"></p>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Option B — Paste an access token (quick, expires ~1h)</summary>
+      <p class="muted">On a machine where you are logged in: run <code>gcloud auth print-access-token</code> and paste the result. No refresh — re-paste when it expires. Good for a quick test.</p>
+      <textarea id="tokenInput" rows="3" placeholder="ya29.…"></textarea>
+      <div class="row"><button id="pasteBtn">Save token</button></div>
+      <p id="pasteMsg" class="muted"></p>
+    </details>
+  </div>
+
+<script>
+  // Resolve the API base up to and including "/ui" so fetches work whether the
+  // page is served with or without a trailing slash (it runs inside the console
+  // proxy at /plugins/gke/ui).
+  const m = location.pathname.match(/^(.*\/ui)(\/|$)/);
+  const BASE = (m ? m[1] : '') || '';
+  const api = (p) => BASE + p;
+
+  const $ = (id) => document.getElementById(id);
+  let loginId = null;
+
+  async function jget(p) { const r = await fetch(api(p)); return r.json(); }
+  async function jpost(p, body) {
+    const r = await fetch(api(p), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    return r.json();
+  }
+
+  function fmtExpiry(ts) {
+    if (!ts) return '';
+    const mins = Math.round((ts - Date.now()) / 60000);
+    return mins > 0 ? ` — token valid ~${mins} min` : ' — token expired';
+  }
+
+  async function refresh() {
+    let s;
+    try { s = await jget('/api/status'); } catch { s = { signedIn: false }; }
+    const dot = $('dot'), txt = $('statusText'), det = $('statusDetail');
+    if (s.signedIn) {
+      dot.className = 'dot on';
+      txt.textContent = 'Signed in';
+      det.innerHTML = `Account: <b>${s.account || '?'}</b> · method: ${s.method || '?'}${s.method === 'pasted-token' ? fmtExpiry(s.pastedExpiresAt) : ''}<br>Cluster: <code>${s.server || 'not configured'}</code>`;
+      $('signout').style.display = '';
+    } else {
+      dot.className = 'dot off';
+      txt.textContent = 'Not signed in';
+      det.innerHTML = `Agents cannot reach the cluster until you sign in.<br>Cluster: <code>${s.server || 'not configured'}</code>`;
+      $('signout').style.display = 'none';
+    }
+  }
+
+  $('beginBtn').onclick = async () => {
+    $('beginBtn').disabled = true;
+    $('deviceMsg').textContent = 'Starting…';
+    const r = await jpost('/api/login/begin', {});
+    loginId = r.id;
+    if (r.error) { $('deviceMsg').innerHTML = `<span class="err">${r.error}</span>`; $('beginBtn').disabled = false; return; }
+    if (r.url) { $('deviceUrl').textContent = r.url; $('deviceUrl').href = r.url; }
+    else { $('deviceUrl').textContent = '(waiting for URL…)'; setTimeout(pollUrl, 1500); }
+    $('deviceStep').style.display = '';
+    $('deviceMsg').textContent = '';
+  };
+
+  async function pollUrl() {
+    if (!loginId) return;
+    const u = await jget('/api/login/url?id=' + encodeURIComponent(loginId));
+    if (u.url) { $('deviceUrl').textContent = u.url; $('deviceUrl').href = u.url; }
+    else if (!u.done) setTimeout(pollUrl, 1500);
+  }
+
+  $('codeBtn').onclick = async () => {
+    if (!loginId) return;
+    $('codeBtn').disabled = true;
+    $('deviceMsg').textContent = 'Submitting…';
+    await jpost('/api/login/code', { id: loginId, code: $('codeInput').value });
+    pollResult();
+  };
+
+  async function pollResult() {
+    const r = await jget('/api/login/result?id=' + encodeURIComponent(loginId));
+    if (r.pending) { setTimeout(pollResult, 1500); return; }
+    $('codeBtn').disabled = false;
+    if (r.ok) { $('deviceMsg').innerHTML = `<span class="ok">Signed in as ${r.account}</span>`; loginId = null; refresh(); }
+    else { $('deviceMsg').innerHTML = `<span class="err">Sign-in failed. ${r.detail ? '(' + r.detail + ')' : ''}</span>`; }
+  }
+
+  $('pasteBtn').onclick = async () => {
+    $('pasteBtn').disabled = true;
+    const r = await jpost('/api/paste-token', { token: $('tokenInput').value });
+    $('pasteBtn').disabled = false;
+    if (r.ok) { $('pasteMsg').innerHTML = '<span class="ok">Token saved.</span>'; $('tokenInput').value = ''; refresh(); }
+    else { $('pasteMsg').innerHTML = `<span class="err">${r.error || 'failed'}</span>`; }
+  };
+
+  $('signout').onclick = async () => { await jpost('/api/logout', {}); refresh(); };
+
+  refresh();
+</script>
+</body>
+</html>

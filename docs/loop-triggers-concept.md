@@ -38,7 +38,7 @@ done. References are `agent-image/scripts/agent-entrypoint.py` unless noted.
 | Loop ingredient | Status | Where |
 |---|---|---|
 | Fresh context per run | ✅ | `sessionPolicy: per-invocation` → `--resume` omitted for triggered runs (`_execute_inner`, `is_per_invocation` at ~3946; runner at ~2547) |
-| Durable state between runs | ✅ | `memory/`, git clone, knowledge-digest, `.aee/artifacts.jsonl` |
+| Durable state between runs | ✅ | `memory/`, git clone, knowledge-digest, `.agent-studio/artifacts.jsonl` |
 | Objective gate (pre-run, exit-code) | ⚠️ partial | `preCheckScript` gates the LLM call by exit code (`_execute_inner` ~3902) — but it runs **before** and only *skips*, it is not a post-run stop condition |
 | Anti-runaway budget (global) | ⚠️ partial | Backstop `try_acquire` — concurrency ceiling + spawn-rate window, "so a self-triggering loop can't grow unbounded" (#611, `_execute` ~3805). Plus conversation throttle + burst digest (github-poller). Not a *purposeful* per-loop budget with a clean done/exhausted outcome |
 | Overlap protection | ✅ agent-wide serialization (#1157) | `WorkspaceGate` — every run (loop iteration, any trigger, chat/DM) passes one gate; a loop holds it across all iterations. Per-trigger-id `if tid in self._running: … skipping` remains a backstop. |

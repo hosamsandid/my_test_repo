@@ -107,7 +107,7 @@ aee-artifact add "Functional Design" designs/acct/fd.md
 aee-artifact add "Java sources" src/main/java --desc "generated transfer service"
 ```
 
-`add` appends to the git-committed manifest `.aee/artifacts.jsonl` and stages it —
+`add` appends to the git-committed manifest `.agent-studio/artifacts.jsonl` and stages it —
 **commit and push it together with your work** so downstream agents are woken by
 the push and can resolve the path.
 

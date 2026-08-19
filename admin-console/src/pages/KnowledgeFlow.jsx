@@ -5,7 +5,7 @@ import {
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
   HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
   Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
-  Pencil,
+  Pencil, Loader2,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import IconButton from '../components/IconButton';
@@ -166,6 +166,7 @@ export default function KnowledgeFlow() {
   const [consolidationSignal, setConsolidationSignal] = useState(0);
   const [promoting, setPromoting] = useState(null); // { suggestion, teamId }
   const [sharing, setSharing] = useState(null); // { node, teamId }
+  const [retiring, setRetiring] = useState(null); // { item, teamId } — retire-learning confirm
   // "How it works" intro: open on first visit, dismissible, reopenable anytime.
   const [showIntro, setShowIntro] = useState(() => {
     try { return localStorage.getItem('kf.introSeen') !== '1'; } catch { return true; }
@@ -279,7 +280,7 @@ export default function KnowledgeFlow() {
   // Reset any per-team UI (provenance rail / dialogs) opened for a team we're
   // leaving behind.
   const resetTeamUi = useCallback(() => {
-    setSelected(null); setDetail(null); setPromoting(null); setSharing(null);
+    setSelected(null); setDetail(null); setPromoting(null); setSharing(null); setRetiring(null);
   }, []);
 
   // A team selected but no longer present (deleted/renamed between loads) →
@@ -565,11 +566,15 @@ export default function KnowledgeFlow() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0, borderTop: '1px solid var(--eb-border-default)' }}>
         <div style={{ flex: 1, overflowY: 'auto', background: 'var(--eb-bg-app)', padding: 'var(--eb-space-4) 0' }}>
           {teams === null ? (
-            <div style={{ color: 'var(--eb-text-muted)' }}>Loading…</div>
+            <div aria-busy="true" style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-muted)' }}>
+              <Loader2 size={14} className="kf-spin" aria-hidden="true" /> Loading…
+            </div>
           ) : teams.length === 0 ? (
             <div style={{ color: 'var(--eb-text-muted)' }}>No agents yet — create a team and its agents will start learning.</div>
           ) : !selectedTeamObj ? (
             <ChooseTeam />
+          ) : loading ? (
+            <TeamKnowledgeSkeleton />
           ) : view === 'table' ? (
             <OverviewTable
               key={selectedTeamObj.id}
@@ -592,11 +597,7 @@ export default function KnowledgeFlow() {
               consolidationSignal={consolidationSignal}
               selectedId={selected?.teamId === selectedTeamObj.id ? selected.id : null}
               onOpenItem={openItem}
-              onRetireItem={(item) => {
-                if (window.confirm(`Retire this learning from the shared KB?\n\n“${item.text}”\n\nIt stays in git for audit and can be un-retired.`)) {
-                  archiveItem(item.id, selectedTeamObj.id, true);
-                }
-              }}
+              onRetireItem={(item) => setRetiring({ item, teamId: selectedTeamObj.id })}
               onUnarchiveItem={(item) => archiveItem(item.id, selectedTeamObj.id, false)}
               onOpenChat={(agentId) => navigate(`/chats/${encodeURIComponent(agentId)}`)}
               onReviewSuggestion={(s, teamSkills) => setPromoting({ suggestion: s, teamId: selectedTeamObj.id, teamSkills })}
@@ -650,6 +651,23 @@ export default function KnowledgeFlow() {
           }}
         />
       )}
+      <ConfirmDialog
+        open={!!retiring}
+        title="Retire learning"
+        variant="warning"
+        confirmLabel="Retire"
+        message={retiring ? (
+          <>
+            Retire this learning from the shared knowledge base?
+            <blockquote style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-3)', borderLeft: '2px solid var(--eb-border-default)', color: 'var(--eb-text-primary)', fontStyle: 'italic' }}>
+              “{retiring.item.text}”
+            </blockquote>
+            <span style={{ display: 'block', marginTop: 'var(--eb-space-2)' }}>It stays in git for audit and can be un-retired at any time.</span>
+          </>
+        ) : ''}
+        onConfirm={() => { archiveItem(retiring.item.id, retiring.teamId, true); setRetiring(null); }}
+        onCancel={() => setRetiring(null)}
+      />
     </div>
   );
 }
@@ -797,6 +815,25 @@ function TeamSelector({ teams, selected, onSelect }) {
       <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
         {selected ? 'Showing this team’s knowledge only.' : 'Pick a team to load its knowledge.'}
       </span>
+    </div>
+  );
+}
+
+/* ── Loading skeleton shown while the selected team's knowledge is fetching ──── */
+// Follows the canonical pattern of adjacent pages (McpServers.jsx, TokenUsage.jsx):
+// a fixed-height elevated block carrying aria-busy so screen readers announce the
+// wait. Shown on first team select and on every team switch until the fetch settles.
+
+function TeamKnowledgeSkeleton() {
+  return (
+    <div
+      aria-busy="true"
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)',
+        height: 240, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)',
+        color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)',
+      }}>
+      <Loader2 size={16} className="kf-spin" aria-hidden="true" /> Loading team knowledge…
     </div>
   );
 }
@@ -2409,6 +2446,7 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
 
   const [picked, setPicked] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set());
+  const [confirmBulk, setConfirmBulk] = useState(null); // { kind: 'retire' | 'unretire', ids, n }
 
   // Keep the selection to what's actually on screen — a filter change or a
   // reload must not leave a tick on a row nobody can see.
@@ -2458,16 +2496,21 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
   const doRetire = useCallback(() => {
     const n = toRetire.length;
     if (n === 0) return;
-    if (!window.confirm(`Retire ${n === 1 ? 'this learning' : `these ${n} learnings`} from the shared KB?\n\nThey stay in git for audit and can be un-retired.`)) return;
-    Promise.resolve(onBulkArchive(toRetire.map(i => i.id), true)).finally(() => setPicked(new Set()));
-  }, [toRetire, onBulkArchive]);
+    setConfirmBulk({ kind: 'retire', ids: toRetire.map(i => i.id), n });
+  }, [toRetire]);
 
   const doUnretire = useCallback(() => {
     const n = toUnretire.length;
     if (n === 0) return;
-    if (!window.confirm(`Un-retire ${n === 1 ? 'this learning' : `these ${n} learnings`} back into the shared KB?`)) return;
-    Promise.resolve(onBulkArchive(toUnretire.map(i => i.id), false)).finally(() => setPicked(new Set()));
-  }, [toUnretire, onBulkArchive]);
+    setConfirmBulk({ kind: 'unretire', ids: toUnretire.map(i => i.id), n });
+  }, [toUnretire]);
+
+  const runBulk = useCallback(() => {
+    if (!confirmBulk) return;
+    const { kind, ids } = confirmBulk;
+    Promise.resolve(onBulkArchive(ids, kind === 'retire')).finally(() => setPicked(new Set()));
+    setConfirmBulk(null);
+  }, [confirmBulk, onBulkArchive]);
 
   const doCombine = useCallback(() => {
     if (toCombine.length < 1) return;
@@ -2601,6 +2644,19 @@ function OverviewTable({ team, data, filters, pulseId, selectedId, onOpenItem, o
           </table>
         </div>
       )}
+      <ConfirmDialog
+        open={!!confirmBulk}
+        title={confirmBulk?.kind === 'unretire' ? 'Un-retire learnings' : 'Retire learnings'}
+        variant={confirmBulk?.kind === 'unretire' ? 'info' : 'warning'}
+        confirmLabel={confirmBulk?.kind === 'unretire' ? 'Un-retire' : 'Retire'}
+        message={confirmBulk ? (
+          confirmBulk.kind === 'unretire'
+            ? `Un-retire ${confirmBulk.n === 1 ? 'this learning' : `these ${confirmBulk.n} learnings`} back into the shared knowledge base?`
+            : `Retire ${confirmBulk.n === 1 ? 'this learning' : `these ${confirmBulk.n} learnings`} from the shared knowledge base? They stay in git for audit and can be un-retired.`
+        ) : ''}
+        onConfirm={runBulk}
+        onCancel={() => setConfirmBulk(null)}
+      />
     </section>
   );
 }
@@ -2787,6 +2843,7 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
   const [open, setOpen] = useState(false); // skill inspector drawer (#774)
   const [busy, setBusy] = useState(null); // 'activate' | 'deactivate' | <agentId>
   const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
+  const [cascadeConfirm, setCascadeConfirm] = useState(null); // { agents } — 409 "delete anyway?" confirm
   const flashTimer = useRef(null);
 
   const feedback = (kind, text) => {
@@ -2884,11 +2941,10 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) {
           if (r.status === 409 && Array.isArray(d.agents) && !cascade) {
-            if (window.confirm(`"${skill.label}" is still active for: ${d.agents.join(', ')}.\nDeactivate those grants and delete anyway? A restorable snapshot is archived first.`)) {
-              runDelete(true); // keeps busy = 'delete' through the cascade
-            } else {
-              setBusy(null);
-            }
+            // Skill still in use — surface the styled cascade confirm instead of a
+            // native prompt. Confirming re-runs the delete with cascade=true.
+            setBusy(null);
+            setCascadeConfirm({ agents: d.agents });
             return;
           }
           throw new Error(d.error || `HTTP ${r.status}`);
@@ -2998,6 +3054,20 @@ function SkillCard({ skill, teamId, onShare, onReload }) {
         onDeactivate={deactivate}
         onResync={resync}
         onDelete={runDelete}
+      />
+      <ConfirmDialog
+        open={!!cascadeConfirm}
+        title="Skill still in use"
+        variant="danger"
+        confirmLabel="Deactivate & delete"
+        message={cascadeConfirm ? (
+          <>
+            <strong>“{skill.label}”</strong> is still active for: {cascadeConfirm.agents.join(', ')}.
+            <span style={{ display: 'block', marginTop: 'var(--eb-space-2)' }}>Deactivate those grants and delete anyway? A restorable snapshot is archived first.</span>
+          </>
+        ) : ''}
+        onConfirm={() => { setCascadeConfirm(null); runDelete(true); }}
+        onCancel={() => setCascadeConfirm(null)}
       />
     </>
   );

@@ -1,7 +1,15 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router';
-import { Github, ArrowRight, AlertCircle, CheckCircle } from 'lucide-react';
+import { Github, ArrowRight, AlertCircle, CheckCircle, Info } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import {
+  hasRepoUrl,
+  quickstartEndpoint,
+  quickstartBody,
+  showRepoPrerequisites,
+  quickstartSubmitReasons,
+  QUICKSTART_COPY,
+} from './quickstart-view';
 
 const inputStyle = {
   width: '100%',
@@ -24,6 +32,11 @@ const labelStyle = {
   marginBottom: 'var(--eb-space-2)',
 };
 
+const optionalHintStyle = {
+  fontWeight: 'var(--eb-font-normal)',
+  color: 'var(--eb-text-muted)',
+};
+
 function Card({ children, accent }) {
   return (
     <div style={{
@@ -43,6 +56,8 @@ export default function QuickStart() {
   const { data: sshKeys, loading: sshKeysLoading } = useApi('/api/ssh-keys');
   const { data: llmEndpoints, loading: llmEndpointsLoading } = useApi('/api/llm-endpoints');
 
+  const [displayName, setDisplayName] = useState('My Assistant');
+  const [llmEndpointId, setLlmEndpointId] = useState('');
   const [url, setUrl] = useState('');
   const [tokenId, setTokenId] = useState('');
   const [sshKeyId, setSshKeyId] = useState('');
@@ -56,7 +71,19 @@ export default function QuickStart() {
   const hasSshKeys = !sshKeysLoading && Array.isArray(sshKeys) && sshKeys.length > 0;
   const showSshKeyPicker = Array.isArray(sshKeys) && sshKeys.length > 1;
   const hasLlmEndpoints = !llmEndpointsLoading && Array.isArray(llmEndpoints) && llmEndpoints.length > 0;
-  const ready = hasTokens && hasSshKeys;
+
+  // Whether the user has entered a repository URL — the single fork that decides
+  // endpoint, body, and which prerequisites apply (no more mode toggle).
+  const repo = hasRepoUrl(url);
+  const showRepoPrereqs = showRepoPrerequisites(url);
+
+  // Effective provider selection: honour an explicit pick, else the first one.
+  const selectedLlmId = llmEndpointId || (hasLlmEndpoints ? llmEndpoints[0].id : '');
+  // Same submit gate as before, but broken out into the specific unmet
+  // requirements so the disabled button can explain itself (#1302 pattern).
+  const { canSubmit, reasons: submitBlockers } = quickstartSubmitReasons({
+    url, hasTokens, hasSshKeys, hasLlmEndpoints, displayName, selectedLlmId,
+  });
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -65,14 +92,12 @@ export default function QuickStart() {
     setResult(null);
     setSubmitting(true);
     try {
-      const res = await fetch('/api/quickstart', {
+      const endpoint = quickstartEndpoint(url);
+      const body = quickstartBody({ url, tokenId, sshKeyId, displayName, llmEndpointId: selectedLlmId });
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: url.trim(),
-          githubTokenId: tokenId || undefined,
-          sshKeyId: sshKeyId || undefined,
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -98,34 +123,46 @@ export default function QuickStart() {
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>Single Agent</h1>
+        }}>{QUICKSTART_COPY.heading}</h1>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
         }}>
-          {ready
-            ? 'Paste a GitHub URL, hit Enter, start chatting. The Working Environment and Agent are created automatically.'
-            : <>Point an agent at a repository and start chatting — you first need an{' '}
-                <Link to="/ssh-keys" style={{ color: 'var(--eb-accent-primary)' }}>SSH key</Link> and a{' '}
-                <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>GitHub token</Link>{' '}
-                (see below). Then paste a URL and the Working Environment and Agent are created automatically.</>}
-        </p>
-        <p style={{
-          fontSize: 'var(--eb-text-sm)',
-          color: 'var(--eb-text-secondary)',
-          marginTop: 'var(--eb-space-3)',
-          marginBottom: 0,
-          lineHeight: 1.6,
-        }}>
-          Creates a single chat agent bound to your repository. The agent can answer questions, read code, and help
-          you work. It does not include automated code review, issue triage, or a development workflow — use the{' '}
-          <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>Agent Team Wizard</Link> for that.
+          {QUICKSTART_COPY.intro}
         </p>
       </div>
 
-      {!tokensLoading && !hasTokens && (
+      <p style={{
+        fontSize: 'var(--eb-text-sm)',
+        color: 'var(--eb-text-secondary)',
+        margin: 0,
+        lineHeight: 1.6,
+      }}>
+        {QUICKSTART_COPY.detail}
+      </p>
+
+      {!llmEndpointsLoading && !hasLlmEndpoints && (
+        <Card accent="var(--eb-status-warning)">
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
+                No model provider configured
+              </div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                An agent needs a model provider — it is the only thing it runs on.{' '}
+                <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
+                  Add provider →
+                </Link>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {showRepoPrereqs && !tokensLoading && !hasTokens && (
         <Card accent="var(--eb-status-warning)">
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
             <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
@@ -134,7 +171,7 @@ export default function QuickStart() {
                 No GitHub token configured
               </div>
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                A single agent needs a GitHub PAT for API actions (PR creation, event polling).{' '}
+                A repository-backed agent needs a GitHub PAT for API actions (PR creation, event polling).{' '}
                 <Link to="/github-tokens" style={{ color: 'var(--eb-accent-primary)' }}>
                   Create token →
                 </Link>
@@ -144,7 +181,7 @@ export default function QuickStart() {
         </Card>
       )}
 
-      {!sshKeysLoading && !hasSshKeys && (
+      {showRepoPrereqs && !sshKeysLoading && !hasSshKeys && (
         <Card accent="var(--eb-status-warning)">
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
             <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
@@ -163,30 +200,54 @@ export default function QuickStart() {
         </Card>
       )}
 
-      {!llmEndpointsLoading && !hasLlmEndpoints && (
-        <Card accent="var(--eb-status-warning)">
-          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
-            <AlertCircle size={20} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
-            <div>
-              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-1)' }}>
-                No model provider configured
-              </div>
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-                The agent will fail on its first message without a model provider.{' '}
-                <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
-                  Add provider →
-                </Link>
-              </div>
-            </div>
-          </div>
-        </Card>
-      )}
-
       <Card>
         <form onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
           <div>
+            <label htmlFor="quickstart-name" style={labelStyle}>
+              Agent Name
+            </label>
+            <input
+              id="quickstart-name"
+              type="text"
+              placeholder="My Assistant"
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              disabled={submitting}
+              autoFocus
+              style={inputStyle}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="quickstart-llm" style={labelStyle}>
+              Model Provider
+            </label>
+            <select
+              id="quickstart-llm"
+              value={selectedLlmId}
+              onChange={e => setLlmEndpointId(e.target.value)}
+              disabled={submitting || !hasLlmEndpoints}
+              style={{ ...inputStyle, fontFamily: 'inherit' }}
+            >
+              {hasLlmEndpoints
+                ? llmEndpoints.map(ep => (
+                    <option key={ep.id} value={ep.id}>{ep.name}</option>
+                  ))
+                : <option value="">No model provider available</option>}
+            </select>
+            <div style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: 'var(--eb-text-muted)',
+              marginTop: 'var(--eb-space-2)',
+            }}>
+              The agent chats using this provider. Manage providers under{' '}
+              <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>Model Providers</Link>.
+            </div>
+          </div>
+
+          <div>
             <label htmlFor="quickstart-url" style={labelStyle}>
-              GitHub Repository URL
+              GitHub Repository URL <span style={optionalHintStyle}>(optional)</span>
             </label>
             <div style={{ position: 'relative' }}>
               <Github size={18} style={{
@@ -196,11 +257,10 @@ export default function QuickStart() {
               <input
                 id="quickstart-url"
                 type="text"
-                placeholder="https://github.com/org/repo"
+                placeholder="https://github.com/org/repo — leave empty for a repo-less agent"
                 value={url}
                 onChange={e => setUrl(e.target.value)}
-                disabled={submitting || !ready}
-                autoFocus
+                disabled={submitting}
                 style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
               />
             </div>
@@ -209,11 +269,12 @@ export default function QuickStart() {
               color: 'var(--eb-text-muted)',
               marginTop: 'var(--eb-space-2)',
             }}>
-              HTTPS or SSH — we normalise to SSH (<code>git@github.com:…</code>) and clone with the SSH key.
+              Leave empty for a repo-less assistant. If provided, HTTPS or SSH — we
+              normalise to SSH (<code>git@github.com:…</code>) and clone with the SSH key.
             </div>
           </div>
 
-          {showSshKeyPicker && (
+          {showRepoPrereqs && showSshKeyPicker && (
             <div>
               <label htmlFor="quickstart-ssh-key" style={labelStyle}>
                 SSH Key
@@ -233,7 +294,7 @@ export default function QuickStart() {
             </div>
           )}
 
-          {showTokenPicker && (
+          {showRepoPrereqs && showTokenPicker && (
             <div>
               <label htmlFor="quickstart-token" style={labelStyle}>
                 GitHub Token
@@ -280,6 +341,13 @@ export default function QuickStart() {
                     </Link>
                   </div>
                 )}
+                {errorCode === 'no_llm_endpoint' && (
+                  <div style={{ marginTop: 'var(--eb-space-2)' }}>
+                    <Link to="/models" style={{ color: 'var(--eb-accent-primary)' }}>
+                      Add provider →
+                    </Link>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -317,9 +385,34 @@ export default function QuickStart() {
             </div>
           )}
 
+          {/* Spell out exactly what is still missing so a first-time user isn't
+              left staring at a greyed-out button with no idea why (the same
+              "explain a disabled submit" discipline as the Model Provider form). */}
+          {!submitting && submitBlockers.length > 0 && (
+            <div style={{
+              display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+              padding: 'var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)',
+              color: 'var(--eb-text-secondary)',
+            }}>
+              <Info size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
+              <span>
+                Before you can start, please:
+                <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
+                  {submitBlockers.map(r => (
+                    <li key={r.field}>{r.message}</li>
+                  ))}
+                </ul>
+              </span>
+            </div>
+          )}
+
           <button
             type="submit"
-            disabled={submitting || !ready || !url.trim()}
+            disabled={submitting || !canSubmit}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)',
               padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -330,8 +423,8 @@ export default function QuickStart() {
               fontSize: 'var(--eb-text-md)',
               fontWeight: 'var(--eb-font-medium)',
               fontFamily: 'inherit',
-              cursor: (submitting || !ready || !url.trim()) ? 'not-allowed' : 'pointer',
-              opacity: (submitting || !ready || !url.trim()) ? 0.5 : 1,
+              cursor: (submitting || !canSubmit) ? 'not-allowed' : 'pointer',
+              opacity: (submitting || !canSubmit) ? 0.5 : 1,
             }}
           >
             {submitting ? 'Creating agent…' : 'Create agent & start chatting'}
@@ -345,11 +438,23 @@ export default function QuickStart() {
         color: 'var(--eb-text-muted)',
         lineHeight: 1.6,
       }}>
-        <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
-        using the repository's default branch (resolved from its remote HEAD), the selected SSH key (for cloning), the current GitHub token (for API actions),
-        and no additional skills. A default agent is then created on top of it. Both can be fine-tuned later under{' '}
-        <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
-        <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
+        {repo ? (
+          <>
+            <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
+            using the repository's default branch (resolved from its remote HEAD), the selected SSH key (for cloning), the current GitHub token (for API actions),
+            and no additional skills. A default agent is then created on top of it. Both can be fine-tuned later under{' '}
+            <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
+            <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
+          </>
+        ) : (
+          <>
+            <strong>What happens here:</strong> A new repo-less Working Environment is created and bound to the model
+            provider you selected, then a single standalone chat agent is created on top of it — no repository is
+            cloned. Both can be fine-tuned later under{' '}
+            <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
+            <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
+          </>
+        )}
       </div>
 
       <div style={{
@@ -360,9 +465,9 @@ export default function QuickStart() {
         fontSize: 'var(--eb-text-sm)',
         color: 'var(--eb-text-secondary)',
       }}>
-        Need a full development team instead?{' '}
+        {QUICKSTART_COPY.teamOfOneNote}{' '}
         <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
-          → Agent Team Wizard
+          {QUICKSTART_COPY.growCtaLabel} →
         </Link>
       </div>
     </div>

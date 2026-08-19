@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck, KeyRound } from 'lucide-react';
+import PasswordField from '../components/PasswordField';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
@@ -7,6 +8,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
+import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
@@ -95,7 +97,7 @@ function CreateTeamForm({ onSave, onCancel, saving, error }) {
         value={id} onChange={handleIdChange}
         isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
         placeholder="e.g. payments"
-        helpText="Auto-derived from Name; edit to override. Lowercase letters, digits and hyphens; must start alphanumeric."
+        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
       />
       <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} placeholder="What this team owns" />
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
@@ -348,15 +350,15 @@ function ManageUsersPanel({ users, onRefresh, onError }) {
             </div>
             {pwUserId === u.id && (
               <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
-                <input
-                  type="password"
+                <PasswordField
                   value={pwValue}
                   onChange={e => setPwValue(e.target.value)}
                   placeholder={`New login password for "${u.subject}"`}
                   autoComplete="new-password"
                   onKeyDown={e => { if (e.key === 'Enter') savePassword(u.id); }}
+                  wrapperStyle={{ flex: 1, minWidth: 0 }}
                   style={{
-                    flex: 1, padding: 'var(--eb-space-2) var(--eb-space-3)',
+                    padding: 'var(--eb-space-2) var(--eb-space-3)',
                     background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
                     borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
                     fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
@@ -574,7 +576,7 @@ export default function Teams() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Teams</h1>
+        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Access &amp; Users</h1>
         {/* Creating teams and managing global user records are System-Admin
             actions (#584); a Team Admin manages memberships within their own
             team via the per-team Manage panel, not here. */}
@@ -595,10 +597,11 @@ export default function Teams() {
         border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
       }}>
-        A <strong>Team</strong> is a <em>human</em> collaboration & visibility scope (the tenant). Every agent, Agent Team,
-        orchestrator and Working Environment is owned by exactly one Team. Add human users as <strong>Team Admins</strong> or
-        <strong> Team Members</strong>; <strong>System Admins</strong> have global access. This is distinct from the
-        <em> Agent Team</em> construct (a squad of agents) created via the Agent Team Wizard.
+        This section manages <strong>access scopes</strong> and the <strong>human users</strong> in them. A scope — internally a
+        <strong> Team</strong> — is a <em>human</em> collaboration &amp; visibility tenant: every agent, Agent Team, orchestrator and
+        Working Environment is owned by exactly one. Add human users as <strong>Team Admins</strong> or <strong>Team Members</strong>;
+        <strong> System Admins</strong> have global access. This is <em>not</em> the <em>Agent Team</em> construct (a squad of agents)
+        created via the Agent Team Wizard.
       </div>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />

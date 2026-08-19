@@ -358,8 +358,12 @@ def run_agent(system_prompt: str, user_prompt: str) -> int:
         "claude",
         "--print",
         "--system-prompt", str(sys_prompt_path),
+        # Offer AskUserQuestion headlessly via the bundled MCP server (#1712) —
+        # merged with any env MCP servers (no --strict-mcp-config).
+        "--mcp-config", _ask_user_mcp_config(),
         "--allowedTools",
-        "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*)",
+        "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*) "
+        + _ASK_USER_MCP_TOOL,
     ]
 
     # Credential check — any of the auth mechanisms the Claude CLI understands:
@@ -1519,17 +1523,56 @@ def _map_stream_json_line(line: str, correlation_id: str,
     return events
 
 
-# ---- AskUserQuestion → chat message (#447) ----
+# ---- AskUserQuestion → chat message (#447, reachable via bundled MCP #1712) ----
 #
 # `AskUserQuestion` is Claude Code's structured "ask the human a question" tool.
-# It is intentionally NOT in the runner's --allowedTools whitelist: an agent turn
-# is a single non-interactive process (stdin closed), so the tool can never be
-# answered in-line and the CLI denies it. Rather than let that surface as a
-# silent "no output" / generic error, we intercept the tool_use, render the
-# question(s) into a readable chat message, and post it. The user's next chat
-# message then continues the resumed session — the answer arrives as a normal,
-# context-bearing turn.
+# Its *built-in* form is interactive-TTY-only: in the `-p`/print mode every agent
+# turn runs in (a single non-interactive process, stdin closed) the CLI removes it
+# from the model's tool set entirely, so the model can never emit it — adding it to
+# --allowedTools / --tools does not help (the tool is filtered before permissions
+# are consulted). To close that gap (#1712) the runner instead offers an
+# identically-shaped `AskUserQuestion` tool from a bundled, dependency-free stdio
+# MCP server (`ask-user-mcp.py`) via --mcp-config, so it *is* available to the
+# model headlessly. When the model calls it the tool_use surfaces in the stream as
+# `mcp__aee-ask__AskUserQuestion`; the MCP tool returns a short "end your turn and
+# wait" instruction so the turn completes cleanly (a normal success `result`, the
+# session stays coherent for --resume) rather than erroring. We intercept that
+# tool_use, render the question(s) into a readable chat message (+ the #1663
+# quick-reply payload), and post it instead of the model's reply. The user's next
+# chat message then continues the resumed session — the answer arrives as a normal,
+# context-bearing turn. The bare-name match is kept so an interactive/legacy
+# built-in emission is handled identically.
 _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+# The bundled MCP server that re-supplies the tool headlessly, the key it is
+# registered under, and the resulting namespaced tool name the model calls.
+_ASK_USER_MCP_SERVER = SCRIPTS_DIR / "ask-user-mcp.py"
+_ASK_USER_MCP_KEY = "aee-ask"
+_ASK_USER_MCP_TOOL = f"mcp__{_ASK_USER_MCP_KEY}__{_ASK_USER_QUESTION_TOOL}"
+
+
+def _ask_user_mcp_config() -> str:
+    """Inline --mcp-config JSON registering the bundled AskUserQuestion server.
+
+    Passed alongside (not instead of) any env-provisioned MCP servers in the
+    agent's settings.json — without --strict-mcp-config the CLI merges the two.
+    """
+    return json.dumps({
+        "mcpServers": {
+            _ASK_USER_MCP_KEY: {
+                "command": "python3",
+                "args": [str(_ASK_USER_MCP_SERVER)],
+            }
+        }
+    })
+
+
+def _is_ask_user_question_tool(name) -> bool:
+    """True for the AskUserQuestion tool by its bare built-in name or its
+    MCP-namespaced form (`mcp__<server>__AskUserQuestion`)."""
+    return isinstance(name, str) and (
+        name == _ASK_USER_QUESTION_TOOL
+        or name.endswith(f"__{_ASK_USER_QUESTION_TOOL}")
+    )
 
 
 def _format_ask_user_question(tool_input) -> str | None:
@@ -1581,6 +1624,65 @@ def _format_ask_user_question(tool_input) -> str | None:
         f"{body}\n\n"
         "_Reply here to answer — the agent will pick up where it left off._"
     )
+
+
+def _ask_user_question_payload(tool_input) -> dict | None:
+    """Structured `AskUserQuestion` data for the Agent Chat quick-reply UI (#1663).
+
+    Returns a JSON-serialisable payload the Admin Console renders as clickable
+    option buttons, or None when the input carries no usable single-choice
+    question. It is attached to the terminal chat message as `io.aee.ask-question`
+    *alongside* the human-readable Markdown `body` (`_format_ask_user_question`),
+    so a Matrix client that cannot render the buttons still sees the full
+    question + options as text (graceful degradation, AC8).
+
+    MVP is single-choice (D1): a `multiSelect: true` question is deliberately
+    omitted from the interactive payload — it still reaches the human as the text
+    body, and the UI leaves it as plain text (AC4). Each option gets a stable
+    `optionId` (`<questionIndex>:<optionIndex>`) unique within the message so the
+    clicked answer can carry a structured identifier back (AC2 / D2).
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+
+    out_questions: list[dict] = []
+    for qi, q in enumerate(questions):
+        if not isinstance(q, dict):
+            continue
+        if q.get("multiSelect") is True:
+            continue  # single-choice only in the MVP (D1)
+        options = q.get("options")
+        if not isinstance(options, list):
+            continue
+        out_options: list[dict] = []
+        for oi, opt in enumerate(options):
+            if not isinstance(opt, dict):
+                continue
+            label = opt.get("label")
+            if not (isinstance(label, str) and label.strip()):
+                continue
+            entry = {"optionId": f"{qi}:{oi}", "label": label.strip()}
+            desc = opt.get("description")
+            if isinstance(desc, str) and desc.strip():
+                entry["description"] = desc.strip()
+            out_options.append(entry)
+        if not out_options:
+            continue
+        qentry: dict = {"questionId": f"q{qi}", "options": out_options}
+        header = q.get("header")
+        if isinstance(header, str) and header.strip():
+            qentry["header"] = header.strip()
+        text = q.get("question")
+        if isinstance(text, str) and text.strip():
+            qentry["question"] = text.strip()
+        out_questions.append(qentry)
+
+    if not out_questions:
+        return None
+    return {"version": 1, "questions": out_questions}
 
 
 # ---- status.json ----
@@ -2513,8 +2615,17 @@ def _resolve_model_arg() -> str | None:
 
 
 def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> list[str]:
+    # The user prompt is fed to `claude` on STDIN by _call_claude_once (#1727),
+    # not as a bare argv argument. A prompt handed to argv is parsed by the CLI's
+    # own option parser, so a message that *begins* with an option-like character
+    # (`-`, en-dash `–`, German quote `„`, `--help`, …) is mistaken for an unknown
+    # flag and the whole turn crashes with a non-zero exit. `--print` (boolean,
+    # the same flag the already-immune Briefing-Pack `run_agent` path uses) reads
+    # the prompt from stdin, so no leading character can ever be read as an option.
+    # `prompt` is kept in the signature as the builder's documented contract even
+    # though it deliberately no longer appears in argv.
     args = [
-        "-p", prompt,
+        "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "acceptEdits",
@@ -2523,8 +2634,13 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     if model_arg:
         args.extend(["--model", model_arg])
     for tool in ("Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
-                 "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)"):
+                 "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)",
+                 # AskUserQuestion, offered headlessly via the bundled MCP server
+                 # (#1712); its tool_use is intercepted and turned into a paused
+                 # chat question rather than executed for real.
+                 _ASK_USER_MCP_TOOL):
         args.extend(["--allowedTools", tool])
+    args.extend(["--mcp-config", _ask_user_mcp_config()])
     return args
 
 
@@ -2844,13 +2960,31 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         ["claude", *args],
         cwd=str(_agent_workdir()),
         env=env,
-        stdin=subprocess.DEVNULL,
+        # The prompt is written to stdin (#1727) rather than passed on argv, so a
+        # message beginning with an option-like character is never parsed as a
+        # CLI flag. Fed by a daemon thread below so an arbitrarily long prompt
+        # can't deadlock against claude's stdin pipe buffer.
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
     )
     _active_claude_proc = proc
+
+    def feed_stdin():
+        # Hand the whole prompt to claude, then close stdin so it sees EOF and
+        # starts generating. Best-effort: if claude has already exited (e.g. a
+        # user Stop terminated it) the write/close races into a broken pipe,
+        # which is harmless and must never crash the run.
+        try:
+            if proc.stdin:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=feed_stdin, daemon=True).start()
 
     final_result: str | None = None
     observed_session: str | None = None
@@ -2896,7 +3030,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
             elif ev.get("type") == "assistant_text" and isinstance(ev.get("text"), str):
                 assistant_chunks.append(ev["text"])
             elif (ev.get("type") == "tool_use"
-                    and ev.get("tool") == _ASK_USER_QUESTION_TOOL
+                    and _is_ask_user_question_tool(ev.get("tool"))
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]
@@ -2987,6 +3121,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         _format_ask_user_question(ask_question_input)
         if ask_question_input is not None else None
     )
+    # Structured quick-reply payload (#1663): stashed onto the caller's
+    # run_context by reference (same channel as `_loopOutputTokens` above) so the
+    # DM path can attach it as `io.aee.ask-question` on the posted message without
+    # widening the return signature. None when the question is not renderable as
+    # single-choice buttons (e.g. multiSelect) — the text body still carries it.
+    if ask_reply is not None and isinstance(run_context, dict):
+        run_context["_askQuestion"] = _ask_user_question_payload(ask_question_input)
 
     if rc != 0:
         was_user_stop = _user_stop_requested
@@ -6692,12 +6833,17 @@ async def run_dm_listener() -> None:
             session = _new_session("dm", room_id=room_id, label="Direct message",
                                    correlation_id=correlation_id)
             _bump_active(+1, session)
+            # Passed by reference so _call_claude_once can stash a structured
+            # AskUserQuestion payload for the quick-reply UI (#1663) — otherwise
+            # inert (it is the default usage-record context either way).
+            dm_run_context = _base_run_context()
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
                 # arrive while a turn is in flight).
                 result = await asyncio.to_thread(
                     _call_claude, body, room_id, correlation_id, blueprint_id,
+                    CLAUDE_TIMEOUT_SEC, dm_run_context,
                 )
             finally:
                 _bump_active(-1, session)
@@ -6717,8 +6863,17 @@ async def run_dm_listener() -> None:
                     "misconfigured or the run was interrupted — check the agent container logs.)_"
                 )
 
+            # If the run paused on an AskUserQuestion, carry the structured
+            # options to the console so it can render clickable quick-reply
+            # buttons (#1663). Absent / multiSelect → plain text reply only.
+            ask_question = dm_run_context.get("_askQuestion")
+            extra_content = (
+                {"io.aee.ask-question": ask_question}
+                if isinstance(ask_question, dict) else None
+            )
+
             try:
-                event_id = await send_formatted(room_id, reply)
+                event_id = await send_formatted(room_id, reply, extra_content=extra_content)
             except Exception as exc:
                 _append_event(room_id, {
                     "type": "error", "correlationId": correlation_id,
@@ -6958,10 +7113,91 @@ def _maybe_enable_fake_claude() -> None:
           file=sys.stderr)
 
 
+PLUGIN_BIN_LINK = Path("/opt/aee/plugin-bin")
+
+# Per-agent workspace state directory. Renamed from the legacy `.aee` (from the
+# retired "Agent Execution Environment" name) to `.agent-studio` (#1549); a
+# one-time atomic move migrates an existing `.aee/` on first touch.
+STATE_DIR = ".agent-studio"
+LEGACY_STATE_DIR = ".aee"
+
+
+def _migrate_state_dir(workspace: Path) -> None:
+    """Rename a legacy `.aee/` state dir to `.agent-studio/` exactly once.
+
+    Atomic (a single `rename`, so bin/plugins/artifacts/history move together
+    with no data loss) and idempotent: once the new dir exists this is a no-op.
+    If both exist (a partial migration or re-run) the new dir wins and the
+    legacy one is left untouched — deterministic, never losing state. Never
+    fatal: a failure leaves the legacy dir in place for a later touch.
+    """
+    new_dir = workspace / STATE_DIR
+    legacy = workspace / LEGACY_STATE_DIR
+    try:
+        if new_dir.exists():
+            return
+        if legacy.is_dir():
+            legacy.rename(new_dir)
+    except OSError as exc:
+        sys.stderr.write(f"[entrypoint] state-dir migration deferred: {exc}\n")
+
+
+def _setup_plugin_cli_env() -> None:
+    """Make this agent's granted plugin CLIs runnable (#1547).
+
+    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
+    /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
+    per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED, which
+    is a live file sync with no respawn (concept §4.5).
+
+    The image therefore puts a fixed directory — /opt/aee/plugin-bin — on PATH,
+    and this points it at the per-agent seed dir with one symlink. The seed dir
+    is created first so the link is never dangling, and because PATH resolves
+    through the link on every lookup, a plugin granted minutes from now is
+    immediately runnable with no respawn.
+
+    Deliberately a symlink rather than mutating os.environ["PATH"]: an env this
+    process changes reaches its children (the Claude CLI and its shell calls)
+    but is invisible to `podman exec`, so an operator debugging a granted plugin
+    would get "command not found" for a CLI that is in fact installed. PATH
+    lives in the image config instead, and this link is all that varies.
+
+    AEE_WORKSPACE — which every CLI reads to find its own
+    `.agent-studio/plugins/<id>.json` — is set on the container by the
+    orchestrator for the same reason; `setdefault` here only covers a hand-run
+    container.
+    """
+    agent_id = os.environ.get("AGENT_ID")
+    if not agent_id:
+        return
+    workspace = Path(os.environ.get("AEE_WORKSPACE") or (Path("/workspace/agents") / agent_id))
+    os.environ.setdefault("AEE_WORKSPACE", str(workspace))
+
+    # Migrate the legacy `.aee/` state dir to `.agent-studio/` once, before
+    # anything reads it, so an upgraded agent keeps all its state — plugin
+    # grants/CLIs, artifacts, seeded-skills, prompt-history (#1549).
+    _migrate_state_dir(workspace)
+
+    plugin_bin = workspace / STATE_DIR / "bin"
+    try:
+        plugin_bin.mkdir(parents=True, exist_ok=True)
+        if PLUGIN_BIN_LINK.is_symlink() or PLUGIN_BIN_LINK.exists():
+            if PLUGIN_BIN_LINK.is_symlink() and PLUGIN_BIN_LINK.readlink() == plugin_bin:
+                return
+            PLUGIN_BIN_LINK.unlink()
+        PLUGIN_BIN_LINK.parent.mkdir(parents=True, exist_ok=True)
+        PLUGIN_BIN_LINK.symlink_to(plugin_bin, target_is_directory=True)
+    except OSError as exc:
+        # Never fatal: an agent with no plugins granted is unaffected, and one
+        # with a grant fails loudly at the CLI rather than silently at boot.
+        print(f"[agent] plugin CLI PATH link failed: {exc}", file=sys.stderr)
+
+
 def main() -> None:
     global _args
 
     _maybe_enable_fake_claude()
+    _setup_plugin_cli_env()
 
     parser = argparse.ArgumentParser(
         description="Agent Execution Environment entrypoint",

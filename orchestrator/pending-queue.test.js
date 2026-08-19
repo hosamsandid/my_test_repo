@@ -109,6 +109,33 @@ test('summarizeEntry exposes GitHub fields and omits the payload (AC4)', () => {
   assert.equal('payload' in s, false, 'payload must never appear in the summary');
 });
 
+test('summarizeEntry lifts the label name for a *.labeled event, still omitting the payload (#1649)', () => {
+  const s = summarizeEntry({
+    id: 'x', receivedAt: '2026-08-12T00:00:00Z',
+    github: {
+      event: 'issues.labeled', repo: 'o/r', actor: 'alice', eventId: '9',
+      payload: { label: { name: 'ready-2' }, issue: { number: 1 } },
+    },
+  });
+  assert.equal(s.event, 'issues.labeled');
+  assert.equal(s.label, 'ready-2');
+  assert.equal('payload' in s, false, 'payload must never appear in the summary');
+});
+
+test('summarizeEntry omits label for a non-label github event (AC2/AC3)', () => {
+  const s = summarizeEntry({
+    id: 'y', github: { event: 'pull_request.opened', repo: 'o/r', eventId: '42', payload: { pull_request: {} } },
+  });
+  assert.equal('label' in s, false, 'no empty label artifact on a non-label event');
+});
+
+test('summarizeEntry degrades gracefully on a malformed payload.label', () => {
+  const s = summarizeEntry({
+    id: 'z', github: { event: 'issues.labeled', eventId: '3', payload: { label: {} } },
+  });
+  assert.equal('label' in s, false);
+});
+
 test('summarizeEntry surfaces per-kind hints for non-GitHub entries', () => {
   assert.equal(summarizeEntry({ id: 'd', kind: 'github-digest', count: 5, convKey: 'pr:1' }).count, 5);
   assert.equal(summarizeEntry({ id: 'd', kind: 'github-digest', events: [1, 2] }).count, 2);

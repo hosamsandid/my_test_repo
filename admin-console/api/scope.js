@@ -148,8 +148,16 @@ function visibleUser(scope, userId, memberships = []) {
 // no `scope` field and carry only `teamId` (all currently 'default'); treat each
 // as team-scoped owned by its team so existing credentials keep working. Returns
 // a normalized copy with an explicit `scope`, `teamId` and `assignedTeamIds`.
+//
+// Personal tier (#1567/epic #1558): a `personal` credential is owned by exactly
+// one human (`userId`) and carries neither a team nor system assignments. It
+// round-trips its owner reference without loss; every other (team/system/legacy)
+// entry normalizes exactly as before — personal is strictly additive.
 function normalizeCredential(entry) {
   if (!entry || typeof entry !== 'object') return entry;
+  if (entry.scope === 'personal') {
+    return { ...entry, scope: 'personal', userId: entry.userId || null, teamId: null, assignedTeamIds: [] };
+  }
   const scope = entry.scope === 'system' ? 'system' : 'team';
   if (scope === 'system') {
     const assignedTeamIds = Array.isArray(entry.assignedTeamIds)
@@ -160,11 +168,25 @@ function normalizeCredential(entry) {
   return { ...entry, scope: 'team', teamId: entry.teamId || 'default', assignedTeamIds: [] };
 }
 
+// A personal credential belongs to exactly one human and is strictly private to
+// them (D2): visible/manageable ONLY by its owner, with NO `scope.all` override —
+// not even a System Admin or the env single-admin may see or manage it. This
+// requires an identified owner (`c.userId`) and an identified caller
+// (`scope.userId`); a personal credential with no owner, or a caller with no user
+// identity (the env single-admin has `userId: null`), matches nobody (fail-closed).
+function ownsPersonalCredential(scope, c) {
+  return !!(c && c.userId && scope && scope.userId && c.userId === scope.userId);
+}
+
 // Is this credential visible to the caller? (list-endpoint filter — AC1/AC2/AC3)
+// A personal credential is checked FIRST, before the `scope.all` admin shortcut,
+// so a System/env admin listing all credentials never sees anyone's personal
+// entries (#1567 AC5 / D2 — no `scope.all` bypass on the personal tier).
 function visibleCredential(scope, cred) {
   if (!scope) return false;
-  if (scope.all) return true;
   const c = normalizeCredential(cred);
+  if (c.scope === 'personal') return ownsPersonalCredential(scope, c);
+  if (scope.all) return true;
   if (c.scope === 'system') return c.assignedTeamIds.some(t => canManageTeam(scope, t));
   return canManageTeam(scope, c.teamId);
 }
@@ -201,8 +223,12 @@ function assistSelectableEndpoint(scope, ep) {
 // (AC5); System Admins may manage all.
 function canManageCredential(scope, cred) {
   if (!scope) return false;
-  if (scope.all) return true;
   const c = normalizeCredential(cred);
+  // Personal tier first, ahead of the `scope.all` shortcut: only the owner may
+  // rename/rotate/delete their own personal credential; `scope.all` grants no
+  // access to it (#1567 AC4 / D2).
+  if (c.scope === 'personal') return ownsPersonalCredential(scope, c);
+  if (scope.all) return true;
   if (c.scope === 'system') return false;
   return canManageTeam(scope, c.teamId);
 }
@@ -212,6 +238,14 @@ function canManageCredential(scope, cred) {
 // only for a team they administer (AC3/AC4/AC6).
 function canCreateCredential(scope, desired) {
   if (!scope) return false;
+  // Any authenticated human may create a personal credential owned by THEMSELVES
+  // (Team Member, Team Admin or System Admin — #1567 AC3). The owner reference on
+  // the desired shape has already been forced to the caller by
+  // resolveCredentialOwnership; here we require that identity match, which also
+  // fails closed for the env single-admin (no user record → `scope.userId` null).
+  // Checked before `scope.all` so a personal create is never waved through as an
+  // admin action — it is always owner-scoped.
+  if (desired && desired.scope === 'personal') return ownsPersonalCredential(scope, desired);
   if (scope.all) return true;
   const reqScope = desired && desired.scope === 'system' ? 'system' : 'team';
   if (reqScope === 'system') return false;

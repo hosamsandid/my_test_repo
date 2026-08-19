@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useParams, useSearchParams } from 'react-router';
+import { Routes, Route, Navigate, useParams, useSearchParams, useLocation } from 'react-router';
 import Shell from './components/Shell';
+import { documentTitleForPath } from './route-title';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
@@ -51,11 +52,13 @@ function CredentialRoute({ children }) {
 const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
+const Create              = lazy(() => import('./pages/Create'));
 const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const JiraTokens          = lazy(() => import('./pages/JiraTokens'));
+const MyCredentials       = lazy(() => import('./pages/MyCredentials'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
@@ -63,16 +66,27 @@ const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
 const McpServers          = lazy(() => import('./pages/McpServers'));
+const Plugins             = lazy(() => import('./pages/Plugins'));
+const PluginUiPage        = lazy(() => import('./pages/PluginUiPage'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
-const PatternsCatalog     = lazy(() => import('./pages/PatternsCatalog'));
-const SdlcCatalogPage     = lazy(() => import('./pages/SdlcCatalogPage'));
-const MainframeCatalogPage = lazy(() => import('./pages/MainframeCatalogPage'));
 const About = lazy(() => import('./pages/About'));
 const GettingStarted = lazy(() => import('./pages/GettingStarted'));
+const PluginSystemHelp = lazy(() => import('./pages/PluginSystemHelp'));
+
+// Keeps the browser tab title in step with the active route so tabs, history
+// and bookmarks are distinguishable (route-title.js). Renders nothing; lives
+// inside the Router so useLocation is available.
+function DocumentTitle() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    document.title = documentTitleForPath(pathname);
+  }, [pathname]);
+  return null;
+}
 
 export default function App() {
   const { loading: authLoading, authenticated } = useAuth();
@@ -124,6 +138,7 @@ export default function App() {
 
   return (
     <Shell>
+      <DocumentTitle />
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
           <Route path="/"             element={<Navigate to="/chats" replace />} />
@@ -131,6 +146,7 @@ export default function App() {
           <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
+          <Route path="/create"      element={<Create />} />
           <Route path="/quickstart"   element={<QuickStart />} />
           <Route path="/team-setup"   element={<TeamSetupRoute />} />
           <Route path="/wizard/team"  element={<TeamSetupRoute />} />
@@ -138,6 +154,9 @@ export default function App() {
           <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
           <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
           <Route path="/jira-tokens"  element={<CredentialRoute><JiraTokens /></CredentialRoute>} />
+          {/* Self-service personal credentials (#1568) — open to any authenticated
+              human, NOT gated on credAdmin (the personal tier is owner-only). */}
+          <Route path="/my-credentials" element={<MyCredentials />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/jobs"         element={<ScheduledJobs />} />
@@ -145,6 +164,11 @@ export default function App() {
           <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
           <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
+          <Route path="/plugins"      element={<AdminRoute><Plugins /></AdminRoute>} />
+          {/* A granted UI plugin is viewable by any team member with the grant —
+              NOT AdminRoute-gated (the registry page is). The console proxy at
+              /plugins/:id/ui and the server both re-enforce access. */}
+          <Route path="/plugins/:id/view" element={<PluginUiPage />} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
           <Route path="/flows"         element={<Briefings />} />
@@ -153,10 +177,10 @@ export default function App() {
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
-          <Route path="/patterns"           element={<PatternsCatalog />} />
-          <Route path="/patterns/sdlc"      element={<SdlcCatalogPage />} />
-          <Route path="/patterns/mainframe" element={<MainframeCatalogPage />} />
           <Route path="/getting-started" element={<GettingStarted />} />
+          {/* Static explanatory help — ungated like Getting Started so a Team
+              Member sees the same content; the Plugins registry page stays admin-only. */}
+          <Route path="/plugin-system" element={<PluginSystemHelp />} />
           <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { presentRoleIds, inferMissingRoles } from './missing-roles-view.js';
+import { presentRoleIds, fulfilledRoleIds, inferMissingRoles } from './missing-roles-view.js';
 
 // Reference templates trimmed to the fields the inference reads.
 const CORE = {
@@ -151,4 +151,110 @@ test('inferMissingRoles: guards missing/empty inputs', () => {
   assert.equal(inferMissingRoles(null, [], TEMPLATES), null);
   assert.equal(inferMissingRoles({ id: 't' }, [{ id: 't-developer' }], []), null);
   assert.equal(inferMissingRoles({ id: 't' }, [{ id: 't-developer' }], null), null);
+});
+
+/* ── #1556: false-positive "Add role" suggestions ─────────────────────── */
+
+// The real dispatched-sdlc template defines `developer-2` / `business-analyst-2`
+// as GENUINELY DISTINCT roles (not multi-instance suffixes of the base role).
+const DISPATCHED_DIGITS = {
+  id: 'dispatched-sdlc',
+  name: 'Dispatched SDLC',
+  roles: [
+    { id: 'business-analyst', displayName: 'Business Analyst' },
+    { id: 'business-analyst-2', displayName: 'Business Analyst 2' },
+    { id: 'dispatcher', displayName: 'Dispatcher' },
+    { id: 'developer', displayName: 'Developer' },
+    { id: 'developer-2', displayName: 'Developer 2' },
+    { id: 'code-reviewer', displayName: 'Code Reviewer' },
+    { id: 'reworker', displayName: 'Reworker' },
+    { id: 'merger', displayName: 'Merger' },
+    { id: 'documentation-sync', displayName: 'Documentation Sync' },
+  ],
+  labels: DISPATCHED.labels,
+};
+
+test('fulfilledRoleIds: a distinct digit-suffixed role id counts itself, not the base (case 1)', () => {
+  const f = fulfilledRoleIds('t', [{ id: 't-developer-2' }], DISPATCHED_DIGITS.roles);
+  assert.ok(f.has('developer-2'));      // the exact distinct role is fulfilled
+  assert.ok(!f.has('developer'));       // and is NOT collapsed onto the base role
+});
+
+test('fulfilledRoleIds: a multi-instance -N of a base role still counts the base (case 3 / no regression)', () => {
+  // `code-reviewer-2` is NOT a template role → the -2 is a genuine second
+  // instance and must count the base `code-reviewer` as present.
+  const f = fulfilledRoleIds('t', [{ id: 't-code-reviewer-2' }], DISPATCHED_DIGITS.roles);
+  assert.deepEqual([...f], ['code-reviewer']);
+});
+
+test('fulfilledRoleIds: a clone id maps to its role by display name (case 2)', () => {
+  const f = fulfilledRoleIds(
+    'agent-studio-2-0',
+    [{ id: 'agent-studio-2-0-business-analyst-copy', displayName: 'Business Analyst 2' }],
+    DISPATCHED_DIGITS.roles,
+  );
+  assert.ok(f.has('business-analyst-2'));
+});
+
+test('fulfilledRoleIds: a non-<teamId>- id is matched by display name (case 3)', () => {
+  const f = fulfilledRoleIds(
+    'agent-studio-2-0',
+    [{ id: 'agent-agent-studio-2-0-documentation-sync', displayName: 'Documentation Sync' }],
+    DISPATCHED_DIGITS.roles,
+  );
+  assert.ok(f.has('documentation-sync'));
+});
+
+test('fulfilledRoleIds: display-name match is case-insensitive and trims whitespace', () => {
+  const f = fulfilledRoleIds('t', [{ id: 'x', displayName: '  dispatcher  ' }], DISPATCHED_DIGITS.roles);
+  assert.ok(f.has('dispatcher'));
+});
+
+test('inferMissingRoles: the reported agent-studio-2-0 state offers ONLY Dispatcher', () => {
+  // Team already has Developer 2 (digit role), Business Analyst 2 (clone),
+  // Documentation Sync (doubled-prefix id) — plus the base loop roles. The only
+  // genuinely missing role is Dispatcher.
+  const team = { id: 'agent-studio-2-0', labels: DISPATCHED_DIGITS.labels };
+  const members = [
+    { id: 'agent-studio-2-0-business-analyst', displayName: 'Business Analyst' },
+    { id: 'agent-studio-2-0-business-analyst-copy', displayName: 'Business Analyst 2' },
+    { id: 'agent-studio-2-0-developer', displayName: 'Developer' },
+    { id: 'agent-studio-2-0-developer-2', displayName: 'Developer 2' },
+    { id: 'agent-studio-2-0-code-reviewer', displayName: 'Code Reviewer' },
+    { id: 'agent-studio-2-0-reworker', displayName: 'Reworker' },
+    { id: 'agent-studio-2-0-merger', displayName: 'Merger' },
+    { id: 'agent-agent-studio-2-0-documentation-sync', displayName: 'Documentation Sync' },
+  ];
+  const res = inferMissingRoles(team, members, [CORE, DISPATCHED_DIGITS, EXTENDED]);
+  assert.equal(res.templateId, 'dispatched-sdlc');
+  assert.deepEqual(res.missing.map(m => m.id), ['dispatcher']);
+  assert.equal(res.missing[0].displayName, 'Dispatcher');
+});
+
+test('inferMissingRoles: both developer and developer-2 filled → neither is missing (edge)', () => {
+  const team = { id: 't', labels: DISPATCHED_DIGITS.labels };
+  const members = [
+    { id: 't-developer', displayName: 'Developer' },
+    { id: 't-developer-2', displayName: 'Developer 2' },
+    { id: 't-code-reviewer', displayName: 'Code Reviewer' },
+  ];
+  const res = inferMissingRoles(team, members, [CORE, DISPATCHED_DIGITS, EXTENDED]);
+  const missingIds = res.missing.map(m => m.id);
+  assert.ok(!missingIds.includes('developer'));
+  assert.ok(!missingIds.includes('developer-2'));
+});
+
+test('inferMissingRoles: a template with no digit-suffixed role is unaffected (edge)', () => {
+  // core-sdlc has no `-N` roles; a `t-developer-2` member is a real 2nd
+  // Developer and must still count `developer` present (base-role behaviour).
+  const team = { id: 't', labels: CORE.labels };
+  const members = [
+    { id: 't-business-analyst', displayName: 'Business Analyst' },
+    { id: 't-developer', displayName: 'Developer' },
+    { id: 't-developer-2', displayName: 'Developer' },
+    { id: 't-code-reviewer', displayName: 'Code Reviewer' },
+  ];
+  const res = inferMissingRoles(team, members, TEMPLATES);
+  assert.equal(res.templateId, 'core-sdlc');
+  assert.deepEqual(res.missing.map(m => m.id), ['reworker']);
 });

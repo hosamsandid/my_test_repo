@@ -1,0 +1,10 @@
+{
+  "name": "podman-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "yaml": "^2.4.0"
+  }
+}

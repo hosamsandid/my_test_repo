@@ -222,15 +222,6 @@ def matrix_invite(room_id: str, user_id: str, *, token: str) -> None:
         raise
 
 
-def matrix_join(room_id: str, *, token: str) -> None:
-    """Join a room."""
-    try:
-        _matrix_request("POST", f"/_matrix/client/v3/rooms/{room_id}/join",
-                        body={}, token=token)
-    except MatrixError:
-        pass  # already joined
-
-
 # ---------------------------------------------------------------------------
 # .matrix-env file
 # ---------------------------------------------------------------------------

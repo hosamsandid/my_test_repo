@@ -16,10 +16,16 @@ and a downstream consumer resolves the real location by that logical name:
     aee-artifact list "Functional Design"      # all matching entries (JSON lines)
     aee-artifact list                          # the whole manifest
 
-The manifest is `.aee/artifacts.jsonl` at the repo root — one JSON object per
-line, committed to git so it travels between agents like every other hand-off.
-`add` stages the manifest (git add); you commit + push it with your own work so
-downstream agents are woken by the push and can look the path up here.
+The manifest is `.agent-studio/artifacts.jsonl` at the repo root — one JSON
+object per line, committed to git so it travels between agents like every other
+hand-off. `add` stages the manifest (git add); you commit + push it with your
+own work so downstream agents are woken by the push and can look the path up
+here.
+
+Transitional compatibility (#1549): the manifest dir was renamed from the legacy
+`.aee/` to `.agent-studio/`. `add` writes the new path; `list`/`path` read BOTH,
+so a hand-off between a producer and consumer running different versions — and
+any in-flight artifacts already committed under `.aee/` — are never dropped.
 
 Pass --json on `add` / `list` / `path` for machine-readable JSON on stdout
 (`list` always emits one JSON object per line).
@@ -34,7 +40,9 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-MANIFEST_REL = os.path.join(".aee", "artifacts.jsonl")
+# New canonical manifest (written by `add`) + the legacy path (still read).
+MANIFEST_REL = os.path.join(".agent-studio", "artifacts.jsonl")
+LEGACY_MANIFEST_REL = os.path.join(".aee", "artifacts.jsonl")
 
 # Shared CLI-contract exit codes (docs/cli-contract.md).
 EXIT_OK = 0
@@ -60,8 +68,7 @@ def manifest_path():
     return os.path.join(repo_root(), MANIFEST_REL)
 
 
-def read_entries():
-    p = manifest_path()
+def _read_manifest_file(p):
     if not os.path.exists(p):
         return []
     out = []
@@ -76,6 +83,18 @@ def read_entries():
                 # Tolerate a hand-mangled line rather than crash a mission.
                 continue
     return out
+
+
+def read_entries():
+    # Read the legacy manifest first, then the new one, so entries stay roughly
+    # chronological and `path` (which returns the LAST match) resolves the newest
+    # registration across the rename (#1549). Nothing committed under `.aee/`
+    # before an agent upgraded is dropped.
+    root = repo_root()
+    return (
+        _read_manifest_file(os.path.join(root, LEGACY_MANIFEST_REL))
+        + _read_manifest_file(os.path.join(root, MANIFEST_REL))
+    )
 
 
 def cmd_add(argv):

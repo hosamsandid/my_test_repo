@@ -1,0 +1,13 @@
+{
+  "name": "test-mgmt-broker",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "description": "Plugin #2 broker sidecar (epic #1516, Phase 5): test management on the Broker SDK.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

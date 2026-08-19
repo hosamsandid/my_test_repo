@@ -18,11 +18,6 @@ import {
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
 
-// Read the current data-flow port block off a live agent's config as a plain
-// {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
-// the whole `dataFlow` block, matching how a draft persists the whole bundle.
-const pathStr = (a) => (typeof a === 'string' ? a : (a && a.path)) || '';
-
 // Mirrors orchestrator/github-poller.js — owner/repo from a repository URL.
 function parseRepoFullName(url) {
   if (!url) return null;
@@ -74,6 +69,9 @@ const setMarkerOn = (a, marker) => {
   }
   return base;
 };
+// Read the current data-flow port block off a live agent's config as a plain
+// {inputs, outputs, dependsOn} shape (read-modify-write helper). The PUT replaces
+// the whole `dataFlow` block, matching how a draft persists the whole bundle.
 async function liveDataFlow(roleId) {
   const a = await apiCall('GET', `/api/agents/${roleId}`);
   const df = (a && typeof a.dataFlow === 'object' && a.dataFlow) || {};

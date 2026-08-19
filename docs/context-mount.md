@@ -133,10 +133,9 @@ to write to a folder the admin made writable. A single legacy folder at bare `/c
 keeps its original single-folder wording (headed *Read-only Context Folder* /
 *Host Context Folder*); two or more folders (or one at a `/context/<slug>` path) render as
 an enumerated **Context Folders** list. An agent without a mount never sees the section —
-the block is gated in `prompt-assembly.js` exactly like Git/Skills/Trigger-management, and
-the Prompt tab shows a `context folder` badge when it is active. Setting or clearing the mount
-rebuilds and reseeds `CLAUDE.md` before the respawn, so the prompt and the container
-never disagree.
+the block is gated in `prompt-assembly.js` exactly like Git/Skills/Trigger-management.
+Setting or clearing the mount rebuilds and reseeds `CLAUDE.md` before the respawn, so the
+prompt and the container never disagree.
 
 ## Browsing it from the console
 

@@ -32,10 +32,10 @@ function plan(prevGrant, nextGrant, agentCfg = MEMBER) {
 
 // ---- layout helpers ---------------------------------------------------------
 
-test('agentPluginPaths puts the CLI on PATH and config under .aee/plugins', () => {
+test('agentPluginPaths puts the CLI on PATH and config under .agent-studio/plugins', () => {
   assert.deepEqual(agentPluginPaths('dummy-echo', 'aee-echo'), {
-    binPath: '.aee/bin/aee-echo',
-    configPath: '.aee/plugins/dummy-echo.json',
+    binPath: '.agent-studio/bin/aee-echo',
+    configPath: '.agent-studio/plugins/dummy-echo.json',
   });
 });
 
@@ -58,11 +58,11 @@ test('a fresh grant seeds the CLI (0755), the 0600 config with a minted token, a
   assert.deepEqual(out.disconnect, []);
   assert.deepEqual(out.connect, [{ pluginId: 'dummy-echo', network: 'aee-net-t1-dev' }]);
 
-  const bin = out.write.find((w) => w.path === '.aee/bin/aee-echo');
+  const bin = out.write.find((w) => w.path === '.agent-studio/bin/aee-echo');
   assert.equal(bin.mode, BIN_MODE);
   assert.equal(bin.copyFrom, 'bin/aee-echo.py');
 
-  const cfg = out.write.find((w) => w.path === '.aee/plugins/dummy-echo.json');
+  const cfg = out.write.find((w) => w.path === '.agent-studio/plugins/dummy-echo.json');
   assert.equal(cfg.mode, CONFIG_MODE);
   assert.deepEqual(cfg.content, {
     pluginId: 'dummy-echo',
@@ -75,7 +75,7 @@ test('a fresh grant seeds the CLI (0755), the 0600 config with a minted token, a
 
 test('agent granularity resolves the member id as the scopeId (and into the token)', () => {
   const out = plan([], [{ id: 'dummy-echo', scopeGranularity: 'agent' }]);
-  const cfg = out.write.find((w) => w.path === '.aee/plugins/dummy-echo.json');
+  const cfg = out.write.find((w) => w.path === '.agent-studio/plugins/dummy-echo.json');
   assert.equal(cfg.content.scopeId, 't1-dev');
   assert.equal(cfg.content.token, 'dummy-echo.t1-dev.SIG');
 });
@@ -86,7 +86,7 @@ test('a revoke removes the CLI + config and disconnects the network', () => {
   const out = plan([{ id: 'dummy-echo', scopeGranularity: 'team' }], []);
   assert.deepEqual(out.write, []);
   assert.deepEqual(out.connect, []);
-  assert.deepEqual(out.remove.sort(), ['.aee/bin/aee-echo', '.aee/plugins/dummy-echo.json']);
+  assert.deepEqual(out.remove.sort(), ['.agent-studio/bin/aee-echo', '.agent-studio/plugins/dummy-echo.json']);
   assert.deepEqual(out.disconnect, [{ pluginId: 'dummy-echo', network: 'aee-net-t1-dev' }]);
 });
 
@@ -98,7 +98,7 @@ test('a revoke of an uninstalled plugin still cleans up via a stored cliName', (
     manifests: {}, // uninstalled
     resolveScopeId, mintToken, networkNameFor,
   });
-  assert.deepEqual(out.remove.sort(), ['.aee/bin/aee-gone', '.aee/plugins/gone.json']);
+  assert.deepEqual(out.remove.sort(), ['.agent-studio/bin/aee-gone', '.agent-studio/plugins/gone.json']);
 });
 
 // ---- idempotence + the granularity flip -------------------------------------
@@ -121,7 +121,7 @@ test('granularity flip re-mints the token + rewrites ONLY the config — additiv
   // Exactly the config rewritten — the CLI bin is untouched.
   assert.equal(out.write.length, 1);
   const cfg = out.write[0];
-  assert.equal(cfg.path, '.aee/plugins/dummy-echo.json');
+  assert.equal(cfg.path, '.agent-studio/plugins/dummy-echo.json');
   assert.equal(cfg.content.scopeId, 't1-dev');           // now the agent id
   assert.equal(cfg.content.token, 'dummy-echo.t1-dev.SIG'); // re-minted for the new scope
 });

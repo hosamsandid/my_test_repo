@@ -1,14 +1,16 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Workflow, Terminal,
-  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw, Ticket, ExternalLink,
+  History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 import { resolveHistoricalId, historyFetchLimit } from './session-default';
 import { findActiveSessionMatch, findFinishedSessionMatch } from '../github-event-session';
-import { describeTicket } from './ticket-view.js';
+import { useSessionsActive } from './SessionsActiveContext';
+import { removeSession } from './sessions-active';
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 /**
  * Merged "Sessions" tab (#543, extended in #544). Replaces the old standalone
@@ -46,7 +48,12 @@ import { describeTicket } from './ticket-view.js';
  * nothing is being viewed.
  */
 
-const POLL_MS = 3_000;
+// Coarse cadence for the elapsed-time re-render tick (#1680). "started 5m ago"
+// doesn't need 1s granularity, and a 1s tick re-rendered this panel every
+// second whenever it was open; 30s keeps the label fresh without the churn.
+// (The active-sessions list itself is polled once for all consumers by
+// SessionsActiveContext, #1678 — this panel no longer polls it locally.)
+const ELAPSED_TICK_MS = 30_000;
 const HISTORY_LIMIT = 100;
 
 function formatElapsed(startedAtIso) {
@@ -124,12 +131,17 @@ export default function SessionsPanel({
   hoveredCorrelationId, onHoverCorrelation,
   onResumeSession, selectRequest = null,
 }) {
-  const [sessions, setSessions] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  // Active sessions come from the shared per-agent poll (#1678) — no rail-local
+  // timer. `setSessions` is the shared optimistic surface (Stop, deep-link);
+  // `pollError` is the poll's own failure. Action failures (Stop) keep a local
+  // error so they surface in the same banner without being clobbered by a poll.
+  const { sessions, loading, error: pollError, refresh, setSessions } = useSessionsActive();
+  const [actionError, setActionError] = useState(null);
+  const error = actionError || pollError;
   const [selectedId, setSelectedId] = useState(null);
   const [stoppingId, setStoppingId] = useState(null);
-  // Force a re-render every second so elapsed-time labels tick between polls.
+  // Force a re-render on a coarse cadence so elapsed-time labels stay fresh
+  // between polls (see ELAPSED_TICK_MS — #1680).
   const [, setTick] = useState(0);
 
   // Historical sessions (#544). The dropdown is collapsed by default; the list
@@ -154,52 +166,16 @@ export default function SessionsPanel({
   // Non-blocking notice shown when a deep-link (#642) couldn't locate the
   // requested session (outside the history window, log pruned, no DM room, …).
   const [notFound, setNotFound] = useState(null); // { correlationId } | null
+  const [confirmResume, setConfirmResume] = useState(false); // resume would replace an active session
 
-  // Parent-ticket binding for this room (#1383, AC5) — surfaced above the
-  // session list so a reviewer can see which GitHub issue this work is about.
-  const [ticket, setTicket] = useState(null);
-  useEffect(() => {
-    if (!active || !agentId || !roomId) { setTicket(null); return undefined; }
-    let cancelled = false;
-    apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/session/${encodeURIComponent(roomId)}/ticket`)
-      .then(d => { if (!cancelled) setTicket(d?.ticket ?? null); })
-      .catch(() => { if (!cancelled) setTicket(null); });
-    return () => { cancelled = true; };
-  }, [active, agentId, roomId]);
-  const ticketView = describeTicket(ticket);
-
-  const fetchSessions = useCallback(async () => {
-    if (!agentId) return;
-    try {
-      const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
-      setSessions(Array.isArray(data?.sessions) ? data.sessions : []);
-      setError(null);
-    } catch (err) {
-      setError(err.message || 'failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }, [agentId]);
-
+  // The active-sessions list itself is polled once for all consumers by
+  // SessionsActiveContext (#1678); this panel only keeps a per-second tick so
+  // the elapsed-time labels advance between polls while the tab is visible.
   useEffect(() => {
     if (!active || !agentId) return undefined;
-    setLoading(true);
-    let cancelled = false;
-    let timer = null;
-    const loop = async () => {
-      if (cancelled) return;
-      await fetchSessions();
-      if (cancelled) return;
-      timer = setTimeout(loop, POLL_MS);
-    };
-    loop();
-    const tickTimer = setInterval(() => setTick(t => t + 1), 1000);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      clearInterval(tickTimer);
-    };
-  }, [active, agentId, fetchSessions]);
+    const tickTimer = setInterval(() => setTick(t => t + 1), ELAPSED_TICK_MS);
+    return () => clearInterval(tickTimer);
+  }, [active, agentId]);
 
   // Only the expanded dropdown (or a session picked out of it) needs the whole
   // page; resolving the default view needs just the newest slice (#910).
@@ -363,17 +339,20 @@ export default function SessionsPanel({
   const handleStop = useCallback(async (sessionId) => {
     if (!agentId || !sessionId || stoppingId) return;
     setStoppingId(sessionId);
+    setActionError(null);
     try {
       await apiCall('POST', `/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/stop`);
-      // Optimistically drop it — the next poll confirms. The runner posts the
-      // cancellation message to Matrix itself.
-      setSessions(prev => prev.filter(s => s.id !== sessionId));
+      // Optimistically drop it from the shared state — the badge and every
+      // consumer update at once; the next poll (or this refresh) confirms. The
+      // runner posts the cancellation message to Matrix itself.
+      setSessions(prev => removeSession(prev, sessionId));
+      refresh();
     } catch (err) {
-      setError(err.message || 'stop failed');
+      setActionError(err.message || 'stop failed');
     } finally {
       setStoppingId(null);
     }
-  }, [agentId, stoppingId]);
+  }, [agentId, stoppingId, setSessions, refresh]);
 
   const selectActive = useCallback((id) => {
     setHistoricalId(null);
@@ -398,57 +377,32 @@ export default function SessionsPanel({
   // confirm first (Open Question B). ChatPanel owns the pointer PUT + sending
   // the predefined message; we just hand it the chosen session-ID and switch
   // back to the live view so the resumed session shows as active (AC4).
-  const handleResume = useCallback(() => {
-    if (!historical || !canResumeSession(historical) || !onResumeSession) return;
-    if (resumeNeedsConfirm(sessions)) {
-      const ok = window.confirm(
-        'A session is currently active in this room. Resuming this finished '
-        + 'session will replace the active one (there is a single session per '
-        + 'room). Continue?',
-      );
-      if (!ok) return;
-    }
+  // Actually perform the resume (after any confirmation). ChatPanel owns the
+  // pointer PUT; we hand it the chosen session-ID and switch back to the live
+  // view so the resumed session shows as active (AC4).
+  const proceedResume = useCallback(() => {
+    if (!historical || !onResumeSession) return;
+    setConfirmResume(false);
     onResumeSession(historical.sessionId);
     // Switch from the read-only historical view to the live view; the resumed
     // session appears as the active session once the run starts.
     setHistoryPinned(false);
     setHistoricalId(null);
-  }, [historical, onResumeSession, sessions]);
+  }, [historical, onResumeSession]);
+
+  const handleResume = useCallback(() => {
+    if (!historical || !canResumeSession(historical) || !onResumeSession) return;
+    if (resumeNeedsConfirm(sessions)) {
+      // Overwriting a live session is irreversible — confirm through the shared
+      // styled dialog (consistent with every other console confirmation).
+      setConfirmResume(true);
+      return;
+    }
+    proceedResume();
+  }, [historical, onResumeSession, sessions, proceedResume]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {ticketView && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-2) var(--eb-space-4)',
-          borderBottom: '1px solid var(--eb-border-default)',
-          background: 'var(--eb-bg-surface)',
-          fontSize: 'var(--eb-text-xs)',
-          color: 'var(--eb-text-muted)',
-          flexShrink: 0,
-        }}>
-          <Ticket size={12} style={{ flexShrink: 0 }} />
-          <span style={{ flexShrink: 0 }}>Parent ticket:</span>
-          <a
-            href={ticketView.href}
-            target="_blank"
-            rel="noreferrer"
-            title={`${ticketView.repo} #${ticketView.number}${ticketView.title ? ' — ' + ticketView.title : ''}`}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 3, minWidth: 0,
-              color: ticketView.closed ? 'var(--eb-text-muted)' : 'var(--eb-accent-primary)',
-              textDecoration: 'none', overflow: 'hidden',
-            }}
-          >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {ticketView.label}{ticketView.closed ? ' (closed)' : ''}
-            </span>
-            <ExternalLink size={9} style={{ flexShrink: 0 }} />
-          </a>
-        </div>
-      )}
       {error && (
         <div role="alert" style={{
           padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -878,6 +832,20 @@ export default function SessionsPanel({
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
+
+      <ConfirmDialog
+        open={confirmResume}
+        title="Replace the active session?"
+        message={
+          'A session is currently active in this room. Resuming this finished '
+          + 'session will replace the active one — there is a single session per '
+          + 'room. Continue?'
+        }
+        variant="warning"
+        confirmLabel="Resume"
+        onConfirm={proceedResume}
+        onCancel={() => setConfirmResume(false)}
+      />
     </div>
   );
 }

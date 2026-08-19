@@ -1,0 +1,26 @@
+{
+  "pluginVersion": 1,
+  "id": "podman-sandbox",
+  "name": "Podman Container Sandbox",
+  "description": "Lets a granted agent spawn and manage its own containers without touching the host container runtime directly. A privilege-holding broker sidecar holds the Podman socket on the agent's behalf and stamps every container it creates with the caller's scope, so agents (or teams) sharing one broker never see or operate on each other's containers, and a per-scope quota caps how much each can run at once. Agents drive it with the dependency-free `aee-podman` command-line tool — for example `aee-podman run <image>` for a single container, or `aee-podman compose up -f compose.yml` for a multi-service stack. Runs on Podman only.",
+  "sidecar": {
+    "image": "localhost/aee-plugin-podman-sandbox:latest",
+    "capabilities": ["podman-socket"],
+    "internalPort": 4004
+  },
+  "cli": {
+    "name": "aee-podman",
+    "entrypoint": "bin/aee-podman.py",
+    "runtime": "python3"
+  },
+  "credentials": [],
+  "platforms": ["podman"],
+  "scopes": ["team", "agent"],
+  "defaultScopeGranularity": "agent",
+  "quota": {
+    "maxObjects": 8,
+    "ttlSeconds": 86400
+  },
+  "requiresApproval": [],
+  "promptLine": "You can spawn and manage your own container stacks through the Podman sandbox broker with `aee-podman` — run `aee-podman --help`. Containers you create are private to your scope; nothing you run is visible to other agents."
+}

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { apiCall } from '../hooks/useApi';
 import { transcribeAudio } from '../hooks/useVoiceRecorder.js';
 import {
@@ -11,7 +11,6 @@ import {
   assembleTranscript,
   countGaps,
   countResolved,
-  hasDeliverableContent,
   durationMinutes,
   formatTranscriptMessage,
   buildRecoveryRecord,
@@ -456,7 +455,10 @@ export function TranscriptionSessionProvider({ children }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const value = {
+  // Memoized so a provider re-render with unchanged inputs keeps a stable
+  // `value` identity: the action callbacks are already useCallback-stable and
+  // session/recovery are replaced (never mutated) on change.
+  const value = useMemo(() => ({
     session,
     recovery,
     active,
@@ -469,7 +471,10 @@ export function TranscriptionSessionProvider({ children }) {
     copyTranscript,
     deliverRecovery,
     discardRecovery,
-  };
+  }), [
+    session, recovery, active, startSession, pause, resume, stop, cancel,
+    retryDelivery, copyTranscript, deliverRecovery, discardRecovery,
+  ]);
 
   return (
     <TranscriptionSessionContext.Provider value={value}>

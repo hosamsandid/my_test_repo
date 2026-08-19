@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import {
   storageKey,
@@ -154,7 +154,10 @@ export function ModelSelectionProvider({ children }) {
 
   const attention = needsSelection(selection, options.providers);
 
-  const value = {
+  // Memoized so consumers don't re-render on an unrelated provider render:
+  // the callbacks are already useCallback-stable and every other field is
+  // primitive or a replaced-not-mutated object.
+  const value = useMemo(() => ({
     loading,
     options,
     providers: options.providers,
@@ -168,7 +171,10 @@ export function ModelSelectionProvider({ children }) {
     openPicker,
     closePicker,
     refetch: load,
-  };
+  }), [
+    loading, options, exclusionReason, selection, attention, pickerOpen,
+    select, clearSelection, openPicker, closePicker, load,
+  ]);
 
   return (
     <ModelSelectionContext.Provider value={value}>

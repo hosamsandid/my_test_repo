@@ -140,7 +140,7 @@ Today nobody records which skills actually landed in a workspace. `seedAgentWork
 (and the activation sync) writes/updates:
 
 ```
-/workspace/agents/<id>/.aee/seeded-skills.json
+/workspace/agents/<id>/.agent-studio/seeded-skills.json
 { "<skillName>": { "tier": "team" | "global", "seededAt": "<ISO>" } }
 ```
 

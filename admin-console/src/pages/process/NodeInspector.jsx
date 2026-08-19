@@ -6,7 +6,14 @@ import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
 import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
+import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
+import {
+  PROMPT_MODES,
+  PROMPT_MODE_LABELS,
+  resolvePromptMode,
+  composeMemberPrompt,
+} from '../prompt-mode-view.js';
 
 // Shared node inspector for the Flow Editor (#692). ONE component drives both
 // modes so the first-page layout, tab set, and routing wiring live in a single
@@ -160,7 +167,7 @@ export default function NodeInspector({
                     <input value={id}
                       onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
                       style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
-                    <span style={hint}>Lowercase letters, digits and hyphens. Renaming rewires all of this agent's inputs and hand-offs.</span>
+                    <span style={hint}>{ID_FORMAT_HINT} Renaming rewires all of this agent's inputs and hand-offs.</span>
                   </>
                 )}
               </Field>
@@ -253,10 +260,10 @@ export default function NodeInspector({
   );
 }
 
-// Live-only prompt editor — preserved verbatim from the old ProcessNodeInspector
-// PromptTab (#692): a team-member gets the inherit-from-team vs. custom-override
-// toggle (systemPrompt: null when inheriting), a non-member gets the file-based
-// prompt path (PUT /api/agents/:id/prompt). Self-contained with its own Save.
+// Live-only prompt editor — the old ProcessNodeInspector PromptTab (#692): a
+// team-member gets the three-mode system-prompt control (#1511: Inherit /
+// Additional input / Exclusive overriding input), a non-member gets the
+// file-based prompt path (PUT /api/agents/:id/prompt). Self-contained + own Save.
 function LivePromptEditor({ agentId, onChanged }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -264,7 +271,10 @@ function LivePromptEditor({ agentId, onChanged }) {
   const [saved, setSaved] = useState(false);
   const [mode, setMode] = useState('file');   // 'file' (AGENT-PROMPT.md) | 'member'
   const [text, setText] = useState('');
-  const [inherit, setInherit] = useState(false);
+  // Team-member system-prompt mode (#1511). One shared `text` field backs both
+  // additional (the addition) and exclusive (the full override) so switching
+  // between them keeps typed text.
+  const [promptMode, setPromptMode] = useState(PROMPT_MODES.INHERIT);
   const [inheritedPreview, setInheritedPreview] = useState('');
   // Bumped on save / revert so the editor text + history list re-fetch.
   const [reloadKey, setReloadKey] = useState(0);
@@ -277,8 +287,7 @@ function LivePromptEditor({ agentId, onChanged }) {
         if (!alive) return;
         if (cfg.role === 'team-member') {
           setMode('member');
-          const hasOverride = typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0;
-          setInherit(!hasOverride);
+          setPromptMode(resolvePromptMode(cfg));
           setText(cfg.systemPrompt || '');
           if (cfg.parentTeamId) {
             try {
@@ -304,7 +313,10 @@ function LivePromptEditor({ agentId, onChanged }) {
     setSaving(true); setError(null); setSaved(false);
     try {
       if (mode === 'member') {
-        await apiCall('PUT', `/api/agents/${agentId}`, { systemPrompt: inherit ? null : text });
+        await apiCall('PUT', `/api/agents/${agentId}`, {
+          promptMode,
+          systemPrompt: promptMode === PROMPT_MODES.INHERIT ? null : text,
+        });
       } else {
         await apiCall('PUT', `/api/agents/${agentId}/prompt`, { content: text });
       }
@@ -320,22 +332,33 @@ function LivePromptEditor({ agentId, onChanged }) {
 
   if (loading) return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading prompt…</span>;
 
-  const editingDisabled = mode === 'member' && inherit;
+  const memberInherit = mode === 'member' && promptMode === PROMPT_MODES.INHERIT;
+  // The main textarea is read-only only when inheriting (member) — it then
+  // previews the team template. Additional/exclusive/file all edit `text`.
+  const editingDisabled = memberInherit;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       {mode === 'member' && (
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          <input type="checkbox" checked={inherit} onChange={e => { setInherit(e.target.checked); setSaved(false); }} />
-          Inherit agent prompt from team
-        </label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {[PROMPT_MODES.INHERIT, PROMPT_MODES.ADDITIONAL, PROMPT_MODES.EXCLUSIVE].map(m => (
+            <label key={m} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
+              <input type="radio" checked={promptMode === m} onChange={() => { setPromptMode(m); setSaved(false); }} />
+              {PROMPT_MODE_LABELS[m]}
+            </label>
+          ))}
+        </div>
       )}
 
       <textarea
         value={editingDisabled ? inheritedPreview : text}
         onChange={e => { setText(e.target.value); setSaved(false); }}
         readOnly={editingDisabled}
-        placeholder={mode === 'member' ? 'Custom agent prompt for this member…' : 'AGENT-PROMPT.md…'}
+        placeholder={mode === 'member'
+          ? (promptMode === PROMPT_MODES.ADDITIONAL
+            ? 'Agent-specific instructions to append after the team prompt…'
+            : 'Full system prompt that replaces the team prompt…')
+          : 'AGENT-PROMPT.md…'}
         style={{
           width: '100%', minHeight: 220, resize: 'vertical', boxSizing: 'border-box',
           fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5,
@@ -347,8 +370,22 @@ function LivePromptEditor({ agentId, onChanged }) {
       />
       {editingDisabled && (
         <span style={hint}>
-          Showing the team template (read-only). Untick “Inherit” to set a custom prompt for this member.
+          Showing the team template (read-only). Choose “Additional input” or “Exclusive overriding input” to set a prompt for this member.
         </span>
+      )}
+      {mode === 'member' && promptMode === PROMPT_MODES.ADDITIONAL && (
+        <>
+          <span style={hint}>Effective prompt preview (team prompt + your addition):</span>
+          <div style={{
+            width: '100%', maxHeight: 220, overflow: 'auto', boxSizing: 'border-box',
+            whiteSpace: 'pre-wrap', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)',
+            lineHeight: 1.5, background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-muted)',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)',
+          }}>
+            {composeMemberPrompt(PROMPT_MODES.ADDITIONAL, inheritedPreview, text) || '(the team prompt is empty)'}
+          </div>
+        </>
       )}
 
       {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}

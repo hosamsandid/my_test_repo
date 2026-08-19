@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""aee-gke — GKE cluster access plugin CLI facade (READ-ONLY pilot).
+
+Dependency-free single file (concept §4.5): stdlib only, no pip installs. It is
+seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
+broker endpoint + per-scope token from `.agent-studio/plugins/gke.json` (0600,
+written at seed time by plugin-sync.js).
+
+The broker (plugins/gke/broker/server.js) holds the Google OAuth credential, refreshes
+the ~1h access token itself, and runs kubectl against the GCP Connect Gateway.
+This CLI is a privilege-less client: it forwards a read-only kubectl arg-vector
+to the broker and carries the scope token. All security lives in the broker —
+it re-checks the scope token AND allowlists the kubectl verb, so a rogue agent
+cannot smuggle a write verb through.
+
+Read verbs only (the broker refuses anything else): get, describe, logs,
+api-resources, top, explain, version.
+
+    aee-gke get ns
+    aee-gke get pods -n platform -o wide
+    aee-gke describe deploy mimir-nginx -n platform
+    aee-gke logs <pod> -n <ns> --tail 100
+    aee-gke api-resources
+    aee-gke status                 # is the broker signed in to GCP? whoami?
+
+Contract (§4.5): `--json` on every subcommand; exit codes 0 ok / 1 domain error
+/ 2 usage / 3 broker unreachable; `--help` carries the full agent-readable docs.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+PLUGIN_ID = "gke"
+
+EXIT_OK = 0
+EXIT_DOMAIN_ERROR = 1
+EXIT_USAGE = 2
+EXIT_BROKER_UNREACHABLE = 3
+
+MCP_PATH = "/mcp"
+
+# Read-only kubectl verbs the CLI will forward. The broker enforces the SAME
+# allowlist server-side — this is a friendly early exit, not the security gate.
+READ_VERBS = frozenset(
+    {"get", "describe", "logs", "api-resources", "api-versions", "top",
+     "explain", "version", "cluster-info"}
+)
+
+
+def _config_path():
+    ws = os.environ.get("AEE_WORKSPACE", os.path.expanduser("~"))
+    new = os.path.join(ws, ".agent-studio", "plugins", f"{PLUGIN_ID}.json")
+    legacy = os.path.join(ws, ".aee", "plugins", f"{PLUGIN_ID}.json")
+    if os.path.exists(new) or not os.path.exists(legacy):
+        return new
+    return legacy
+
+
+def load_config():
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+class BrokerUnreachable(Exception):
+    pass
+
+
+class BrokerDomainError(Exception):
+    pass
+
+
+def _call_broker(cfg, tool, arguments):
+    """Run one MCP tool call against the broker over Streamable-HTTP.
+
+    initialize -> notifications/initialized -> tools/call, parsing the SSE
+    `data:` frames the transport emits. Connection-level failures raise
+    BrokerUnreachable (exit 3); a reachable broker returning an error raises
+    BrokerDomainError (exit 1).
+    """
+    base = cfg.get("endpoint")
+    token = cfg.get("token")
+    if not base:
+        raise BrokerUnreachable("no broker endpoint in config")
+    url = base.rstrip("/") + MCP_PATH
+
+    session = {"id": None}
+
+    def post(payload):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if token:
+            headers["Authorization"] = "Bearer %s" % token
+        if session["id"]:
+            headers["Mcp-Session-Id"] = session["id"]
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                sid = resp.headers.get("Mcp-Session-Id")
+                if sid:
+                    session["id"] = sid
+                if resp.status == 202:
+                    return None
+                for raw in resp:
+                    line = raw.decode(errors="replace").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data:
+                            return json.loads(data)
+                return None
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            raise BrokerDomainError("broker HTTP %s: %s" % (e.code, body[:400])) from e
+        except (urllib.error.URLError, OSError) as e:
+            raise BrokerUnreachable("cannot reach broker at %s: %s" % (url, e)) from e
+
+    post({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "aee-gke", "version": "1.0"}},
+    })
+    post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    resp = post({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    })
+
+    if resp is None:
+        raise BrokerDomainError("no response from broker for tool '%s'" % tool)
+    if "error" in resp:
+        err = resp["error"]
+        raise BrokerDomainError("broker error %s: %s" % (err.get("code"), err.get("message")))
+    result = resp.get("result") or {}
+    parts = result.get("content") or []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    return text, bool(result.get("isError"))
+
+
+def emit(text, as_json, is_error):
+    if as_json:
+        print(json.dumps({"ok": not is_error, "output": text}))
+    else:
+        stream = sys.stderr if is_error else sys.stdout
+        print(text, file=stream)
+
+
+HELP = __doc__
+
+
+def main(argv):
+    args = list(argv)
+    as_json = False
+    if "--json" in args:
+        as_json = True
+        args = [a for a in args if a != "--json"]
+
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(HELP)
+        return EXIT_OK if args and args[0] in ("-h", "--help", "help") else EXIT_USAGE
+
+    cfg = load_config()
+    if not cfg:
+        emit("plugin not granted to this agent (no gke config seeded)", as_json, True)
+        return EXIT_DOMAIN_ERROR
+
+    verb = args[0]
+
+    # `status` / `whoami` — is the broker signed in to GCP, and as whom.
+    if verb in ("status", "whoami"):
+        tool, tool_args = "auth_status", {}
+    elif verb in READ_VERBS:
+        tool, tool_args = "kube_read", {"argv": args}
+    else:
+        emit(
+            "refused: '%s' is not a read verb. Allowed: %s"
+            % (verb, ", ".join(sorted(READ_VERBS))),
+            as_json, True,
+        )
+        return EXIT_USAGE
+
+    try:
+        text, is_error = _call_broker(cfg, tool, tool_args)
+    except BrokerUnreachable as e:
+        emit(str(e), as_json, True)
+        return EXIT_BROKER_UNREACHABLE
+    except BrokerDomainError as e:
+        emit(str(e), as_json, True)
+        return EXIT_DOMAIN_ERROR
+
+    emit(text, as_json, is_error)
+    return EXIT_DOMAIN_ERROR if is_error else EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

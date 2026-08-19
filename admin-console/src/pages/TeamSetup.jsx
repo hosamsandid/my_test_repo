@@ -1,8 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router';
 import {
-  ArrowLeft, ArrowRight, Check, AlertCircle, CheckCircle, Github,
-  Loader2, Circle, XCircle,
+  ArrowLeft, ArrowRight, Check, AlertCircle, Github,
   Layers, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
@@ -12,6 +11,12 @@ import KnowledgeLearningSections, {
 } from '../components/KnowledgeLearningConfig';
 import StepProcess, { BundleRolesSummary, BundleFlowPreview, LintBadges } from './team-setup/StepProcess';
 import { buildReviewFields } from './team-setup/review-fields';
+// The shared "Launch" step (#1668, epic #1661 Phase E) — the same component the
+// Flows-canvas Materialize dialog renders, so the two front doors that turn a
+// design into running agents can't diverge. It owns the streaming submit +
+// progress/collision/error feedback; the wizard collects the team identity on
+// its earlier steps and shows only the extend / materialize-now toggles here.
+import LaunchStep from './process/LaunchStep';
 
 const inputStyle = {
   width: '100%',
@@ -89,8 +94,9 @@ function ErrorBox({ message }) {
 }
 
 // Process first (#428): the process choice is the entry decision — everything
-// else (environment, name, knowledge) qualifies it. As step 1, "Start blank in
-// the canvas" exits without losing any entered configuration.
+// else (environment, name, knowledge) qualifies it. The step lands directly on
+// the template/draft gallery (#1703); describe/blank-canvas authoring lives in
+// the "+ Create" launcher.
 const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
 
 function StepIndicator({ current, onStepClick }) {
@@ -308,7 +314,10 @@ function envRepositories(env) {
 
 function EnvironmentCard({ env, selected, onSelect }) {
   const repos = envRepositories(env);
-  const selectable = repos.length > 0;
+  // Repo-less environments are selectable too (#1623 / #1668 AC6): the team runs
+  // without a repository — chat + skills only, no GitHub hand-offs. The card
+  // still says so, but no longer blocks the pick.
+  const selectable = true;
   return (
     <div
       onClick={selectable ? onSelect : undefined}
@@ -366,9 +375,9 @@ function EnvironmentCard({ env, selected, onSelect }) {
               </span>
             </div>
           )) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: 'var(--eb-text-muted)' }}>
               <AlertCircle size={12} style={{ flexShrink: 0 }} />
-              No repository configured — a team needs one. Add it under Working Environments.
+              No repository — the team runs without one (chat + skills only; no GitHub hand-offs).
             </div>
           )}
           {repos.length > 0 && !env.githubTokenId && (
@@ -711,95 +720,14 @@ function ReviewRow({ label, value }) {
   );
 }
 
-// ─── Live progress card ──────────────────────────────────────────────
-// Renders one row per planned step. Status comes from the streaming
-// /api/teams/stream endpoint (one NDJSON event per status transition).
-function spin() {
-  // CSS animation defined inline so we don't have to touch tokens.css.
-  return {
-    animation: 'team-setup-spin 0.9s linear infinite',
-  };
-}
-
-function StepIcon({ status }) {
-  if (status === 'done') {
-    return <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0 }} />;
-  }
-  if (status === 'running') {
-    return <Loader2 size={16} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0, ...spin() }} />;
-  }
-  if (status === 'error') {
-    return <XCircle size={16} style={{ color: 'var(--eb-status-error)', flexShrink: 0 }} />;
-  }
-  return <Circle size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, opacity: 0.6 }} />;
-}
-
-function ProgressCard({ steps, error }) {
-  const total = steps.length;
-  const done = steps.filter(s => s.status === 'done').length;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  return (
-    <Card>
-      <style>{`@keyframes team-setup-spin { to { transform: rotate(360deg); } }`}</style>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--eb-space-3)' }}>
-        <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-          Materializing team…
-        </div>
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontFamily: 'var(--eb-font-mono)' }}>
-          {done} / {total}
-        </div>
-      </div>
-      <div style={{
-        height: 6, borderRadius: 999, background: 'var(--eb-bg-elevated)',
-        overflow: 'hidden', marginBottom: 'var(--eb-space-4)',
-      }}>
-        <div style={{
-          width: `${pct}%`, height: '100%',
-          background: error ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)',
-          transition: 'width 0.25s ease-out',
-        }} />
-      </div>
-      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-        {steps.map(s => (
-          <li key={s.id} style={{
-            display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
-            fontSize: 'var(--eb-text-sm)',
-            color: s.status === 'pending' ? 'var(--eb-text-muted)' : 'var(--eb-text-primary)',
-          }}>
-            <span style={{ marginTop: 2 }}>
-              <StepIcon status={s.status} />
-            </span>
-            <span style={{ flex: 1, lineHeight: 1.4 }}>
-              {s.label}
-              {s.error && (
-                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 2 }}>
-                  {s.error}
-                </div>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {error && (
-        <div style={{ marginTop: 'var(--eb-space-4)' }}>
-          <ErrorBox message={error} />
-        </div>
-      )}
-    </Card>
-  );
-}
-
 // ─── Main wizard ─────────────────────────────────────────────────────
 export default function TeamSetup() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [stepError, setStepError] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [collisionInfo, setCollisionInfo] = useState(null);
-  const [result, setResult] = useState(null);
-  const [progressSteps, setProgressSteps] = useState(null);
-  const [progressError, setProgressError] = useState(null);
-  const [matWarnings, setMatWarnings] = useState([]);
+  // The shared LaunchStep owns the submit/progress state now; the wizard only
+  // needs to know when a launch is in flight (to lock the Back button).
+  const [launchBusy, setLaunchBusy] = useState(false);
 
   const [form, setForm] = useState({
     teamName: '',
@@ -813,6 +741,11 @@ export default function TeamSetup() {
     dispatchLabel: 'dispatch',
     maxParallel: 1,
     labelSuffix: '',
+    // Launch toggles surfaced by the shared LaunchStep on the Review step.
+    // materializeNow defaults on — the wizard has always materialized members
+    // immediately (the backend default), now made explicit (#1668).
+    extend: false,
+    materializeNow: true,
     sshKeyId: '',
     githubTokenId: '',
     mcpSelections: [],
@@ -827,7 +760,7 @@ export default function TeamSetup() {
     },
     // Process step (#422): the selected process-template bundle drives
     // team creation.
-    processMode: null,        // null | 'template' | 'describe'
+    processMode: null,        // null | 'template' (describe/blank moved to "+ Create", #1703)
     processTemplateId: null,  // 'registry:<id>' | 'draft:<id>'
     processBundle: null,      // processTemplateVersion-1 bundle
     processLints: null,       // authoritative lints for the current bundle
@@ -901,7 +834,7 @@ export default function TeamSetup() {
   function validateStep() {
     if (step === 0) {
       if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
-        return 'Pick a process template or describe a flow first';
+        return 'Pick a process template or saved draft first';
       }
       if ((form.processLints || []).some(l => l.severity === 'error')) {
         return 'The process has wiring errors — fix them before continuing';
@@ -910,7 +843,8 @@ export default function TeamSetup() {
     }
     if (step === 1) {
       if (!form.environmentId) return 'Pick a working environment';
-      if (!form.repoUrl.trim()) return 'The selected working environment has no repository — add one first';
+      // A repo-less environment is a valid target (#1623 / #1668 AC6) — no repo
+      // requirement here.
       return null;
     }
     if (step === 2) {
@@ -933,7 +867,6 @@ export default function TeamSetup() {
   }
   function back() {
     setStepError(null);
-    setCollisionInfo(null);
     setStep(s => Math.max(s - 1, 0));
   }
 
@@ -944,130 +877,39 @@ export default function TeamSetup() {
     return ba || (created || [])[0] || null;
   }
 
-  // mode is 'create' by default; the collision card re-submits the same bundle
-  // with 'extend' to add only the members that don't already exist.
-  async function submit(mode = 'create') {
-    setStepError(null);
-    setCollisionInfo(null);
-    setProgressError(null);
-    setProgressSteps(null);
-    setMatWarnings([]);
-    setSubmitting(true);
-
-    const body = {
-      teamId: form.teamId,
-      teamName: form.teamName.trim(),
-      // The wizard reuses an existing Working Environment: the backend resolves
-      // repository + credentials + MCP set from environmentId. The legacy
-      // repository/githubTokenId/mcpServers fields are only sent as a fallback
-      // when no environment id is known.
-      ...(form.environmentId
-        ? { environmentId: form.environmentId }
-        : {
-            repository: { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId },
-            githubTokenId: form.githubTokenId,
-            mcpServers: (form.mcpSelections || []).filter(s => s.serverId),
-          }),
+  // Entry-point-specific POST fields the shared LaunchStep passes through as
+  // `extra` (the canonical teamId/teamName/mode/environmentId/labelSuffix/
+  // materializeMembers/processTemplate are built by buildLaunchBody). The legacy
+  // repository/githubTokenId/mcpServers fallback is only sent when no
+  // environmentId is known (never today — the env step requires one).
+  function launchExtraBody() {
+    const extra = {
       readyLabel: (form.readyLabel || 'ready').trim() || 'ready',
       dispatchLabel: (form.dispatchLabel || 'dispatch').trim() || 'dispatch',
       maxParallel: Number.isInteger(form.maxParallel) ? form.maxParallel : 1,
-      ...(form.labelSuffix ? { labelSuffix: form.labelSuffix } : {}),
-      mode,
       // Initial team skill set — placed on the team agent.
       skills: form.skills || [],
     };
-    // Knowledge learning config (#567) — autonomy/review/gates. Persisted onto
-    // the new team after creation; the backend drops it when it matches the
-    // defaults (no behaviour change vs today's wizard, AC-4).
-    if (form.knowledgeConfig) body.knowledgeConfig = form.knowledgeConfig;
-    // Ship the Process step's bundle (#422). With Process as step 1 the team
-    // name isn't known when the bundle is selected — bind the bundle name to
-    // the team name at submit time instead (#428).
-    if (form.processBundle) {
-      body.processTemplate = { ...form.processBundle, name: form.teamName.trim() || form.processBundle.name };
+    // Knowledge learning config (#567) — the backend drops it when it matches
+    // the defaults (no behaviour change vs today's wizard, AC-4).
+    if (form.knowledgeConfig) extra.knowledgeConfig = form.knowledgeConfig;
+    if (!form.environmentId) {
+      extra.repository = { url: form.repoUrl.trim(), branch: form.branch.trim() || 'main', sshKeyId: form.sshKeyId };
+      extra.githubTokenId = form.githubTokenId;
+      extra.mcpServers = (form.mcpSelections || []).filter(s => s.serverId);
     }
+    return extra;
+  }
 
-    let res;
-    try {
-      res = await fetch('/api/teams/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      setStepError(err.message || String(err));
-      setSubmitting(false);
-      return;
-    }
-
-    if (!res.ok && !res.body) {
-      const data = await res.json().catch(() => ({}));
-      setStepError(data.error || `HTTP ${res.status}`);
-      setSubmitting(false);
-      return;
-    }
-
-    // NDJSON stream: split on newlines, ignore blank/partial lines.
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buf = '';
-    const handleEvent = (ev) => {
-      if (ev.type === 'plan') {
-        setProgressSteps(ev.steps.map(s => ({ ...s, status: 'pending' })));
-      } else if (ev.type === 'step') {
-        setProgressSteps(prev => prev
-          ? prev.map(s => s.id === ev.id ? { ...s, status: ev.status, error: ev.error || s.error } : s)
-          : prev);
-      } else if (ev.type === 'collision') {
-        // The process-template flow has no role-card UI to fall back to — keep
-        // the current step and offer "Add missing roles" (mode: extend
-        // re-submits the same bundle, adding only the members that don't exist).
-        setCollisionInfo({ existing: ev.existing, suggestion: ev.suggestion });
-        setProgressSteps(null);
-      } else if (ev.type === 'complete') {
-        setResult(ev.result);
-        const land = landingAgent(ev.result?.created);
-        setTimeout(() => {
-          if (land) navigate(`/chats/${land}`);
-          else navigate('/agents');
-        }, 1500);
-      } else if (ev.type === 'warning') {
-        setMatWarnings(prev => [...prev, ev.message]);
-      } else if (ev.type === 'error') {
-        // Backend already marked any in-flight step as `error`; surface the
-        // top-level message in the progress card and as the form-level error
-        // so users see it whether or not the plan was rendered.
-        setProgressError(ev.error || `HTTP ${ev.status || 500}`);
-        setStepError(ev.error || `HTTP ${ev.status || 500}`);
-      }
-    };
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          try { handleEvent(JSON.parse(line)); }
-          catch (e) { console.warn('[TeamSetup] bad NDJSON line:', line, e); }
-        }
-      }
-      // Flush any trailing partial line (defensive — server always closes
-      // with a newline, but a dropped connection mid-line shouldn't crash).
-      const tail = buf.trim();
-      if (tail) {
-        try { handleEvent(JSON.parse(tail)); } catch { /* ignore */ }
-      }
-    } catch (err) {
-      setProgressError(err.message || String(err));
-      setStepError(err.message || String(err));
-    } finally {
-      setSubmitting(false);
-    }
+  // On a successful launch, land on the Business Analyst chat when it was
+  // created, else the first created agent (unchanged behaviour). Keep the brief
+  // success card visible before navigating away.
+  function onLaunchComplete(result) {
+    const land = landingAgent(result?.created);
+    setTimeout(() => {
+      if (land) navigate(`/chats/${land}`);
+      else navigate('/agents');
+    }, 1500);
   }
 
   const stepProps = { form, setForm };
@@ -1149,119 +991,58 @@ export default function TeamSetup() {
         />
       )}
 
-      {progressSteps && !result && (
-        <ProgressCard steps={progressSteps} error={progressError} />
-      )}
-
-      {/* Creation failed: reassure that the backend rolled everything back
-          (members → team → env, so no half-built team lingers) and offer a
-          one-click Retry that re-runs the same create. Collisions have their
-          own card, so this stays out of their way. */}
-      {progressError && !result && !collisionInfo && (
-        <Card accent="var(--eb-status-error)">
-          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
-            <AlertTriangle size={20} style={{ color: 'var(--eb-status-error)', flexShrink: 0, marginTop: 2 }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-                Team creation failed
-              </div>
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
-                No partial team was left behind — every resource created during this attempt
-                (members, then the team, then the working environment) was rolled back. Fix the
-                issue above and try again.
-              </div>
-              <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                <button
-                  type="button"
-                  onClick={() => submit('create')}
-                  disabled={submitting}
-                  style={primaryButtonStyle(submitting)}
-                >
-                  {submitting ? 'Retrying…' : <><RefreshCw size={16} /> Retry</>}
-                </button>
-              </div>
-            </div>
-          </div>
-        </Card>
-      )}
-
-      {collisionInfo && (
-        <Card accent="var(--eb-status-warning)">
-          <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>
-            Some resources for team <code>{form.teamId}</code> already exist.
-          </div>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-3)' }}>
-            {collisionInfo.existing?.env && <>Env: <code>{collisionInfo.existing.env}</code><br /></>}
-            {collisionInfo.existing?.team && <>Team: <code>{collisionInfo.existing.team}</code><br /></>}
-            {collisionInfo.existing?.members?.length > 0 && <>Members: {collisionInfo.existing.members.join(', ')}</>}
-          </div>
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <button type="button" onClick={() => submit('extend')}
-              disabled={submitting}
-              style={primaryButtonStyle(submitting)}>
-              {submitting ? 'Adding…' : 'Add missing agents'}
-            </button>
-            <button type="button" onClick={() => setCollisionInfo(null)}
-              style={secondaryButtonStyle()}>Cancel</button>
-          </div>
-        </Card>
-      )}
-
-      {result && (
-        <Card accent="var(--eb-status-success)">
-          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
-            <CheckCircle size={20} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />
-            <div>
-              <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-                {result.message
-                  ? `Team ${result.teamName}: ${result.message}`
-                  : `Team ${result.teamName} ready — ${result.created?.length || 0} agent(s) created.`}
-              </div>
-              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
-                {landingAgent(result.created) ? 'Redirecting to chat…' : 'Redirecting to Agents page…'}
-              </div>
-            </div>
-          </div>
-        </Card>
-      )}
-      {matWarnings.length > 0 && (
-        <Card accent="var(--eb-status-warning)">
-          <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)', marginBottom: 'var(--eb-space-2)' }}>
-            Label suffix — coverage warnings
-          </div>
-          <ul style={{ margin: 0, padding: '0 0 0 var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-            {matWarnings.map((w, i) => <li key={i}>{w}</li>)}
-          </ul>
-        </Card>
-      )}
-
-      {!result && (
+      {/* Non-final steps keep the Back / Next nav. */}
+      {!isLast && (
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--eb-space-3)' }}>
           <button
             type="button"
             onClick={back}
-            disabled={step === 0 || submitting}
+            disabled={step === 0}
             style={{
               ...secondaryButtonStyle(),
-              opacity: step === 0 || submitting ? 0.4 : 1,
-              cursor: step === 0 || submitting ? 'not-allowed' : 'pointer',
+              opacity: step === 0 ? 0.4 : 1,
+              cursor: step === 0 ? 'not-allowed' : 'pointer',
             }}
           >
             <ArrowLeft size={16} /> Back
           </button>
-
-          {!isLast && (
-            <button type="button" onClick={next} disabled={tplLoading || submitting} style={primaryButtonStyle(submitting || tplLoading)}>
-              Next <ArrowRight size={16} />
-            </button>
-          )}
-          {isLast && (
-            <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryButtonStyle(submitting)}>
-              {submitting ? 'Creating team…' : 'Create team'}
-              {!submitting && <ArrowRight size={16} />}
-            </button>
-          )}
+          <button type="button" onClick={next} disabled={tplLoading} style={primaryButtonStyle(tplLoading)}>
+            Next <ArrowRight size={16} />
+          </button>
         </div>
+      )}
+
+      {/* The final step delegates the launch to the shared LaunchStep — the same
+          component the Flows-canvas Materialize dialog renders (#1668). The team
+          identity + environment are already collected on earlier steps, so only
+          the extend / materialize-now toggles show here; LaunchStep owns the
+          "Create team" button, the streaming submit, and the progress /
+          collision / rollback / success feedback. */}
+      {isLast && (
+        <LaunchStep
+          bundle={form.processBundle}
+          environments={environments}
+          values={form}
+          onChange={patch => setForm(f => ({ ...f, ...patch }))}
+          fields={['extend', 'materializeNow']}
+          extraBody={launchExtraBody()}
+          onComplete={onLaunchComplete}
+          onBusyChange={setLaunchBusy}
+          leftAction={(
+            <button
+              type="button"
+              onClick={back}
+              disabled={launchBusy}
+              style={{
+                ...secondaryButtonStyle(),
+                opacity: launchBusy ? 0.4 : 1,
+                cursor: launchBusy ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <ArrowLeft size={16} /> Back
+            </button>
+          )}
+        />
       )}
     </div>
   );

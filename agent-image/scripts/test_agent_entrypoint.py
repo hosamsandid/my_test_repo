@@ -102,6 +102,213 @@ class FormatAskUserQuestion(unittest.TestCase):
         self.assertNotIn("no label", out)
 
 
+class AskUserQuestionPayload(unittest.TestCase):
+    fn = staticmethod(entrypoint._ask_user_question_payload)
+
+    def test_single_choice_payload_shape(self):
+        out = self.fn({
+            "questions": [{
+                "header": "Auth method",
+                "question": "Which auth method should we use?",
+                "options": [
+                    {"label": "OAuth", "description": "Delegated login"},
+                    {"label": "API key"},
+                ],
+            }],
+        })
+        self.assertEqual(out["version"], 1)
+        self.assertEqual(len(out["questions"]), 1)
+        q = out["questions"][0]
+        self.assertEqual(q["questionId"], "q0")
+        self.assertEqual(q["header"], "Auth method")
+        self.assertEqual(q["question"], "Which auth method should we use?")
+        self.assertEqual(q["options"][0], {
+            "optionId": "0:0", "label": "OAuth", "description": "Delegated login",
+        })
+        # An option with no description omits the key entirely.
+        self.assertEqual(q["options"][1], {"optionId": "0:1", "label": "API key"})
+
+    def test_multiselect_excluded_from_interactive_payload(self):
+        # A multiSelect question is single-select-only in the MVP (D1/AC4):
+        # dropped from the structured payload (still in the text body).
+        self.assertIsNone(self.fn({"questions": [{
+            "header": "H", "question": "Pick some", "multiSelect": True,
+            "options": [{"label": "A"}, {"label": "B"}],
+        }]}))
+
+    def test_multiselect_mixed_keeps_single_choice_only(self):
+        out = self.fn({"questions": [
+            {"header": "Q1", "question": "One?", "options": [{"label": "A"}]},
+            {"header": "Q2", "question": "Many?", "multiSelect": True,
+             "options": [{"label": "B"}, {"label": "C"}]},
+        ]})
+        self.assertEqual(len(out["questions"]), 1)
+        self.assertEqual(out["questions"][0]["questionId"], "q0")
+
+    def test_option_ids_unique_across_questions(self):
+        out = self.fn({"questions": [
+            {"question": "One?", "options": [{"label": "A"}, {"label": "B"}]},
+            {"question": "Two?", "options": [{"label": "C"}]},
+        ]})
+        ids = [o["optionId"] for q in out["questions"] for o in q["options"]]
+        self.assertEqual(ids, ["0:0", "0:1", "1:0"])
+        self.assertEqual(len(set(ids)), len(ids))
+
+    def test_malformed_options_skipped(self):
+        out = self.fn({"questions": [{
+            "question": "Q",
+            "options": [None, "bad", {"description": "no label"}, {"label": "Good"}],
+        }]})
+        self.assertEqual(len(out["questions"][0]["options"]), 1)
+        self.assertEqual(out["questions"][0]["options"][0]["label"], "Good")
+
+    def test_invalid_inputs_return_none(self):
+        for bad in (None, "nope", 42, {}, {"questions": []}, {"questions": "x"}):
+            self.assertIsNone(self.fn(bad))
+
+    def test_all_empty_questions_return_none(self):
+        self.assertIsNone(self.fn({"questions": [{}, {"options": []}]}))
+
+
+class AskUserQuestionReachable(unittest.TestCase):
+    """AskUserQuestion is offered headlessly via the bundled MCP server (#1712)."""
+
+    def test_is_ask_user_question_tool_matches_bare_and_namespaced(self):
+        fn = entrypoint._is_ask_user_question_tool
+        self.assertTrue(fn("AskUserQuestion"))                       # built-in
+        self.assertTrue(fn("mcp__aee-ask__AskUserQuestion"))         # bundled MCP
+        self.assertTrue(fn("mcp__other-server__AskUserQuestion"))    # any server
+        self.assertEqual(fn("mcp__aee-ask__AskUserQuestion"),
+                         entrypoint._is_ask_user_question_tool(entrypoint._ASK_USER_MCP_TOOL))
+
+    def test_is_ask_user_question_tool_rejects_others(self):
+        fn = entrypoint._is_ask_user_question_tool
+        for bad in (None, "", 42, "Bash", "AskUserQuestionX",
+                    "AskUserQuestionExtra", "mcp__aee-ask__SomethingElse"):
+            self.assertFalse(fn(bad))
+
+    def test_mcp_config_registers_bundled_server(self):
+        import json as _json
+        cfg = _json.loads(entrypoint._ask_user_mcp_config())
+        server = cfg["mcpServers"][entrypoint._ASK_USER_MCP_KEY]
+        self.assertEqual(server["command"], "python3")
+        self.assertEqual(server["args"], [str(entrypoint._ASK_USER_MCP_SERVER)])
+        # The namespaced tool name is derived from the same key.
+        self.assertEqual(entrypoint._ASK_USER_MCP_TOOL,
+                         f"mcp__{entrypoint._ASK_USER_MCP_KEY}__AskUserQuestion")
+
+    def test_base_claude_args_offers_and_allows_the_tool(self):
+        args = entrypoint._base_claude_args("hi", "", None)
+        # The MCP server is registered ...
+        self.assertIn("--mcp-config", args)
+        cfg = args[args.index("--mcp-config") + 1]
+        self.assertIn(entrypoint._ASK_USER_MCP_KEY, cfg)
+        # ... and the namespaced tool is on the allow list.
+        allowed = {args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"}
+        self.assertIn(entrypoint._ASK_USER_MCP_TOOL, allowed)
+
+    def test_base_claude_args_keeps_prompt_off_argv(self):
+        # #1727: the prompt is delivered on stdin, never as an argv argument, so
+        # an option-like leading character can't be parsed as a CLI flag. The
+        # builder emits the boolean `--print` and no `-p <prompt>` pair.
+        prompt = "„Zeig mir die Pods"
+        args = entrypoint._base_claude_args(prompt, "mem-hint", "some-model")
+        self.assertIn("--print", args)
+        self.assertNotIn("-p", args)
+        self.assertNotIn(prompt, args)
+        # A dash-leading prompt likewise never reaches argv (would be an option).
+        self.assertNotIn("-v please explain this",
+                         entrypoint._base_claude_args("-v please explain this",
+                                                      "", None))
+        # Existing invocation features are untouched.
+        self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+        self.assertEqual(args[args.index("--model") + 1], "some-model")
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "mem-hint")
+
+
+class AskUserMcpServer(unittest.TestCase):
+    """Drive the bundled ask-user-mcp.py stdio server over JSON-RPC."""
+
+    _SERVER = Path(__file__).resolve().parent / "ask-user-mcp.py"
+
+    def _rpc(self, requests):
+        import json as _json
+        proc = subprocess.run(
+            ["python3", str(self._SERVER)],
+            input="\n".join(_json.dumps(r) for r in requests) + "\n",
+            capture_output=True, text=True, timeout=15,
+        )
+        return [_json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+
+    def test_initialize_advertises_tools_capability(self):
+        out = self._rpc([{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                          "params": {}}])
+        self.assertEqual(out[0]["id"], 1)
+        self.assertIn("tools", out[0]["result"]["capabilities"])
+        self.assertEqual(out[0]["result"]["serverInfo"]["name"], "aee-ask")
+
+    def test_tools_list_exposes_ask_user_question_with_questions_schema(self):
+        out = self._rpc([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
+        tools = out[0]["result"]["tools"]
+        self.assertEqual(len(tools), 1)
+        tool = tools[0]
+        self.assertEqual(tool["name"], "AskUserQuestion")
+        props = tool["inputSchema"]["properties"]
+        self.assertIn("questions", props)
+        # Shape must match what _format_ask_user_question / _payload consume.
+        qprops = props["questions"]["items"]["properties"]
+        self.assertEqual(set(qprops), {"header", "question", "options", "multiSelect"})
+
+    def test_tools_call_returns_non_error_stop_instruction(self):
+        out = self._rpc([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                          "params": {"name": "AskUserQuestion",
+                                     "arguments": {"questions": [
+                                         {"question": "A or B?",
+                                          "options": [{"label": "A"}]}]}}}])
+        res = out[0]["result"]
+        self.assertNotIn("error", out[0])
+        text = res["content"][0]["text"]
+        self.assertIn("END YOUR TURN", text.upper())
+
+    def test_unknown_request_gets_error_notification_ignored(self):
+        out = self._rpc([
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},   # ignored
+            {"jsonrpc": "2.0", "id": 9, "method": "no/such/method"},     # error
+        ])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["id"], 9)
+        self.assertEqual(out[0]["error"]["code"], -32601)
+
+
+class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
+    """The stream mapper + intercept predicate recognise the MCP-namespaced
+    tool_use the model actually emits, feeding the existing #447/#1663 render."""
+
+    def test_mapper_carries_namespaced_tool_name_and_intercept_matches(self):
+        import json as _json
+        line = _json.dumps({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "mcp__aee-ask__AskUserQuestion",
+                "input": {"questions": [{"header": "Deploy",
+                                         "question": "Staging or prod first?",
+                                         "options": [{"label": "Staging"},
+                                                     {"label": "Prod"}]}]},
+            }]},
+        })
+        events = [e for e in map_stream_json_line(line, "corr-1", {})
+                  if e.get("type") == "tool_use"]
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev["tool"], "mcp__aee-ask__AskUserQuestion")
+        self.assertTrue(entrypoint._is_ask_user_question_tool(ev["tool"]))
+        # The captured input renders through the existing helpers unchanged.
+        self.assertIsNotNone(entrypoint._format_ask_user_question(ev["input"]))
+        self.assertIsNotNone(entrypoint._ask_user_question_payload(ev["input"]))
+
+
 class BuildHarvestHint(unittest.TestCase):
     fn = staticmethod(entrypoint.build_harvest_hint)
 
@@ -2536,6 +2743,43 @@ class FakeClaudeShim(unittest.TestCase):
             text = next(e for e in events if e["type"] == "assistant_text")["text"]
             self.assertEqual(text, "Done.")
 
+    def test_prompt_via_stdin_survives_option_like_leading_chars(self):
+        """#1727: the production runtime passes a bare `--print` and feeds the
+        prompt on stdin, so a message beginning with an option-like character is
+        treated as prompt text, never parsed as a CLI flag. The shim mirrors the
+        real CLI (reads stdin for a bare `--print`); an `[[E2E:<tok>]]` marker in
+        the prompt is echoed back verbatim, proving the leading character neither
+        crashed the invocation nor was stripped from the prompt (AC1-4, 8, 9)."""
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["AEE_FAKE_CLAUDE_SESSION_ID"] = self.fixture["sessionId"]
+        cases = [
+            "„Zeig mir die Pods [[E2E:de-quote]]",   # U+201E German opening quote
+            "-v please explain [[E2E:hyphen]]",       # leading hyphen
+            "–dash prefixed [[E2E:endash]]",          # U+2013 en-dash
+            "--help me [[E2E:ddash]] with this",      # double-dash-like token
+            "   -leading whitespace [[E2E:ws]]",      # whitespace then punctuation
+            "line one\n--line two [[E2E:multiline]]",  # multi-line
+        ]
+        for prompt in cases:
+            with self.subTest(prompt=prompt):
+                proc = subprocess.run(
+                    ["python3", str(self.shim), "--print",
+                     "--output-format", "stream-json", "--verbose"],
+                    input=prompt, capture_output=True, text=True,
+                    env=env, timeout=30,
+                )
+                # Exit 0 — no "unknown option" crash (AC1-4, 6).
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+                events = self._parse(proc.stdout)
+                text = next(e for e in events
+                            if e["type"] == "assistant_text")["text"]
+                tok = prompt.split("[[E2E:")[1].split("]]")[0]
+                # The prompt was received verbatim (marker echoed) — nothing was
+                # stripped or escaped as a side effect (AC9).
+                self.assertIn(f"E2E-ACK:{tok}", text)
+
     def test_resume_id_used_as_session_when_no_env_override(self):
         import os
         import subprocess
@@ -3562,6 +3806,51 @@ class WorkspaceGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(gate.busy)
         async with gate.acquire():  # still acquirable
             self.assertTrue(gate.busy)
+
+
+class MigrateStateDir(unittest.TestCase):
+    """The one-time `.aee/` → `.agent-studio/` state-dir migration (#1549)."""
+
+    def _ws(self):
+        return Path(tempfile.mkdtemp())
+
+    def test_legacy_dir_is_renamed_preserving_contents(self):
+        ws = self._ws()
+        legacy = ws / ".aee"
+        (legacy / "bin").mkdir(parents=True)
+        (legacy / "seeded-skills.json").write_text('{"x":1}', encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        new = ws / ".agent-studio"
+        self.assertTrue(new.is_dir())
+        self.assertFalse(legacy.exists())
+        self.assertTrue((new / "bin").is_dir())
+        self.assertEqual((new / "seeded-skills.json").read_text(encoding="utf-8"), '{"x":1}')
+
+    def test_fresh_workspace_is_a_noop(self):
+        ws = self._ws()
+        entrypoint._migrate_state_dir(ws)
+        self.assertFalse((ws / ".agent-studio").exists())
+        self.assertFalse((ws / ".aee").exists())
+
+    def test_already_migrated_leaves_a_stray_legacy_untouched(self):
+        ws = self._ws()
+        (ws / ".agent-studio").mkdir()
+        (ws / ".agent-studio" / "keep.txt").write_text("new", encoding="utf-8")
+        # A leftover legacy dir (partial migration / re-run) must NOT clobber the
+        # already-migrated new dir — the new dir wins, deterministically.
+        (ws / ".aee").mkdir()
+        (ws / ".aee" / "old.txt").write_text("old", encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        self.assertEqual((ws / ".agent-studio" / "keep.txt").read_text(encoding="utf-8"), "new")
+        self.assertTrue((ws / ".aee").exists())
+
+    def test_idempotent(self):
+        ws = self._ws()
+        (ws / ".aee").mkdir()
+        (ws / ".aee" / "f.json").write_text("{}", encoding="utf-8")
+        entrypoint._migrate_state_dir(ws)
+        entrypoint._migrate_state_dir(ws)  # second call is a no-op
+        self.assertTrue((ws / ".agent-studio" / "f.json").exists())
 
 
 if __name__ == "__main__":

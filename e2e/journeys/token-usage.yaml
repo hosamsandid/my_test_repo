@@ -1,0 +1,81 @@
+journeyVersion: 1
+id: token-usage
+title: Token Usage
+order: 60
+# CI lane only: the `usageData` fixture seeds deterministic usage records under a
+# dedicated team and drives the real GET /api/usage/summary aggregation — no
+# external GitHub, no live token data. The e2e storageState is a System Admin,
+# which is the only precondition the System-Admin-only /token-usage page needs.
+lanes: [ci]
+
+# Precondition: fixed usage records logged under a dedicated Team so the page's
+# Team filter can isolate them, keeping every figure deterministic across re-runs
+# on the same stack (§7). The fixture pre-/post-cleans the team and its seed
+# files so a re-run (or a crashed prior run) starts and ends clean.
+fixtures:
+  - fixture: usageData
+    params:
+      teamId: token-usage-demo
+      teamName: Token Usage Demo
+
+steps:
+  # ── Chapter intro (narrative-only) ──────────────────────────────────────────
+  - kind: narrative-only
+    id: intro
+    voiceover: |
+      Every agent run costs tokens. The Token Usage page is where an operator sees exactly how many, and where they went — per agent, per team, over time.
+    narrative: |
+      A team of agents does real work, and real work costs real tokens. The Token Usage page is the operator's window onto that spend: how many tokens the whole system has consumed, broken down by agent, by team, by model, and over time.
+
+      It's deliberately a System-Admin surface — consumption numbers stay with the operator for now. Two tabs organise it: Statistics, the aggregate view we'll tour here, and Work items, which attributes cost to individual issue-and-PR chains. Everything on the page is tokens only; prices are applied downstream, so the numbers stay contract-agnostic.
+
+  # ── The page + its chrome ───────────────────────────────────────────────────
+  - id: token-usage-page
+    narrative: |
+      This is the Token Usage page. At the top: the title, a page-level Team filter, and the two tabs — Statistics and Work items. Below them, a reminder that these are raw token counts, not dollars.
+
+      By default the Statistics tab shows the last seven days across every team. We'll narrow it down next so the numbers tell a clear story.
+    action:
+      do: usage.openTokenUsagePage
+
+  # Narrow to the seeded team (pure plumbing — the range is still the default
+  # 7 days here, so the historical seed isn't in view yet).
+  - action:
+      do: usage.selectTeamFilter
+      teamName: Token Usage Demo
+
+  # ── Statistics for one team, all time ───────────────────────────────────────
+  # Widen the range to All time so the seeded historical records fall in view,
+  # then assert + capture the populated Statistics tab.
+  - id: statistics
+    voiceover: |
+      We narrow the Team filter to one team and open up the range to all time. The summary cards show the totals — input, output, cache — the chart plots tokens per day, and the table breaks the spend down by agent.
+    narrative: |
+      To make the picture concrete, we narrow the Team filter to a single team and set the time range to All time. Now everything on the tab describes just this team's consumption.
+
+      The summary cards across the top give the headline numbers: total tokens, total invocations, and the four token classes that make up the cost — input, output, cache write and cache read. Beneath them, the "Tokens per day" chart plots the same totals as a stacked time series, so a spike in usage is obvious at a glance. And the table at the bottom breaks the spend down by agent — the default grouping — so you can see which agent is doing the most expensive work.
+    action:
+      do: usage.selectTimeRange
+      label: All time
+    assert:
+      do: usage.expectStatistics
+      totalTokens: "7,000"
+      inputTokens: "3,900"
+      primaryKey: token-usage-alpha
+      secondaryKey: token-usage-beta
+    screenshot: token-usage-statistics
+
+  # ── Re-group the breakdown ──────────────────────────────────────────────────
+  - id: group-by-team
+    voiceover: |
+      The Group by control re-keys the breakdown table on demand — here, by team, folding every agent's spend into one row.
+    narrative: |
+      The breakdown table isn't fixed to agents. The "Group by" control re-keys it on demand — by team, by model, by provider, or by day — and the table and its totals recompute against the same range and team filter. Switching to "Team" folds every agent's spend into a single row for the team we filtered to, confirming the total we saw on the cards.
+    action:
+      do: usage.selectGrouping
+      label: Team
+    assert:
+      do: usage.expectGroupRow
+      key: token-usage-demo
+      total: "7,000"
+    screenshot: token-usage-by-team

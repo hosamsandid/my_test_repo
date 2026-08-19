@@ -3,9 +3,11 @@ import { useNavigate } from 'react-router';
 import { RefreshCw, Trash2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
 import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
+import { eventLabel } from './agent-chat/trigger-summary';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -174,13 +176,32 @@ function ProcessedEventsView() {
   const events = data || [];
 
   const COLS = [
-    { key: 'ts', label: 'Time', render: v => v ? new Date(v).toLocaleString() : '—' },
+    // Show a scannable relative phrase ("2 minutes ago") with the exact local
+    // time on hover, via the shared WhenCell — so this log reads the same
+    // friendly way as the credential/connection "Added" columns instead of a
+    // raw machine timestamp a new user has to decode.
+    { key: 'ts', label: 'Time', render: v => <WhenCell iso={v} /> },
     { key: 'repo', label: 'Repository' },
-    { key: 'event', label: 'Event', render: (v, row) => (
-      <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
-        {v || '—'}{row.label ? ` (${row.label})` : ''}
-      </span>
-    ) },
+    { key: 'event', label: 'Event', render: (v, row) => {
+      // Lead with the plain-language event name (single source of truth: the
+      // shared eventLabel map used by the trigger editor) so this log reads
+      // for someone who doesn't know the GitHub Events API vocabulary; keep
+      // the raw key as a muted technical sub-line for exact matching. When the
+      // key is unknown, eventLabel() returns the raw key unchanged, so we skip
+      // the duplicate sub-line.
+      const friendly = eventLabel(v);
+      const showRaw = !!v && friendly !== v;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span>{friendly || '—'}{row.label ? ` (${row.label})` : ''}</span>
+          {showRaw && (
+            <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              {v}
+            </span>
+          )}
+        </div>
+      );
+    } },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {
       if (row.noMatchingTrigger) return <NoMatchBadge />;
@@ -260,7 +281,7 @@ function AgentPendingGroup({ group, onCancel, busyId }) {
         ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{d}</span>
         : <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
     } },
-    { key: 'receivedAt', label: 'Received', render: v => v ? new Date(v).toLocaleString() : '—' },
+    { key: 'receivedAt', label: 'Received', render: v => <WhenCell iso={v} /> },
     { key: '_cancel', label: '', sortable: false, render: (_v, row) => (
       <button
         type="button"

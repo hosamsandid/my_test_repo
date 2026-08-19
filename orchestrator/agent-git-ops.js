@@ -165,24 +165,40 @@ function buildRepoGitEnv({
     }
   }
 
-  if (isHttpsGithubUrl(repoUrl) && effectiveTokenId && ghTokensDir) {
+  // Read the PAT once, with the same containment guard the SSH branch uses. The
+  // two consumers below want it for different reasons and under different
+  // conditions, so resolution is deliberately separated from application.
+  let token = null;
+  if (effectiveTokenId && ghTokensDir) {
     const tokenPath = path.join(ghTokensDir, effectiveTokenId);
     const resolved = path.resolve(tokenPath);
     if (resolved.startsWith(path.resolve(ghTokensDir) + path.sep) && fs.existsSync(tokenPath)) {
       try {
-        const token = fs.readFileSync(tokenPath, "utf8").trim();
-        if (token) {
-          const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
-          gitEnv.GIT_CONFIG_COUNT = "1";
-          gitEnv.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
-          gitEnv.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
-          // gh CLI reads GH_TOKEN/GITHUB_TOKEN — make sure PR creation is
-          // authenticated even if the base env didn't carry it.
-          if (!gitEnv.GH_TOKEN) gitEnv.GH_TOKEN = token;
-          if (!gitEnv.GITHUB_TOKEN) gitEnv.GITHUB_TOKEN = token;
-        }
-      } catch { /* fall through to unauthenticated attempt */ }
+        token = fs.readFileSync(tokenPath, "utf8").trim() || null;
+      } catch { token = null; /* fall through to unauthenticated attempt */ }
     }
+  }
+
+  // (1) git-level credential — an http.<url>.extraheader only authenticates git
+  // I/O against an https://github.com/ remote, so it stays scheme-gated. On an
+  // SSH remote the GIT_SSH_COMMAND above is what carries the identity.
+  if (token && isHttpsGithubUrl(repoUrl)) {
+    const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+    gitEnv.GIT_CONFIG_COUNT = "1";
+    gitEnv.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    gitEnv.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
+  }
+
+  // (2) `gh` credential — deliberately NOT scheme-gated. `gh pr create` talks to
+  // the REST API, never to the git remote, so it needs the PAT regardless of how
+  // the repo is cloned. Gating this on isHttpsGithubUrl broke PR creation on
+  // exactly the configuration the docs recommend (SSH URL + deploy key): the
+  // push succeeded over SSH, then `gh` failed with an opaque "run gh auth login"
+  // — the very error the PR route's token pre-check exists to prevent, which it
+  // could not catch because it does not look at the URL scheme.
+  if (token) {
+    if (!gitEnv.GH_TOKEN) gitEnv.GH_TOKEN = token;
+    if (!gitEnv.GITHUB_TOKEN) gitEnv.GITHUB_TOKEN = token;
   }
 
   return gitEnv;

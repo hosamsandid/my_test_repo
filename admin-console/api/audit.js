@@ -14,6 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readLastLinesAcross } = require('./tail-read');
 
 // Persistent location on the shared workspace volume. Overridable for tests.
 const AUDIT_DIR = process.env.AUDIT_DIR || '/workspace/audit';
@@ -78,21 +79,19 @@ function auditMutations(req, res, next) {
 }
 
 // Read the most recent entries (newest first). Best-effort; returns [] on error.
+// Cost is bounded by `cap` (the requested page size), not by total audit
+// history: only the tail of the most recent day files is read (#1684).
 function recentEntries(limit = 200) {
   const cap = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 200;
   try {
     const files = fs.readdirSync(AUDIT_DIR)
       .filter(f => /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
-      .sort(); // chronological by name
-    const lines = [];
-    for (const f of files) {
-      const content = fs.readFileSync(path.join(AUDIT_DIR, f), 'utf8');
-      for (const ln of content.split('\n')) {
-        if (ln.trim()) lines.push(ln);
-      }
-    }
-    return lines
-      .slice(-cap)
+      .sort() // chronological by name
+      .map(f => path.join(AUDIT_DIR, f));
+    // Newest `cap` lines across day files, in chronological order — identical
+    // to reading everything and slicing the last `cap`, but without parsing the
+    // whole history on every request.
+    return readLastLinesAcross(files, cap)
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean)
       .reverse();

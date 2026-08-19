@@ -52,18 +52,6 @@ _STATUS_ORDER = {
 }
 
 
-def find_project_root(start: Path) -> Path:
-    """Walk up from start to find the directory containing artifacts/briefings/."""
-    current = start.resolve()
-    while current != current.parent:
-        if (current / "artifacts" / "briefings").is_dir():
-            return current
-        current = current.parent
-    raise FileNotFoundError(
-        "Could not find project root (no artifacts/briefings/ directory found)"
-    )
-
-
 def find_briefings(base_dir: Path) -> list[Path]:
     """Recursively find all brief.md files under base_dir."""
     return sorted(base_dir.rglob("brief.md"))

@@ -167,15 +167,26 @@ They are otherwise unconnected. **To make anything appear in the human-facing
 chat, the runner must post a normal Matrix message** — i.e. return it as the
 turn's reply text via `send_formatted` (markdown→HTML). No frontend change is
 needed for that. The only standing bridge is the final `result` text posted once
-per run; intermediate tool calls (e.g. `AskUserQuestion`) do **not** reach the
-chat on their own.
+per run; other intermediate tool calls do **not** reach the chat on their own —
+the one exception is `AskUserQuestion`, which is intercepted (see below).
 
 **`AskUserQuestion` in this environment:** a turn is a single non-interactive
-`claude -p` process with stdin closed, so it can never answer an interactive
-question inline — the tool is deliberately kept **out of `--allowedTools`**. If
-you need to ask the user something, **ask it as plain text in your reply**; the
-user's chat reply continues the resumed session as a new turn. (Issue #447 added
-runtime interception that renders such questions as readable chat markdown.)
+`claude --print` process (the prompt is fed on stdin, #1727), so the tool's
+*built-in* form (which is interactive-TTY-only) is removed from the model's tool
+set entirely in headless print mode — a bare `--allowedTools` add does nothing. To make asking the user possible
+headlessly (#1712) the runner re-supplies an **identically-shaped**
+`AskUserQuestion` from a bundled, dependency-free stdio MCP server
+(`agent-image/scripts/ask-user-mcp.py`, registered via `--mcp-config` in
+`agent-entrypoint.py`); it reaches the model as `mcp__aee-ask__AskUserQuestion`.
+When you call it the runner **intercepts** the `tool_use` (matching either the
+namespaced or the bare name), renders the question(s) into a readable chat
+message with clickable quick-reply buttons (#1663), and posts that instead of a
+reply — the MCP tool returns a clean "end your turn and wait" result so the run
+completes as a success and stays `--resume`-able. The user's chosen option (or
+free-text) then continues the resumed session as a new turn. Single-choice only —
+`multiSelect` degrades to the plain text body. (Issue #447 added the original
+interception; #1712 made the tool actually reachable.) Plain-text questions in
+your reply still work too.
 
 ---
 

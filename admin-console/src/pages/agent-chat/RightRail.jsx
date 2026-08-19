@@ -1,17 +1,16 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, FileText, MoreHorizontal, Brain, Target } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import OutcomesPanel from './OutcomesPanel';
-import PromptPreviewPanel from './PromptPreviewPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import { fitTabCount } from './rail-layout';
-import { apiCall } from '../../hooks/useApi';
+import { useSessionsActive } from './SessionsActiveContext';
+import { activeSessionCount } from './sessions-active';
 
 const TAB_KEY = 'agentChat.rightRailTab';
-const SESSION_POLL_MS = 3_000;
 
 // The whole rail toggles with Cmd+Shift+L on macOS / Ctrl+Shift+L elsewhere
 // (handler in AgentChat.jsx). Detect the platform once so the visible hint and
@@ -20,7 +19,7 @@ const IS_MAC = typeof navigator !== 'undefined'
   && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'knowledge'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -33,7 +32,6 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'kn
  *   - "Outcomes"  — read-only view of the agent's outcome options (#963); the
  *     outputs counterpart of Triggers, so it sits next to it. Team members only
  *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
- *   - "Prompt"    — read-only preview of the composed system prompt
  *   - "Knowledge" — the agent's knowledge base
  *
  * The active tab is persisted in localStorage so it survives reloads; an old
@@ -58,7 +56,7 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'prompt', 'kn
 export default function RightRail({
   agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
-  onResumeSession, sessionSelectRequest = null, collapsed = false,
+  onResumeSession, sessionSelectRequest = null, collapsed = false, onReferenceInChat = null,
 }) {
   // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
   // standalone agent (#963 AC1).
@@ -91,28 +89,13 @@ export default function RightRail({
     if (!showOutcomes && tab === 'outcomes') setTab('sessions');
   }, [agentId, showOutcomes, tab]);
 
-  // Lightweight poll of just the session COUNT — so the "Sessions" tab
-  // can show a badge regardless of which tab is currently visible. The
-  // SessionsPanel itself owns the full list when it's active.
-  const [sessionCount, setSessionCount] = useState(0);
-  useEffect(() => {
-    if (!agentId) { setSessionCount(0); return undefined; }
-    let cancelled = false;
-    let timer = null;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const data = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/sessions/active`);
-        if (!cancelled) setSessionCount(Array.isArray(data?.sessions) ? data.sessions.length : 0);
-      } catch { /* keep prior count */ }
-      if (!cancelled) timer = setTimeout(tick, SESSION_POLL_MS);
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [agentId]);
+  // Session COUNT for the "Sessions" tab badge — regardless of which tab is
+  // visible, and even while the rail is collapsed (the icon dot). Derived from
+  // the shared active-sessions poll (#1678) rather than a rail-local timer, so
+  // the badge, the SessionsPanel list and the DiffView running-probe all read
+  // the same data from a single poller.
+  const { sessions } = useSessionsActive();
+  const sessionCount = activeSessionCount(sessions);
 
   // `Icon` is the component (not a rendered element) because the tab strip and
   // the collapsed icon rail render it at different sizes — 13 inline next to a
@@ -122,7 +105,6 @@ export default function RightRail({
     { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
     { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
     ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
-    { key: 'prompt', Icon: FileText, label: 'Prompt', hint: 'Read-only preview of the composed system prompt' },
     { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
   ], [sessionCount, showOutcomes]);
 
@@ -372,7 +354,7 @@ export default function RightRail({
           />
         </div>
         <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} />
+          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
         </div>
         <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
@@ -382,9 +364,6 @@ export default function RightRail({
             <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
           </div>
         )}
-        <div style={{ display: tab === 'prompt' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <PromptPreviewPanel agentId={agentId} embedded />
-        </div>
         <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
         </div>

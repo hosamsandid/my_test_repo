@@ -17,8 +17,11 @@
 //      `labelSuffix` still matches its source template.
 //   2. Present member role-ids, recovered from each member id (`<teamId>-<roleId>`,
 //      the deterministic materialisation scheme) — used as the fallback signal
-//      when a team carries no label registry (hand-built / pre-#928), and always
-//      to compute which roles are missing.
+//      when a team carries no label registry (hand-built / pre-#928).
+//
+// Which roles are MISSING is decided separately, once the source template is
+// known, by `fulfilledRoleIds` (#1556): a template-aware, display-name-aware
+// check so a role a member visibly provides is never offered as "Add role".
 //
 // Conservative by design: when nothing clearly matches we surface NOTHING (an
 // empty result), so unrelated teams never sprout spurious buttons — the button
@@ -40,6 +43,10 @@ function stripSuffix(token, suffix) {
 // A member id is `<teamId>-<roleId>` (POST /api/teams materialisation scheme).
 // Multi-instance roles add a `-N` suffix (`<teamId>-<roleId>-2`); the base role
 // counts as present either way, so a trailing `-<digits>` is trimmed.
+//
+// Template-AGNOSTIC (it has no role list to consult), so it is used only for the
+// coarse role-id-overlap fallback that infers the source template — NOT to decide
+// which roles are missing (`fulfilledRoleIds` does that, template-aware).
 export function presentRoleIds(teamId, members) {
   const prefix = `${teamId}-`;
   const out = new Set();
@@ -49,6 +56,54 @@ export function presentRoleIds(teamId, members) {
     let roleId = id.slice(prefix.length);
     roleId = roleId.replace(/-\d+$/, ''); // drop multi-instance suffix
     if (roleId) out.add(roleId);
+  }
+  return out;
+}
+
+// Decide which of a matched template's roles are already fulfilled by an existing
+// team member (#1556) — the template-aware successor to the naive present-role-id
+// parse, used to compute the missing set once the source template is known.
+//
+// Fulfilment is the UNION of two signals, so a role a member visibly provides is
+// never offered as an "Add role" suggestion (the #1556 false positives):
+//
+//   1. Member-id parse (`<teamId>-<roleId>`, the materialisation scheme):
+//      - an EXACT template role id counts that role — including an id that ends
+//        in a digit when the template genuinely defines it (`developer-2`,
+//        `business-analyst-2`), which must NOT be collapsed to its base role
+//        (case 1, the reported bug);
+//      - otherwise a trailing `-<n>` is treated as a multi-instance suffix and
+//        counts the BASE role, but only when the base is a template role and the
+//        full `<roleId>-<n>` is not — so a genuine second Developer still counts
+//        Developer present without inventing a `developer-2` fulfilment.
+//   2. Display-name match (case-insensitive) against the template role's
+//      displayName — recovers members whose id does not encode the template role
+//      id at all: a clone `…-business-analyst-copy` shown as "Business Analyst 2"
+//      (case 2), or a doubled-prefix `agent-agent-…-documentation-sync` that
+//      fails the `<teamId>-` guard entirely (case 3).
+export function fulfilledRoleIds(teamId, members, roles) {
+  const roleIds = new Set((roles || []).map(r => r && r.id).filter(Boolean));
+  const byDisplayName = new Map();
+  for (const r of roles || []) {
+    const dn = r && typeof r.displayName === 'string' ? r.displayName.trim().toLowerCase() : '';
+    if (dn && !byDisplayName.has(dn)) byDisplayName.set(dn, r.id);
+  }
+
+  const prefix = `${teamId}-`;
+  const out = new Set();
+  for (const m of members || []) {
+    const id = m && typeof m.id === 'string' ? m.id : '';
+    if (id.startsWith(prefix)) {
+      const roleId = id.slice(prefix.length);
+      if (roleId && roleIds.has(roleId)) {
+        out.add(roleId); // exact role id (incl. a distinct digit-suffixed role)
+      } else if (roleId) {
+        const base = roleId.replace(/-\d+$/, ''); // multi-instance suffix?
+        if (base !== roleId && roleIds.has(base)) out.add(base);
+      }
+    }
+    const dn = m && typeof m.displayName === 'string' ? m.displayName.trim().toLowerCase() : '';
+    if (dn && byDisplayName.has(dn)) out.add(byDisplayName.get(dn));
   }
   return out;
 }
@@ -122,8 +177,9 @@ export function inferMissingRoles(team, members, templates) {
 
   if (!winner) return null;
 
+  const fulfilled = fulfilledRoleIds(teamId, members, winner.roles);
   const missing = (winner.roles || [])
-    .filter(r => r && typeof r.id === 'string' && !present.has(r.id))
+    .filter(r => r && typeof r.id === 'string' && !fulfilled.has(r.id))
     .map(r => ({ id: r.id, displayName: r.displayName || r.id }));
   if (missing.length === 0) return null;
 

@@ -13,6 +13,15 @@
 // unit-testable in isolation and shared by the registry/install path and the
 // broker SDK.
 //
+// NOTE: this file exists TWICE — `admin-console/api/plugin-manifest.js` (the
+// install path validates before writing to the registry) and
+// `orchestrator/plugin-manifest.js` (the sidecar/seed path re-validates on
+// read, since a registry directory can also be placed by hand). The two build
+// contexts are disjoint, so neither can require the other — the same constraint
+// that duplicates plugin-scope-token.js into a broker image. The copies are
+// asserted BYTE-IDENTICAL by orchestrator/plugin-manifest-mirror.test.js:
+// change both in one commit.
+//
 // Shape (pluginVersion 1):
 //   {
 //     pluginVersion: 1,
@@ -20,10 +29,13 @@
 //     sidecar: { image, env?, capabilities?, internalPort },
 //     cli: { name, entrypoint, runtime },
 //     credentials?: [ { key, description?, required? } ],
-//     platforms?: [ "podman" | "any" ],
+//     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
+//     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
+//     quota?: { maxObjects, ttlSeconds? },      // per-scope resource cap (§4.6)
 //     requiresApproval?: [ "<subcommand>" ],
-//     ui?: { title?, routes?: [ { path, minRole } ] },  // reserved for Phase 5
+//     policy?: { "<subcommand>": { scopes?: ["team"|"agent"], requiresFlowFinal?: bool } },
+//     ui?: { title?, global?, routes?: [ { path, minRole } ] },
 //     companionSkill?, promptLine?, version?,
 //   }
 
@@ -40,8 +52,10 @@ const HOST_MOUNT_PREFIX = 'host-mount:';
 const CLI_RUNTIMES = Object.freeze(['python3', 'node', 'bash']);
 
 // Runtime requirements a plugin can declare (§4.1). `podman` = local/compose
-// only (like context mounts); `any` = no special stack requirement.
-const PLATFORMS = Object.freeze(['podman', 'any']);
+// only (like context mounts); `kubernetes` = runs as a k8s plugin sidecar (the
+// positive mirror of `podman`); `any` = no special stack requirement. A
+// manifest may combine the positive declarations (e.g. ["podman","kubernetes"]).
+const PLATFORMS = Object.freeze(['podman', 'kubernetes', 'any']);
 
 // Scope granularities the broker can implement (§4.6). A grant may only choose
 // a granularity the manifest's `scopes` declares.
@@ -208,6 +222,53 @@ function validatePluginManifest(input) {
     }
   }
 
+  // ── defaultScopeGranularity (optional) ───────────────────────────────────
+  // Which granularity a grant defaults to when the admin does not choose one
+  // (§4.4). The §10 open question — one platform-wide default vs. per-manifest
+  // — is decided here in favour of per-manifest: plugin #1 (the sandbox) reads
+  // most naturally as `agent`, the opposite of the safe `team` default for
+  // shared expensive backends, so the default is the manifest's to declare.
+  // Absent → the platform default `team` (see `defaultGranularity`). It must be
+  // one of the granularities the broker actually honours.
+  let defaultScopeGranularity;
+  if (input.defaultScopeGranularity !== undefined) {
+    if (!SCOPE_GRANULARITIES.includes(input.defaultScopeGranularity)) {
+      errors.push(`defaultScopeGranularity has unknown granularity "${String(input.defaultScopeGranularity)}"`);
+    } else if (!scopes.includes(input.defaultScopeGranularity)) {
+      errors.push(`defaultScopeGranularity "${input.defaultScopeGranularity}" is not in scopes (${scopes.join(', ')})`);
+    } else {
+      defaultScopeGranularity = input.defaultScopeGranularity;
+    }
+  }
+
+  // ── quota (optional; mandatory in practice for resource-creating plugins) ─
+  // Per-scope resource cap (§4.6): a loop-triggered agent creating one object
+  // per iteration is a runaway the #611 backstop cannot see, so the cap is a
+  // manifest field rather than a single platform-wide Settings toggle, and it
+  // is enforced per `scopeId` — n members at `agent` granularity means n× the
+  // footprint, which the grant UI states as a ceiling before the toggle.
+  let quota;
+  if (input.quota !== undefined) {
+    if (!isPlainObject(input.quota)) {
+      errors.push('quota must be an object');
+    } else {
+      const q = {};
+      if (!Number.isInteger(input.quota.maxObjects) || input.quota.maxObjects < 1) {
+        errors.push('quota.maxObjects must be a positive integer');
+      } else {
+        q.maxObjects = input.quota.maxObjects;
+      }
+      if (input.quota.ttlSeconds !== undefined) {
+        if (!Number.isInteger(input.quota.ttlSeconds) || input.quota.ttlSeconds < 1) {
+          errors.push('quota.ttlSeconds must be a positive integer');
+        } else {
+          q.ttlSeconds = input.quota.ttlSeconds;
+        }
+      }
+      if (q.maxObjects !== undefined) quota = q;
+    }
+  }
+
   // ── requiresApproval (optional) ──────────────────────────────────────────
   let requiresApproval = [];
   if (input.requiresApproval !== undefined) {
@@ -215,6 +276,61 @@ function validatePluginManifest(input) {
       errors.push('requiresApproval must be an array of non-empty strings');
     } else {
       requiresApproval = [...new Set(input.requiresApproval.map((s) => s.trim()))];
+    }
+  }
+
+  // ── policy (optional; per-subcommand authorization keyed on scope, §4.6) ──
+  // The first governance surface that only agent granularity can carry
+  // (plugin #2, #1521): "test cases may only be created by the last agent in
+  // the flow, once its cross-checks passed." Each key is a CLI subcommand; each
+  // value narrows who may run it. `scopes` restricts the calling granularity
+  // (⊆ the manifest's `scopes`); `requiresFlowFinal` gates on flow position,
+  // which a team-scoped token cannot express — so a rule with it must not admit
+  // team granularity. The broker enforces via broker-sdk/authz.js.
+  let policy;
+  if (input.policy !== undefined) {
+    if (!isPlainObject(input.policy)) {
+      errors.push('policy must be an object keyed by subcommand');
+    } else {
+      const out = {};
+      for (const [sub, rawRule] of Object.entries(input.policy)) {
+        if (!isNonEmptyString(sub)) { errors.push('policy keys must be non-empty subcommand names'); continue; }
+        if (!isPlainObject(rawRule)) { errors.push(`policy["${sub}"] must be an object`); continue; }
+        const rule = {};
+        let ruleScopes = null;
+        if (rawRule.scopes !== undefined) {
+          if (!Array.isArray(rawRule.scopes) || rawRule.scopes.length === 0) {
+            errors.push(`policy["${sub}"].scopes must be a non-empty array`);
+          } else {
+            const invalid = rawRule.scopes.filter((s) => !SCOPE_GRANULARITIES.includes(s));
+            const notHonoured = rawRule.scopes.filter((s) => SCOPE_GRANULARITIES.includes(s) && !scopes.includes(s));
+            if (invalid.length) {
+              errors.push(`policy["${sub}"].scopes has unknown granularities: ${invalid.map(String).join(', ')}`);
+            } else if (notHonoured.length) {
+              errors.push(`policy["${sub}"].scopes has granularities not in the plugin's scopes: ${notHonoured.join(', ')}`);
+            } else {
+              ruleScopes = [...new Set(rawRule.scopes)];
+              rule.scopes = ruleScopes;
+            }
+          }
+        }
+        if (rawRule.requiresFlowFinal !== undefined) {
+          if (typeof rawRule.requiresFlowFinal !== 'boolean') {
+            errors.push(`policy["${sub}"].requiresFlowFinal must be a boolean`);
+          } else if (rawRule.requiresFlowFinal) {
+            // Flow position is only expressible at agent granularity — the rule
+            // must not admit a team-scoped caller.
+            const effectiveScopes = ruleScopes || scopes;
+            if (effectiveScopes.includes('team')) {
+              errors.push(`policy["${sub}"].requiresFlowFinal is only expressible at agent granularity; set scopes to ["agent"]`);
+            } else {
+              rule.requiresFlowFinal = true;
+            }
+          }
+        }
+        out[sub] = rule;
+      }
+      policy = out;
     }
   }
 
@@ -228,6 +344,16 @@ function validatePluginManifest(input) {
       if (input.ui.title !== undefined) {
         if (!isNonEmptyString(input.ui.title)) errors.push('ui.title must be a non-empty string');
         else ui.title = input.ui.title.trim();
+      }
+      // Opt-in global UI visibility (#1599): when true, an INSTALLED plugin's UI
+      // nav entry is shown to every authenticated user and its ordinary-user
+      // routes are reachable without a team grant. Purely a human-UI concern —
+      // it never widens an agent's capability grant. Off by default; only a
+      // `true` value is persisted so a manifest without it normalizes
+      // byte-identically to today (no regression for existing plugins).
+      if (input.ui.global !== undefined) {
+        if (typeof input.ui.global !== 'boolean') errors.push('ui.global must be a boolean');
+        else if (input.ui.global) ui.global = true;
       }
       if (input.ui.routes !== undefined) {
         if (!Array.isArray(input.ui.routes)) {
@@ -278,6 +404,9 @@ function validatePluginManifest(input) {
     scopes,
     requiresApproval,
   };
+  if (defaultScopeGranularity) manifest.defaultScopeGranularity = defaultScopeGranularity;
+  if (quota) manifest.quota = quota;
+  if (policy) manifest.policy = policy;
   if (ui) manifest.ui = ui;
   Object.assign(manifest, optionalStrings);
   return { ok: true, errors: [], manifest };
@@ -286,6 +415,17 @@ function validatePluginManifest(input) {
 // Which granularities a (validated) manifest permits a grant to choose.
 function grantableGranularities(manifest) {
   return (manifest && Array.isArray(manifest.scopes)) ? manifest.scopes.slice() : ['team'];
+}
+
+// The granularity a grant defaults to when the admin does not choose one: the
+// manifest's own declared default, else the platform default `team` (§4.4/§10).
+// Always returns a granularity the manifest honours (the validator rejects a
+// `defaultScopeGranularity` outside `scopes`).
+function defaultGranularity(manifest) {
+  if (manifest && SCOPE_GRANULARITIES.includes(manifest.defaultScopeGranularity)) {
+    return manifest.defaultScopeGranularity;
+  }
+  return 'team';
 }
 
 // A grant may only choose a granularity the broker honours (§4.4/§4.6).
@@ -311,6 +451,7 @@ module.exports = {
   UI_ROLES,
   validatePluginManifest,
   grantableGranularities,
+  defaultGranularity,
   assertGranularityGrantable,
   isValidCapability,
 };

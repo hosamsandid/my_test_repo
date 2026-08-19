@@ -72,8 +72,6 @@ function LegacyMultiEventNote({ events, selected }) {
   );
 }
 
-const uniq = (arr) => [...new Set(arr)];
-
 function firstRepo(...triggerLists) {
   for (const list of triggerLists) {
     for (const t of list || []) {

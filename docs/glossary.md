@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Teams** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
+| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Access & Users** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on a Working Environment. |
@@ -43,7 +43,7 @@ What kind of agent this is. Five values:
 |---|---|
 | `agent` | A standalone agent. Answers your direct messages; with triggers it can also act on its own. |
 | `team` | Not an agent you chat with — a **template + shared settings** for a squad. It holds the shared system prompt and the team's skill grant. |
-| `team-member` | One actual agent spawned from a `team`. Inherits the team's prompt and skills unless it overrides them. |
+| `team-member` | One actual agent spawned from a `team`. Inherits the team's prompt and skills unless it overrides them. The system prompt has three modes: **Inherit from team**, **Additional input** (team prompt + an agent-specific addition), and **Exclusive overriding input** (a full replacement, formerly "Custom"). |
 | `orchestrator` | Watches a Briefing-Pack directory and creates one `bp-instance` stub per pack. |
 | `bp-instance` | One agent per Briefing Pack. Exists as an inert stub until it is claimed or activated. |
 
@@ -190,7 +190,7 @@ The five ways two agents can be wired together:
 ### Artifact
 A named work product handed from one agent to another. Matched on its **logical name**,
 not its path — the producer records where it actually landed in a git-committed manifest
-(`.aee/artifacts.jsonl`) and the consumer looks it up by name. This is why a re-runnable
+(`.agent-studio/artifacts.jsonl`) and the consumer looks it up by name. This is why a re-runnable
 agent can write to a different path each run without breaking the hand-off.
 
 ### Stage
@@ -223,7 +223,7 @@ The tenant. Every agent, Working Environment and credential belongs to exactly o
 Teams scope who can see and manage what. Roles: **System Admin** (global),
 **Team Admin**, **Team Member**.
 
-*Where you meet it:* the **Teams** page.
+*Where you meet it:* the **Access & Users** page.
 *Read more:* [teams-data-model.md](teams-data-model.md) · [multi-user-concept.md](multi-user-concept.md)
 
 ### Model Provider
@@ -299,10 +299,24 @@ and knowing which is which saves confusion:
 |---|---|---|
 | **Agent Studio** | the **product** | the UI, the browser tab, the login screen, the README |
 | **agent-studio** | the **compose project** (default container and volume name prefix) | `podman ps`, volume names, `COMPOSE_PROJECT_NAME` in `.env` |
-| **AEE** / `AEE_*` | the **runtime/env-var namespace** ("Agent Execution Environment") | environment variables, operator docs |
+| **`.agent-studio/`** | the **per-agent workspace state directory** | every agent's file tree (`bin/`, `plugins/`, `seeded-skills.json`, `prompt-history.json`, `artifacts.jsonl`, …) |
+| **AEE** / `AEE_*` | the **internal runtime/env-var namespace** ("Agent Execution Environment") | environment variables, container labels (`aee.*`), the `io.aee.*` wire protocol, operator docs |
 
-When in doubt: what you *use* is Agent Studio; what you *operate* is the `agent-studio`
-compose project (the default `COMPOSE_PROJECT_NAME`); what you *configure* uses `AEE_*` variables.
+**The naming rule (#1549).** The retired abbreviation **"aee"** (from the old
+product name "Agent Execution Environment") is no longer used for anything a user
+sees. The one prominent user-visible instance — the per-agent state directory,
+formerly `.aee/` — is now **`.agent-studio/`** (an upgraded agent is migrated
+automatically, keeping all state). What deliberately **remains** "AEE" is purely
+*internal* and not surfaced in the file tree: the `AEE_*` operator environment
+variables, the `aee.*` container labels, and the `io.aee.*` agent↔console wire
+keys. The `aee-…` command-line tools (`aee-artifact`, `aee-emit`, `aee-podman`,
+`aee-test`, …) keep their names for now; retiring the CLI prefix is tracked
+separately (a plugin-ecosystem convention decision, out of scope for the
+directory rename).
+
+When in doubt: what you *use* is Agent Studio; the folder in an agent's workspace
+is `.agent-studio/`; what you *operate* is the `agent-studio` compose project (the
+default `COMPOSE_PROJECT_NAME`); what you *configure* uses `AEE_*` variables.
 
 ---
 

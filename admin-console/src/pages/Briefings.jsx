@@ -4,6 +4,7 @@ import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, Fil
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
@@ -463,6 +464,11 @@ export default function Briefings() {
   // set by the "Describe flow…" entry below and by scope changes that should
   // keep the panel open (draft re-key on rename, team → draft bridge).
   const copilotParam = searchParams.get('copilot') === '1';
+  // Create-launcher deep link (#1665): `?new=blank` starts a fresh draft in the
+  // canvas (the "Build it yourself" entry), `?new=describe` a fresh draft with
+  // the Flow Copilot open (the conversational "Describe it" entry). Consumed
+  // once on mount, then replaced by the resulting `?proc=draft:<id>` selection.
+  const newParam = searchParams.get('new');
   const pendingFocus = useMemo(
     () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
     [proc, focusNode, focusTab],
@@ -511,6 +517,9 @@ export default function Briefings() {
   // and drafts to load so the stored id can be validated against live data.
   useEffect(() => {
     if (proc || selectedFlow) return;
+    // A launcher deep link (`?new=…`) owns the initial selection — don't let the
+    // last-selected restore race it and navigate away before it's consumed.
+    if (newParam) return;
     if (!lastSelectedKey) return;
     if (agents === null || draftsList === null) return;
 
@@ -531,6 +540,22 @@ export default function Briefings() {
     }
   }, [agents, draftsList, proc, selectedFlow, lastSelectedKey,
       teams, drafts, orchestrators, setSearchParams]);
+
+  // Consume a Create-launcher `?new=…` deep link exactly once. Waits for the
+  // lists so the new draft appears immediately; newProcess/describeFlow replace
+  // the URL with the draft selection, which clears `new` and prevents re-firing.
+  const launcherNewConsumed = useRef(false);
+  useEffect(() => {
+    if (!newParam || launcherNewConsumed.current) return;
+    if (agents === null || draftsList === null) return;
+    launcherNewConsumed.current = true;
+    if (newParam === 'describe') describeFlow();
+    else if (newParam === 'blank') newProcess();
+    else setSearchParams({}, { replace: true }); // unknown value → drop the param
+    // newProcess/describeFlow are stable hoisted declarations; deps intentionally
+    // omit them so this fires only on the param/data becoming ready.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newParam, agents, draftsList]);
 
   async function newProcess() {
     try {
@@ -592,14 +617,26 @@ export default function Briefings() {
     }
   }
 
-  async function deleteDraft(d) {
-    if (!window.confirm(`Delete draft “${d.name}”? This cannot be undone.`)) return;
+  // Delete confirmation goes through the shared styled ConfirmDialog (like every
+  // other delete action in the console) rather than a native browser prompt,
+  // so the flow looks and behaves consistently across pages.
+  const [deleteTarget, setDeleteTarget] = useState(null); // the draft pending deletion
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  async function confirmDeleteDraft() {
+    const d = deleteTarget;
+    if (!d) return;
+    setDeleteBusy(true);
     try {
       await apiCall('DELETE', `/api/process/drafts/${d.id}`);
       // If the deleted draft was open, drop the selection.
       if (proc === `draft:${d.id}`) setSearchParams({});
       refetchDrafts();
     } catch { /* leave the list as-is; the draft may already be gone */ }
+    finally {
+      setDeleteBusy(false);
+      setDeleteTarget(null);
+    }
   }
 
   // Import the selected BriefingPack flow as an editable process draft (#377) —
@@ -828,7 +865,7 @@ export default function Briefings() {
                     sub={`${d.roleCount} agent${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
-                    onDelete={() => deleteDraft(d)}
+                    onDelete={() => setDeleteTarget(d)}
                     deleteTitle="Delete draft"
                   />
                 ))
@@ -927,6 +964,26 @@ export default function Briefings() {
         {/* AC 2: help panel slide-in overlay */}
         {helpOpen && <HelpPanel onClose={closeHelp} />}
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete draft"
+        message={
+          <>
+            <p style={{ margin: 0 }}>
+              Really delete "<strong>{deleteTarget?.name || deleteTarget?.id}</strong>"?
+            </p>
+            <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+              This cannot be undone.
+            </p>
+          </>
+        }
+        variant="danger"
+        confirmLabel="Delete"
+        busy={deleteBusy}
+        onConfirm={confirmDeleteDraft}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

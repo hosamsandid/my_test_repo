@@ -72,8 +72,15 @@ const IS_MAC = isMacPlatform();
  * @param {boolean} [meetingActive]        true while a meeting session is running
  *        anywhere in the app — disables both quick dictation and starting a
  *        second meeting (one mic use at a time).
+ * @param {?{ref:string, ts:number}} [insertRefRequest]  Cross-panel request
+ *        (#1699) to splice a `@<ref>` token into this agent's draft — fired by the
+ *        workspace browser's "Reference in chat" button. Reuses the same
+ *        caret-aware `insertRefs` path uploads use, so it obeys AC3/AC4/AC7/AC8.
+ *        `ts` re-fires the effect on repeat clicks (request-object pattern,
+ *        mirrors `resumeRequest`); the leading `@` is added here, so `ref` is a
+ *        bare workspace-relative path with no `@`.
  */
-export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false }) {
+export default function MessageInput({ onSend, disabled = false, agentId = null, agentDisplayName, onUpload, uploading = false, onLoopClick, loopRunning = false, loopBusy = false, loopTrigger = null, loopProgress = null, busy = false, onStop, stopBusy = false, onStartMeeting, meetingActive = false, insertRefRequest = null }) {
   // Seed the composer from any persisted draft for this agent (#1388). The
   // component remounts per agent (key={agent.id}) so this initialiser runs
   // fresh with the right agentId on every switch.
@@ -190,6 +197,22 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     const uploaded = await onUpload(list);
     if (Array.isArray(uploaded) && uploaded.length) insertRefs(uploaded);
   }
+
+  // Cross-panel "Reference in chat" (#1699): the workspace browser pushes a
+  // `{ ref, ts }` request; we splice `@<ref>` into the draft through the same
+  // caret-aware `insertRefs` uploads use. Seeding the ref with the incoming ts
+  // means a request already present when this composer mounts (e.g. left over on
+  // an agent switch) is NOT re-inserted — only a genuinely new ts fires, so an
+  // insertion always targets the currently selected agent's draft (edge case).
+  const lastInsertRefTs = useRef(insertRefRequest?.ts ?? null);
+  useEffect(() => {
+    const ts = insertRefRequest?.ts;
+    if (!ts || ts === lastInsertRefTs.current) return;
+    lastInsertRefTs.current = ts;
+    if (insertRefRequest.ref) insertRefs([{ ref: insertRefRequest.ref }]);
+    // insertRefs is a stable closure over refs (taRef/setValue); it needs no dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertRefRequest]);
 
   const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
 

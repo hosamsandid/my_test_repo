@@ -1036,7 +1036,29 @@ function jiraTokenPreview(token) {
 // Storage keeps whichever form the operator entered (minus a trailing
 // slash) — resolution to a full API base happens in the Jira poller.
 function normalizeJiraSiteUrl(raw) {
-  return String(raw).trim().replace(/\/+$/, '');
+  // A regex trailing-slash strip (`/\/+$/`) is CodeQL-flagged as a
+  // polynomial-time ReDoS risk on adversarial input (many slashes not at the
+  // very end force backtracking at every position). A plain loop is O(n)
+  // with no backtracking possible.
+  let s = String(raw).trim();
+  while (s.endsWith('/')) s = s.slice(0, -1);
+  return s;
+}
+
+// A plausibility check for the Jira credential's Basic-Auth username, not a
+// full RFC 5322 validator. Deliberately avoids a `^[^\s@]+@[^\s@]+\.[^\s@]+$`-
+// style regex: CodeQL flags that shape as a polynomial ReDoS risk (the two
+// unbounded `[^\s@]+` runs overlap with the literal `.`, so adversarial input
+// like `!@!.` + many `!.` repetitions forces catastrophic backtracking).
+// `indexOf`/`lastIndexOf` are linear with no backtracking possible.
+function isPlausibleEmail(value) {
+  const s = String(value).trim();
+  const at = s.indexOf('@');
+  if (at <= 0 || at !== s.lastIndexOf('@') || at === s.length - 1) return false; // exactly one '@', not first/last char
+  if (/\s/.test(s)) return false;
+  const domain = s.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  return dot > 0 && dot < domain.length - 1; // dot present in the domain, not at its edges
 }
 
 function jiraTokenInUse(tokenId) {
@@ -14046,7 +14068,7 @@ app.post('/api/jira-tokens', apiLimiter, (req, res) => {
   if (!siteUrl || typeof siteUrl !== 'string' || !siteUrl.trim()) {
     return res.status(400).json({ error: 'siteUrl is required (e.g. "yourcompany" or "https://yourcompany.atlassian.net")' });
   }
-  if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+  if (!email || typeof email !== 'string' || !isPlausibleEmail(email)) {
     return res.status(400).json({ error: 'a valid email is required (the Jira Cloud Basic-Auth username)' });
   }
   if (!token || typeof token !== 'string' || token.trim().length < 10) {

@@ -81,6 +81,18 @@ Fields: `projectKey` (required, must match the agent's env `jiraProjects[]`), `e
 - `CLAUDE.md`: add a **"Jira poller (`jira-event` triggers)"** subsection right after the existing GitHub poller section, same structure (why polling, cursor/dedup model — explicitly note reuse of `selectFreshEvents` — fetch mechanism + truncation fallback, throttle/digest reuse). Add a `jira-event` row to the trigger-type table and a `jira-poller.js` row to Key Files.
 - Testing: unit-test the pure pieces first (changelog→event flattening, `statusFilter` gating, per-agent project/credential resolution) exactly like `github-poller.js`'s existing unit tests. An e2e fake-Jira fixture (mirroring an existing `fake-github`-style fixture, if present) implementing `/rest/api/3/search/jql` + `/rest/api/3/issue/:key/changelog` is a reasonable fast-follow for full end-to-end coverage, not a blocker for the initial poller landing.
 
+## v1 scope boundary
+
+`jira-event` ships as a **wake source only** — it fires an agent's trigger prompt with the Jira event payload, exactly like a raw `github-event` trigger with no `labelFilter`. It is deliberately **not** a full flow participant in this v1, unlike `github-event`'s deep integration into the Process Canvas:
+
+- **No `claim` label swap.** GitHub's `ready` → `ready:wip` → `ready:completed` mechanical claim rotation (§ Autonomous Agent Triggers in `CLAUDE.md`) has no Jira analogue — there is nothing that marks a Jira issue "picked up" the way a claim label does on GitHub.
+- **No channel/graph/human-touchpoint wiring.** `jira-event` triggers don't participate in the Process Canvas's declarative ports (`channels`, `dataFlow`, `humans[]`); a Jira-driven agent shows up on the flow graph the same way a raw, `labelFilter`-less `github-event` listener does (`external: true`, no derived edge) — never as a first-class producer/consumer node.
+- **No flow-anomaly-detector integration.** The four anomaly classes (`wake-not-claimed`, `claim-stalled`, `output-missing`, `gate-idle`) read GitHub label/timeline state; they have no Jira-side signal to read and never fire for a Jira-only hand-off.
+- **No event-transparency log.** The GitHub Event Log (`orchestrator/github-event-log.js`, `/github-events`) answers "what did the poller see and what happened to it" for GitHub; there is no Jira equivalent yet. A dedicated `JiraEventLog.jsx` (mirroring `GithubEventLog.jsx`) is noted above as an independent, deferred add-on — not required to ship the poller, and not part of this v1.
+- **`events` field kept for forward-compat, not extensibility yet.** The trigger schema carries `events` (defaults to `['status_changed']`) and `jql` (reserved, unused) so a v1.1 can grow additional Jira event shapes or free-form JQL without a schema migration — but v1 implements exactly the one status-change path described above.
+
+This is a deliberate v1 boundary, not an oversight: the goal was parity with GitHub's *wake* mechanism (poll → dedup → throttle → burst-digest → fan-out), not parity with its *flow-orchestration* surface. Extending `jira-event` into a full flow participant (claim-equivalent, graph wiring, anomaly detection, transparency log) is future work, scoped separately if/when a concrete need for it shows up.
+
 ## Verification
 
 1. Unit tests for `orchestrator/jira-poller.js`'s pure functions (event flattening from changelog histories, `statusFilter` gate, per-agent poll-plan resolution) — run via the existing test runner (`npm test` in `orchestrator/`, matching how `github-poller.js`'s tests run).

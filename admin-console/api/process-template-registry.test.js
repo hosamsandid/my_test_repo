@@ -117,16 +117,8 @@ function curatedBundleLints(b) {
 
 test('curated repo templates render with no error/warning lints', () => {
   for (const t of listProcessTemplates(CURATED_DIR)) {
-    const b = loadProcessTemplate(CURATED_DIR, t.id);
-    // Mirror the POST /api/process/graph preview path: roles become nodes with
-    // their declarative ports; effective emits = persisted emits.
-    const agents = b.roles.map(r => ({
-      id: r.id, role: r.role || 'team-member', displayName: r.displayName,
-      sessionPolicy: r.sessionPolicy, emits: r.emits, github: r.github,
-      channels: r.channels, triggers: r.triggers || [],
-    }));
-    const graph = buildProcessGraph(agents);
-    const bad = graph.lints.filter(l => l.severity === 'error' || l.severity === 'warning');
+    const lints = curatedBundleLints(loadProcessTemplate(CURATED_DIR, t.id));
+    const bad = lints.filter(l => l.severity === 'error' || l.severity === 'warning');
     assert.deepEqual(bad, [], `${t.id} must be lint-clean, got: ${JSON.stringify(bad)}`);
   }
 });

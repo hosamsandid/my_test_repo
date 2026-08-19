@@ -303,33 +303,6 @@ function shouldFetchNextPage(pageEvents, seenArr, pageIndex, { perPage = PER_PAG
   return !reachedKnown;
 }
 
-function planBurstHandoffs(deliverables, cap) {
-  const CAP = Number.isInteger(cap) && cap >= 0 ? cap : BURST_CAP;
-  const groups = new Map();
-  const order = [];
-  for (const d of Array.isArray(deliverables) ? deliverables : []) {
-    if (!d || !d.agentId) continue;
-    const convKey = d.convKey ?? null;
-    const gkey = `${d.agentId} ${convKey ?? ''}`;
-    let g = groups.get(gkey);
-    if (!g) {
-      g = { agentId: d.agentId, convKey, items: [] };
-      groups.set(gkey, g);
-      order.push(gkey);
-    }
-    g.items.push(d);
-  }
-  return order.map((k) => {
-    const g = groups.get(k);
-    return {
-      agentId: g.agentId,
-      convKey: g.convKey,
-      mode: g.items.length > CAP ? 'digest' : 'individual',
-      items: g.items,
-    };
-  });
-}
-
 // Poller-wedge fix: run an HTTP request under a guarantee that its promise settles exactly
 // once, no matter which phase stalls. `makeRequest` receives the single-settle
 // `resolve`/`reject` and must return the ClientRequest so the deadline can

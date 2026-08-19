@@ -5327,71 +5327,6 @@ class TriggerScheduler:
                     except Exception as exc:
                         print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
                               file=sys.stderr)
-                    continue
-                if kind == "github-digest":
-                    # #449-D: a burst of GitHub events for one (agent, conversation)
-                    # was collapsed by the poller into a single lossless digest.
-                    # Deliver it as a plain DM (no Claude call) — the burst is an
-                    # exceptional/loop-ish signal, so we surface it and let the human
-                    # decide rather than auto-acting on a batched backlog.
-                    try:
-                        await self._execute_github_digest(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
-                              file=sys.stderr)
-                    continue
-                if kind == "jira-digest":
-                    # Jira analogue of github-digest: a burst of status changes
-                    # for one (agent, issue) was collapsed by the Jira poller —
-                    # bulk sprint transitions are at least as plausible a burst
-                    # source as GitHub's mass-relabeling case. Same posture:
-                    # plain DM, no Claude call.
-                    try:
-                        await self._execute_jira_digest(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] jira-digest error: {exc}",
-                              file=sys.stderr)
-                    continue
-                if kind in _PENDING_OUT_OF_SCOPE_KINDS:
-                    print(
-                        f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
-                        f"in Python — skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-
-                entry_tid = entry.get("triggerId")
-                if not entry_tid:
-                    continue
-                match = next(
-                    (
-                        t for t in triggers
-                        if t.get("id") == entry_tid
-                        and t.get("type") in ("http", "github-event", "jira-event")
-                        and t.get("enabled", True)
-                    ),
-                    None,
-                )
-                if not match:
-                    print(
-                        f"[Runner:{self._agent_id}] Pending trigger '{entry_tid}' "
-                        f"not found or disabled — skipping",
-                        file=sys.stderr,
-                    )
-                    continue
-
-                gh = entry.get("github")
-                jira = entry.get("jira")
-                if match.get("type") == "github-event":
-                    label = f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
-                elif match.get("type") == "jira-event":
-                    label = f"{(jira or {}).get('issueKey') or '?'} ({(jira or {}).get('eventId') or '?'})"
-                else:
-                    label = "HTTP trigger"
-                print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
-                exec_ctx = {"github": gh} if gh else ({"jira": jira} if jira else None)
-                try:
-                    await self._execute(dict(match), ctx=exec_ctx)
                 return
             if kind == "session-set":
                 # Control→agent resume command (#574): the admin can't write our
@@ -5435,6 +5370,18 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] github-digest error: {exc}",
                           file=sys.stderr)
                 return
+            if kind == "jira-digest":
+                # Jira analogue of github-digest: a burst of status changes
+                # for one (agent, issue) was collapsed by the Jira poller —
+                # bulk sprint transitions are at least as plausible a burst
+                # source as GitHub's mass-relabeling case. Same posture:
+                # plain DM, no Claude call.
+                try:
+                    await self._execute_jira_digest(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] jira-digest error: {exc}",
+                          file=sys.stderr)
+                return
             if kind in _PENDING_OUT_OF_SCOPE_KINDS:
                 print(
                     f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
@@ -5450,7 +5397,7 @@ class TriggerScheduler:
                 (
                     t for t in triggers
                     if t.get("id") == entry_tid
-                    and t.get("type") in ("http", "github-event")
+                    and t.get("type") in ("http", "github-event", "jira-event")
                     and t.get("enabled", True)
                 ),
                 None,
@@ -5464,14 +5411,16 @@ class TriggerScheduler:
                 return
 
             gh = entry.get("github")
-            label = (
-                f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
-                if match.get("type") == "github-event"
-                else "HTTP trigger"
-            )
+            jira = entry.get("jira")
+            if match.get("type") == "github-event":
+                label = f"{(gh or {}).get('event') or '?'} ({(gh or {}).get('eventId') or '?'})"
+            elif match.get("type") == "jira-event":
+                label = f"{(jira or {}).get('issueKey') or '?'} ({(jira or {}).get('eventId') or '?'})"
+            else:
+                label = "HTTP trigger"
             print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
             try:
-                await self._execute(dict(match), ctx={"github": gh} if gh else None)
+                await self._execute(dict(match), ctx={"github": gh} if gh else ({"jira": jira} if jira else None))
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
                       file=sys.stderr)
@@ -5670,9 +5619,9 @@ class TriggerScheduler:
         conv = entry.get("convKey") or "?"
 
         lines = [
-            f"⚠️ **Status-Änderungs-Burst geklammert** — {count} Jira-Events auf "
-            f"`{conv}` in einem Poll-Zyklus. Statt {count} Einzel-Sessions "
-            f"fasse ich sie hier zusammen und starte **keinen** automatischen Lauf.",
+            f"⚠️ **Status-change burst clamped** — {count} Jira events on "
+            f"`{conv}` in one poll cycle. Collapsing them into this digest "
+            f"instead of starting **{count}** separate sessions.",
             "",
         ]
         # Render oldest-first; cap the visible lines so a large burst doesn't
@@ -5685,15 +5634,15 @@ class TriggerScheduler:
             if from_status or to_status:
                 parts.append(f"({from_status or '?'} → {to_status or '?'})")
             if ev.get("actor"):
-                parts.append(f"von {ev.get('actor')}")
+                parts.append(f"by {ev.get('actor')}")
             if ev.get("createdAt"):
-                parts.append(f"um {ev.get('createdAt')}")
+                parts.append(f"at {ev.get('createdAt')}")
             lines.append("- " + " ".join(parts))
         hidden = len(events) - len(shown)
         if hidden > 0:
-            lines.append(f"- … und {hidden} weitere")
+            lines.append(f"- … and {hidden} more")
         lines.append("")
-        lines.append("Schau bei Bedarf selbst in Jira nach.")
+        lines.append("Check Jira directly if you need more detail.")
 
         body = "\n".join(lines)
         try:

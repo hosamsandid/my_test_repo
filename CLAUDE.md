@@ -146,7 +146,6 @@ Results post to `trigger.roomId` if set, else the agent's DM room. If no room ex
 | `github-event` | `repo` (`owner/name`), `events` (string list, e.g. `pull_request.opened`), optional `labelFilter` (fire only when that exact label is set) | Fired by the GitHub poller when the GitHub Events API reports a matching event for the repo. **No source/origin filtering** — it fires on any matching event regardless of who caused it (human, another agent, or the subscriber itself). The agent receives the trigger's `prompt` plus the full event payload as JSON. |
 | `jira-event` | `projectKey` (must be bound in the agent's environment's `jiraProjects[]`), `events` (defaults to `['status_changed']` — the only key implemented today), optional `statusFilter` (fire only when the issue transitions into that exact status) | Fired by the Jira poller when a JQL search of the bound project reports a status-field change on an issue. Same no-source-filtering posture as `github-event`. The agent receives the trigger's `prompt` plus the Jira event fields as JSON. |
 
-
 **Session policy.** With `sessionPolicy: per-invocation`, *triggered* runs start fresh (no `--resume`) and don't write the session pointer — DM continuity is untouched; the trigger prompt gets a learn-hint to extract lessons into `memory/log.md` first. Absent = `persistent` (legacy).
 
 ### Process Canvas / Flows (orchestration graph)
@@ -329,30 +328,6 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 |---|---|
 | `docker-compose.yml` | All four services + volumes |
 | `.env` | Secrets: Matrix tokens, LLM proxy URL + auth token (gitignored) |
-| `Makefile` | Build + start convenience targets (`make up`, `make down`, `make logs`, ...) |
-| `orchestrator/orchestrator.js` | Backend service: agent lifecycle, child-process spawning, environment-aware workspace seeding, internal HTTP API for the admin console |
-| `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over the libpod socket; provisions per-agent network (Seam #2), filesystem SubPath (Seam #3), and dedicated-volume (`AEE_PER_AGENT_VOLUME`) isolation. |
-| `orchestrator/teams-store.js` | Single source of truth for the human **Team** data model (#299): pure factory for Teams / users / memberships CRUD, referential integrity, default-team + System-Admin bootstrap. Unit-tested in `teams-store.test.js`. See `docs/teams-data-model.md`. |
-| `agent-image/` | The per-agent container image `as-agent:latest` (`python:3.12-slim`). Entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live agent runtime: Matrix client + Claude CLI invocations + trigger scheduler. Honors `sessionPolicy: per-invocation` and posts plain-text throttle warnings on `kind: throttle-warning` queue entries. |
-| `orchestrator/github-poller.js` | Polls the GitHub Events API; matches events by type + optional `labelFilter` + history horizon (no source/origin filtering), then applies the frequency throttle (`_checkAndIncThrottle`) and the #449 burst-cap digest (`planBurstHandoffs`) before fanning events out to per-agent `pending-triggers.json`. |
-| `orchestrator/jira-poller.js` | Polls Jira Cloud's enhanced JQL search for issue status changes, per-agent-scoped against each agent's own environment's `jiraProjects[]` binding (never a global map); reuses the GitHub poller's dedup/throttle/digest primitives via `event-poller-shared.js`. See `docs/jira-integration-concept.md`. |
-| `orchestrator/event-poller-shared.js` | Pure primitives shared by the GitHub and Jira pollers: seen-id dedup (`selectFreshEvents`), history-horizon gating (`effectiveHorizon`/`passesHorizon`), burst-cap grouping (`planBurstHandoffs`), and the Layer-3 throttle bucket load/save/increment. |
-| `orchestrator/Dockerfile` | Node 22 + Claude Code CLI + git + openssh-client |
-| `orchestrator/CLAUDE-template.md` | Base template baked into the image as `/defaults/CLAUDE.md`, used as fallback when the skill-pool volume has no CLAUDE.md |
-| `orchestrator/prompt-assembly.js` | Pure, unit-tested single source of truth for system-prompt composition: CLAUDE.md ordering, conditional gating (git/trigger/skills), de-duplication, and the runtime memory hint. Used by both `buildAgentClaudeMd` (seeding) and the prompt-preview endpoint. See *System-prompt assembly & preview*. |
-| `orchestrator/skill-pool/agent-templates/` | Role-template JSON files for the Team-Setup wizard (seeded into `/template-workspace/agent-templates/` via `make seed-templates`). |
-| `orchestrator/setup.sh` | Initial setup: register the admin Matrix user, print the access token |
-| `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, github-tokens, jira-tokens, skills, models, mcp, **`POST /api/teams`** (Team-Setup wizard backend), `GET /api/agent-templates`. |
-| `admin-console/src/pages/WorkingEnvironments.jsx` | UI: CRUD for environments (optional repo + ssh key + MCP; no skills — grants are team-owned) |
-| `orchestrator/skill-grants.js` | Pure, unit-tested source of truth for the team-owned skill grant: `effectiveSkills` (member override → own `skills[]` → parent construct) + the one-time `migrateSkillGrant` (env.skills → config.skills). |
-| `admin-console/src/pages/SshKeys.jsx` | UI: CRUD for SSH keys (paste private key, see fingerprint only) |
-| `admin-console/src/pages/Agents.jsx` | UI: CRUD for agents (env dropdown, role-aware cards, team-member edit form with inherit/override toggles for `systemPrompt` and `skillsOverride`). |
-| `admin-console/src/pages/TeamSetup.jsx` | UI: 5-step wizard (Process → Working Environment → Team → Knowledge (optional) → Review) that drives `POST /api/teams(/stream)` with `environmentId`. |
-| `admin-console/src/pages/team-setup/StepProcess.jsx` | UI: the wizard's Process step (#422) — template gallery, stage composer with custom-role dialog, flow preview + lints. |
-| `admin-console/api/flow-weaver.js` | Deterministic wiring engine (#421): stages + catalog-v2 roles → lint-clean process-template bundle (`POST /api/process/weave`). |
-| `admin-console/api/catalog-ports.js` | Catalog v2 (#420): normalises `patternRole` / `stageAffinity` / `ports` + `intrinsic` trigger filtering on agent templates. |
-| `admin-console/api/process-template-registry.js` | Curated process-template registry (#419): `orchestrator/skill-pool/process-templates/` → `GET /api/process-templates`. |
-| `admin-console/api/port-suggestion.js` | Wiring suggestion for custom roles (#423): LLM parse + keyword heuristic behind `POST /api/agent-ports/suggest`. |
 | `Makefile` | Build/start targets (`up`, `down`, `logs`, `build`, `ps`, `seed-*`) |
 | `orchestrator/orchestrator.js` | Backend: agent lifecycle, container spawning, env-aware seeding, internal HTTP API |
 | `orchestrator/spawn-container.js` | Spawns/kills the per-agent Podman container over libpod; network + FS SubPath + dedicated-volume + optional host-folder isolation (one or more folders via `contextMount`/`contextMounts`, read-only or read-write per folder — `buildContextMountSpecs`) |
@@ -365,6 +340,8 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `orchestrator/tar-single.js` | Dependency-free ustar builder for the archive-endpoint upload path |
 | `orchestrator/container-exec.js` | One-shot command execution + archive PUT inside a running agent container over libpod |
 | `orchestrator/github-poller.js` | GitHub Events API polling: match, throttle, burst digest, fan-out |
+| `orchestrator/jira-poller.js` | Polls Jira Cloud's enhanced JQL search for issue status changes, per-agent-scoped against each agent's own environment's `jiraProjects[]` binding (never a global map); reuses the GitHub poller's dedup/throttle/digest primitives via `event-poller-shared.js`. See `docs/jira-integration-concept.md` |
+| `orchestrator/event-poller-shared.js` | Pure primitives shared by the GitHub and Jira pollers: seen-id dedup (`selectFreshEvents`), history-horizon gating (`effectiveHorizon`/`passesHorizon`), burst-cap grouping (`planBurstHandoffs`), and the Layer-3 throttle bucket load/save/increment |
 | `orchestrator/flow-anomaly-detector.js` | Pure deterministic stall classifier: derives flow's expected label state machine from ports; classifies four anomaly classes with age |
 | `orchestrator/flow-anomaly-sweep.js` | GitHub/session-log → detector objects adapter; I/O helpers + per-team threshold merge |
 | `orchestrator/setup.sh` | Register the admin Matrix user, print the access token |

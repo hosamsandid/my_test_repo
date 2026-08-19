@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, Clock, CalendarClock, Globe, Github, AlertCircle, Edit, Workflow, Repeat, Jira } from 'lucide-react';
+import { Plus, Trash2, Clock, CalendarClock, Globe, Github, AlertCircle, Edit, Workflow, Repeat } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -22,7 +22,7 @@ function TypeBadge({ type }) {
   const isLoop   = type === 'loop';
   const bg    = isLoop ? 'var(--eb-status-warning-bg)' : isCron ? 'var(--eb-accent-muted)'   : isOnce ? 'var(--eb-bg-elevated)'    : isHttp ? 'var(--eb-status-success-bg)' : (isGithub || isJira) ? 'var(--eb-status-info-bg, var(--eb-bg-elevated))' : 'var(--eb-status-warning-bg)';
   const color = isLoop ? 'var(--eb-status-warning)'    : isCron ? 'var(--eb-accent-primary)' : isOnce ? 'var(--eb-text-secondary)' : isHttp ? 'var(--eb-status-success)'    : (isGithub || isJira) ? 'var(--eb-text-primary)' : 'var(--eb-status-warning)';
-  const label = isLoop ? 'loop'                        : isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : (isGithub || isJira) ? 'github-event' : type || 'unknown';
+  const label = isLoop ? 'loop'                        : isCron ? 'cron'                     : isOnce ? 'once'                     : isHttp ? 'http'                        : isGithub ? 'github-event' : isJira ? 'jira-event' : type || 'unknown';
   const Icon  = isLoop ? Repeat                        : isCron ? Clock                      : isOnce ? CalendarClock              : isHttp ? Globe                         : isGithub ? Github : isJira ? Workflow : AlertCircle;
   return (
     <span style={{

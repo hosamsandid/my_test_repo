@@ -60,6 +60,8 @@ The built-in Jira poller queries Jira Cloud's JQL search every 60 seconds (confi
 
 Because a Jira project key (e.g. `ENG`) is not globally unique the way a GitHub `owner/repo` is, project resolution is scoped to each agent's own Working Environment — the same key bound to two different Jira sites on two different environments is never conflated.
 
+**v1 scope: `jira-event` is a wake source, not a flow participant.** Unlike `github-event`, a `jira-event` trigger today has no `claim` label swap, no channel/graph/human-touchpoint wiring in the Process Canvas, no flow-anomaly-detector integration, and no event-transparency log (the GitHub Event Log has no Jira equivalent). It fires the trigger's prompt with the Jira event payload and nothing more. See [docs/jira-integration-concept.md](./jira-integration-concept.md#v1-scope-boundary) for what's deferred and why.
+
 See [docs/jira-integration-concept.md](./jira-integration-concept.md) for the full design rationale.
 
 ## Operational note: host clock skew (Podman machine)

@@ -65,6 +65,28 @@ const POLL_WINDOW_MINUTES = (() => {
   return Math.max(5, Math.ceil((POLL_INTERVAL_MS / 60_000) * 2));
 })();
 
+// Upper bound on how far a widened catch-up window (below) may reach back,
+// so a genuinely long outage produces one generous-but-bounded query instead
+// of an unbounded one.
+const MAX_CATCHUP_MINUTES = 24 * 60;
+
+// The fixed POLL_WINDOW_MINUTES alone silently drops any status transition
+// that happened while the orchestrator was down longer than the window: the
+// JQL `updated >= -Nm` clause excludes an issue from the search entirely
+// once it falls outside it, so an issue untouched since the transition never
+// resurfaces — not even via the changelog-truncation fallback, which only
+// runs on issues the search already returned. Widen the window to cover the
+// actual gap since the last successful poll, capped at MAX_CATCHUP_MINUTES.
+// Pure — unit-tested.
+function computeQueryWindowMinutes(lastPolledAt, baseWindowMinutes = POLL_WINDOW_MINUTES, maxCatchupMinutes = MAX_CATCHUP_MINUTES) {
+  if (!lastPolledAt) return baseWindowMinutes;
+  const lastMs = new Date(lastPolledAt).getTime();
+  if (!Number.isFinite(lastMs)) return baseWindowMinutes;
+  const elapsedMinutes = Math.ceil((Date.now() - lastMs) / 60_000);
+  if (elapsedMinutes <= baseWindowMinutes) return baseWindowMinutes;
+  return Math.min(elapsedMinutes, maxCatchupMinutes);
+}
+
 const STATE_DIR = '/workspace/jira-poller';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const THROTTLE_STATE_FILE = path.join(STATE_DIR, 'throttle-state.json');
@@ -84,6 +106,7 @@ function isValidCredentialId(id) {
   return typeof id === 'string'
     && id.length > 0
     && id.length < 64
+    && !id.includes('..')
     && /^[a-zA-Z0-9_.-]+$/.test(id);
 }
 
@@ -133,6 +156,16 @@ function resolveProjectCredential(envProjects, projectKey, loadJiraCredential) {
 function matchesStatusFilter(toStatus, statusFilter) {
   if (!statusFilter) return true;
   return toStatus === statusFilter;
+}
+
+// Pure: a jira-event trigger's `events` field is kept for forward-compat
+// (v1 only implements `'status_changed'` — see docs/jira-integration-concept.md)
+// — mirrors github-event's type filtering so the field isn't silently
+// ignored. Absent/empty `events` subscribes to everything (today, the one
+// event this poller ever emits); a non-empty list must actually name it.
+function subscribesToStatusChanged(events) {
+  if (!Array.isArray(events) || events.length === 0) return true;
+  return events.includes('status_changed');
 }
 
 // Pure: flattens an issue's (possibly backfilled) changelog histories into
@@ -330,6 +363,7 @@ class JiraPoller {
 
       for (const t of triggers) {
         if (t?.type !== 'jira-event' || t.enabled === false) continue;
+        if (!subscribesToStatusChanged(t.events)) continue;
         const projectKey = typeof t.projectKey === 'string' ? t.projectKey.trim() : '';
         if (!projectKey) continue;
 
@@ -380,7 +414,14 @@ class JiraPoller {
 
     const siteBase = resolveJiraApiBase(siteUrl);
     const authHeader = `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`;
-    const jql = `project = "${projectKey.replace(/"/g, '\\"')}" AND updated >= -${POLL_WINDOW_MINUTES}m ORDER BY updated ASC`;
+    // Escape backslashes before quotes — reversing the order would let a
+    // trailing backslash swallow the closing escaped quote and break out of
+    // the JQL string literal. The env-level JIRA_PROJECT_KEY_RE already
+    // restricts projectKey to `^[A-Za-z][A-Za-z0-9_]*$`, but this line is the
+    // defense-in-depth layer and should hold on its own.
+    const escapedProjectKey = projectKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const windowMinutes = computeQueryWindowMinutes(projectState.lastPolledAt);
+    const jql = `project = "${escapedProjectKey}" AND updated >= -${windowMinutes}m ORDER BY updated ASC`;
 
     let issues;
     try {
@@ -458,7 +499,11 @@ class JiraPoller {
       const result = await searchIssuesPage({ origin, authHeader, jql, nextPageToken });
       const pageIssues = Array.isArray(result.issues) ? result.issues : [];
       issues.push(...pageIssues);
-      if (result.isLast !== false || !result.nextPageToken || page >= MAX_PAGES) break;
+      // `isLast` is optional per Jira's docs — only stop early on an
+      // explicit `true`. Otherwise `nextPageToken` presence is the real
+      // pagination signal; an omitted `isLast` must not be read as "done"
+      // or every project silently caps at page 1 (100 issues).
+      if (result.isLast === true || !result.nextPageToken || page >= MAX_PAGES) break;
       nextPageToken = result.nextPageToken;
     }
     return issues;
@@ -624,8 +669,11 @@ module.exports = {
   extractStatusChangeEvents,
   resolveProjectCredential,
   matchesStatusFilter,
+  subscribesToStatusChanged,
   isValidCredentialId,
+  computeQueryWindowMinutes,
   POLL_INTERVAL_MS,
   POLL_WINDOW_MINUTES,
+  MAX_CATCHUP_MINUTES,
   MAX_PAGES,
 };

@@ -9,7 +9,9 @@ const {
   extractStatusChangeEvents,
   resolveProjectCredential,
   matchesStatusFilter,
+  subscribesToStatusChanged,
   isValidCredentialId,
+  computeQueryWindowMinutes,
 } = require('./jira-poller');
 
 // ── resolveJiraApiBase ──────────────────────────────────────────────────
@@ -225,8 +227,50 @@ test('isValidCredentialId: accepts the same charset as SSH-key/GitHub-token ids'
 
 test('isValidCredentialId: rejects path traversal and empty/oversized ids', () => {
   assert.equal(isValidCredentialId('../../etc/passwd'), false);
+  // Bare '..' passes the charset regex on its own (it's a valid filename
+  // character run) — the traversal guard needs an explicit check for it.
+  assert.equal(isValidCredentialId('..'), false);
   assert.equal(isValidCredentialId(''), false);
   assert.equal(isValidCredentialId('a'.repeat(64)), false);
   assert.equal(isValidCredentialId(null), false);
   assert.equal(isValidCredentialId(42), false);
+});
+
+// ── subscribesToStatusChanged ────────────────────────────────────────────
+
+test('subscribesToStatusChanged: absent/empty events subscribes to everything', () => {
+  assert.equal(subscribesToStatusChanged(undefined), true);
+  assert.equal(subscribesToStatusChanged([]), true);
+});
+
+test('subscribesToStatusChanged: a non-empty list must name status_changed', () => {
+  assert.equal(subscribesToStatusChanged(['status_changed']), true);
+  assert.equal(subscribesToStatusChanged(['something_else']), false);
+});
+
+// ── computeQueryWindowMinutes ────────────────────────────────────────────
+
+test('computeQueryWindowMinutes: no lastPolledAt uses the base window', () => {
+  assert.equal(computeQueryWindowMinutes(null, 5, 1440), 5);
+  assert.equal(computeQueryWindowMinutes(undefined, 5, 1440), 5);
+});
+
+test('computeQueryWindowMinutes: an unparsable lastPolledAt uses the base window', () => {
+  assert.equal(computeQueryWindowMinutes('not-a-date', 5, 1440), 5);
+});
+
+test('computeQueryWindowMinutes: a gap shorter than the base window is a no-op', () => {
+  const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
+  assert.equal(computeQueryWindowMinutes(oneMinuteAgo, 5, 1440), 5);
+});
+
+test('computeQueryWindowMinutes: a gap longer than the base window widens to cover it', () => {
+  const twentyMinutesAgo = new Date(Date.now() - 20 * 60_000).toISOString();
+  const widened = computeQueryWindowMinutes(twentyMinutesAgo, 5, 1440);
+  assert.ok(widened >= 20, `expected >= 20, got ${widened}`);
+});
+
+test('computeQueryWindowMinutes: a very long outage is capped at maxCatchupMinutes', () => {
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+  assert.equal(computeQueryWindowMinutes(twoDaysAgo, 5, 1440), 1440);
 });

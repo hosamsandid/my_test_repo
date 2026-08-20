@@ -99,6 +99,20 @@ podman exec <container> sh -c 'curl -s -H "Authorization: Bearer $ANTHROPIC_AUTH
 Auth/model/connection errors from `claude` are **posted to the room** and logged
 as `[Runner:<id>] Error: ...` — they are no longer silent.
 
+**`api_error_status=401` / "Invalid bearer token":** this means `ANTHROPIC_BASE_URL`
+points straight at `https://api.anthropic.com` while the token is a plain API key
+(`sk-ant-api03-...`). The CLI always sends `ANTHROPIC_AUTH_TOKEN` as
+`Authorization: Bearer <token>`, and the real Anthropic API only accepts a plain
+key via `x-api-key` — it 401s the Bearer form outright, it doesn't fall back.
+Fix: point the provider's `baseUrl` (Model Providers page, or `ANTHROPIC_BASE_URL`
+in `.env` for the auto-migrated `default` provider) at this stack's built-in
+bridge, `http://orchestrator:4004`, instead — it translates Bearer → `x-api-key`
+for you (`orchestrator/anthropic-proxy.js`). See `docs/model-providers.md`. After
+changing a *registered provider's* `baseUrl` (`/workspace/llm-endpoints/index.json`),
+already-running agents need a respawn to pick it up — `.env` changes need an
+orchestrator container recreate (`up -d`, not `restart`, which doesn't re-read
+env vars) plus the same respawn.
+
 ## 4. Empty reply (looks like silence)
 
 If `claude` exits cleanly but produces no text, the agent now posts a visible

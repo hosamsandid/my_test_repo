@@ -12,7 +12,7 @@
 //
 // Unlike GitHub, Jira Cloud has no discrete immutable events feed. Instead:
 //   1. Per tracked project, run a JQL search scoped to a narrow recent
-//      window (`updated >= -Nm`) with `expand: ['changelog']`.
+//      window (`updated >= -Nm`) with `expand: 'changelog'`.
 //   2. Each returned issue's changelog histories carry a stable `id`; every
 //      history item with `field === 'status'` becomes a candidate event
 //      keyed `<issueKey>:<historyId>` — playing the exact role GitHub's
@@ -252,11 +252,18 @@ function requestJson({ origin, reqPath, method = 'GET', authHeader, body }) {
 
 // One page of the enhanced JQL search (POST /search/jql). Returns
 // { issues, isLast, nextPageToken }.
+//
+// `expand` must be a comma-separated STRING here, not the JSON array every
+// other v3 endpoint accepts (`fields` above is still a real array) — this
+// newer endpoint 400s ("Invalid request payload", no further detail) on an
+// array `expand`, confirmed empirically against a live site. Verified fixed
+// with the string form; keep it that way even though it looks inconsistent
+// next to `fields`.
 function searchIssuesPage({ origin, authHeader, jql, nextPageToken }) {
   const body = {
     jql,
     fields: ['summary', 'status'],
-    expand: ['changelog'],
+    expand: 'changelog',
     maxResults: 100,
   };
   if (nextPageToken) body.nextPageToken = nextPageToken;

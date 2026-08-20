@@ -114,6 +114,7 @@ const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable,
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
+const { createAnthropicProxyServer } = require("./anthropic-proxy");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const usageLog = require("./usage-log");
@@ -14312,6 +14313,22 @@ async function main() {
 
   hookServer.listen(HOOK_PORT, '0.0.0.0', () =>
     console.log(`[Orchestrator] Hook server listening on :${HOOK_PORT}`)
+  );
+
+  // ============================================================
+  // Anthropic proxy — lets the `claude` CLI (Bearer-only auth via
+  // ANTHROPIC_AUTH_TOKEN) reach the real api.anthropic.com with a plain
+  // API key (x-api-key-only auth). See anthropic-proxy.js for why this
+  // exists. Every agent container already resolves `orchestrator` by name
+  // (it's connected into every per-agent network for the internal API), so
+  // pointing ANTHROPIC_BASE_URL here needs no new networking.
+  // ============================================================
+  const ANTHROPIC_PROXY_PORT = parseInt(process.env.ANTHROPIC_PROXY_PORT || '4004', 10);
+  const anthropicProxy = createAnthropicProxyServer({
+    upstreamBase: process.env.ANTHROPIC_PROXY_UPSTREAM || 'https://api.anthropic.com',
+  });
+  anthropicProxy.listen(ANTHROPIC_PROXY_PORT, '0.0.0.0', () =>
+    console.log(`[Orchestrator] Anthropic proxy listening on :${ANTHROPIC_PROXY_PORT}`)
   );
 
   // ============================================================

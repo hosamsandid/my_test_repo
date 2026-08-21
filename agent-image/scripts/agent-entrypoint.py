@@ -5322,11 +5322,6 @@ class TriggerScheduler:
                     _clear_session_pointer(rid)
                     print(f"[Runner:{self._agent_id}] session-reset for {rid}",
                           file=sys.stderr)
-                    try:
-                        await self._execute_handover_dm(entry)
-                    except Exception as exc:
-                        print(f"[Runner:{self._agent_id}] handover-dm error: {exc}",
-                              file=sys.stderr)
                 return
             if kind == "session-set":
                 # Control→agent resume command (#574): the admin can't write our

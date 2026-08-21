@@ -114,7 +114,10 @@ function isValidCredentialId(id) {
 // ("https://yourcompany.atlassian.net", or a custom domain / test fixture
 // host) — whichever form the credential's siteUrl was stored in.
 function resolveJiraApiBase(siteUrl) {
-  const trimmed = String(siteUrl || '').trim().replace(/\/+$/, '');
+  // Manual strip, not /\/+$/ — see api.js's normalizeJiraSiteUrl for why
+  // (CodeQL flags that regex shape as a polynomial-time ReDoS risk).
+  let trimmed = String(siteUrl || '').trim();
+  while (trimmed.endsWith('/')) trimmed = trimmed.slice(0, -1);
   if (/^https?:\/\//.test(trimmed)) return trimmed;
   return `https://${trimmed}.atlassian.net`;
 }

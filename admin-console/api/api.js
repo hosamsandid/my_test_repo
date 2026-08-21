@@ -14076,7 +14076,7 @@ app.post('/api/jira-tokens', apiLimiter, (req, res) => {
   }
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this credential', code: 'forbidden' });
@@ -14108,6 +14108,7 @@ app.post('/api/jira-tokens', apiLimiter, (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(ownership.userId ? { userId: ownership.userId } : {}),
     siteUrl: normalizeJiraSiteUrl(siteUrl),
     email: email.trim(),
     preview: jiraTokenPreview(trimmed),

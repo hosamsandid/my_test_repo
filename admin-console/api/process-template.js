@@ -1451,6 +1451,17 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       out.activatedAt = now;
     } else if (tr.type === 'cron') {
       out.cron = tr.cron;
+    } else if (tr.type === 'jira-event') {
+      out.projectKey = subst(tr.projectKey || '');
+      out.events = tr.events || ['status_changed'];
+      if (typeof tr.statusFilter === 'string' && tr.statusFilter.trim()) {
+        out.statusFilter = subst(tr.statusFilter);
+      }
+      // Same horizon-safety rationale as github-event above: stamp "now" so a
+      // freshly materialised member doesn't inherit a stale backlog window.
+      const now = new Date().toISOString();
+      out.createdAt = now;
+      out.activatedAt = now;
     }
     if (tr.preCheckScript) out.preCheckScript = tr.preCheckScript;
     if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {

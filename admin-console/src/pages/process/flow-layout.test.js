@@ -6,6 +6,10 @@ import {
   acyclicEdges,
   longestPathLayers,
   countCrossings,
+  WRAP_MIN_COLUMN,
+  membersPerLine,
+  wrapColumn,
+  wrapColumns,
 } from './flow-layout.js';
 
 // A → B → C → D linear pipeline lays out as four ordered columns.
@@ -222,4 +226,108 @@ test('groups survive the stage partitioning', () => {
   });
   assert.equal(colOf.get('c1'), colOf.get('c2'));
   assert.ok(colOf.get('c1') > colOf.get('p'));
+});
+
+
+// ── over-wide column wrapping ───────────────────────────────────────────────
+// One column is one layer, and for a hierarchy that is every sibling of one
+// parent — a BriefingPack pack with 270 children used to lay them out in a
+// single ~100 000px line. These lock in the wrapping that bounds it.
+
+// The renderer's real numbers for a top→down flow: 320px card + 50px gap, with a
+// 6 000px cross-axis budget.
+const CARD = 320 + 50;
+const BUDGET = 6000;
+const wrapOpts = (over = {}) => ({ crossExtent: CARD, maxCrossExtent: BUDGET, ...over });
+const ids = (n, p = 'n') => Array.from({ length: n }, (_, i) => p + i);
+
+test('membersPerLine fits as many as the budget allows', () => {
+  // 6000 / 370 = 16.2 → 16 across
+  assert.equal(membersPerLine(16, CARD, BUDGET), 16);
+  assert.equal(membersPerLine(5, CARD, BUDGET), 5, 'a short column is never padded out');
+});
+
+test('membersPerLine balances the lines instead of leaving a near-empty last one', () => {
+  // 17 members with room for 16 → 2 lines, so 9 + 8 rather than 16 + 1
+  assert.equal(membersPerLine(17, CARD, BUDGET), 9);
+  // 270 → ceil(270/16) = 17 lines → ceil(270/17) = 16 per line
+  assert.equal(membersPerLine(270, CARD, BUDGET), 16);
+});
+
+test('membersPerLine degrades safely on nonsense input', () => {
+  assert.equal(membersPerLine(50, 10000, 100), 1, 'a card wider than the whole budget');
+  assert.equal(membersPerLine(0, CARD, BUDGET), 1, 'an empty column');
+  assert.equal(membersPerLine(5, 0, BUDGET), 5, 'a zero extent must not divide by zero');
+  // No budget means "unbounded", NOT "one per line": a missing option must never
+  // shred a flow into single-card rows.
+  assert.equal(membersPerLine(5, CARD, 0), 5);
+  assert.equal(membersPerLine(5, CARD, undefined), 5);
+});
+
+test('a column inside the budget is returned untouched, as one row', () => {
+  const col = ids(16);
+  const rows = wrapColumn(col, wrapOpts());
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], col);
+  assert.notEqual(rows[0], col, 'returns a copy, not the array the caller passed in');
+});
+
+test('small columns are never wrapped, even under a tiny budget', () => {
+  const col = ids(WRAP_MIN_COLUMN);
+  assert.deepEqual(wrapColumn(col, wrapOpts({ maxCrossExtent: 1 })), [col]);
+  // one past the threshold the budget starts to apply again
+  assert.ok(wrapColumn(ids(WRAP_MIN_COLUMN + 1), wrapOpts({ maxCrossExtent: 1 })).length > 1);
+});
+
+test('the 270-sibling BriefingPack column wraps into a bounded block', () => {
+  const rows = wrapColumn(ids(270), wrapOpts());
+  assert.equal(rows.length, 17);
+  assert.equal(rows[0].length, 16);
+  assert.equal(rows.at(-1).length, 270 - 16 * 16, 'the remainder lands in the last row');
+  const widest = Math.max(...rows.map(r => r.length));
+  assert.ok(widest * CARD <= BUDGET, `block is ${widest * CARD}px wide, budget ${BUDGET}px`);
+});
+
+test('wrapping preserves order, loses nothing and duplicates nothing', () => {
+  const col = ids(270);
+  const flat = wrapColumn(col, wrapOpts()).flat();
+  assert.deepEqual(flat, col);
+  assert.equal(new Set(flat).size, col.length);
+});
+
+test('the block stays bounded as the column keeps growing', () => {
+  for (const n of [40, 120, 270, 648, 2000]) {
+    const rows = wrapColumn(ids(n), wrapOpts());
+    const widest = Math.max(...rows.map(r => r.length));
+    assert.ok(widest * CARD <= BUDGET, `n=${n}: ${widest * CARD}px exceeds the budget`);
+    assert.equal(rows.flat().length, n, `n=${n}: members lost`);
+  }
+});
+
+test('a left→right flow wraps on measured card heights, not the card width', () => {
+  // cross axis is y there, so the extent is the card height + a 34px gap
+  const rows = wrapColumn(ids(100), { crossExtent: 120 + 34, maxCrossExtent: BUDGET });
+  assert.equal(membersPerLine(100, 154, BUDGET), 34);
+  assert.equal(rows.length, 3);
+  assert.equal(rows.flat().length, 100);
+});
+
+test('wrapColumns applies per column and can size each one differently', () => {
+  const cols = [ids(3, 'a'), ids(270, 'b'), ids(9, 'c')];
+  const rows = wrapColumns(cols, {
+    crossExtentOf: col => (col[0].startsWith('c') ? 3000 : CARD),
+    maxCrossExtent: BUDGET,
+  });
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], [cols[0]], 'short column: single row');
+  assert.equal(rows[1].length, 17, 'wide column: wrapped');
+  // 9 cards at 3000px each would be 27 000px, but 9 > WRAP_MIN_COLUMN so it wraps
+  assert.ok(rows[2].length > 1, 'a column of very wide cards wraps too');
+  assert.deepEqual(rows.flat().flat().sort(), [...cols.flat()].sort());
+});
+
+test('wrapColumns accepts a constant extent and tolerates an empty graph', () => {
+  assert.deepEqual(wrapColumns([[]], { crossExtentOf: CARD, maxCrossExtent: BUDGET }), [[[]]]);
+  assert.deepEqual(wrapColumns([], { crossExtentOf: CARD, maxCrossExtent: BUDGET }), []);
+  assert.deepEqual(wrapColumns(undefined, {}), []);
 });

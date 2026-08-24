@@ -391,6 +391,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // second during a drag, each one a reflow over 81 cards and 500 SVG nodes.
     // The ResizeObserver below is the authority on when it changes.
     viewportSize:       { w: 0, h: 0 },
+    rafScheduled:       false,         // dedup guard: one rAF in flight at most
   };
 
   function viewportSize() {
@@ -1516,8 +1517,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
     // Re-layout with actual DOM heights, then reposition. The heights are read
     // into the cache FIRST, because the layout no longer touches the DOM for
-    // them.
+    // them. Guard prevents multiple rapid render() calls from piling up rAF callbacks.
+    if (state.rafScheduled) return;
+    state.rafScheduled = true;
     requestAnimationFrame(() => {
+      state.rafScheduled = false;
       measureHeights();
       layout();
       canvas.querySelectorAll('.bp-node').forEach(el => {
@@ -2686,10 +2690,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     else if (onConnect) onConnect(fromId, toId);
   }
 
+  // Cache the viewport rect so wheel events don't force a layout reflow on every tick.
+  // Invalidated by onResize so it stays accurate after layout changes.
+  let cachedViewportRect = null;
   function onWheel(e) {
     e.preventDefault();
-    const rect = viewport.getBoundingClientRect();
-    setZoom(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - rect.left, e.clientY - rect.top);
+    if (!cachedViewportRect) cachedViewportRect = viewport.getBoundingClientRect();
+    setZoom(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - cachedViewportRect.left, e.clientY - cachedViewportRect.top);
   }
 
   // Zoom to an absolute factor, keeping the viewport point (cx, cy) fixed —
@@ -2708,9 +2715,17 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     scheduleTransform();
   }
 
+  // Throttle all DOM writes to one per animation frame — pan and wheel both
+  // call this at raw pointer-event rate, which far exceeds display refresh.
+  let transformRaf = 0;
   function applyTransform() {
-    canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-    if (document.activeElement !== zoomInput) zoomInput.value = Math.round(state.zoom * 100) + '%';
+    if (transformRaf) return;
+    transformRaf = requestAnimationFrame(() => {
+      transformRaf = 0;
+      canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
+      const pct = Math.round(state.zoom * 100) + '%';
+      if (document.activeElement !== zoomInput && zoomInput.value !== pct) zoomInput.value = pct;
+    });
   }
 
   // ─── Utilities ────────────────────────────────────────────────────────
@@ -2725,6 +2740,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ─── Resize observer ─────────────────────────────────────────────────
 
   function onResize() {
+    cachedViewportRect = null;
     state.viewportSize.w = viewport.clientWidth;
     state.viewportSize.h = viewport.clientHeight;
     layout();

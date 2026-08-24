@@ -185,6 +185,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [anomaliesOpen, setAnomaliesOpen] = useState(false);
   // Per-node anomaly counts (#959) — overlaid as a badge on the canvas cards.
   const [anomalyCounts, setAnomalyCounts] = useState({});
+  // Stable callback so FlowAnomaliesPanel's useCallback([teamId, onData]) dep never
+  // changes between renders — an inline arrow here would recreate load() on every
+  // render, causing an infinite fetch → setState → re-render → fetch loop.
+  const onAnomalyData = useCallback(
+    (data) => setAnomalyCounts(anomalyCountByNode(data && data.anomalies)),
+    [],
+  );
   // Improvements panel (#1223, hill-climbing loop Phase 1) — run-metric tiles.
   const [improvementsOpen, setImprovementsOpen] = useState(false);
 
@@ -311,7 +318,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         }
       },
       actorSources: true, // offer @github/@external as drag sources (#411)
-      expandChildrenByDefault: true, // process flows show the whole team; parents collapse on demand
+      expandChildrenByDefault: false, // start collapsed; user expands on demand to avoid rendering crashes on large flows
     });
     graphRef.current = g;
     return () => { g.cleanup(); graphRef.current = null; };
@@ -977,7 +984,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         <FlowAnomaliesPanel
           teamId={scope}
           onClose={() => setAnomaliesOpen(false)}
-          onData={(data) => setAnomalyCounts(anomalyCountByNode(data && data.anomalies))}
+          onData={onAnomalyData}
         />
       )}
 

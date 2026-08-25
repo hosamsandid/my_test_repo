@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
-  Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
+  Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch, Workflow,
   Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
@@ -141,6 +141,7 @@ const NAV_GROUPS = [
     { path: '/models',        label: 'Model Providers',      Icon: Sparkles, credAdmin: true },
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github,   credAdmin: true },
+    { path: '/jira-tokens',   label: 'Jira Credentials',     Icon: Workflow, credAdmin: true },
     // My Credentials (#1568) — personal credential self-service, visible to every
     // authenticated human (no credAdmin gate).
     { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },

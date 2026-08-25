@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle,
   GitPullRequest, CircleDot, Link, RefreshCw, Package, ChevronDown, ChevronRight,
-  Clock, CalendarClock, Globe, Github, Pencil } from 'lucide-react';
+  Clock, CalendarClock, Globe, Github, Workflow, Pencil } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
@@ -435,7 +435,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
 
 // A manual trigger row: type icon + plain-language schedule + enabled switch +
 // edit + remove. The detail editor (edit) is the reused TriggersPanel form.
-const TRIGGER_ICON = { cron: Clock, once: CalendarClock, http: Globe, 'github-event': Github };
+const TRIGGER_ICON = { cron: Clock, once: CalendarClock, http: Globe, 'github-event': Github, 'jira-event': Workflow };
 function ManualTriggerRow({ trigger, agentId, busy, onEdit, onToggle, onRemove, nameOf }) {
   const Icon = TRIGGER_ICON[trigger.type] || Github;
   const enabled = trigger.enabled !== false;

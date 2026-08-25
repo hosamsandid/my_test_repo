@@ -28,6 +28,21 @@ const path = require('path');
 const https = require('https');
 const githubEventLog = require('./github-event-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
+const {
+  SEEN_MAX,
+  BURST_CAP,
+  THROTTLE_WINDOW_MS,
+  THROTTLE_THRESHOLD,
+  GRACE_MS,
+  computeBackoffDelayMs,
+  effectiveHorizon,
+  passesHorizon,
+  selectFreshEvents,
+  planBurstHandoffs,
+  loadThrottleState,
+  saveThrottleState,
+  checkAndIncThrottle,
+} = require('./event-poller-shared');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -45,43 +60,9 @@ const AGENTS_DIR = '/workspace/agents';
 const ENVIRONMENTS_DIR = '/workspace/environments';
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, '_tokens');
 
-// Layer-3 loop protection: per (agent, conversation-key) sliding window.
-// If an agent has reacted more than THROTTLE_THRESHOLD times to the same
-// PR/issue within THROTTLE_WINDOW_MS, further events are dropped until the
-// window resets, and a one-shot warning is posted to the agent's DM.
-//
-// Defaults err on the side of "loud rather than silent": 5 reactions / hour
-// per conversation is generous for normal review cycles but cheap to trip
-// on a real loop.
-const THROTTLE_WINDOW_MS = 60 * 60_000;
-const THROTTLE_THRESHOLD = 5;
-
-// Backoff bounds for repos that consistently fail (e.g. expired token,
-// repo deleted, network outage). Capped at 30m so a once-flaky token
-// recovers within at most one work-break.
-const BACKOFF_BASE_MS = 60_000;
-const BACKOFF_MAX_MS = 30 * 60_000;
-
-// #320-B: safety look-back applied to the per-subscriber history horizon. The
-// GitHub Events API delivers events out of order and up to hours late, so an
-// event that legitimately belongs to a subscriber can carry a `created_at`
-// slightly older than the subscriber's activation stamp. Widening the horizon
-// by GRACE_MS catches those border cases without letting a real backlog in.
-const GRACE_MS = 5 * 60_000;
-
-// #320-F: upper bound on the sliding set of processed event ids kept per repo.
-// One page of the Events API is <=100 events; retaining several polls' worth
-// means a delayed/re-observed event is still recognised as already-seen. Tiny
-// on disk; oldest ids beyond this bound are pruned.
-const SEEN_MAX = 500;
-
-// #449-C: burst cap for the fan-out. When MORE than BURST_CAP fresh events for
-// the same (agent, conversationKey) arrive in a SINGLE poll, they collapse into
-// one lossless `github-digest` queue entry instead of BURST_CAP+ individual
-// agent wake-ups. This is the poll-scoped sibling of the Layer-3 throttle
-// (THROTTLE_*, hour-scoped): the throttle silently *drops* beyond its threshold,
-// the digest *bundles* without losing any event.
-const BURST_CAP = 3;
+// SEEN_MAX, BURST_CAP, THROTTLE_WINDOW_MS, THROTTLE_THRESHOLD, GRACE_MS and
+// the backoff bounds now live in ./event-poller-shared (shared with the Jira
+// poller) — see the require block above.
 
 // #449: Events-API pagination. The API returns newest-first, one page at a time.
 // A burst of more than PER_PAGE events between two polls pushes the older-but-
@@ -286,14 +267,6 @@ function usingNonDefaultApiBase() {
   return githubApiBase() !== DEFAULT_GITHUB_API_BASE;
 }
 
-// #320-A: the per-subscriber history horizon. Prefer the trigger's activation
-// stamp (set on create and refreshed on re-enable), then its creation stamp,
-// then the triggers.json mtime as the legacy fallback for triggers authored
-// before the stamps existed. Returns an ISO string or null (no horizon known).
-function effectiveHorizon(trigger, triggersMtime) {
-  return (trigger && (trigger.activatedAt || trigger.createdAt)) || triggersMtime || null;
-}
-
 // #525: one-time history-horizon backfill for legacy github-event triggers. A
 // trigger authored before the #320/#446 activation stamps has neither `createdAt`
 // nor `activatedAt`, so `effectiveHorizon` falls back to the triggers.json mtime —
@@ -315,53 +288,6 @@ function backfillHorizonStamps(triggers, stampIso) {
   return { triggers: changed ? out : triggers, changed };
 }
 
-// #320-B: is `eventCreatedAt` recent enough to reach a subscriber whose horizon
-// is `horizonIso`? The horizon is widened by `graceMs` to absorb late/out-of-
-// order delivery. Missing horizon or timestamp fails open (deliver) — the same
-// posture the code had before a horizon existed.
-function passesHorizon(eventCreatedAt, horizonIso, graceMs) {
-  if (!horizonIso || !eventCreatedAt) return true;
-  const cutoff = Date.parse(horizonIso) - (graceMs || 0);
-  const ts = Date.parse(eventCreatedAt);
-  if (Number.isNaN(cutoff) || Number.isNaN(ts)) return true;
-  return ts >= cutoff;
-}
-
-// #320-F: split a freshly fetched event list into the events not yet processed
-// (`fresh`) and the next sliding id set (`nextSeen`), given the previous set.
-// Membership is by event id, so GitHub's lack of ordering and delayed delivery
-// no longer matter: an event with an older `created_at` but an unseen id is
-// still fresh, and a re-observed id is never re-delivered. `nextSeen` prepends
-// every currently visible id (so ids still in the API window stay remembered),
-// dedups preserving newest-first order, and caps at `seenMax`.
-function selectFreshEvents(events, seenArr, seenMax) {
-  const list = Array.isArray(events) ? events : [];
-  const seen = new Set(Array.isArray(seenArr) ? seenArr : []);
-  const fresh = list.filter(e => e && e.id != null && !seen.has(String(e.id)));
-
-  const nextSeen = [];
-  const added = new Set();
-  const push = (id) => {
-    if (id == null) return;
-    const s = String(id);
-    if (added.has(s)) return;
-    added.add(s);
-    nextSeen.push(s);
-  };
-  for (const e of list) push(e && e.id);
-  for (const id of (Array.isArray(seenArr) ? seenArr : [])) push(id);
-  return { fresh, nextSeen: nextSeen.slice(0, seenMax || SEEN_MAX) };
-}
-
-// #449-C (pure core, unit-tested). Given the events that passed every delivery
-// gate in one poll — each tagged as { agentId, triggerId, convKey, key, ghEvent }
-// — group them by (agentId, convKey) and decide per group how to hand off:
-//   mode 'digest'     when a group has MORE than `cap` events (the burst case
-//                     AK2 collapses into one lossless notification), else
-//   mode 'individual' (normal volume — the caller enqueues each event and applies
-//                     the Layer-3 throttle unchanged).
-// Group insertion order and per-group event order (caller passes oldest-first)
-// are preserved. Pure — no I/O.
 // #449 (pure): should the poller fetch the NEXT Events-API page? We only page to
 // recover events a burst pushed off page 1. Continue while the page just read was
 // FULL (so more may exist), we're under the page cap, and it contained NO
@@ -375,33 +301,6 @@ function shouldFetchNextPage(pageEvents, seenArr, pageIndex, { perPage = PER_PAG
   const seen = new Set((Array.isArray(seenArr) ? seenArr : []).map(String));
   const reachedKnown = list.some(e => e && e.id != null && seen.has(String(e.id)));
   return !reachedKnown;
-}
-
-function planBurstHandoffs(deliverables, cap) {
-  const CAP = Number.isInteger(cap) && cap >= 0 ? cap : BURST_CAP;
-  const groups = new Map();
-  const order = [];
-  for (const d of Array.isArray(deliverables) ? deliverables : []) {
-    if (!d || !d.agentId) continue;
-    const convKey = d.convKey ?? null;
-    const gkey = `${d.agentId} ${convKey ?? ''}`;
-    let g = groups.get(gkey);
-    if (!g) {
-      g = { agentId: d.agentId, convKey, items: [] };
-      groups.set(gkey, g);
-      order.push(gkey);
-    }
-    g.items.push(d);
-  }
-  return order.map((k) => {
-    const g = groups.get(k);
-    return {
-      agentId: g.agentId,
-      convKey: g.convKey,
-      mode: g.items.length > CAP ? 'digest' : 'individual',
-      items: g.items,
-    };
-  });
 }
 
 // Poller-wedge fix: run an HTTP request under a guarantee that its promise settles exactly
@@ -654,10 +553,7 @@ class GitHubPoller {
       // ...) up to 30m. Auth failures (revoked PAT) otherwise spam the log
       // forever; a 30m cap keeps recovery quick once the operator fixes it.
       const failures = (repoState.consecutiveFailures || 0) + 1;
-      const delayMs = Math.min(
-        BACKOFF_BASE_MS * Math.pow(2, failures - 1),
-        BACKOFF_MAX_MS,
-      );
+      const delayMs = computeBackoffDelayMs(failures);
       repoState.consecutiveFailures = failures;
       repoState.skipUntil = new Date(Date.now() + delayMs).toISOString();
       this.state[repoFullName] = repoState;
@@ -1160,38 +1056,15 @@ class GitHubPoller {
   }
 
   // ─── Layer-3 throttle ────────────────────────────────────────────────
-  // The state file is a flat map of `<agentId>:<convKey>` → bucket. Buckets
-  // older than 2× the window are pruned at load time so the file doesn't
-  // grow unbounded as old PRs go quiet.
+  // Bucket load/save/increment logic lives in ./event-poller-shared (shared
+  // with the Jira poller); these methods just supply this poller's own
+  // state-file path and in-memory bucket map.
   _loadThrottleState() {
-    try {
-      if (!fs.existsSync(THROTTLE_STATE_FILE)) return {};
-      const raw = JSON.parse(fs.readFileSync(THROTTLE_STATE_FILE, 'utf8')) || {};
-      const buckets = raw.buckets || {};
-      const now = Date.now();
-      const pruned = {};
-      for (const [k, b] of Object.entries(buckets)) {
-        if (!b?.windowStart) continue;
-        const age = now - new Date(b.windowStart).getTime();
-        if (age <= 2 * THROTTLE_WINDOW_MS) pruned[k] = b;
-      }
-      return pruned;
-    } catch (err) {
-      console.error(`[GH-Poller] Cannot load throttle state: ${err.message}`);
-      return {};
-    }
+    return loadThrottleState(THROTTLE_STATE_FILE, THROTTLE_WINDOW_MS);
   }
 
   _saveThrottleState() {
-    try {
-      fs.mkdirSync(STATE_DIR, { recursive: true });
-      fs.writeFileSync(
-        THROTTLE_STATE_FILE,
-        JSON.stringify({ buckets: this.throttleBuckets }, null, 2),
-      );
-    } catch (err) {
-      console.error(`[GH-Poller] Cannot save throttle state: ${err.message}`);
-    }
+    saveThrottleState(THROTTLE_STATE_FILE, this.throttleBuckets);
   }
 
   // Increments the bucket for (agent, convKey). Returns:
@@ -1200,40 +1073,10 @@ class GitHubPoller {
   // crosses the threshold — so the agent gets one DM, not one per dropped
   // event.
   _checkAndIncThrottle(agentId, convKey) {
-    const k = `${agentId}:${convKey}`;
-    const now = Date.now();
-    let bucket = this.throttleBuckets[k];
-    if (!bucket || now - new Date(bucket.windowStart).getTime() > THROTTLE_WINDOW_MS) {
-      bucket = { count: 1, windowStart: new Date(now).toISOString(), warned: false };
-      this.throttleBuckets[k] = bucket;
-      return {
-        drop: false,
-        justWarned: false,
-        count: 1,
-        threshold: THROTTLE_THRESHOLD,
-        windowEndsAt: new Date(now + THROTTLE_WINDOW_MS).toISOString(),
-      };
-    }
-    bucket.count++;
-    let justWarned = false;
-    let drop = false;
-    if (bucket.count > THROTTLE_THRESHOLD) {
-      drop = true;
-      if (!bucket.warned) {
-        bucket.warned = true;
-        justWarned = true;
-      }
-    }
-    const windowEndsAt = new Date(
-      new Date(bucket.windowStart).getTime() + THROTTLE_WINDOW_MS,
-    ).toISOString();
-    return {
-      drop,
-      justWarned,
-      count: bucket.count,
+    return checkAndIncThrottle(this.throttleBuckets, `${agentId}:${convKey}`, {
+      windowMs: THROTTLE_WINDOW_MS,
       threshold: THROTTLE_THRESHOLD,
-      windowEndsAt,
-    };
+    });
   }
 
   // Append a one-shot warning entry to the agent's pending-triggers.json.

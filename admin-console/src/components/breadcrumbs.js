@@ -14,6 +14,7 @@ export const BREADCRUMBS = {
   '/environments': 'Working Environments',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
+  '/jira-tokens':  'Jira Credentials',
   '/my-credentials': 'My Credentials',
   '/skills':       'Skills Registry',
   '/role-templates': 'Agent Templates',

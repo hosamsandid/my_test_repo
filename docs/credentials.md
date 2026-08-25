@@ -1,4 +1,4 @@
-# SSH Keys and GitHub Tokens
+# SSH Keys, GitHub Tokens, and Jira Credentials
 
 ## Credential ownership tiers
 
@@ -93,6 +93,16 @@ To let an agent push commits, open PRs, or run the `gh` CLI:
 1. **Admin Console → GitHub Tokens** → paste a PAT with `repo` scope on the repos the agent should touch. Give it any id (e.g. `gh-as-agent`).
 2. **Edit the agent's Working Environment** → set "GitHub Token" to that id and save.
 3. **Toggle the agent's Enabled switch off, then on.** The orchestrator re-spawns the agent and injects the token as `GH_TOKEN` and `GITHUB_TOKEN` into its container. Confirm in `make logs`: look for `[Orchestrator] Agent <id> → GH_TOKEN injected (env=<env>, token=<token-id>)`.
+
+## Jira Credentials
+
+Jira credentials authorize the built-in Jira poller to watch a project's issues for status changes ([docs/triggers.md](./triggers.md)).
+
+**Registering a credential** (`/jira-tokens`): enter the Jira site (a bare Atlassian subdomain or a full origin for a custom domain), the account email, and an API token generated at `id.atlassian.com/manage-profile/security/api-tokens`. The token is stored securely and displayed only as a masked preview plus fingerprint — never returned by the API after creation.
+
+**Why site + email live on the credential, not the environment:** a single deployment can span multiple Jira sites, so "which site" has to travel with "which secret" — the same split reasoning as SSH keys vs. GitHub tokens above, just for a different axis (site, not scope).
+
+**Using a credential:** on a Working Environment, bind a project key (e.g. `ENG`) to a Jira credential under **Jira Projects**. Agents in that environment can then add a `jira-event` trigger referencing that project key.
 
 ### Agent workspace and repos
 

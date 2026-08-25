@@ -64,6 +64,12 @@ export function scheduleText(trigger, agentId) {
     const events = s.events.length ? s.events.join(', ') : 'a repo event';
     return s.label ? `Wakes on ${events} · label “${s.label}”` : `Wakes on ${events}`;
   }
+  if (type === 'jira-event') {
+    const project = trigger.projectKey ? ` in ${trigger.projectKey}` : '';
+    return trigger.statusFilter
+      ? `Wakes on status change${project} · to “${trigger.statusFilter}”`
+      : `Wakes on status change${project}`;
+  }
   if (type === 'cron') {
     const d = describeCron(parseCronState(trigger.cron));
     return d ? `On schedule — ${d}` : `On schedule — ${trigger.cron || '(unset)'}`;

@@ -28,6 +28,7 @@ _spec.loader.exec_module(entrypoint)
 
 fmt = entrypoint._format_ask_user_question
 github_event_detail = entrypoint.TriggerScheduler._github_event_detail
+jira_event_detail = entrypoint.TriggerScheduler._jira_event_detail
 map_stream_json_line = entrypoint._map_stream_json_line
 
 
@@ -376,6 +377,29 @@ class GithubEventDetail(unittest.TestCase):
         self.assertIsNone(github_event_detail("issues.labeled", {"issue": "not-a-dict"}))
 
 
+class JiraEventDetail(unittest.TestCase):
+    def test_includes_issue_key_summary_url(self):
+        detail = jira_event_detail({
+            "issueKey": "ENG-42", "summary": "Fix login bug",
+            "issueUrl": "https://acme.atlassian.net/browse/ENG-42",
+        })
+        self.assertEqual(
+            detail, "Issue ENG-42: Fix login bug — https://acme.atlassian.net/browse/ENG-42")
+
+    def test_falls_back_to_key_and_url_without_summary(self):
+        detail = jira_event_detail({
+            "issueKey": "ENG-42", "issueUrl": "https://acme.atlassian.net/browse/ENG-42",
+        })
+        self.assertEqual(detail, "Issue ENG-42 — https://acme.atlassian.net/browse/ENG-42")
+
+    def test_missing_fields_returns_none(self):
+        self.assertIsNone(jira_event_detail({}))
+        self.assertIsNone(jira_event_detail({"issueKey": "ENG-42"}))
+
+    def test_non_dict_does_not_raise(self):
+        self.assertIsNone(jira_event_detail({"issueKey": None, "issueUrl": None}))
+
+
 class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self):
         client = AsyncMock()
@@ -416,6 +440,40 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertEqual(
             body, "⚡ Trigger fired (GitHub: `release.published` on `o/r`) — desc — starting work…")
+
+    async def test_jira_event_body_includes_detail_and_description(self):
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "jira-event", "description": "moved to dev"}
+        ctx = {"jira": {
+            "issueKey": "ENG-42", "summary": "Fix login bug",
+            "issueUrl": "https://acme.atlassian.net/browse/ENG-42",
+            "fromStatus": "To Do", "toStatus": "Ready for Dev",
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("ENG-42", body)
+        self.assertIn("To Do → Ready for Dev", body)
+        self.assertIn("Issue ENG-42: Fix login bug", body)
+        self.assertIn("moved to dev", body)
+
+    async def test_jira_event_missing_detail_falls_back_to_transition(self):
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "jira-event"}
+        ctx = {"jira": {"issueKey": "ENG-1", "fromStatus": "Open", "toStatus": "Done"}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(
+            body, "⚡ Trigger fired (Jira: `ENG-1` Open → Done) — starting work…")
+
+    async def test_jira_event_io_aee_trigger_content(self):
+        scheduler, client = self._scheduler()
+        ctx = {"jira": {"event": "status_changed", "issueKey": "ENG-1"}}
+        await scheduler._post_trigger_notice(
+            {"id": "j1", "type": "jira-event"}, ctx, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertEqual(content["io.aee.trigger"],
+                          {"triggerId": "j1", "triggerType": "jira-event",
+                           "event": "status_changed"})
 
     async def test_cron_and_http_notices_unchanged(self):
         scheduler, client = self._scheduler()

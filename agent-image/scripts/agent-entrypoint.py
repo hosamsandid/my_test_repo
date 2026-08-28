@@ -358,13 +358,14 @@ def run_agent(system_prompt: str, user_prompt: str) -> int:
         "claude",
         "--print",
         "--system-prompt", str(sys_prompt_path),
+    ]
+    allowed = "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*)"
+    if not _ASK_MCP_DISABLED:
         # Offer AskUserQuestion headlessly via the bundled MCP server (#1712) —
         # merged with any env MCP servers (no --strict-mcp-config).
-        "--mcp-config", _ask_user_mcp_config(),
-        "--allowedTools",
-        "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*) "
-        + _ASK_USER_MCP_TOOL,
-    ]
+        cmd += ["--mcp-config", _ask_user_mcp_config()]
+        allowed += " " + _ASK_USER_MCP_TOOL
+    cmd += ["--allowedTools", allowed]
 
     # Credential check — any of the auth mechanisms the Claude CLI understands:
     # direct API key, proxy bearer token (ANTHROPIC_AUTH_TOKEN), subscription
@@ -1548,6 +1549,14 @@ _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 _ASK_USER_MCP_SERVER = SCRIPTS_DIR / "ask-user-mcp.py"
 _ASK_USER_MCP_KEY = "aee-ask"
 _ASK_USER_MCP_TOOL = f"mcp__{_ASK_USER_MCP_KEY}__{_ASK_USER_QUESTION_TOOL}"
+# In environments where Claude Code managed policy restricts MCP servers, the
+# bundled aee-ask server is refused and `claude` exits non-zero on every turn.
+# Operators who know their environment forbids MCP can set AEE_DISABLE_ASK_MCP=1
+# to skip injecting it; the agent then runs without the headless AskUserQuestion
+# tool instead of failing. Default off -> behaviour unchanged.
+_ASK_MCP_DISABLED = os.environ.get("AEE_DISABLE_ASK_MCP", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 
 def _ask_user_mcp_config() -> str:
@@ -2633,14 +2642,17 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     ]
     if model_arg:
         args.extend(["--model", model_arg])
-    for tool in ("Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
-                 "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)",
-                 # AskUserQuestion, offered headlessly via the bundled MCP server
-                 # (#1712); its tool_use is intercepted and turned into a paused
-                 # chat question rather than executed for real.
-                 _ASK_USER_MCP_TOOL):
+    tools = ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
+             "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)"]
+    if not _ASK_MCP_DISABLED:
+        # AskUserQuestion, offered headlessly via the bundled MCP server (#1712);
+        # its tool_use is intercepted and turned into a paused chat question
+        # rather than executed for real.
+        tools.append(_ASK_USER_MCP_TOOL)
+    for tool in tools:
         args.extend(["--allowedTools", tool])
-    args.extend(["--mcp-config", _ask_user_mcp_config()])
+    if not _ASK_MCP_DISABLED:
+        args.extend(["--mcp-config", _ask_user_mcp_config()])
     return args
 
 

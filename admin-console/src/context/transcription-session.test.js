@@ -129,7 +129,7 @@ test('formatTranscriptMessage: clean transcript', () => {
   });
   assert.equal(
     msg,
-    '🎙️ Meeting transcript — started Jan 1, 2026, 9:00 AM, duration 4 min\n\nhello world'
+    '🎙️ Transcript — started Jan 1, 2026, 9:00 AM, duration 4 min\n\nhello world'
   );
 });
 
@@ -142,7 +142,7 @@ test('formatTranscriptMessage: gaps and interruption notes', () => {
     interrupted: true,
   });
   const lines = msg.split('\n');
-  assert.equal(lines[0], '🎙️ Meeting transcript — started T, duration 6 min');
+  assert.equal(lines[0], '🎙️ Transcript — started T, duration 6 min');
   assert.equal(lines[1], '');
   assert.equal(lines[2], 'partial text');
   assert.equal(lines[3], '');

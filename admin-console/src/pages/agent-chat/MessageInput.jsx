@@ -437,7 +437,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
               disabled={disabled || voiceState === 'transcribing' || meetingActive}
               aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
               title={meetingActive
-                ? 'A meeting transcription is already running'
+                ? 'A transcription is already running'
                 : voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input (tap to dictate)'}
               style={{
                 width: 32, height: 32,
@@ -465,10 +465,10 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             {onStartMeeting && (
               <button
                 onClick={() => setMeetingMenuOpen(o => !o)}
-                aria-label="Meeting transcription options"
+                aria-label="Transcription options"
                 aria-haspopup="menu"
                 aria-expanded={meetingMenuOpen}
-                title="Meeting transcription"
+                title="Transcription"
                 style={{
                   width: 16, height: 32,
                   background: 'transparent',
@@ -502,7 +502,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   role="menuitem"
                   disabled={meetingActive}
                   onClick={() => { setMeetingMenuOpen(false); onStartMeeting(); }}
-                  title={meetingActive ? 'A meeting transcription is already running' : undefined}
+                  title={meetingActive ? 'A transcription is already running' : undefined}
                   style={{
                     display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%',
                     background: 'transparent', border: 'none', textAlign: 'left',
@@ -517,11 +517,11 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   <Radio size={15} style={{ marginTop: 1, flexShrink: 0 }} />
                   <span style={{ minWidth: 0 }}>
                     <span style={{ display: 'block', fontWeight: 'var(--eb-font-medium)' }}>
-                      Record meeting{agentDisplayName ? ` for ${agentDisplayName}` : ''}
+                      Record transcript{agentDisplayName ? ` for ${agentDisplayName}` : ''}
                     </span>
                     <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.35 }}>
                       {meetingActive
-                        ? 'A meeting transcription is already running'
+                        ? 'A transcription is already running'
                         : 'Keeps recording as you move around Agent Studio; the transcript is sent here when you stop.'}
                     </span>
                   </span>

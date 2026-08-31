@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, Workflow, X, Check, AlertTriangle, Loader2, Cpu, Users, Info } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -229,19 +229,16 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     additionalContext: initial?.additionalContext || '',
     repositories: initialRepositories(initial),
     githubTokenId: initial?.githubTokenId || '',
-    jiraProjects: initial?.jiraProjects || [],
     llmEndpointId: initial?.llmEndpointId || '',
     defaultModelId: initial?.defaultModelId || '',
   }));
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
-  const { data: jiraTokensData } = useApi('/api/jira-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
 
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
-  const jiraTokens = jiraTokensData || [];
   const llmEndpoints = endpointsData || [];
   const selectedEndpoint = llmEndpoints.find(e => e.id === form.llmEndpointId) || null;
   const endpointModels = selectedEndpoint?.models || [];
@@ -289,20 +286,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     setForm(f => ({ ...f, repositories: f.repositories.filter((_, i) => i !== idx) }));
   };
 
-  const updateJiraProject = (idx, key, val) => {
-    setForm(f => {
-      const next = f.jiraProjects.slice();
-      next[idx] = { ...next[idx], [key]: val };
-      return { ...f, jiraProjects: next };
-    });
-  };
-  const addJiraProject = () => {
-    setForm(f => ({ ...f, jiraProjects: [...f.jiraProjects, { projectKey: '', credentialId: '' }] }));
-  };
-  const removeJiraProject = (idx) => {
-    setForm(f => ({ ...f, jiraProjects: f.jiraProjects.filter((_, i) => i !== idx) }));
-  };
-
   const submit = () => {
     onSave({
       id: form.id,
@@ -317,9 +300,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           sshKeyId: r.sshKeyId || null,
         })),
       githubTokenId: form.githubTokenId || null,
-      jiraProjects: form.jiraProjects
-        .filter(p => p.projectKey.trim() && p.credentialId)
-        .map(p => ({ projectKey: p.projectKey.trim(), credentialId: p.credentialId })),
       llmEndpointId: form.llmEndpointId || null,
       defaultModelId: form.defaultModelId || null,
     });
@@ -517,68 +497,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
           ))}
         </select>
-      </div>
-
-      <div style={{
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        padding: 'var(--eb-space-3)',
-        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <Workflow size={14} />
-          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-            Jira Projects
-          </span>
-          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            (optional)
-          </span>
-        </div>
-        <div style={helpTextStyle}>
-          Binds a Jira project key to a credential so the Jira poller knows which site/token to use when a
-          <code> jira-event</code> trigger references that project key. Manage credentials on the <em>Jira Credentials</em> page.
-        </div>
-
-        {form.jiraProjects.map((p, idx) => (
-          <div key={idx} style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
-            <input
-              value={p.projectKey}
-              onChange={e => updateJiraProject(idx, 'projectKey', e.target.value)}
-              placeholder="e.g. ENG"
-              style={{ ...inputStyle, flex: '0 0 120px' }}
-            />
-            <select
-              value={p.credentialId}
-              onChange={e => updateJiraProject(idx, 'credentialId', e.target.value)}
-              style={{ ...inputStyle, flex: 1 }}
-            >
-              <option value="">— select credential —</option>
-              {jiraTokens.map(t => (
-                <option key={t.id} value={t.id}>{t.name} ({t.siteUrl})</option>
-              ))}
-            </select>
-            <IconButton icon={X} label="Remove" onClick={() => removeJiraProject(idx)} />
-          </div>
-        ))}
-
-        <button
-          type="button"
-          onClick={addJiraProject}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            gap: 'var(--eb-space-2)',
-            padding: 'var(--eb-space-2) var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)',
-            border: '1px dashed var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            color: 'var(--eb-text-secondary)',
-            cursor: 'pointer',
-            fontSize: 'var(--eb-text-sm)',
-            fontFamily: 'inherit',
-          }}
-        >
-          <Plus size={13} /> Add Jira project
-        </button>
       </div>
 
       <div style={{

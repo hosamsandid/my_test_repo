@@ -15,10 +15,10 @@ The **Model Providers** page (`/models`) manages the LLM endpoints Agent Studio 
 The global fallback provider is set via `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` in `.env`. The Model Providers page overrides these at the Working Environment or individual agent level.
 
 Any endpoint that speaks the Anthropic Messages API is supported. This includes:
+- Direct Anthropic API (`https://api.anthropic.com`)
 - LiteLLM proxy
 - Azure AI Foundry with an Anthropic-compatible wrapper
 - Any internal enterprise gateway that exposes the Anthropic Messages API
-- The real Anthropic API (`https://api.anthropic.com`) — see the callout below, a plain API key needs the built-in bridge, not this URL directly
 
 ## Authentication types
 
@@ -26,13 +26,9 @@ Each registered provider carries an `authType` that controls how the orchestrato
 
 ### `api-key` (default)
 
-A **Bearer token** (`Authorization: Bearer <token>`) sent against the provider's `baseUrl` — the transport a LiteLLM/Azure/enterprise gateway expects, since the gateway re-authenticates upstream itself. Set the token at registration time; it is stored at mode 0600 and never returned by the API after creation.
+A Bearer token sent against the provider's `baseUrl`. This covers every gateway, proxy, or direct Anthropic API endpoint. Set the token at registration time; it is stored at mode 0600 and never returned by the API after creation.
 
 Legacy providers without an `authType` field behave identically to `api-key`.
-
-**Plain Anthropic API keys (`sk-ant-api03-...`) do NOT work against `https://api.anthropic.com` directly under `api-key` auth.** The real Anthropic API only accepts a standard key via the `x-api-key` header — a Bearer request with the same key gets a hard `401 Invalid bearer token`, not a soft fallback. (An OAuth setup-token, `sk-ant-oat-...`, from `claude setup-token` *is* Bearer-compatible — see `oauth-token` below.)
-
-To use a plain API key without an external gateway, point the provider's Base URL at the stack's **built-in Anthropic bridge** instead of `api.anthropic.com`: `http://orchestrator:4004` (internal-only, reachable from every agent container without extra networking — see `orchestrator/anthropic-proxy.js`). It accepts the same Bearer request the CLI already sends and re-issues it upstream as `x-api-key`, unmodified otherwise; point `ANTHROPIC_BASE_URL` (`.env`) or a Model Provider's `baseUrl` at it and keep the plain API key as the token. The `default` provider auto-migrated from `.env` on first boot is wired this way already.
 
 ### `oauth-token` — Claude subscription auth (Max / Enterprise)
 

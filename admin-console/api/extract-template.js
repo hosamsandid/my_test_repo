@@ -107,10 +107,6 @@ function sanitizeTemplateTrigger(tr) {
     if (Array.isArray(tr.events)) out.events = tr.events.filter(e => typeof e === 'string');
     if (isNonEmptyString(tr.labelFilter)) out.labelFilter = tr.labelFilter;
   }
-  if (tr.type === 'jira-event') {
-    if (isNonEmptyString(tr.projectKey)) out.projectKey = tr.projectKey;
-    if (isNonEmptyString(tr.statusFilter)) out.statusFilter = tr.statusFilter;
-  }
   if (isNonEmptyString(tr.preCheckScript)) out.preCheckScript = tr.preCheckScript;
   if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object' && !Array.isArray(tr.preCheckEnv)) {
     out.preCheckEnv = { ...tr.preCheckEnv };

@@ -19,10 +19,11 @@ const NEXT = { name: 'Next', exact: true };
 const CREATE = { name: 'Create team', exact: true };
 
 // "Use a template" is the first Process-step entry card (#671 wizard). It renders
-// as an <button> whose accessible name is the heading *plus* its body copy
-// ("Use a template Start from a curated process…"), so an exact match never hits
-// it — match the heading as a substring (Playwright's default, case-insensitive).
-const TEMPLATE_ENTRY = { name: 'Use a template' };
+// Process-step landmark (#1703): the step now lands DIRECTLY on the template /
+// draft gallery — the former "Use a template" chooser button is gone (moved to the
+// "+ Create" launcher, #1665). The gallery is headed by this label; a template is
+// selected by clicking its card (a <button> carrying the template's visible name).
+const GALLERY_HEADING = 'Pick a process template';
 
 /**
  * Open the wizard and confirm the Process step (step 0) is showing.
@@ -33,7 +34,7 @@ const TEMPLATE_ENTRY = { name: 'Use a template' };
  */
 async function open(ctx) {
   await ctx.page.goto('/team-setup');
-  await expect(ctx.page.getByRole('button', TEMPLATE_ENTRY)).toBeVisible();
+  await expect(ctx.page.getByText(GALLERY_HEADING)).toBeVisible();
 }
 
 /**
@@ -61,7 +62,9 @@ async function next(ctx) {
  */
 async function selectProcessTemplate(ctx, { templateName }) {
   const { page } = ctx;
-  await page.getByRole('button', TEMPLATE_ENTRY).click();
+  // #1703: no "Use a template" chooser to click first — the gallery is the landing
+  // view. Confirm it's up, then click the template card by its visible name.
+  await expect(page.getByText(GALLERY_HEADING)).toBeVisible();
 
   const lint = page.waitForResponse(
     (r) => r.url().includes('/api/flows/graph') && r.request().method() === 'POST',

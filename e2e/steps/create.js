@@ -70,9 +70,9 @@ async function expectEntry(ctx, { entry }) {
 async function startFromTemplate(ctx) {
   const { page } = ctx;
   await page.getByTestId(ENTRIES.template.testid).click();
-  // The wizard's Process step lands on the template gallery; its first entry
-  // card is "Use a template" (see wizard.open / StepProcess.jsx).
-  await expect(page.getByRole('button', { name: 'Use a template' })).toBeVisible();
+  // The wizard's Process step lands directly on the template gallery (#1703 — the
+  // former "Use a template" chooser is gone), headed by this label.
+  await expect(page.getByText('Pick a process template')).toBeVisible();
 }
 
 module.exports = { open, expectEntry, startFromTemplate };

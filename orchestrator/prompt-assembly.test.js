@@ -535,6 +535,24 @@ test('workingEnvironmentSection renders repo + the granted skills and is empty f
   assert.match(grantOnly, /\*\*Skills:\*\* `y`/);
 });
 
+test('workingEnvironmentSection annotates read-only repositories (#1813)', () => {
+  // Single-repo branch: the read-only note is appended at the repo line, and a
+  // writable repo (no flag) is byte-identical to pre-#1813.
+  const ro = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git', readOnly: true }] });
+  assert.match(ro, /cloned to `\.\/b\/` \(READ-ONLY — reference only, do not commit or push\)/);
+  const rw = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }] });
+  assert.ok(!/READ-ONLY/.test(rw));
+
+  // Multi-repo branch: only the flagged repo carries the note.
+  const multi = workingEnvironmentSection({ name: 'E', repositories: [
+    { url: 'git@github.com:a/main.git' },
+    { url: 'git@github.com:a/docs.git', readOnly: true },
+  ] });
+  assert.match(multi, /- `git@github.com:a\/main\.git` — cloned to `\.\/main\/`\n/);
+  assert.match(multi, /- `git@github.com:a\/docs\.git` — cloned to `\.\/docs\/` \(READ-ONLY — reference only, do not commit or push\)/);
+  assert.equal((multi.match(/READ-ONLY/g) || []).length, 1);
+});
+
 test('envHasRepository / hasSkillGrant', () => {
   assert.equal(envHasRepository({ repositories: [{ url: 'x' }] }), true);
   assert.equal(envHasRepository({ repositories: [] }), false);

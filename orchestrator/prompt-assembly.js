@@ -256,13 +256,19 @@ function workingEnvironmentSection(env, skills = []) {
   if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
   if (env && env.description) parts.push(env.description);
   const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
+  // Read-only repos are cloned for reference only (#1813): annotate them where
+  // the repository is listed so the agent knows without relying on its role
+  // prompt. Availability is unchanged — the repo is still cloned (AC3).
+  const readOnlyNote = " (READ-ONLY — reference only, do not commit or push)";
   if (repos.length === 1) {
     const repoName = (repos[0].url.split("/").pop() || "repo").replace(/\.git$/, "");
-    parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\``);
+    const note = repos[0].readOnly === true ? readOnlyNote : "";
+    parts.push(`**Repository:** \`${repos[0].url}\` — cloned to \`./${repoName}/\`${note}`);
   } else if (repos.length > 1) {
     const lines = repos.map((r) => {
       const repoName = (r.url.split("/").pop() || "repo").replace(/\.git$/, "");
-      return `- \`${r.url}\` — cloned to \`./${repoName}/\``;
+      const note = r.readOnly === true ? readOnlyNote : "";
+      return `- \`${r.url}\` — cloned to \`./${repoName}/\`${note}`;
     });
     parts.push(`**Repositories:**\n${lines.join("\n")}`);
   }

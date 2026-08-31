@@ -19,7 +19,8 @@ import { isAtBottom, isNearTop } from './chat-scroll.js';
 import { latestLoopProgress } from './loop-run-view.js';
 import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
-  buildAnswerContent, indexAskAnswers, questionState,
+  buildAnswerContent, buildMultiAnswerContent, multiAnswerText,
+  indexAskAnswers, questionState,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import VirtualList from '../../components/VirtualList.jsx';
@@ -977,23 +978,38 @@ export default function ChatPanel({
     }
   }
 
-  /* ─── 5a′. Quick-reply answer (#1663) ────────────────────────────────
-   * Clicking an AskUserQuestion option sends its label as the user's reply
-   * (the normal reply path, so the agent resumes exactly as if it were typed)
-   * plus a structured `io.aee.ask-answer` identifier referencing the question
-   * message. Selection is final (AC5): the optimistic reply lands after the
-   * question, so `questionState` immediately marks the buttons inert — and a
-   * guard here rejects a click once an answer already references this question,
-   * covering the rapid/duplicate-click case.
+  /* ─── 5a′. Quick-reply answer (#1663, #1799) ─────────────────────────
+   * Single-question (D1): clicking an option sends its label as the user's
+   * reply (unchanged, AC1).
+   *
+   * Multi-question (#1799 AC4): the card collects intermediate choices
+   * client-side (no message sent) and calls back here only after the last
+   * question with { isMulti: true, answers: [{questionId,optionId,label}…] }.
+   * We then send one consolidated reply and resume the session.
+   *
+   * Selection is final in both cases (AC5/AC6): the optimistic reply lands
+   * after the question, so `questionState` immediately marks the card inert.
+   * The guard below also rejects a duplicate click once any answer references
+   * this question.
    */
-  function handleAnswerQuestion(questionEventId, option) {
-    if (!questionEventId || !option?.label) return;
+  function handleAnswerQuestion(questionEventId, optOrConsolidated) {
+    if (!questionEventId) return;
     if (sending) return;
-    // Ignore a duplicate/late click for a question already answered.
     const already = messages.some(m => m[ASK_ANSWER_FIELD]?.questionEventId === questionEventId);
     if (already) return;
-    const extra = buildAnswerContent(questionEventId, option);
-    handleSend(option.label, extra);
+
+    if (optOrConsolidated?.isMulti && Array.isArray(optOrConsolidated.answers)) {
+      // Multi-question consolidated reply (#1799).
+      const { answers } = optOrConsolidated;
+      const extra = buildMultiAnswerContent(questionEventId, answers);
+      handleSend(multiAnswerText(answers), extra);
+    } else {
+      // Single-question (unchanged).
+      const option = optOrConsolidated;
+      if (!option?.label) return;
+      const extra = buildAnswerContent(questionEventId, option);
+      handleSend(option.label, extra);
+    }
   }
 
   /* ─── 5b. Attach files ───────────────────────────────────────────────

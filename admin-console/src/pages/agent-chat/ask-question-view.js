@@ -93,6 +93,43 @@ export function buildAnswerContent(questionEventId, option) {
 }
 
 /**
+ * Build the consolidated `io.aee.ask-answer` content for a multi-question
+ * payload (AC4). All question→option pairs are carried in `answers[]`; a single
+ * resume message is sent only after the last question is answered.
+ *
+ * @param {string} questionEventId  the question message's event_id
+ * @param {Array<{questionId: string, optionId: string, label: string}>} answers
+ * @returns {{'io.aee.ask-answer': object}}
+ */
+export function buildMultiAnswerContent(questionEventId, answers) {
+  return { [ASK_ANSWER_FIELD]: { questionEventId, answers } };
+}
+
+/**
+ * Build the plain-text body for the consolidated reply of a multi-question
+ * payload. Each question's chosen label is joined with newlines.
+ *
+ * @param {Array<{label: string}>} answers
+ * @returns {string}
+ */
+export function multiAnswerText(answers) {
+  return answers.map(a => a.label).join('\n');
+}
+
+/**
+ * Return the progress label ("Question X of N") shown on the active step of a
+ * multi-question card, or null for a single-question payload.
+ *
+ * @param {number} openIdx   0-based index of the currently-open question
+ * @param {number} total     total number of questions in the payload
+ * @returns {string|null}
+ */
+export function questionProgressLabel(openIdx, total) {
+  if (total <= 1) return null;
+  return `Question ${openIdx + 1} of ${total}`;
+}
+
+/**
  * Index the transcript's answer messages by the question event_id they answer,
  * so a rendered question can look up whether (and how) it was answered.
  *
@@ -136,5 +173,7 @@ export function questionState({ index, messageCount, answer, disabled = false })
     answerable: isLast && !answered && !disabled,
     answeredOptionId: answered && typeof answer.optionId === 'string' ? answer.optionId : null,
     answeredLabel: answered && typeof answer.label === 'string' ? answer.label : null,
+    // Populated when a consolidated multi-question reply was sent (AC4 shape).
+    multiAnswers: answered && Array.isArray(answer.answers) ? answer.answers : null,
   };
 }

@@ -1,45 +1,99 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Bot, Check } from 'lucide-react';
 
 /**
- * Quick-reply question card (#1663).
+ * Quick-reply question card (#1663, #1799).
  *
- * Renders an agent message that paused on Claude's `AskUserQuestion` tool as
- * clickable option controls beneath the question text. Clicking an option sends
- * its label as the user's reply (via `onAnswer`), exactly as if the human had
- * typed it — free-text typing stays available in the composer at all times.
+ * Single-question payloads: one click submits immediately (unchanged, AC1).
  *
- * The structured `io.aee.ask-question` payload is rendered here in the Admin
- * Console; the same message's Markdown `body` (with the options as a bullet
- * list) is what other Matrix clients / older builds show, so no information is
- * lost when the buttons can't render (AC8). We therefore intentionally do NOT
- * render `body` here — the structured header/question text below is the same
- * content, and showing both would duplicate every option.
+ * Multi-question payloads (#1799 AC2–AC6): questions are answered one at a
+ * time. Only the current question is shown with interactive options; earlier
+ * questions' choices are held in component state. When the last question is
+ * answered, all choices are sent together in one consolidated reply (AC4).
+ * Progress is shown as "Question X of N" (AC5). Intermediate clicks never
+ * post a message and never resume the session (AC3). multiSelect questions
+ * fall through to plain text (unchanged, AC7).
  *
- * MVP is single-choice (D1): one click submits immediately. Selection is final
- * (AC5) — once `answerable` is false the options no longer accept input and the
- * chosen one is marked; the parent decides answerability from transcript
- * position (`questionState` in `ask-question-view.js`).
+ * Answerability is still determined externally by `questionState` in
+ * `ask-question-view.js` (newest message + not already answered — AC6).
  *
  * @param {object}  props
- * @param {{questions: Array}} props.question   normalized ask-question payload
- * @param {boolean} props.answerable            options accept a click
- * @param {?string} props.answeredOptionId      the chosen option (marks it), if any
- * @param {?string} props.answeredLabel         the chosen label (fallback match)
- * @param {(option: object) => void} props.onAnswer  called with the clicked option
- * @param {?string} props.time                  formatted timestamp for the footer
+ * @param {{questions: Array}} props.question     normalized ask-question payload
+ * @param {boolean} props.answerable              overall card is interactive
+ * @param {?string} props.answeredOptionId        chosen option id (single-q answered)
+ * @param {?string} props.answeredLabel           chosen label (single-q fallback match)
+ * @param {?Array}  props.answeredMulti           [{questionId,optionId,label}] (multi-q answered)
+ * @param {(arg: object|{isMulti:boolean,answers:Array}) => void} props.onAnswer
+ * @param {?string} props.time                    formatted timestamp
  */
 export default function AskQuestionCard({
-  question, answerable, answeredOptionId = null, answeredLabel = null, onAnswer, time = null,
+  question, answerable, answeredOptionId = null, answeredLabel = null,
+  answeredMulti = null, onAnswer, time = null,
 }) {
+  const [openIdx, setOpenIdx] = useState(0);
+  const [pendingAnswers, setPendingAnswers] = useState({});
+
   if (!question || !Array.isArray(question.questions) || question.questions.length === 0) {
     return null;
   }
 
-  const isChosen = (opt) =>
-    (answeredOptionId != null && opt.optionId === answeredOptionId) ||
-    (answeredOptionId == null && answeredLabel != null && opt.label === answeredLabel);
-  const answered = answeredOptionId != null || answeredLabel != null;
+  const isMulti = question.questions.length > 1;
+  const answered = answeredMulti != null || answeredOptionId != null || answeredLabel != null;
+
+  // Determine if a specific option was chosen — covers all three cases:
+  // (a) consolidated multi-answer was sent, (b) locally-pending in active multi,
+  // (c) single-question answered.
+  const isChosen = (q, opt) => {
+    if (answeredMulti) {
+      return answeredMulti.some(
+        a => a.questionId === q.questionId && a.optionId === opt.optionId,
+      );
+    }
+    if (isMulti) {
+      const p = pendingAnswers[q.questionId];
+      return p != null && p.optionId === opt.optionId;
+    }
+    return (answeredOptionId != null && opt.optionId === answeredOptionId) ||
+      (answeredOptionId == null && answeredLabel != null && opt.label === answeredLabel);
+  };
+
+  // Handle an option click.
+  const handleOptionClick = (q, qi, opt) => {
+    if (!answerable) return;
+    if (isMulti) {
+      const updated = { ...pendingAnswers, [q.questionId]: opt };
+      const isLast = qi === question.questions.length - 1;
+      if (!isLast) {
+        // Intermediate question — hold locally, advance to the next (AC3).
+        setPendingAnswers(updated);
+        setOpenIdx(qi + 1);
+      } else {
+        // Last question — build and send the consolidated reply (AC4).
+        const answers = question.questions.map(qItem => {
+          const a = updated[qItem.questionId];
+          return a ? { questionId: qItem.questionId, optionId: a.optionId, label: a.label } : null;
+        }).filter(Boolean);
+        onAnswer?.({ isMulti: true, answers });
+      }
+    } else {
+      onAnswer?.(opt);
+    }
+  };
+
+  // In active multi-question mode show only the open question; in all other
+  // states (answered, superseded, single) show every question.
+  const showCurrentOnly = isMulti && answerable && !answered;
+  const visibleQuestions = showCurrentOnly
+    ? [{ q: question.questions[openIdx], qi: openIdx }]
+    : question.questions.map((q, qi) => ({ q, qi }));
+
+  const footerText = answered
+    ? 'answered'
+    : isMulti && answerable
+      ? `Question ${openIdx + 1} of ${question.questions.length} · awaiting your choice`
+      : answerable
+        ? 'awaiting your choice'
+        : 'question';
 
   return (
     <div style={{
@@ -83,14 +137,14 @@ export default function AskQuestionCard({
           flexDirection: 'column',
           gap: 'var(--eb-space-3)',
         }}>
-          {question.questions.map((q, qi) => (
+          {visibleQuestions.map(({ q, qi }) => (
             <QuestionBlock
               key={q.questionId || qi}
               q={q}
-              answerable={answerable}
+              answerable={answerable && (!isMulti || qi === openIdx)}
               answered={answered}
-              isChosen={isChosen}
-              onAnswer={onAnswer}
+              isChosen={(opt) => isChosen(q, opt)}
+              onAnswer={(opt) => handleOptionClick(q, qi, opt)}
             />
           ))}
         </div>
@@ -101,7 +155,7 @@ export default function AskQuestionCard({
           marginTop: 'var(--eb-space-0-5)',
           padding: '0 var(--eb-space-1)',
         }}>
-          {answered ? 'answered' : (answerable ? 'awaiting your choice' : 'question')}
+          {footerText}
           {time ? ` · ${time}` : ''}
         </div>
       </div>
@@ -154,9 +208,6 @@ function QuestionBlock({ q, answerable, answered, isChosen, onAnswer }) {
                 font: 'inherit',
                 fontSize: 'var(--eb-text-sm)',
                 cursor: clickable ? 'pointer' : 'default',
-                // Answered-but-not-chosen options dim; a still-open question that
-                // is simply not the newest message keeps full contrast but is
-                // non-interactive.
                 opacity: answered && !chosen ? 0.55 : 1,
                 maxWidth: '100%',
               }}

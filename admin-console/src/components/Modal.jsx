@@ -30,7 +30,12 @@ export default function Modal({ open, onClose, title, children, maxWidth = 560, 
   const focusables = () => {
     const card = cardRef.current;
     if (!card) return [];
-    const sel = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    // Only natural Tab stops count for the trap. A roving-tabindex widget (e.g.
+    // SettingsModal's section rail) gives its non-selected buttons tabIndex=-1;
+    // those match `button` but are NOT reachable by forward Tab, so counting
+    // them would put the "last focusable" past the real final tab stop and let
+    // Tab escape the modal (AC4). Exclude [tabindex="-1"] from every arm.
+    const sel = 'a[href]:not([tabindex="-1"]), button:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
     // Skip elements that are not currently rendered/visible (offsetParent null),
     // but keep the active element so the trap can reason about where focus is.
     return Array.from(card.querySelectorAll(sel))

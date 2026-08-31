@@ -4,6 +4,11 @@ import { focusTrapTarget, backdropDismisses } from './modal-view.js';
 
 test('forward Tab off the last element wraps to the first', () => {
   assert.equal(focusTrapTarget(2, 3, false), 0);
+  // Count=2 boundary: with the corrected focusables() list (tabindex=-1
+  // roving-tabindex buttons excluded), a SettingsModal with the selected
+  // section tab focused yields [close, selectedTab] — Tab off index 1 must
+  // wrap to the close button rather than escape the modal (#1802 AC4).
+  assert.equal(focusTrapTarget(1, 2, false), 0);
 });
 
 test('forward Tab in the middle lets the browser handle it (null)', () => {

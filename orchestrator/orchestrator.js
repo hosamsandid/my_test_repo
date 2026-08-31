@@ -388,6 +388,14 @@ const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
 const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume, perAgentNetworkName } = require("./container-runtime");
+// Fast/background split of agent deletion (#1791): graceful-role decision +
+// the in-memory "teardown in progress" guard for same-id re-create safety.
+const { isGracefulDeleteRole, TeardownRegistry } = require("./agent-delete-plan");
+// One process-wide registry: the delete fast phase arms it, the background
+// phase clears it, and every create/clone/import/materialise path consults it
+// (alongside loadAgentConfig) so a same-id re-create can't collide with an
+// in-flight background teardown whose config.json is already gone (#1525).
+const agentTeardownRegistry = new TeardownRegistry();
 // Host-folder context mounts (#1283) are a LOCAL/self-hosted-only feature. On
 // the podman runtime they are always available; on Kubernetes they are an
 // EXPLICIT opt-in (#1319, AEE_K8S_CONTEXT_HOSTPATH=1): the mount renders as a
@@ -7568,7 +7576,10 @@ class Orchestrator {
 
     let memberId, memberDisplayName;
     if (opts.id) {
-      if (loadAgentConfig(opts.id)) {
+      // Reject a collision with a live config OR an id whose background teardown
+      // is still in flight — its config.json is already gone but its network/
+      // volume/Matrix reaping may still be racing a same-id re-create (#1525/#1791).
+      if (loadAgentConfig(opts.id) || agentTeardownRegistry.has(opts.id)) {
         throw new Error(`Agent '${opts.id}' already exists`);
       }
       memberId = opts.id;
@@ -9749,7 +9760,7 @@ class Orchestrator {
   async createInstance(blueprintId, instanceId, instanceDisplayName) {
     const blueprint = loadBlueprint(blueprintId);
     if (!blueprint) throw new Error(`Blueprint '${blueprintId}' not found`);
-    if (loadAgentConfig(instanceId)) throw new Error(`Agent '${instanceId}' already exists`);
+    if (loadAgentConfig(instanceId) || agentTeardownRegistry.has(instanceId)) throw new Error(`Agent '${instanceId}' already exists`);
 
     const env = loadEnvironment(blueprint.environmentId);
     if (!env) throw new Error(`Working Environment '${blueprint.environmentId}' not found`);
@@ -9814,7 +9825,7 @@ class Orchestrator {
     if (!["agent", "team-member"].includes(sourceCfg.role)) {
       throw new Error(`Agent '${sourceId}' has role '${sourceCfg.role}' and cannot be cloned`);
     }
-    if (loadAgentConfig(newId)) throw new Error(`Agent '${newId}' already exists`);
+    if (loadAgentConfig(newId) || agentTeardownRegistry.has(newId)) throw new Error(`Agent '${newId}' already exists`);
 
     const teamCfg = opts.parentTeamId ? loadAgentConfig(opts.parentTeamId) : null;
     const { role, parentTeamId, environmentId } = resolveCloneTarget(sourceCfg, opts, teamCfg);
@@ -9881,7 +9892,7 @@ class Orchestrator {
   //                     Absent → imported as a standalone `agent`.
   async importAgent(stagingDir, agentId, opts = {}) {
     if (!agentId || !AGENT_ID_RE.test(agentId)) throw new Error(`Invalid agent id '${agentId}'`);
-    if (loadAgentConfig(agentId)) throw new Error(`Agent '${agentId}' already exists`);
+    if (loadAgentConfig(agentId) || agentTeardownRegistry.has(agentId)) throw new Error(`Agent '${agentId}' already exists`);
 
     // Containment: staging dirs live under WORKSPACE/.import-staging only.
     const stagingRoot = path.resolve(path.join(WORKSPACE, ".import-staging"));
@@ -10897,6 +10908,14 @@ async function main() {
     if (deleteMatch) {
       const id = decodeURIComponent(deleteMatch[1]);
       (async () => {
+        // Ids we armed in the teardown registry — cleared on a fast-phase error
+        // (so a retry isn't blocked) and, on success, one at a time as each
+        // agent's background reaping finishes.
+        const armed = [];
+        // Agents whose slow reaping the background phase must finish, captured
+        // in the fast phase while their configs were still readable.
+        const bgTargets = [];
+        let parentCfg = null;
         try {
           if (!fs.existsSync(agentDir(id))) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -10911,8 +10930,53 @@ async function main() {
           // under any parent, and a future orchestrator that scans the same
           // BP slug can't claim the deterministic agentId because the orphan
           // already occupies it.
-          const parentCfg = loadAgentConfig(id);
+          parentCfg = loadAgentConfig(id);
           const cascaded = [];
+
+          // ── FAST PHASE (#1791) ────────────────────────────────────────────
+          // Do only the cheap steps that make the agent *logically gone* — stop
+          // the process, reap plugin scopes (while configs are still on disk so
+          // §4.9 ordering + the sibling-still-held check both hold), delete
+          // config.json (the agent leaves listAgentIds()/the UI), drop the
+          // in-memory config. The slow, dominant work (per-agent network grace
+          // poll + retries, volume, Matrix deactivation) is deferred to the
+          // background phase after the response. Plugin teardown is kept here on
+          // purpose: it is cheap ("only with plugins") and running it before
+          // config.json is gone is the unambiguous way to satisfy the §4.9
+          // "reap before the scope token/config is invalidated" contract.
+
+          // deleteAgentFiles removes config.json, so listAgentIds() can no
+          // longer guard a same-id re-create against this in-flight teardown —
+          // arm the registry first so the create paths reject the id until the
+          // background reaping below finishes (#1525).
+          agentTeardownRegistry.begin(id);
+          armed.push(id);
+
+          // Fast-phase teardown for one agent: stop → plugin reap → delete
+          // config → drop in-memory config. Records the agent for background
+          // reaping. `graceful` keeps the SIGTERM→commit→autoremove window only
+          // for a bp-instance (its entrypoint commits partial work on
+          // shutdown); every other role is force-removed (#1791, Change 2).
+          const fastTeardown = async (targetId, cfg, deactivateMatrix) => {
+            stopAgentProcess(targetId);
+            if (cfg) {
+              // Reap plugin-owned resources BEFORE the config (and with it the
+              // grant this scope is derived from) is deleted — §4.9 requires the
+              // reap to precede token invalidation. At `team` granularity the
+              // sibling-still-held check means only the last member torn down
+              // actually reaps, so this must run while siblings are on disk.
+              await orchestrator.teardownAgentPluginScopes(targetId, cfg).catch(e =>
+                console.warn(`[Orchestrator] plugin teardown ${targetId}: ${e.message}`));
+            }
+            deleteAgentFiles(targetId);
+            orchestrator.agentConfigs.delete(targetId);
+            bgTargets.push({
+              id: targetId,
+              graceful: isGracefulDeleteRole(cfg ? cfg.role : null),
+              deactivateMatrix,
+            });
+          };
+
           if (parentCfg) {
             const childField = parentCfg.role === 'orchestrator' ? 'parentOrchestratorId'
                             :  parentCfg.role === 'team' ? 'parentTeamId'
@@ -10923,27 +10987,18 @@ async function main() {
                 const childCfg = loadAgentConfig(childId);
                 if (!childCfg) continue;
                 if (childCfg[childField] !== id) continue;
+                agentTeardownRegistry.begin(childId);
+                armed.push(childId);
                 try {
-                  stopAgentProcess(childId);
-                  if (childCfg.token) {
-                    // Materialized child — best-effort Matrix cleanup.
-                    await orchestrator.deactivateMatrixUser(childId);
-                  }
-                  // Reap plugin-owned resources BEFORE the config (and with it
-                  // the grant this scope is derived from) is deleted — §4.9
-                  // requires the reap to precede token invalidation. Deleting
-                  // members one at a time is safe: each checks whether a
-                  // sibling still holds the same scopeId, so at `team`
-                  // granularity only the last one actually tears down.
-                  await orchestrator.teardownAgentPluginScopes(childId, childCfg);
-                  deleteAgentFiles(childId);
-                  if (PER_AGENT_VOLUME) await removePerAgentVolume(childId).catch(e =>
-                    console.warn(`[Orchestrator] volume teardown ${childId}: ${e.message}`));
-                  await removePerAgentNetwork(childId).catch(e =>
-                    console.warn(`[Orchestrator] network teardown ${childId}: ${e.message}`));
-                  orchestrator.agentConfigs.delete(childId);
+                  // Materialized child (has a token) → best-effort Matrix
+                  // cleanup in the background phase; a stub has no Matrix user.
+                  await fastTeardown(childId, childCfg, !!childCfg.token);
                   cascaded.push(childId);
                 } catch (err) {
+                  // Match the prior best-effort cascade: one child failing its
+                  // fast steps doesn't abort the rest (or the parent). It wasn't
+                  // recorded for background reaping, so release its guard.
+                  agentTeardownRegistry.finish(childId);
                   console.error(`[Orchestrator] cascade-delete child '${childId}' failed: ${err.message}`);
                 }
               }
@@ -10955,36 +11010,69 @@ async function main() {
             }
           }
 
-          stopAgentProcess(id);
-          // Same ordering rule as the cascade above: reap first, delete after.
-          if (parentCfg) {
-            await orchestrator.teardownAgentPluginScopes(id, parentCfg).catch(e =>
-              console.warn(`[Orchestrator] plugin teardown ${id}: ${e.message}`));
-          }
-          deleteAgentFiles(id);
-          if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
-            console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
-          await removePerAgentNetwork(id).catch(e =>
-            console.warn(`[Orchestrator] network teardown ${id}: ${e.message}`));
-          orchestrator.agentConfigs.delete(id);
-          await orchestrator.deactivateMatrixUser(id);
-
-          // Tear down the squad's team-scoped knowledge so a later same-name
-          // (same-id) team can't silently re-adopt it (#532). Only for a `team`
-          // agent — its own id is the KB scope; standalone/member deletes leave
-          // the shared team KB intact. Runs after the parent + its members are
-          // gone so the in-use guard sees the true survivor set.
-          if (parentCfg && parentCfg.role === 'team') {
-            try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
-            catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
-          }
+          // Parent last. A parent fast-phase failure IS surfaced (below) — the
+          // agent the caller asked to delete could not be removed.
+          await fastTeardown(id, parentCfg, true);
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, cascaded }));
         } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          // Fast-phase failure — surface a hard error to the console (AC8: a
+          // fast-phase failure still returns an error to the caller). We do NOT
+          // return: any agent already fast-torn-down (its config.json gone) is
+          // recorded in bgTargets and must still be reaped below, or it would
+          // leak its network/volume/Matrix user.
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+          console.error(`[Orchestrator] agent delete fast phase for '${id}' failed: ${err.message}`);
         }
+
+        // ── BACKGROUND PHASE (#1791) ──────────────────────────────────────────
+        // Off the request path now that the response is sent. Best-effort and
+        // fully idempotent; a failure here is logged (AC8) — it can no longer be
+        // returned to the caller. Runs after either a 200 or a partial-failure
+        // 500. Each id's guard is released only after its reaping finishes, so a
+        // same-id re-create waits out the whole teardown.
+        (async () => {
+          for (const t of bgTargets) {
+            try {
+              if (PER_AGENT_VOLUME) await removePerAgentVolume(t.id).catch(e =>
+                console.warn(`[Orchestrator] volume teardown ${t.id}: ${e.message}`));
+              await removePerAgentNetwork(t.id, { graceful: t.graceful }).catch(e =>
+                console.warn(`[Orchestrator] network teardown ${t.id}: ${e.message}`));
+              if (t.deactivateMatrix) await orchestrator.deactivateMatrixUser(t.id).catch(e =>
+                console.warn(`[Orchestrator] matrix deactivate ${t.id}: ${e.message}`));
+              // Tear down the squad's team-scoped knowledge so a later same-name
+              // (same-id) team can't silently re-adopt it (#532). Only for the
+              // parent `team` entry — its own id is the KB scope; standalone/
+              // member deletes leave the shared team KB intact. The parent is
+              // reaped LAST (pushed after its members), so by here every member
+              // is gone and the in-use guard sees the true survivor set. Runs
+              // BEFORE the parent's guard is released in `finally`, so a same-id
+              // team re-create can't slip between the release and the purge and
+              // either read stale KB or have its freshly-seeded KB purged (AC7).
+              if (t.id === id && parentCfg && parentCfg.role === 'team') {
+                try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
+                catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
+              }
+            } catch (err) {
+              console.error(`[Orchestrator] background teardown for '${t.id}' failed: ${err.message}`);
+            } finally {
+              agentTeardownRegistry.finish(t.id);
+            }
+          }
+
+          // Release the guard for any id armed but never recorded for reaping
+          // (a child whose fast steps threw, or the parent on a fast-phase
+          // failure) — there is nothing to reap, so it must not block a retry.
+          const reaped = new Set(bgTargets.map(t => t.id));
+          for (const aid of armed) {
+            if (!reaped.has(aid)) agentTeardownRegistry.finish(aid);
+          }
+        })().catch(err =>
+          console.error(`[Orchestrator] background teardown crashed for '${id}': ${err.message}`));
       })();
       return;
     }
@@ -14157,7 +14245,7 @@ async function main() {
           res.end(JSON.stringify({ error: 'systemPrompt required for non-orchestrator roles' }));
           return;
         }
-        if (loadAgentConfig(id)) {
+        if (loadAgentConfig(id) || agentTeardownRegistry.has(id)) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
           return;

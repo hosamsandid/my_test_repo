@@ -385,16 +385,22 @@ async function listAgentContainers(id) {
   return [];
 }
 
-// Ensure the agent's own container is gone before we touch the network. Prefer
-// the graceful path (the SIGTERM sent by stopAgentProcess lets the agent exit
-// and autoremove); fall back to force-remove so teardown always makes progress.
-async function ensureAgentContainerGone(id) {
-  for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
-    if ((await listAgentContainers(id)).length === 0) return;
-    await sleep(AGENT_STOP_GRACE_DELAY_MS);
+// Ensure the agent's own container is gone before we touch the network. With
+// `graceful` (bp-instance only), prefer the graceful path: the SIGTERM sent by
+// stopAgentProcess lets the agent commit partial work, exit and autoremove
+// within the grace window; fall back to force-remove so teardown always makes
+// progress. Non-BP agents (`graceful: false`, #1791) have no bound repo and
+// nothing to flush, so we skip the up-to-8s poll and force-remove immediately.
+async function ensureAgentContainerGone(id, { graceful = true } = {}) {
+  if (graceful) {
+    for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
+      if ((await listAgentContainers(id)).length === 0) return;
+      await sleep(AGENT_STOP_GRACE_DELAY_MS);
+    }
   }
-  // Still around after the grace window — force-remove whatever remains. This
-  // also detaches it from the per-agent network.
+  // Nothing left (graceful exit already autoremoved it) — done.
+  // Otherwise force-remove whatever remains. This also detaches it from the
+  // per-agent network.
   for (const cid of await listAgentContainers(id)) {
     const r = await libpodRequest('DELETE', `/containers/${cid}?force=true`);
     if (r.status >= 300 && r.status !== 404) {
@@ -406,10 +412,12 @@ async function ensureAgentContainerGone(id) {
   }
 }
 
-async function removePerAgentNetwork(id) {
+async function removePerAgentNetwork(id, { graceful = true } = {}) {
   const name = perAgentNetworkName(id);
-  // 1. Make sure the agent's own container is gone (graceful, then forced).
-  await ensureAgentContainerGone(id);
+  // 1. Make sure the agent's own container is gone. `graceful` (bp-instance
+  //    only, #1791) allows the SIGTERM-driven commit + autoremove window before
+  //    force-removing; non-BP agents force-remove immediately.
+  await ensureAgentContainerGone(id, { graceful });
   // 2. Disconnect the persistent service containers (orchestrator + conduwuit).
   //    Force so a half-attached service still comes off. 404 / "not connected"
   //    are benign.

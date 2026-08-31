@@ -11044,6 +11044,19 @@ async function main() {
                 console.warn(`[Orchestrator] network teardown ${t.id}: ${e.message}`));
               if (t.deactivateMatrix) await orchestrator.deactivateMatrixUser(t.id).catch(e =>
                 console.warn(`[Orchestrator] matrix deactivate ${t.id}: ${e.message}`));
+              // Tear down the squad's team-scoped knowledge so a later same-name
+              // (same-id) team can't silently re-adopt it (#532). Only for the
+              // parent `team` entry — its own id is the KB scope; standalone/
+              // member deletes leave the shared team KB intact. The parent is
+              // reaped LAST (pushed after its members), so by here every member
+              // is gone and the in-use guard sees the true survivor set. Runs
+              // BEFORE the parent's guard is released in `finally`, so a same-id
+              // team re-create can't slip between the release and the purge and
+              // either read stale KB or have its freshly-seeded KB purged (AC7).
+              if (t.id === id && parentCfg && parentCfg.role === 'team') {
+                try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
+                catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
+              }
             } catch (err) {
               console.error(`[Orchestrator] background teardown for '${t.id}' failed: ${err.message}`);
             } finally {
@@ -11057,16 +11070,6 @@ async function main() {
           const reaped = new Set(bgTargets.map(t => t.id));
           for (const aid of armed) {
             if (!reaped.has(aid)) agentTeardownRegistry.finish(aid);
-          }
-
-          // Tear down the squad's team-scoped knowledge so a later same-name
-          // (same-id) team can't silently re-adopt it (#532). Only for a `team`
-          // agent — its own id is the KB scope; standalone/member deletes leave
-          // the shared team KB intact. Runs after the parent + its members are
-          // gone so the in-use guard sees the true survivor set.
-          if (parentCfg && parentCfg.role === 'team') {
-            try { purgeTeamKnowledge(agentKnowledgeTeamId(parentCfg)); }
-            catch (err) { console.warn(`[Orchestrator] knowledge purge for '${id}': ${err.message}`); }
           }
         })().catch(err =>
           console.error(`[Orchestrator] background teardown crashed for '${id}': ${err.message}`));

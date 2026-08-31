@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-14T13:07:36.933Z",
+  "generated": "2026-08-31T08:28:48.602Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -8,6 +8,11 @@
       "title": "Team Setup",
       "route": "/team-setup",
       "steps": [
+        {
+          "id": "create-launcher",
+          "voiceover": "Everything starts at the \"+ Create\" launcher, reachable from the sidebar on every page. It offers four equally-ranked ways in: describe what you need in plain language, start from a ready-made setup, build it yourself on a canvas, or spin up a single assistant to chat with. None is a forced default, and the titles avoid our internal vocabulary — you choose by what you want to do. For the demo we take \"Start from a ready-made setup\".",
+          "screenshotPath": "team-setup/create-launcher.png"
+        },
         {
           "id": "process-step",
           "voiceover": "The wizard lands on the Process step — the template gallery. It comes first on purpose, because it's the central decision. For the demo we pick a ready-made template, the Core SDLC flow. It gives us four agents that cover a full build-and-review loop: a Business Analyst who writes issues, a Developer who implements them, a Code Reviewer, and a Reworker. The live preview on the right confirms the hand-offs connect.",
@@ -32,6 +37,19 @@
           "id": "review-step",
           "voiceover": "Finally, review — everything in one place. When we hit create, the wizard builds the whole team in one atomic transaction, each member with its own chat identity, ready for the first issue.",
           "screenshotPath": "team-setup/review-step.png"
+        }
+      ]
+    },
+    {
+      "id": "iban-story",
+      "order": 30,
+      "title": "The IBAN Story — the label-driven SDLC loop",
+      "route": "/chats",
+      "steps": [
+        {
+          "id": "agent-chat",
+          "voiceover": "This is the Agent Chat, where a human talks directly to any agent. On the left is our team with its four members: Business Analyst, Code Reviewer, Developer and Reworker. In the middle is the conversation, and on the right a live view into the agent's own workspace.",
+          "screenshotPath": "iban-story/agent-chat.png"
         }
       ]
     },
@@ -98,6 +116,24 @@
           "id": "stages",
           "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
           "screenshotPath": "flows-draft/flow-stages.png"
+        }
+      ]
+    },
+    {
+      "id": "token-usage",
+      "order": 60,
+      "title": "Token Usage",
+      "route": "/token-usage",
+      "steps": [
+        {
+          "id": "statistics",
+          "voiceover": "We narrow the Team filter to one team and open up the range to all time. The summary cards show the totals — input, output, cache — the chart plots tokens per day, and the table breaks the spend down by agent.",
+          "screenshotPath": "token-usage/token-usage-statistics.png"
+        },
+        {
+          "id": "group-by-team",
+          "voiceover": "The Group by control re-keys the breakdown table on demand — here, by team, folding every agent's spend into one row.",
+          "screenshotPath": "token-usage/token-usage-by-team.png"
         }
       ]
     }

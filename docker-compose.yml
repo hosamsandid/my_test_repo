@@ -98,12 +98,6 @@ services:
       ACE_WATCH_INTERVAL_SECONDS: "${ACE_WATCH_INTERVAL_SECONDS:-30}"
       ACE_BRIEFING_ENV_ID: "${ACE_BRIEFING_ENV_ID:-briefing-pack}"
       HOOK_PORT: "${HOOK_PORT:-4003}"
-      # Bridges the `claude` CLI's Bearer-only auth (ANTHROPIC_AUTH_TOKEN) to a
-      # plain Anthropic API key's x-api-key-only auth — see anthropic-proxy.js.
-      # Internal-only, like the :4002 API; agent containers reach it as
-      # `orchestrator:${ANTHROPIC_PROXY_PORT}` (already connected into every
-      # per-agent network), so it needs no published host port.
-      ANTHROPIC_PROXY_PORT: "${ANTHROPIC_PROXY_PORT:-4004}"
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-agent-studio}"
       # Instance identity for per-stack container eviction/reconcile scoping.
       # Lets multiple stacks share one Podman store without evicting each other's

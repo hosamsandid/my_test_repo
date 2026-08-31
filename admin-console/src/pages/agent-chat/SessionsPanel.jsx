@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Workflow, Terminal,
+  Activity, Loader2, Square, MessageCircle, Clock, Zap, Github, Terminal,
   History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
@@ -83,7 +83,6 @@ function typeIcon(session) {
     if (session.triggerType === 'once') return <Clock size={12} />;
     if (session.triggerType === 'http') return <Zap size={12} />;
     if (session.triggerType === 'github-event') return <Github size={12} />;
-    if (session.triggerType === 'jira-event') return <Workflow size={12} />;
     return <Zap size={12} />;
   }
   if (session.type === 'autonomous') return <Terminal size={12} />;

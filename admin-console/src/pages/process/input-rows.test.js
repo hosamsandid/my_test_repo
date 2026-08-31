@@ -44,14 +44,6 @@ test('scheduleText renders a plain-language sentence per type', () => {
     scheduleText({ type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }),
     'Wakes on Issue labeled · label “ready”',
   );
-  assert.equal(
-    scheduleText({ type: 'jira-event', projectKey: 'ENG' }),
-    'Wakes on status change in ENG',
-  );
-  assert.equal(
-    scheduleText({ type: 'jira-event', projectKey: 'ENG', statusFilter: 'Ready for Dev' }),
-    'Wakes on status change in ENG · to “Ready for Dev”',
-  );
 });
 
 // ─── derivedChannelTrigger (#958) ────────────────────────────────────────────

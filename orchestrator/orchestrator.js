@@ -114,7 +114,6 @@ const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable,
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
-const { createAnthropicProxyServer } = require("./anthropic-proxy");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const usageLog = require("./usage-log");
@@ -246,7 +245,6 @@ const ENVIRONMENTS_DIR = "/workspace/environments";
 const SSH_KEYS_DIR = path.join(ENVIRONMENTS_DIR, "_keys");
 const SSH_KEYS_INDEX = path.join(SSH_KEYS_DIR, "index.json");
 const GH_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_tokens");
-const JIRA_TOKENS_DIR = path.join(ENVIRONMENTS_DIR, "_jira-tokens");
 const LLM_ENDPOINTS_INDEX = "/workspace/llm-endpoints/index.json";
 const LLM_KEYS_DIR = "/workspace/llm-endpoints/_keys";
 const MCP_SERVERS_DIR = "/workspace/mcp-servers";
@@ -990,7 +988,6 @@ function backfillResourceOwnership() {
   const CREDENTIAL_INDEXES = [
     SSH_KEYS_INDEX,
     path.join(GH_TOKENS_DIR, "index.json"),
-    path.join(JIRA_TOKENS_DIR, "index.json"),
     path.join(MCP_CREDENTIALS_KEYS_DIR, "index.json"),
     LLM_ENDPOINTS_INDEX,
   ];
@@ -14316,22 +14313,6 @@ async function main() {
   );
 
   // ============================================================
-  // Anthropic proxy — lets the `claude` CLI (Bearer-only auth via
-  // ANTHROPIC_AUTH_TOKEN) reach the real api.anthropic.com with a plain
-  // API key (x-api-key-only auth). See anthropic-proxy.js for why this
-  // exists. Every agent container already resolves `orchestrator` by name
-  // (it's connected into every per-agent network for the internal API), so
-  // pointing ANTHROPIC_BASE_URL here needs no new networking.
-  // ============================================================
-  const ANTHROPIC_PROXY_PORT = parseInt(process.env.ANTHROPIC_PROXY_PORT || '4004', 10);
-  const anthropicProxy = createAnthropicProxyServer({
-    upstreamBase: process.env.ANTHROPIC_PROXY_UPSTREAM || 'https://api.anthropic.com',
-  });
-  anthropicProxy.listen(ANTHROPIC_PROXY_PORT, '0.0.0.0', () =>
-    console.log(`[Orchestrator] Anthropic proxy listening on :${ANTHROPIC_PROXY_PORT}`)
-  );
-
-  // ============================================================
   // GitHub event poller — translates GitHub Events API activity into
   // pending-triggers entries for agents that subscribed via a
   // type=github-event trigger. See orchestrator/github-poller.js.
@@ -14351,28 +14332,6 @@ async function main() {
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
   });
   ghPoller.start();
-
-  // ============================================================
-  // Jira status-change poller — translates Jira issue status transitions
-  // into pending-triggers entries for agents that subscribed via a
-  // type=jira-event trigger. See orchestrator/jira-poller.js and
-  // docs/jira-integration-concept.md.
-  // ============================================================
-  const { JiraPoller } = require('./jira-poller');
-  const jiraPoller = new JiraPoller({
-    loadEnvironment,
-    loadJiraCredential: (id) => {
-      try {
-        const list = JSON.parse(fs.readFileSync(path.join(JIRA_TOKENS_DIR, 'index.json'), 'utf8'));
-        return Array.isArray(list) ? (list.find((c) => c.id === id) || null) : null;
-      } catch {
-        return null;
-      }
-    },
-    enqueuePending, // #185 Phase 2: orchestrator owns the queue (control plane when isolated)
-    triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
-  });
-  jiraPoller.start();
 
   // ============================================================
   // Knowledge curator backstop (Shared Agent Learning, Phase 4).

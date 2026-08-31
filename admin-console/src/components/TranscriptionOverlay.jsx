@@ -75,10 +75,10 @@ export default function TranscriptionOverlay() {
         <div style={{ ...CARD_STYLE, bottom: session ? 'calc(var(--eb-space-4) + 190px)' : 'var(--eb-space-4)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, fontWeight: 'var(--eb-font-semibold)' }}>
             <AlertTriangle size={15} style={{ color: 'var(--eb-status-warning, #b45309)' }} />
-            Recover meeting transcript?
+            Recover transcript?
           </div>
           <div style={{ color: 'var(--eb-text-secondary)', marginBottom: 10, lineHeight: 1.4 }}>
-            A meeting recording for <strong>{recovery.agentName}</strong> was interrupted. The already-transcribed portion can still be delivered.
+            A recording for <strong>{recovery.agentName}</strong> was interrupted. The already-transcribed portion can still be delivered.
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={deliverRecovery} style={iconBtn('var(--eb-accent-primary)', 'var(--eb-text-inverted)')}>
@@ -199,7 +199,7 @@ export default function TranscriptionOverlay() {
 
 function statusLabel(session) {
   switch (session.status) {
-    case 'recording': return 'Recording meeting…';
+    case 'recording': return 'Recording…';
     case 'paused': return 'Paused';
     case 'stopping':
     case 'delivering': {

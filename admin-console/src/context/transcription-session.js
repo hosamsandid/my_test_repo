@@ -135,7 +135,7 @@ export function formatElapsed(totalSeconds) {
  */
 export function formatTranscriptMessage({ startedAtLabel, durationMin, transcript, gapCount = 0, interrupted = false }) {
   const lines = [
-    `🎙️ Meeting transcript — started ${startedAtLabel}, duration ${durationMin} min`,
+    `🎙️ Transcript — started ${startedAtLabel}, duration ${durationMin} min`,
     '',
     transcript && transcript.trim() ? transcript : '(no speech was transcribed)',
   ];

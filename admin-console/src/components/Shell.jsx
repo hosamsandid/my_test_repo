@@ -4,7 +4,7 @@ import {
   Users, Zap, Clock, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, LogOut, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
+  Sun, Moon, Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
@@ -20,6 +20,8 @@ import {
 } from './plugin-nav';
 import BrandMark from './BrandMark';
 import AssistModelSelector from './AssistModelSelector';
+import AccountMenu from './AccountMenu';
+import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
 import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
@@ -173,6 +175,8 @@ const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
+  // User Settings modal (#1802) — opened from the header account menu.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
@@ -653,40 +657,11 @@ export default function Shell({ children }) {
             >
               {theme === 'admin-light' ? <Moon size={16} /> : <Sun size={16} />}
             </button>
-            <button
-              onClick={logout}
-              title={user?.username ? `Sign out (${user.username})` : 'Sign out'}
-              aria-label="Sign out"
-              style={{
-                background: 'none',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-md)',
-                color: 'var(--eb-text-secondary)',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--eb-space-2)',
-                padding: 'var(--eb-space-1) var(--eb-space-2)',
-                fontFamily: 'inherit',
-                fontSize: 'var(--eb-text-sm)',
-                transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
-              }}
-              onMouseEnter={e => {
-                e.currentTarget.style.background = 'var(--eb-bg-hover)';
-                e.currentTarget.style.color = 'var(--eb-text-primary)';
-              }}
-              onMouseLeave={e => {
-                e.currentTarget.style.background = 'none';
-                e.currentTarget.style.color = 'var(--eb-text-secondary)';
-              }}
-            >
-              <LogOut size={16} />
-              {user?.username && (
-                <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {user.username}
-                </span>
-              )}
-            </button>
+            <AccountMenu
+              username={user?.username}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onLogout={logout}
+            />
           </div>
         </header>
 
@@ -703,6 +678,10 @@ export default function Shell({ children }) {
       {/* Helper Chat panel (#1735) — a non-blocking slide-in help assistant,
           mounted once here so it is available on every route without a backdrop. */}
       <HelperChatPanel />
+
+      {/* User Settings modal (#1802) — opened from the header account menu;
+          mounted once here so it overlays every route. */}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

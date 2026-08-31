@@ -48,8 +48,10 @@ change without a redeploy:
 **Session.** On successful login the server issues an HMAC-signed, stateless
 session token in an **HttpOnly, SameSite=Lax cookie** (`aee_session`, 7-day
 TTL). A browser refresh re-validates via `GET /api/auth/session` rather than
-re-prompting. A **Sign out** button in the header clears the cookie and returns
-to the login screen; an expired session (any `401`) does the same automatically.
+re-prompting. A **Logout** item in the header **account menu** (#1802 — the
+user-anchored control in the top-right cluster, alongside a **Settings** item)
+clears the cookie and returns to the login screen; an expired session (any
+`401`) does the same automatically.
 
 **API surface** (all public — everything else under `/api` requires the cookie):
 - `POST /api/auth/login` — `{ username, password }` → sets the cookie, or `401` with an inline error.

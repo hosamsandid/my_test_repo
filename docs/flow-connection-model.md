@@ -47,9 +47,12 @@ Die 4-Aktoren-Außenwelt aus Teil 2 hat sich in der Praxis als zu laut erwiesen
    unterhalb der Prozess-Verdrahtung: sie belegt keine Kanal-Lanes/Ports,
    kann dank der Gruppierung nichts kreuzen und trennt Struktur visuell
    von Arbeits-Hand-offs. Kinder bleiben pro Karte auf-/zuklappbar
-   (`Children (n)`-Button); Prozess-/Team-Ansichten klappen sie per Default
-   auf (`expandChildrenByDefault` an `initFlowGraph`, Nutzer-Zuklappen
-   überlebt Daten-Refreshes), BP-Workspaces bleiben default-zugeklappt.
+   (`Children (n)`-Button); die Live-/Team-Baum-Ansichten (`FlowGraph`)
+   klappen sie per Default auf (`expandChildrenByDefault` an `initFlowGraph`,
+   Nutzer-Zuklappen überlebt Daten-Refreshes). Der Prozess-/Flows-Canvas
+   (`ProcessCanvas`) startet dagegen seit #1790 default-zugeklappt — der
+   Nutzer klappt bei Bedarf auf; das verhindert Render-Abstürze bei sehr
+   großen Flows. BP-Workspaces bleiben ebenfalls default-zugeklappt.
 
 Dieses Dokument beschreibt, wie das Erstellen, Bearbeiten und Darstellen von
 Verbindungen zwischen Agenten (und externen Quellen) über **alle Ansichten

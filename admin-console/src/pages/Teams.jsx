@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck, KeyRound } from 'lucide-react';
-import PasswordField from '../components/PasswordField';
+import { useNavigate } from 'react-router';
+import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
@@ -244,142 +244,9 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnl
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           {readOnly
             ? 'You have read-only access to this team. Team Admins can manage members.'
-            : <>Users are created under <strong>Manage Users</strong>. System Admins have global access regardless of team membership.</>}
+            : <>Users are managed on the <strong>Users</strong> page. System Admins have global access regardless of team membership.</>}
         </div>
       </Section>
-    </div>
-  );
-}
-
-/* ── Manage-users panel ───────────────────────────────────────────────── */
-function ManageUsersPanel({ users, onRefresh, onError }) {
-  const [subject, setSubject] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [email, setEmail] = useState('');
-  const [systemAdmin, setSystemAdmin] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState(null);
-  // Inline per-user password setting (#374).
-  const [pwUserId, setPwUserId] = useState(null);
-  const [pwValue, setPwValue] = useState('');
-  const [pwSaving, setPwSaving] = useState(false);
-  const [pwMsg, setPwMsg] = useState(null);
-
-  async function savePassword(userId) {
-    if (!pwValue) return;
-    setPwSaving(true);
-    try {
-      await apiCall('POST', `/api/admin/users/${encodeURIComponent(userId)}/password`, { password: pwValue });
-      setPwUserId(null); setPwValue(''); setPwMsg(userId);
-      setTimeout(() => setPwMsg(null), 2500);
-    } catch (e) { onError(e.message); }
-    finally { setPwSaving(false); }
-  }
-
-  async function createUser() {
-    if (!subject.trim()) return;
-    setSaving(true);
-    try {
-      await apiCall('POST', '/api/admin/users', {
-        subject: subject.trim(),
-        displayName: displayName.trim() || undefined,
-        email: email.trim() || undefined,
-        systemAdmin,
-      });
-      setSubject(''); setDisplayName(''); setEmail(''); setSystemAdmin(false);
-      onRefresh();
-    } catch (e) { onError(e.message); }
-    finally { setSaving(false); }
-  }
-
-  async function toggleSysadmin(u) {
-    try {
-      await apiCall('PUT', `/api/admin/users/${encodeURIComponent(u.id)}`, { systemAdmin: !u.systemAdmin });
-      onRefresh();
-    } catch (e) { onError(e.message); }
-  }
-
-  async function doDelete() {
-    try {
-      await apiCall('DELETE', `/api/admin/users/${encodeURIComponent(deleteTarget.id)}`);
-      setDeleteTarget(null);
-      onRefresh();
-    } catch (e) { onError(e.message); setDeleteTarget(null); }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
-      <Section title="Add user">
-        <FormInput label="Subject (stable identity) *" value={subject} onChange={setSubject} placeholder="e.g. jane.doe@corp.com or OIDC subject" />
-        <FormInput label="Display name" value={displayName} onChange={setDisplayName} placeholder="e.g. Jane Doe" />
-        <FormInput label="Email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          <input type="checkbox" checked={systemAdmin} onChange={e => setSystemAdmin(e.target.checked)} />
-          System Admin (global access)
-        </label>
-        <div>
-          <button onClick={createUser} disabled={saving || !subject.trim()} style={{ ...primaryBtn, opacity: (saving || !subject.trim()) ? 0.6 : 1 }}>
-            <UserPlus size={14} /> {saving ? 'Adding…' : 'Add user'}
-          </button>
-        </div>
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          The <strong>subject</strong> is the stable identifier a future SSO login maps onto (OIDC subject claim or corporate email).
-          To let a user log in <em>today</em>, set a password with the <KeyRound size={11} style={{ verticalAlign: 'middle' }} /> button below — they then sign in with their <strong>subject</strong> + that password. This is interim until enterprise SSO (#307); the operator's env admin login always keeps working.
-        </div>
-      </Section>
-
-      <Section title={`Users (${users.length})`}>
-        {users.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No users yet.</div>}
-        {users.map(u => (
-          <div key={u.id} style={{
-            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-            padding: 'var(--eb-space-2) var(--eb-space-3)',
-            background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-          }}>
-            <div className="eb-wrap-md" style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 'var(--eb-text-sm)' }}>{u.displayName || u.subject}</div>
-                <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{u.email || u.subject}</div>
-              </div>
-              {pwMsg === u.id && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>password set</span>}
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-                <input type="checkbox" checked={!!u.systemAdmin} onChange={() => toggleSysadmin(u)} /> sysadmin
-              </label>
-              <IconButton icon={KeyRound} label="Set login password" onClick={() => { setPwUserId(pwUserId === u.id ? null : u.id); setPwValue(''); }} />
-              <IconButton icon={Trash2} label="Delete user" danger onClick={() => setDeleteTarget(u)} />
-            </div>
-            {pwUserId === u.id && (
-              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
-                <PasswordField
-                  value={pwValue}
-                  onChange={e => setPwValue(e.target.value)}
-                  placeholder={`New login password for "${u.subject}"`}
-                  autoComplete="new-password"
-                  onKeyDown={e => { if (e.key === 'Enter') savePassword(u.id); }}
-                  wrapperStyle={{ flex: 1, minWidth: 0 }}
-                  style={{
-                    padding: 'var(--eb-space-2) var(--eb-space-3)',
-                    background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
-                    borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
-                    fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
-                  }}
-                />
-                <button onClick={() => savePassword(u.id)} disabled={pwSaving || !pwValue} style={{ ...primaryBtn, padding: 'var(--eb-space-2) var(--eb-space-3)', opacity: (pwSaving || !pwValue) ? 0.6 : 1 }}>
-                  {pwSaving ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            )}
-          </div>
-        ))}
-      </Section>
-
-      <ConfirmDialog
-        open={!!deleteTarget}
-        title="Delete user"
-        message={`Delete "${deleteTarget?.displayName || deleteTarget?.subject}"? Their team memberships will be removed too.`}
-        variant="danger" confirmLabel="Delete"
-        onConfirm={doDelete} onCancel={() => setDeleteTarget(null)}
-      />
     </div>
   );
 }
@@ -474,6 +341,7 @@ function ResourceOwnership({ teams, agents, environments, onError, onRefreshAgen
 /* ── Page ─────────────────────────────────────────────────────────────── */
 export default function Teams() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   // Full admins (env admin + System Admin) manage everything; a non-admin may
   // only manage a team they are the Team Admin of (#584 AC9). Mirrors the
   // backend's canManageTeam — the UI trims controls, the API enforces.
@@ -491,7 +359,6 @@ export default function Teams() {
   const [savingCreate, setSavingCreate] = useState(false);
   const [createError, setCreateError] = useState(null);
   const [manageTeam, setManageTeam] = useState(null);
-  const [managingUsers, setManagingUsers] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
 
@@ -582,7 +449,9 @@ export default function Teams() {
             team via the per-team Manage panel, not here. */}
         {isAdmin && (
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <button onClick={() => setManagingUsers(true)} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
+            {/* User records now live on their own full-page Users screen (#1844).
+                This is a pointer to it — the single place to manage users. */}
+            <button onClick={() => navigate('/users')} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
               <Users2 size={15} /> Manage Users
             </button>
             <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
@@ -636,10 +505,6 @@ export default function Teams() {
             readOnly={!canManage(liveManageTeam.id)}
           />
         )}
-      </SidePanel>
-
-      <SidePanel open={managingUsers} onClose={() => setManagingUsers(false)} title="Manage users" width="560px">
-        {managingUsers && <ManageUsersPanel users={userList} onRefresh={refreshAll} onError={setActionError} />}
       </SidePanel>
 
       <ConfirmDialog

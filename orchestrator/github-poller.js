@@ -840,6 +840,15 @@ class GitHubPoller {
           }
         }
 
+        // Record the matched wake label per-outcome (#1846). This is the label
+        // that actually satisfied this subscriber's filter — which may differ
+        // from payload.label.name when the Events API collapses a multi-label
+        // change (e.g. payload.label.name='ux' but the subscriber matched
+        // 'ready' from the full payload.labels set). null for any-label
+        // listeners (no labelFilter). Not set for history-horizon or
+        // label-filter drops, which continue before reaching this point.
+        outcome.wakeLabel = sub.labelFilter || null;
+
         deliverables.push({
           agentId: sub.agentId,
           triggerId: sub.triggerId,
@@ -947,9 +956,11 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest }) => ({
-            agentId, triggerId, status, reason, digest,
-          })),
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel }) => {
+            const o = { agentId, triggerId, status, reason, digest };
+            if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
+            return o;
+          }),
         }),
       );
     }

@@ -639,3 +639,181 @@ test("pollerSubscribes: disabled, wrong-type and malformed triggers are excluded
   assert.equal(pollerSubscribes(subscribable({ events: [] })), false);
   assert.equal(pollerSubscribes(null), false);
 });
+
+// ── _fanOutBatch: wakeLabel attribution (#1846) ──────────────────────────────
+//
+// AC8: a collapsed issues.labeled event where payload.label.name='ux' (the
+// arbitrarily-named single label the Events API surfaces) but payload.labels
+// includes 'ready'. A subscriber on labelFilter:'ready' must see wakeLabel:'ready'
+// in the recorded outcome, not 'ux'. This reproduces the reported case.
+
+const githubEventLog = require("./github-event-log");
+
+test("_fanOutBatch: wakeLabel on outcome = subscriber's labelFilter, not collapsed payload.label.name (AC8)", async () => {
+  // Capture event-log records without touching the filesystem.
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    // Suppress file I/O side-effects irrelevant to this test.
+    poller._enqueuePending = () => {};
+
+    // Collapsed event: the Events API named 'ux' as payload.label, but both
+    // 'ux' and 'ready' were added in one action and appear in payload.labels.
+    const ghEvent = {
+      id: "ac8-collapsed-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }, { name: "ready" }],
+        issue: { number: 1846, title: "Test", html_url: "https://github.com/org/repo/issues/1846" },
+      },
+    };
+
+    const subscribers = [{
+      agentId: "developer",
+      triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready",
+      horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(recorded.length, 1, "one event should be recorded");
+    const entry = recorded[0];
+    // Event-level label stays as the raw collapsed value — unchanged.
+    assert.equal(entry.label, "ux");
+    // The single outcome was delivered and attributed to the matched filter.
+    assert.equal(entry.outcomes.length, 1);
+    assert.equal(entry.outcomes[0].status, "delivered");
+    assert.equal(entry.outcomes[0].wakeLabel, "ready",
+      "wakeLabel must be the subscriber's labelFilter, not the collapsed payload.label.name");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: each of two subscribers on different labelFilters gets its own wakeLabel (AC2)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._enqueuePending = () => {};
+
+    const ghEvent = {
+      id: "ac2-collapsed-1",
+      actor: { login: "user" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }, { name: "ready" }, { name: "ready-2" }],
+        issue: { number: 2, title: "Two subscribers", html_url: "https://github.com/org/repo/issues/2" },
+      },
+    };
+
+    const subscribers = [
+      { agentId: "developer-1", triggerId: "t-ready",   events: new Set(["issues.labeled"]), labelFilter: "ready",   horizon: null },
+      { agentId: "developer-2", triggerId: "t-ready-2", events: new Set(["issues.labeled"]), labelFilter: "ready-2", horizon: null },
+    ];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(recorded.length, 1);
+    const entry = recorded[0];
+    assert.equal(entry.outcomes.length, 2);
+    const by = Object.fromEntries(entry.outcomes.map((o) => [o.agentId, o]));
+    assert.equal(by["developer-1"].wakeLabel, "ready");
+    assert.equal(by["developer-2"].wakeLabel, "ready-2");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: any-label listener (no labelFilter) gets wakeLabel null, not the collapsed label (AC3)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._enqueuePending = () => {};
+
+    const ghEvent = {
+      id: "ac3-any-label-1",
+      actor: { login: "user" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }],
+        issue: { number: 3, title: "Any-label", html_url: "https://github.com/org/repo/issues/3" },
+      },
+    };
+
+    const subscribers = [
+      { agentId: "any-listener", triggerId: "t-any", events: new Set(["issues.labeled"]), labelFilter: null, horizon: null },
+    ];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(recorded.length, 1);
+    const entry = recorded[0];
+    assert.equal(entry.outcomes.length, 1);
+    assert.equal(entry.outcomes[0].status, "delivered");
+    assert.equal(entry.outcomes[0].wakeLabel, null,
+      "any-label listener must have wakeLabel null, not the collapsed label name");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: label-filter-dropped outcome carries no wakeLabel", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._enqueuePending = () => {};
+
+    const ghEvent = {
+      id: "ac-drop-1",
+      actor: { login: "user" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }],
+        issue: { number: 4, title: "Drop test", html_url: "https://github.com/org/repo/issues/4" },
+      },
+    };
+
+    const subscribers = [
+      { agentId: "developer", triggerId: "t1", events: new Set(["issues.labeled"]), labelFilter: "ready", horizon: null },
+    ];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(recorded.length, 1);
+    const entry = recorded[0];
+    assert.equal(entry.outcomes.length, 1);
+    assert.equal(entry.outcomes[0].status, "dropped");
+    assert.equal(entry.outcomes[0].reason, "label-filter");
+    // No wakeLabel on a label-filter drop — the label did not match.
+    assert.equal(entry.outcomes[0].wakeLabel, undefined);
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});

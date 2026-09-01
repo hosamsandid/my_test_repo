@@ -4,6 +4,13 @@ import {
   SETTINGS_SECTIONS, defaultSectionId, resolveSectionId, adjacentSectionId, sectionById,
 } from './settings-modal-view.js';
 import AssistModelSelector from './AssistModelSelector.jsx';
+import {
+  isMacPlatform,
+  loadSendKeybinding,
+  saveSendKeybinding,
+  notifySendKeybindingChanged,
+  sendKeybindingOptions,
+} from '../pages/agent-chat/message-send-keybinding.js';
 
 /**
  * SettingsModal — the user Settings dialog (#1802, UX-1 foundation).
@@ -89,7 +96,9 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
         >
           <h3 style={paneTitleStyle}>{active.label}</h3>
           <p style={paneBlurbStyle}>{active.blurb}</p>
-          {active.id === 'model' ? (
+          {active.id === 'behavior' ? (
+            <BehaviorSettings />
+          ) : active.id === 'model' ? (
             <div style={settingRowStyle}>
               <div>
                 <div style={settingLabelStyle}>Assist model</div>
@@ -105,6 +114,49 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
         </div>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Behavior section — the per-user send-on-Enter preset (#1804, migrated out of
+ * the chat composer). Persists to localStorage via `saveSendKeybinding` and
+ * broadcasts `notifySendKeybindingChanged()` so the active chat's composer
+ * applies the new mode immediately, without a reload (AC3). Reuses the same
+ * `agentChat.sendKeybinding` key + `message-send-keybinding.js` logic, so the
+ * setting round-trips with the composer (AC4) and its tooltip (AC5).
+ */
+function BehaviorSettings() {
+  const isMac = isMacPlatform();
+  const [sendKeybinding, setSendKeybinding] = useState(() => loadSendKeybinding());
+  const options = sendKeybindingOptions(isMac);
+
+  function change(value) {
+    setSendKeybinding(value);
+    saveSendKeybinding(value);
+    notifySendKeybindingChanged();
+  }
+
+  return (
+    <div style={settingRowStyle}>
+      <div>
+        <div style={settingLabelStyle}>Send on Enter</div>
+        <div style={settingHintStyle}>
+          Choose what pressing Enter does in the chat composer. IDE style keeps
+          Enter for newlines ({isMac ? '⌘' : 'Ctrl'}+↩ sends); Chat style sends
+          on Enter (Shift+↩ for a newline).
+        </div>
+      </div>
+      <select
+        value={sendKeybinding}
+        onChange={(e) => change(e.target.value)}
+        aria-label="Enter key sends or inserts a newline"
+        style={selectStyle}
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
   );
 }
 
@@ -180,4 +232,16 @@ const settingHintStyle = {
   marginTop: 'var(--eb-space-1)',
   fontSize: 'var(--eb-text-xs)',
   color: 'var(--eb-text-secondary)',
+};
+
+const selectStyle = {
+  fontFamily: 'inherit',
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-primary)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-sm)',
+  padding: 'var(--eb-space-1) var(--eb-space-2)',
+  cursor: 'pointer',
+  flexShrink: 0,
 };

@@ -5,9 +5,9 @@ import LoopSummaryCard from './LoopSummaryCard';
 import {
   isMacPlatform,
   loadSendKeybinding,
-  saveSendKeybinding,
   decideSendKey,
   placeholderSendHint,
+  SEND_KEYBINDING_CHANGED_EVENT,
 } from './message-send-keybinding.js';
 import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
@@ -85,11 +85,23 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   // fresh with the right agentId on every switch.
   const [value, setValue] = useState(() => loadDraft(agentId));
   const [dragging, setDragging] = useState(false);
-  // Per-user send-keybinding preset ('ide' | 'chat'), persisted in localStorage
-  // (mirrors WorkspaceBrowser's workspaceMode pattern). Defaults to 'ide' so
-  // existing users keep the historic Cmd/Ctrl+Enter behaviour (#1354 AC).
+  // Per-user send-keybinding preset ('ide' | 'chat'), persisted in localStorage.
+  // Defaults to 'ide' so existing users keep the historic Cmd/Ctrl+Enter
+  // behaviour (#1354 AC). The preset is now *configured* in Settings → Behavior
+  // (#1804) — the composer is a read-only consumer that re-reads it on the
+  // same-tab change signal (AC3, immediate effect without reload) and on the
+  // cross-tab `storage` event, so the send behaviour, placeholder hint and Send
+  // tooltip (UX-2, AC5) always reflect the chosen mode.
   const [sendKeybinding, setSendKeybinding] = useState(() => loadSendKeybinding());
-  useEffect(() => { saveSendKeybinding(sendKeybinding); }, [sendKeybinding]);
+  useEffect(() => {
+    const sync = () => setSendKeybinding(loadSendKeybinding());
+    window.addEventListener(SEND_KEYBINDING_CHANGED_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(SEND_KEYBINDING_CHANGED_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
   // Meeting-mode menu (#1296): the mic becomes a split control — plain tap is
   // quick dictation (unchanged), the chevron opens a small menu to start a
   // persistent meeting transcription for this agent.
@@ -581,34 +593,17 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
         marginTop: 'var(--eb-space-1)',
         paddingLeft: 'var(--eb-space-1)',
         transition: 'color var(--eb-transition-fast)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 'var(--eb-space-2)',
+        minHeight: '1em',
       }}>
-        <span>
-          {voiceError
-            ? voiceError
-            : voiceState === 'transcribing'
-              ? 'Transcribing…'
-              : uploading
-                ? 'Uploading attachment…'
-                : null}
-        </span>
-        {/* Per-user send-behaviour toggle (#1354). */}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, whiteSpace: 'nowrap' }}>
-          <span>Enter:</span>
-          <select
-            value={sendKeybinding}
-            onChange={e => setSendKeybinding(e.target.value)}
-            aria-label="Enter key sends or inserts a newline"
-            title="Choose what pressing Enter does. IDE style keeps Enter for newlines; Chat style sends on Enter."
-            style={selectStyle}
-          >
-            <option value="ide">{IS_MAC ? '⌘' : 'Ctrl'}+↩ sends</option>
-            <option value="chat">↩ sends</option>
-          </select>
-        </label>
+        {/* Status line (transcribing / uploading / voice error). The send-on-Enter
+            selector that used to sit here (#1354) moved to Settings → Behavior (#1804). */}
+        {voiceError
+          ? voiceError
+          : voiceState === 'transcribing'
+            ? 'Transcribing…'
+            : uploading
+              ? 'Uploading attachment…'
+              : null}
       </div>
     </div>
   );
@@ -658,14 +653,3 @@ function ButtonTooltip({ label, children }) {
     </span>
   );
 }
-
-const selectStyle = {
-  fontFamily: 'inherit',
-  fontSize: 'var(--eb-text-xs)',
-  color: 'var(--eb-text-secondary)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-sm)',
-  padding: '1px 4px',
-  cursor: 'pointer',
-};

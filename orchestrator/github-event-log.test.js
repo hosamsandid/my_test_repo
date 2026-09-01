@@ -114,6 +114,32 @@ test('buildEventEntry work item is null-safe: partial payload never throws, miss
   );
 });
 
+test('extractWorkItem classifies an issue_comment on a PR as kind pr (#1848)', () => {
+  // GitHub fires issue_comment for both issues and PRs; a PR's issue object
+  // carries a nested pull_request marker and no top-level payload.pull_request.
+  const workItem = eventLog.extractWorkItem({
+    issue: {
+      number: 1846,
+      title: 'Label attribution on the event log',
+      html_url: 'https://github.com/org/repo/pull/1846',
+      pull_request: { url: 'https://api.github.com/repos/org/repo/pulls/1846' },
+    },
+  });
+  assert.deepEqual(workItem, {
+    kind: 'pr',
+    number: 1846,
+    title: 'Label attribution on the event log',
+    url: 'https://github.com/org/repo/pull/1846',
+  });
+});
+
+test('extractWorkItem keeps a plain issue_comment (no pull_request marker) as kind issue (#1848)', () => {
+  assert.deepEqual(
+    eventLog.extractWorkItem({ issue: { number: 99, title: 'A real issue' } }),
+    { kind: 'issue', number: 99, title: 'A real issue', url: null },
+  );
+});
+
 test('extractWorkItem returns null for absent/oddly-shaped payloads without throwing', () => {
   assert.equal(eventLog.extractWorkItem(undefined), null);
   assert.equal(eventLog.extractWorkItem(null), null);

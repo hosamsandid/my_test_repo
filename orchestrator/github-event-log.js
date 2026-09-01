@@ -64,9 +64,11 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
 // null-safe (#1827). PR events carry `payload.pull_request` (the poller enriches
 // it with `title`/`html_url` before this runs — see
 // github-poller._enrichPullRequestPayload); issue events carry `payload.issue`
-// natively. A payload with neither (e.g. `push`), or an oddly-shaped one,
-// yields null — this must never throw, since it feeds the strictly best-effort
-// writer. `title`/`url` may individually be null when the payload is partial.
+// natively. An `issue_comment` on a PR arrives as `payload.issue` with a nested
+// `pull_request` marker and is classified `kind: 'pr'` accordingly (#1848). A
+// payload with neither (e.g. `push`), or an oddly-shaped one, yields null — this
+// must never throw, since it feeds the strictly best-effort writer.
+// `title`/`url` may individually be null when the payload is partial.
 //
 // `closesIssues` (#1833 item 3) is carried only for a PR whose enriched
 // `pull_request.closesIssues` holds the issue number(s) it resolves (parsed
@@ -79,7 +81,10 @@ function extractWorkItem(payload) {
     const src = (p.pull_request && typeof p.pull_request === 'object')
       ? { kind: 'pr', item: p.pull_request }
       : (p.issue && typeof p.issue === 'object')
-        ? { kind: 'issue', item: p.issue }
+        // GitHub fires `issue_comment` for both issues and PRs; a PR's issue
+        // object carries a nested `pull_request` marker (#1848). Classify it as
+        // a PR so a comment on a pull request reads `PR`, not `Issue`.
+        ? { kind: p.issue.pull_request ? 'pr' : 'issue', item: p.issue }
         : null;
     if (!src || src.item.number == null) return null;
     const workItem = {

@@ -8,6 +8,7 @@ import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-sess
 import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
+import { workItemTypeLabel } from './github-event-log-type';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -166,6 +167,16 @@ function WorkItemCell({ workItem, repo }) {
   );
 }
 
+/* ── Type cell (#1848) — the work-item type (PR / Issue) at a glance, driven
+   purely by the persisted `workItem.kind` so it is correct even when the Event
+   column shows a raw fallback key. A row with no work item (push / create /
+   delete / release) or a legacy row with no kind shows a neutral `—`. */
+function TypeCell({ workItem }) {
+  const label = workItemTypeLabel(workItem);
+  if (!label) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  return <span>{label}</span>;
+}
+
 /* ── Title cell (#1827) — the work-item title, truncated with the full
    text on hover so a long title never wraps and stretches the row. */
 function TitleCell({ title }) {
@@ -305,6 +316,9 @@ function ProcessedEventsView() {
     ...e,
     workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
     workItemTitle: e.workItem ? e.workItem.title : null,
+    // Flat 'PR'/'Issue'/null so the Type column sorts + filters by its own key
+    // (#1848), consistent with the Work item / Title columns.
+    workItemType: workItemTypeLabel(e.workItem),
   })), [data]);
 
   const COLS = [
@@ -322,6 +336,11 @@ function ProcessedEventsView() {
     // flat key; the cells render the whole workItem object. The Work-item cell
     // also trails a linked `→ closes #<issue>` for PRs (#1833 item 3), using the
     // row's repo to build the issue URL.
+    // Type (#1848): the work-item type (PR / Issue) as an always-visible,
+    // scannable column so it needn't be read off the Work-item hover title or
+    // inferred from the Event wording. Driven by workItem.kind (its own flat
+    // 'workItemType' key so it sorts/filters); work-item-less rows show `—`.
+    { key: 'workItemType', label: 'Type', render: (_v, row) => <TypeCell workItem={row.workItem} /> },
     { key: 'workItemNumber', label: 'Work item', render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
     { key: 'workItemTitle', label: 'Title', render: v => <TitleCell title={v} /> },
     { key: 'event', label: 'Event', render: (v, row) => {

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Send, Paperclip, Loader2, Mic, Square, Repeat, ChevronDown, Radio } from 'lucide-react';
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 import LoopSummaryCard from './LoopSummaryCard';
+import Tooltip from '../../components/Tooltip.jsx';
 import {
   isMacPlatform,
   loadSendKeybinding,
@@ -486,7 +487,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
               hidden
               onChange={e => { doUpload(e.target.files); e.target.value = ''; }}
             />
-            <ButtonTooltip label={IS_MAC ? 'Attach file — drag & drop or paste (⌘+V)' : 'Attach file — drag & drop or paste (Ctrl+V)'}>
+            <Tooltip label={IS_MAC ? 'Attach file — drag & drop or paste (⌘+V)' : 'Attach file — drag & drop or paste (Ctrl+V)'}>
               <button
                 onClick={() => fileRef.current?.click()}
                 disabled={!canAttach}
@@ -506,7 +507,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   ? <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
                   : <Paperclip size={16} />}
               </button>
-            </ButtonTooltip>
+            </Tooltip>
           </>
         )}
 
@@ -537,7 +538,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           }}
         />
         {onLoopClick && (
-          <ButtonTooltip label={
+          <Tooltip label={
             loopRunning ? 'A loop is running — use Stop to end it' :
             busy ? 'Agent is busy — wait for the turn to finish' :
             'Run a loop — repeats until the goal is met'
@@ -565,7 +566,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                 ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
                 : <Repeat size={15} />}
             </button>
-          </ButtonTooltip>
+          </Tooltip>
         )}
         <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
           {voiceState === 'recording' && (
@@ -579,7 +580,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             </span>
           )}
           <div ref={micGroupRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-            <ButtonTooltip label={
+            <Tooltip label={
               meetingActive ? 'A transcription is already running' :
               voiceState === 'recording' ? 'Stop recording' :
               voiceState === 'transcribing' ? 'Transcribing…' :
@@ -616,7 +617,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
                   : <Mic size={14} />}
             </button>
-            </ButtonTooltip>
+            </Tooltip>
             {/* Meeting-mode chevron (#1296). Only when the host wires meetings. */}
             {onStartMeeting && (
               <button
@@ -686,7 +687,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             )}
           </div>
         </div>
-        <ButtonTooltip label={
+        <Tooltip label={
           showStop
             ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn')
             : sendKeybinding === 'chat' ? 'Send — ↵' : IS_MAC ? 'Send — ⌘+↵' : 'Send — Ctrl+↵'
@@ -722,7 +723,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   : <Square size={14} />)
               : <Send size={14} />}
           </button>
-        </ButtonTooltip>
+        </Tooltip>
       </div>
 
       <div style={{
@@ -755,39 +756,5 @@ function autoResize(el) {
   el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
 }
 
-function ButtonTooltip({ label, children }) {
-  const [visible, setVisible] = React.useState(false);
-  return (
-    <span
-      style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}
-      onMouseEnter={() => setVisible(true)}
-      onMouseLeave={() => setVisible(false)}
-      onFocus={() => setVisible(true)}
-      onBlur={() => setVisible(false)}
-    >
-      {children}
-      {visible && (
-        <span
-          role="tooltip"
-          style={{
-            position: 'absolute',
-            bottom: 'calc(100% + 6px)',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--eb-bg-inverted, #1a1a1a)',
-            color: 'var(--eb-text-inverted, #fff)',
-            fontSize: 'var(--eb-text-xs)',
-            padding: '4px 8px',
-            borderRadius: 'var(--eb-radius-sm)',
-            whiteSpace: 'nowrap',
-            pointerEvents: 'none',
-            zIndex: 100,
-            boxShadow: 'var(--eb-shadow-sm, 0 2px 8px rgba(0,0,0,0.18))',
-          }}
-        >
-          {label}
-        </span>
-      )}
-    </span>
-  );
-}
+// The composer's short-label tooltips now use the shared, canonical
+// `Tooltip` component (#1850) — a local `ButtonTooltip` used to live here.

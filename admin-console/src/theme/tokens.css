@@ -42,6 +42,15 @@
   --eb-text-muted:        oklch(0.55 0.008 293);
   --eb-text-inverted:     oklch(0.13 0.006 293);
 
+  /* Tooltip (shared dark hover tooltip — .eb-tooltip / Tooltip.jsx, #1850).
+     A dark chip with light text in EVERY theme (a "dark tooltip" must stay
+     dark even in the dark theme), so it uses its own tokens rather than the
+     theme-flipping --eb-*-inverted pair. Here it floats slightly above the
+     dark app background with a crisp border. */
+  --eb-tooltip-bg:        oklch(0.28 0.010 293);
+  --eb-tooltip-fg:        oklch(0.98 0.003 293);
+  --eb-tooltip-border:    oklch(0.42 0.012 293);
+
   /* Accent (Accenture Purple — #A100FF) */
   --eb-accent-primary:    oklch(0.65 0.28 293);
   --eb-accent-hover:      oklch(0.58 0.26 293);
@@ -145,6 +154,11 @@
   --eb-text-muted:        oklch(0.60 0.008 293);
   --eb-text-inverted:     oklch(0.98 0.003 293);
 
+  /* Tooltip: dark chip with light text, floating over the light page. */
+  --eb-tooltip-bg:        oklch(0.20 0.006 293);
+  --eb-tooltip-fg:        oklch(0.98 0.003 293);
+  --eb-tooltip-border:    oklch(0.20 0.006 293);
+
   --eb-accent-primary:    oklch(0.52 0.30 293);
   --eb-accent-hover:      oklch(0.46 0.28 293);
   --eb-accent-muted:      oklch(0.94 0.04 293);
@@ -176,6 +190,11 @@
 
   --eb-accent-primary:    oklch(0.75 0.30 293);
   --eb-accent-hover:      oklch(0.70 0.28 293);
+
+  /* Tooltip: pure-black chip, white text, bright border for max contrast. */
+  --eb-tooltip-bg:        oklch(0.15 0 0);
+  --eb-tooltip-fg:        oklch(1.0 0 0);
+  --eb-tooltip-border:    oklch(0.70 0 0);
 }
 
 /* ─── Global Styles ─────────────────────────────────────────────────── */
@@ -308,28 +327,43 @@ select option:disabled {
   animation: eb-status-pulse 1.4s ease-in-out infinite;
 }
 
-/* ─── Icon-only action button: fast tooltip (no native-title delay) ──
-   Pairs with admin-console/src/components/IconButton.jsx. Rendered via a
-   React portal into document.body with position: fixed (coordinates from
-   the button's getBoundingClientRect()) so it can never be clipped by an
-   ancestor's `overflow` — e.g. DataTable's horizontal-scroll wrapper —
-   the way an absolutely-positioned in-flow tooltip would be. Shown on
-   hover AND focus so the label is reachable via keyboard too. */
+/* ─── Shared dark hover tooltip (short labels) ───────────────────────
+   Pairs with admin-console/src/components/Tooltip.jsx — the canonical
+   short-label tooltip for the whole console (#1850). Rendered via a React
+   portal into document.body with position: fixed (coordinates from the
+   trigger's getBoundingClientRect()) so it can never be clipped by an
+   ancestor's `overflow` — e.g. DataTable's horizontal-scroll wrapper.
+   Dark/inverted look via theme-specific --eb-tooltip-* tokens so it reads
+   the same and stays readable in all three themes. Shown instantly on
+   hover AND focus so the label is reachable via keyboard too. No transition
+   → nothing to soften for prefers-reduced-motion. Backs both the Agent-Chat
+   composer tooltip and the shared IconButton, so they read identically. */
 .eb-icon-btn-wrap {
   display: inline-flex;
 }
-.eb-icon-btn-tooltip {
+.eb-tooltip {
   position: fixed;
   transform: translate(-50%, -100%);
-  background: var(--eb-bg-elevated);
-  color: var(--eb-text-primary);
-  border: 1px solid var(--eb-border-default);
-  padding: 2px 8px;
+  background: var(--eb-tooltip-bg);
+  color: var(--eb-tooltip-fg);
+  border: 1px solid var(--eb-tooltip-border);
+  padding: 4px 8px;
   border-radius: var(--eb-radius-sm);
   font-size: var(--eb-text-xs);
+  line-height: 1.4;
+  max-width: min(320px, calc(100vw - 16px));
   white-space: nowrap;
   pointer-events: none;
   z-index: 1000;
+  box-shadow: var(--eb-shadow-sm);
+}
+/* Flipped below the trigger when there is no room above. */
+.eb-tooltip--bottom {
+  transform: translate(-50%, 0);
+}
+/* Opt-in multi-line wrapping for long labels (default is single-line). */
+.eb-tooltip--wrap {
+  white-space: normal;
 }
 
 /* ─── Tablet-width (≤768px) action-row wrap ───────────────────────────
@@ -396,8 +430,8 @@ select option:disabled {
 
 /* ─── InfoTip: rich multi-line explanation popover ───────────────────
    Pairs with admin-console/src/components/InfoTip.jsx. Same portal +
-   position:fixed approach as .eb-icon-btn-tooltip, but sized for
-   sentences: wraps, readable max width, soft shadow. */
+   position:fixed approach as .eb-tooltip, but sized for sentences and kept
+   on the light/elevated surface (D1: only short-label tooltips go dark). */
 .eb-infotip-pop {
   position: fixed;
   transform: translateX(-50%);

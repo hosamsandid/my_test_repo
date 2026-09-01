@@ -21,7 +21,8 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
 | **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it; links to the Plugin System help page |
-| **Access & Users** | `/teams` | Manage human access scopes (**Teams**, the tenant) and users: team CRUD, users, per-team roles, and assigning agents/environments to a team. Renamed from "Teams" (#1726) to avoid confusion with the *Agent Team* squad; the route, API and internal entity stay `team` |
+| **Users** | `/users` | Dedicated full-page user management (#1844, System-Admin only): a sortable/filterable list of all human users with **Create** and **Edit** dialogs (edit display name, email and System-Admin status; the immutable `subject` is shown read-only), set/clear login password, and delete. Split out of the former Access & Users slide-out so users are managed end-to-end in one place |
+| **Access & Users** | `/teams` | Manage human access scopes (**Teams**, the tenant): team CRUD, per-team roles, and assigning agents/environments to a team. User *records* now live on the dedicated **Users** page (#1844); this page links to it. Renamed from "Teams" (#1726) to avoid confusion with the *Agent Team* squad; the route, API and internal entity stay `team` |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
@@ -57,9 +58,9 @@ clears the cookie and returns to the login screen; an expired session (any
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
-**Per-user local passwords (#374, interim).** Human users created on the Access & Users
-page (#308) can be given a local password (Access & Users → Manage Users → the
-🔑 button), letting more than one person log in before SSO lands. Login then
+**Per-user local passwords (#374, interim).** Human users created on the **Users**
+page (#1844) can be given a local password (Users → Edit → Login password),
+letting more than one person log in before SSO lands. Login then
 resolves in two steps: first the **user store** (match by `subject`, verify a
 salted **scrypt** hash held in the user record and never returned by any API),
 then the **env single-admin** credential. Key properties:
@@ -90,7 +91,7 @@ endpoints and the internal **Team** entity are unchanged.
 
 A System Admin can:
 - **Team CRUD** — create / edit / delete teams. The `default` team cannot be deleted.
-- **Manage Users** — create human users (keyed by a stable `subject` an SSO login will later map onto), toggle the global **System Admin** flag, and delete users (their memberships cascade).
+- **Manage Users** — a **Manage Users** button links to the dedicated **Users** page (`/users`, #1844) where human user records (keyed by a stable `subject` an SSO login will later map onto) are created, edited (display name / email / System-Admin), given a login password, and deleted. The former in-page "Manage users" slide-out was removed so there is a single place to manage users.
 - **Members & roles** — per team, add/remove human members and set their per-team role (**Team Admin** / **Team Member**). Membership is an upsert: re-adding a user updates their role.
 - **Resource ownership** — reassign any agent or Working Environment to a team via a per-row team selector. Agents reassign through `PUT /api/agents/:id { teamId }`, environments through `PUT /api/environments/:id { teamId }`; both validate the target team exists.
 

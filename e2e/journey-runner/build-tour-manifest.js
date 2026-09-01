@@ -56,6 +56,7 @@ const ROUTE_MAP = {
   triggers: '/chats',
   'flows-draft': '/flows',
   'agent-templates': '/role-templates',
+  knowledge: '/knowledge',
   'token-usage': '/token-usage',
 };
 

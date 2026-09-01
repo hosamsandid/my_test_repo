@@ -153,7 +153,7 @@ Journeys are only published when the e2e run passes — screenshots are provably
 |---|---|---|---|
 | 1 | Setting up an Agent Team | `team-setup` | `/team-setup` |
 | 2 | Working with Agents | `iban-story` | `/chats` |
-| 3 | Triggers | `triggers` | `/jobs` |
+| 3 | Triggers | `triggers` | `/chats` |
 | 4 | Designing Flows | `flows-draft` | `/flows` |
 | 5 | Agent Templates | `agent-templates` | `/role-templates` |
 | 6 | Knowledge & Skills | *(journey not yet authored — #TBD)* | `/knowledge` |

@@ -135,6 +135,18 @@ export function ModelSelectionProvider({ children }) {
   const openPicker = useCallback(() => setPickerOpen(true), []);
   const closePicker = useCallback(() => setPickerOpen(false), []);
 
+  // The picker (AssistModelSelector) now lives inside the Settings modal (#1805),
+  // which is unmounted while closed — so setPickerOpen(true) alone fires into an
+  // unmounted component and the user sees nothing. A host (Shell) registers how
+  // to surface it (open Settings, deep-linked to the Model section); the assist-
+  // error nudge below calls it before opening the picker so the recovery path
+  // stays visible and actionable.
+  const openSettingsRef = useRef(null);
+  const registerOpenSettings = useCallback((fn) => {
+    openSettingsRef.current = fn || null;
+    return () => { if (openSettingsRef.current === fn) openSettingsRef.current = null; };
+  }, []);
+
   // Error-code nudges from the transport layer (§4.5). Kept in a ref-free effect
   // so the latest handlers (closing over current state) are always registered.
   const loadRef = useRef(load);
@@ -143,12 +155,16 @@ export function ModelSelectionProvider({ children }) {
     return registerAssistErrorHandlers({
       onForbidden: () => {
         // Provider gone / team unassigned mid-session: drop the stale pick,
-        // refetch options, open the picker so the user re-chooses.
+        // refetch options, surface + open the picker so the user re-chooses.
         clearSelection();
         loadRef.current();
+        openSettingsRef.current?.();
         setPickerOpen(true);
       },
-      onNotSelected: () => setPickerOpen(true),
+      onNotSelected: () => {
+        openSettingsRef.current?.();
+        setPickerOpen(true);
+      },
     });
   }, [clearSelection]);
 
@@ -170,10 +186,11 @@ export function ModelSelectionProvider({ children }) {
     clearSelection,
     openPicker,
     closePicker,
+    registerOpenSettings,
     refetch: load,
   }), [
     loading, options, exclusionReason, selection, attention, pickerOpen,
-    select, clearSelection, openPicker, closePicker, load,
+    select, clearSelection, openPicker, closePicker, registerOpenSettings, load,
   ]);
 
   return (

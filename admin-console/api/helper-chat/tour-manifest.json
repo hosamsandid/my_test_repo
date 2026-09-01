@@ -57,7 +57,7 @@
       "id": "triggers",
       "order": 30,
       "title": "Triggers",
-      "route": "/jobs",
+      "route": "/chats",
       "steps": [
         {
           "id": "cron",

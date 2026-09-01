@@ -42,9 +42,8 @@ async function openPanel(ctx, { agentId }) {
   const { page } = ctx;
   await page.goto(`/chats/${agentId}`);
 
-  // Scope to the chat area (Shell's <main>) so we click the right-rail "Triggers"
-  // TAB, not the identically-named left-nav "Triggers" page button (which sits in
-  // the complementary sidebar and would navigate away to /jobs).
+  // Scope to the chat area (Shell's <main>) so the "Triggers" match is the
+  // right-rail TAB, not the identically-named agent-list entry in the sidebar.
   const rail = page.getByRole('main');
   // exact:true so we don't also match the agent-list entry "triggers-demo…".
   let tab = rail.getByRole('button', { name: 'Triggers', exact: true });

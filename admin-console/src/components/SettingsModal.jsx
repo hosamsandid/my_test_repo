@@ -1,8 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Modal from './Modal.jsx';
 import {
   SETTINGS_SECTIONS, defaultSectionId, resolveSectionId, adjacentSectionId, sectionById,
 } from './settings-modal-view.js';
+import AssistModelSelector from './AssistModelSelector.jsx';
 
 /**
  * SettingsModal — the user Settings dialog (#1802, UX-1 foundation).
@@ -12,11 +13,20 @@ import {
  * so every section renders an empty placeholder for now. The overlay behaviour
  * (centred, focus-trapped, Esc / ✕ / backdrop dismiss) is owned by <Modal>.
  */
-export default function SettingsModal({ open, onClose }) {
+export default function SettingsModal({ open, onClose, requestedSectionId = null }) {
   const [activeId, setActiveId] = useState(defaultSectionId());
   const tabRefs = useRef({});
 
   const active = sectionById(resolveSectionId(activeId));
+
+  // On open, land on the requested section when the caller deep-links to one
+  // (e.g. the assist-error nudge opens Settings → Model, #1805); otherwise the
+  // default first section. Keyed on [open, requestedSectionId] so a fresh open
+  // — or a nudge arriving while the modal is already open — jumps correctly.
+  useEffect(() => {
+    if (!open) return;
+    setActiveId(requestedSectionId ? resolveSectionId(requestedSectionId) : defaultSectionId());
+  }, [open, requestedSectionId]);
 
   // Arrow keys move between tabs on the vertical rail (roving focus).
   function onTabKeyDown(e) {
@@ -79,9 +89,19 @@ export default function SettingsModal({ open, onClose }) {
         >
           <h3 style={paneTitleStyle}>{active.label}</h3>
           <p style={paneBlurbStyle}>{active.blurb}</p>
-          <p style={placeholderStyle}>
-            Settings for this section will appear here.
-          </p>
+          {active.id === 'model' ? (
+            <div style={settingRowStyle}>
+              <div>
+                <div style={settingLabelStyle}>Assist model</div>
+                <div style={settingHintStyle}>Which model AI helpers bill against</div>
+              </div>
+              <AssistModelSelector />
+            </div>
+          ) : (
+            <p style={placeholderStyle}>
+              Settings for this section will appear here.
+            </p>
+          )}
         </div>
       </div>
     </Modal>
@@ -140,4 +160,24 @@ const placeholderStyle = {
   fontSize: 'var(--eb-text-sm)',
   color: 'var(--eb-text-muted)',
   fontStyle: 'italic',
+};
+
+const settingRowStyle = {
+  marginTop: 'var(--eb-space-5)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 'var(--eb-space-4)',
+};
+
+const settingLabelStyle = {
+  fontSize: 'var(--eb-text-sm)',
+  fontWeight: 'var(--eb-font-medium)',
+  color: 'var(--eb-text-primary)',
+};
+
+const settingHintStyle = {
+  marginTop: 'var(--eb-space-1)',
+  fontSize: 'var(--eb-text-xs)',
+  color: 'var(--eb-text-secondary)',
 };

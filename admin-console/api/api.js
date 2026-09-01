@@ -11157,6 +11157,10 @@ function normalizeRepositoriesInput(repositories, legacyRepository) {
       url,
       branch: entry.branch ? String(entry.branch).trim() || null : null,
       sshKeyId: sshKeyId || null,
+      // Read-only marker (#1813): the repo is cloned as reference only and the
+      // agent is told not to push to it. Defaults off — an entry without the
+      // flag (every pre-#1813 environment) round-trips as writable, unchanged.
+      readOnly: entry.readOnly === true,
     });
   }
   return cleaned;

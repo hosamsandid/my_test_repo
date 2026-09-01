@@ -12,6 +12,7 @@ const teardown = require('../steps/teardown');
 const gh = require('../steps/gh');
 const team = require('../steps/team');
 const context = require('../steps/context');
+const knowledge = require('../steps/knowledge');
 
 /**
  * teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
@@ -488,8 +489,68 @@ const usageData = {
   },
 };
 
+/**
+ * knowledgeTeam: the Knowledge-chapter journey's precondition (#1784). Gives the
+ * /knowledge page deterministic content to show WITHOUT depending on any agent
+ * having actually run (a fresh team has learned nothing yet): it (1) seeds a
+ * global-pool skill so the team-flow's skills lane and the activation beat have a
+ * real skill to activate, (2) creates a credential-less Working Environment on
+ * the in-stack git remote (no external deps), and (3) materialises a small
+ * two-member team (BA + Developer) so the page shows a real team with real
+ * members — enough to prove member-level activation on the activation beat.
+ *
+ * Composes the existing #668 fixture steps (knowledge.createGlobalSkill,
+ * env.createFixtureEnv, team.materializeTeam) — no duplicate logic. FIXED ids
+ * keep the screenshots deterministic (§7): setup pre-cleans a leftover team+env
+ * and the pool skill from a crashed prior run, and teardown removes the team,
+ * env and skill this journey created — one idempotent, re-runnable surface.
+ *
+ * @param {string} params.teamId - Team slug id to create (also its member prefix).
+ * @param {string} params.envId - Fixture environment id to create.
+ * @param {string} params.envName - Fixture environment display name.
+ * @param {string} params.repoUrl - Git URL the environment points at (the in-stack git remote).
+ * @param {string} params.skillName - Global-pool skill to seed and activate on the team.
+ * @param {string} [params.branch=main] - Branch to track.
+ * @param {string[]} [params.roles=[business-analyst, developer]] - Catalog role ids for the members.
+ * @example
+ * fixtures:
+ *   - fixture: knowledgeTeam
+ *     params:
+ *       teamId: knowledge-demo
+ *       envId: knowledge-demo-env
+ *       envName: Knowledge Demo
+ *       repoUrl: "http://git-remote/e2e/fixture.git"
+ *       skillName: iban-validation
+ */
+const knowledgeTeam = {
+  async setup(ctx, params = {}) {
+    const {
+      teamId, envId, envName, repoUrl, skillName, branch = 'main',
+      roles = ['business-analyst', 'developer'],
+    } = params;
+    if (!teamId || !envId || !envName || !repoUrl || !skillName) {
+      throw new Error('knowledgeTeam fixture requires { teamId, envId, envName, repoUrl, skillName }');
+    }
+    // Pre-clean so a re-run starts from a clean slate (team+env, then the pool skill).
+    await teardown.teardownTeam(ctx, { teamId, envId });
+    await knowledge.deleteGlobalSkill(ctx, { name: skillName });
+    // Seed the global skill BEFORE the team so the activation beat has a candidate.
+    await knowledge.createGlobalSkill(ctx, { name: skillName });
+    await env.createFixtureEnv(ctx, { id: envId, name: envName, repoUrl, branch });
+    await team.materializeTeam(ctx, { teamId, envId, roles });
+    return { teamId, envId, skillName, memberCount: roles.length };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId, envId, skillName } = params;
+    // Team first (drops the grant + member copies), then the now-unreferenced skill.
+    if (teamId && envId) await teardown.teardownTeam(ctx, { teamId, envId });
+    if (skillName) await knowledge.deleteGlobalSkill(ctx, { name: skillName });
+  },
+};
+
 const FIXTURES = {
   teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam, contextMountAgent, usageData,
+  knowledgeTeam,
 };
 
 function resolveFixture(name) {

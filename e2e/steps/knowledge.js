@@ -36,9 +36,62 @@ async function deleteGlobalSkill(ctx, { name }) {
   await ctx.request.delete(`/api/skills/${encodeURIComponent(name)}`);
 }
 
-// Open the Knowledge page scoped to a team. The deep-link param preselects the
-// team once the agent list loads; we also drive the select explicitly so the
-// step is robust regardless of load ordering.
+/**
+ * Open the Knowledge page's overview with the "How the knowledge system works"
+ * explainer visible — the tour's opening beat. Navigates to /knowledge (no team
+ * selected), waits for the team selector to confirm the page has loaded, and
+ * ensures the explainer panel is shown (it is shown by default until dismissed,
+ * persisted in `localStorage['kf.introSeen']`; we click "How it works" only if a
+ * prior dismissal hid it, so the step is robust to storage state).
+ *
+ * @example
+ * - action:
+ *     do: knowledge.openOverview
+ *   screenshot: knowledge-overview
+ */
+async function openOverview(ctx) {
+  const { page } = ctx;
+  await page.goto('/knowledge');
+  // The mandatory team selector anchors the page — its presence confirms the
+  // team list has loaded (and that we are not stuck in the initial spinner).
+  await expect(page.locator('#kf-team-select')).toBeVisible();
+  const explainer = page.getByText('How the knowledge system works', { exact: true });
+  if (!(await explainer.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: /How it works/ }).click();
+  }
+  await expect(explainer).toBeVisible();
+}
+
+/**
+ * Plumbing: dismiss the "How it works" explainer for the remaining beats by
+ * setting the same `localStorage['kf.introSeen']` flag the "Got it — hide this"
+ * button sets, so the following team-flow / activation screenshots aren't topped
+ * by the (already-captured) explainer. The flag is read on the next navigation,
+ * so this must run while the page is already on the console origin (e.g. right
+ * after `openOverview`). Carries no screenshot of its own.
+ *
+ * @example
+ * - action:
+ *     do: knowledge.hideIntro
+ */
+async function hideIntro(ctx) {
+  await ctx.page.evaluate(() => {
+    try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
+  });
+}
+
+/**
+ * Open the Knowledge page scoped to a team. The deep-link param preselects the
+ * team once the agent list loads; we also drive the select explicitly so the
+ * step is robust regardless of load ordering.
+ *
+ * @param {string} params.teamId - Team slug id to scope the Knowledge page to.
+ * @example
+ * - action:
+ *     do: knowledge.openTeam
+ *     teamId: knowledge-demo
+ *   screenshot: knowledge-team-flow
+ */
 async function openTeam(ctx, { teamId }) {
   const { page } = ctx;
   await page.goto(`/knowledge?team=${encodeURIComponent(teamId)}`);
@@ -51,9 +104,18 @@ async function openTeam(ctx, { teamId }) {
   await expect(page.getByRole('button', { name: /Add global skill/ })).toBeVisible();
 }
 
-// Activate a global skill onto the selected team via the picker. The candidate
-// row is a flex div holding the skill-name span + its Activate button; scope to
-// the row by the (unique) skill name.
+/**
+ * Activate a global skill onto the selected team via the picker. The candidate
+ * row is a flex div holding the skill-name span + its Activate button; scope to
+ * the row by the (unique) skill name.
+ *
+ * @param {string} params.skillName - Name of the global-pool skill to activate on the team.
+ * @example
+ * - action:
+ *     do: knowledge.activateGlobalSkill
+ *     skillName: iban-validation
+ *   screenshot: knowledge-skill-activation
+ */
 async function activateGlobalSkill(ctx, { skillName }) {
   const { page } = ctx;
   await page.getByRole('button', { name: /Add global skill/ }).click();
@@ -62,12 +124,22 @@ async function activateGlobalSkill(ctx, { skillName }) {
   await row.getByRole('button', { name: 'Activate' }).click();
 }
 
-// Assert member-level activation state through the UI. Since #774 the skill card
-// no longer carries an `active · n/n` expandable badge: it shows an "In use" pill
-// + a health sentence (`Installed on all n agents`), and the per-member `✓ active`
-// chips moved into the skill-inspector drawer's Rollout tab. So: check the card's
-// pill + sentence, then open the inspector and count one `✓ active` chip per
-// member — proving activation reached each workspace, not just the team toggle.
+/**
+ * Assert member-level activation state through the UI. Since #774 the skill card
+ * no longer carries an `active · n/n` expandable badge: it shows an "In use" pill
+ * + a health sentence (`Installed on all n agents`), and the per-member `✓ active`
+ * chips moved into the skill-inspector drawer's Rollout tab. So: check the card's
+ * pill + sentence, then open the inspector and count one `✓ active` chip per
+ * member — proving activation reached each workspace, not just the team toggle.
+ *
+ * @param {number} params.memberCount - Expected number of team members the skill activated on.
+ * @param {string} params.skillName - Name of the activated skill (its card text).
+ * @example
+ * - assert:
+ *     do: knowledge.expectAllMembersActive
+ *     memberCount: 2
+ *     skillName: iban-validation
+ */
 async function expectAllMembersActive(ctx, { memberCount, skillName }) {
   const { page } = ctx;
   const card = page
@@ -102,6 +174,8 @@ async function getActivation(ctx, { teamId, skillName }) {
 module.exports = {
   createGlobalSkill,
   deleteGlobalSkill,
+  openOverview,
+  hideIntro,
   openTeam,
   activateGlobalSkill,
   expectAllMembersActive,

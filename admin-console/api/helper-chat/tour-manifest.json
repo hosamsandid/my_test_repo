@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-01T09:30:23.286Z",
+  "generated": "2026-09-01T13:27:33.126Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -116,6 +116,29 @@
           "id": "stages",
           "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
           "screenshotPath": "flows-draft/flow-stages.png"
+        }
+      ]
+    },
+    {
+      "id": "knowledge",
+      "order": 50,
+      "title": "Knowledge",
+      "route": "/knowledge",
+      "steps": [
+        {
+          "id": "overview",
+          "voiceover": "This is the Knowledge Flow page. The explainer lays out the whole model: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. Below, the three stages — agents learn while they work, lessons converge into team knowledge, and the best knowledge becomes a skill — and the reminder that you stay in control of how much happens automatically.",
+          "screenshotPath": "knowledge/knowledge-overview.png"
+        },
+        {
+          "id": "team-flow",
+          "voiceover": "We pick a team, and the page draws its whole knowledge flow left to right: the agents on the left, the shared team knowledge they feed in the middle, and the skills on the right. A brand-new team hasn't learned anything yet — which is exactly the point: you watch this fill in as the team works.",
+          "screenshotPath": "knowledge/knowledge-team-flow.png"
+        },
+        {
+          "id": "skill-activation",
+          "voiceover": "The end of the pipeline is skills. Here we take a reusable skill from the pool and activate it on the team. Activation is an immediate file sync — no restart — and the inspector confirms it reached every member's workspace, not just a team-level toggle. That's the same one-click control you use to promote a team's own learned knowledge into a skill.",
+          "screenshotPath": "knowledge/knowledge-skill-activation.png"
         }
       ]
     },

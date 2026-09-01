@@ -1,0 +1,75 @@
+journeyVersion: 1
+id: knowledge
+title: Knowledge
+order: 50
+# CI lane only: a credential-less team on the in-stack git remote + an API-seeded
+# global skill — no external GitHub, no live LLM. The chapter walks the Knowledge
+# Flow page (/knowledge): how agents' lessons become shared team knowledge and how
+# the best of it is promoted into reusable skills. The content is deterministic
+# without any agent having actually run — the `knowledgeTeam` fixture seeds a real
+# team + a real pool skill so every beat shows real UI (§7).
+lanes: [ci]
+
+# Precondition: a two-member team (BA + Developer) on a credential-less env, plus a
+# global-pool skill to activate. Fixed ids keep the screenshots stable across
+# re-runs on the same stack; the fixture pre-/post-cleans the team, env and skill.
+fixtures:
+  - fixture: knowledgeTeam
+    params:
+      teamId: knowledge-demo
+      envId: knowledge-demo-env
+      envName: Knowledge Demo
+      repoUrl: "http://git-remote/e2e/fixture.git"
+      skillName: iban-validation
+
+steps:
+  # ── Chapter intro (narrative-only) ──────────────────────────────────────────
+  - kind: narrative-only
+    id: intro
+    voiceover: |
+      Agents don't just do work — they get better at it. The Knowledge page is where a team's agents turn what they learn on the job into shared knowledge, and the best of that knowledge into reusable skills. Let's see how.
+    narrative: |
+      A team of agents that only ever repeated the same mistakes wouldn't be much of a team. The Knowledge Flow page is where the Agent Studio closes that loop: it shows how each agent's private lessons become knowledge the whole team shares, and how the most valuable of that knowledge is promoted into reusable skills that every agent loads automatically.
+
+      Three ideas sit side by side here. Memory is what one agent privately remembers. Knowledge is what the team shares. Skills are polished, reusable instruction files — often distilled from the best knowledge. This chapter walks that pipeline: agents learn while they work, lessons converge into team knowledge, and the strongest lessons are promoted into skills — with a human in control of how much of that happens automatically.
+
+  # ── The overview + the "how it works" explainer ─────────────────────────────
+  - id: overview
+    voiceover: |
+      This is the Knowledge Flow page. The explainer lays out the whole model: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. Below, the three stages — agents learn while they work, lessons converge into team knowledge, and the best knowledge becomes a skill — and the reminder that you stay in control of how much happens automatically.
+    narrative: |
+      This is the Knowledge Flow page. At the top, a short explainer places the three concepts side by side — Memory, Knowledge, Skills — and then walks the three stages of the pipeline: agents learn while they work; lessons flow into the team's shared knowledge and are marked "converged" when several agents learn the same thing independently; and the best knowledge is promoted into a skill. It closes on the control surface: every team has an Autonomy dial, an optional Review mode, and promotion gates — nothing is deleted silently, and nothing is promoted behind your back unless you let the team curate itself.
+    action:
+      do: knowledge.openOverview
+    screenshot: knowledge-overview
+
+  # Dismiss the explainer for the remaining beats (already captured above) so the
+  # team-flow / activation shots aren't topped by it. Pure plumbing — no capture.
+  - action:
+      do: knowledge.hideIntro
+
+  # ── One team's knowledge flow ────────────────────────────────────────────────
+  - id: team-flow
+    voiceover: |
+      We pick a team, and the page draws its whole knowledge flow left to right: the agents on the left, the shared team knowledge they feed in the middle, and the skills on the right. A brand-new team hasn't learned anything yet — which is exactly the point: you watch this fill in as the team works.
+    narrative: |
+      The page is always scoped to one team — knowledge belongs to a team, not the whole platform. We pick our demo team and the flow view draws its pipeline left to right: each member agent on the left, the shared team knowledge in the middle, and the skills on the right, with the counts in the header — learned, converged, skills. Our demo team is freshly created, so those are still at zero; that's deliberate, because the value of this page is watching it fill in as the agents do real work and record what they learn.
+    action:
+      do: knowledge.openTeam
+      teamId: knowledge-demo
+    screenshot: knowledge-team-flow
+
+  # ── Promote / activate a reusable skill onto the team ────────────────────────
+  - id: skill-activation
+    voiceover: |
+      The end of the pipeline is skills. Here we take a reusable skill from the pool and activate it on the team. Activation is an immediate file sync — no restart — and the inspector confirms it reached every member's workspace, not just a team-level toggle. That's the same one-click control you use to promote a team's own learned knowledge into a skill.
+    narrative: |
+      The right end of the pipeline is skills — reusable instruction files every member loads automatically. We add one from the shared pool and activate it on the team. Activation is a synchronous, additive file sync: no respawn, and the skill inspector's Rollout tab confirms it landed in every member's workspace — member-level truth, not just a team-level switch. This is the same control the team uses to promote its own converged knowledge into a skill once it has learned enough to be worth reusing.
+    action:
+      do: knowledge.activateGlobalSkill
+      skillName: iban-validation
+    assert:
+      do: knowledge.expectAllMembersActive
+      memberCount: 2
+      skillName: iban-validation
+    screenshot: knowledge-skill-activation

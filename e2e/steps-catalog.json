@@ -13,7 +13,8 @@
     "triggers",
     "flows",
     "context",
-    "usage"
+    "usage",
+    "knowledge"
   ],
   "steps": [
     {
@@ -1638,6 +1639,86 @@
       "params": []
     },
     {
+      "name": "knowledge.activateGlobalSkill",
+      "module": "knowledge",
+      "description": "Activate a global skill onto the selected team via the picker. The candidate row is a flex div holding the skill-name span + its Activate button; scope to the row by the (unique) skill name.",
+      "params": [
+        {
+          "name": "skillName",
+          "required": true,
+          "type": "string",
+          "description": "Name of the global-pool skill to activate on the team."
+        }
+      ],
+      "example": "- action:\n    do: knowledge.activateGlobalSkill\n    skillName: iban-validation\n  screenshot: knowledge-skill-activation"
+    },
+    {
+      "name": "knowledge.createGlobalSkill",
+      "module": "knowledge",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "knowledge.deleteGlobalSkill",
+      "module": "knowledge",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "knowledge.expectAllMembersActive",
+      "module": "knowledge",
+      "description": "Assert member-level activation state through the UI. Since #774 the skill card no longer carries an `active · n/n` expandable badge: it shows an \"In use\" pill + a health sentence (`Installed on all n agents`), and the per-member `✓ active` chips moved into the skill-inspector drawer's Rollout tab. So: check the card's pill + sentence, then open the inspector and count one `✓ active` chip per member — proving activation reached each workspace, not just the team toggle.",
+      "params": [
+        {
+          "name": "memberCount",
+          "required": true,
+          "type": "number",
+          "description": "Expected number of team members the skill activated on."
+        },
+        {
+          "name": "skillName",
+          "required": true,
+          "type": "string",
+          "description": "Name of the activated skill (its card text)."
+        }
+      ],
+      "example": "- assert:\n    do: knowledge.expectAllMembersActive\n    memberCount: 2\n    skillName: iban-validation"
+    },
+    {
+      "name": "knowledge.getActivation",
+      "module": "knowledge",
+      "description": "",
+      "params": []
+    },
+    {
+      "name": "knowledge.hideIntro",
+      "module": "knowledge",
+      "description": "Plumbing: dismiss the \"How it works\" explainer for the remaining beats by setting the same `localStorage['kf.introSeen']` flag the \"Got it — hide this\" button sets, so the following team-flow / activation screenshots aren't topped by the (already-captured) explainer. The flag is read on the next navigation, so this must run while the page is already on the console origin (e.g. right after `openOverview`). Carries no screenshot of its own.",
+      "params": [],
+      "example": "- action:\n    do: knowledge.hideIntro"
+    },
+    {
+      "name": "knowledge.openOverview",
+      "module": "knowledge",
+      "description": "Open the Knowledge page's overview with the \"How the knowledge system works\" explainer visible — the tour's opening beat. Navigates to /knowledge (no team selected), waits for the team selector to confirm the page has loaded, and ensures the explainer panel is shown (it is shown by default until dismissed, persisted in `localStorage['kf.introSeen']`; we click \"How it works\" only if a prior dismissal hid it, so the step is robust to storage state).",
+      "params": [],
+      "example": "- action:\n    do: knowledge.openOverview\n  screenshot: knowledge-overview"
+    },
+    {
+      "name": "knowledge.openTeam",
+      "module": "knowledge",
+      "description": "Open the Knowledge page scoped to a team. The deep-link param preselects the team once the agent list loads; we also drive the select explicitly so the step is robust regardless of load ordering.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to scope the Knowledge page to."
+        }
+      ],
+      "example": "- action:\n    do: knowledge.openTeam\n    teamId: knowledge-demo\n  screenshot: knowledge-team-flow"
+    },
+    {
       "name": "teardown.deleteEnv",
       "module": "teardown",
       "description": "Idempotent teardown — 204 (deleted) and 404 (already gone) are both success, so a re-run or a partially-failed spec leaves no environment behind.",
@@ -2314,6 +2395,57 @@
         }
       ],
       "example": "fixtures:\n  - fixture: ibanStoryTeam\n    params:\n      teamId: iban-demo\n      teamName: IBAN Demo\n      envId: iban-demo-env\n      envName: IBAN Demo\n      repoUrl: \"http://git-remote/e2e/fixture.git\"\n      tokenId: iban-demo-token"
+    },
+    {
+      "name": "knowledgeTeam",
+      "description": "knowledgeTeam: the Knowledge-chapter journey's precondition (#1784). Gives the /knowledge page deterministic content to show WITHOUT depending on any agent having actually run (a fresh team has learned nothing yet): it (1) seeds a global-pool skill so the team-flow's skills lane and the activation beat have a real skill to activate, (2) creates a credential-less Working Environment on the in-stack git remote (no external deps), and (3) materialises a small two-member team (BA + Developer) so the page shows a real team with real members — enough to prove member-level activation on the activation beat. Composes the existing #668 fixture steps (knowledge.createGlobalSkill, env.createFixtureEnv, team.materializeTeam) — no duplicate logic. FIXED ids keep the screenshots deterministic (§7): setup pre-cleans a leftover team+env and the pool skill from a crashed prior run, and teardown removes the team, env and skill this journey created — one idempotent, re-runnable surface.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id to create (also its member prefix)."
+        },
+        {
+          "name": "envId",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment id to create."
+        },
+        {
+          "name": "envName",
+          "required": true,
+          "type": "string",
+          "description": "Fixture environment display name."
+        },
+        {
+          "name": "repoUrl",
+          "required": true,
+          "type": "string",
+          "description": "Git URL the environment points at (the in-stack git remote)."
+        },
+        {
+          "name": "skillName",
+          "required": true,
+          "type": "string",
+          "description": "Global-pool skill to seed and activate on the team."
+        },
+        {
+          "name": "branch",
+          "required": false,
+          "type": "string",
+          "default": "main",
+          "description": "Branch to track."
+        },
+        {
+          "name": "roles",
+          "required": false,
+          "type": "string[]",
+          "default": "[business-analyst, developer]",
+          "description": "Catalog role ids for the members."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: knowledgeTeam\n    params:\n      teamId: knowledge-demo\n      envId: knowledge-demo-env\n      envName: Knowledge Demo\n      repoUrl: \"http://git-remote/e2e/fixture.git\"\n      skillName: iban-validation"
     },
     {
       "name": "liveWiringTeam",

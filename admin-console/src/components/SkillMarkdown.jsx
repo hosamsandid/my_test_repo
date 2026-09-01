@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypePrettyCode from 'rehype-pretty-code';
+import { rehypeShikiSync } from './shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 
 /*
@@ -10,34 +10,20 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
  * Extracted from SkillsRegistry so the Skills Registry viewer and the Knowledge
  * page's skill inspector drawer (#774) render skill content identically instead
  * of keeping two divergent copies of the sanitize schema + pretty-code pipeline.
- * Same pipeline as the chat UI: remark-gfm → rehype-pretty-code → rehype-sanitize
+ * Same pipeline as the chat UI: remark-gfm → rehypeShikiSync → rehype-sanitize
  * (sanitize runs LAST so the syntax-highlight markup survives), with an error
- * boundary that falls back to a plain sanitized render if pretty-code throws.
+ * boundary that falls back to a plain sanitized render if Shiki throws.
  */
 
-const PRETTY_CODE_OPTIONS = {
-  theme: { light: 'github-light', dark: 'github-dark' },
-  keepBackground: true,
-  defaultLang: 'plaintext',
-};
-
-const PRETTY_CODE_DATA_ATTRS = [
-  'data-line', 'data-language', 'data-theme',
-  'data-rehype-pretty-code-figure', 'data-rehype-pretty-code-fragment',
-  'data-rehype-pretty-code-title', 'data-highlighted-line',
-  'data-highlighted-line-id', 'data-highlighted-chars', 'data-chars-id',
-  'data-line-numbers', 'data-line-numbers-max-digits', 'data-word', 'data-word-id',
-];
+const SHIKI_DATA_ATTRS = ['data-theme'];
 
 const SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...(defaultSchema.attributes || {}),
-    span:   [...((defaultSchema.attributes?.span)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    code:   [...((defaultSchema.attributes?.code)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    pre:    [...((defaultSchema.attributes?.pre)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    figure: [...((defaultSchema.attributes?.figure) || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    div:    [...((defaultSchema.attributes?.div)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    span: [...((defaultSchema.attributes?.span) || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
+    code: [...((defaultSchema.attributes?.code) || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
+    pre:  [...((defaultSchema.attributes?.pre)  || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
   },
 };
 
@@ -63,7 +49,7 @@ export default class SkillMarkdown extends React.Component {
     const { content } = this.props;
     const rehypePlugins = this.state.fallback
       ? [[rehypeSanitize, SANITIZE_SCHEMA]]
-      : [[rehypePrettyCode, PRETTY_CODE_OPTIONS], [rehypeSanitize, SANITIZE_SCHEMA]];
+      : [rehypeShikiSync(), [rehypeSanitize, SANITIZE_SCHEMA]];
     return (
       <div className="skill-md">
         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={MD_COMPONENTS}>

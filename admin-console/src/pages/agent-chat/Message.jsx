@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypePrettyCode from 'rehype-pretty-code';
+import { rehypeShikiSync } from '../../components/shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, Zap } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
@@ -10,24 +10,24 @@ import { normalizeAskQuestion } from './ask-question-view.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
- * remark-gfm + rehype-pretty-code (Shiki) + rehype-sanitize pipeline is the
- * expensive part, and its output depends only on the source text — the dual
- * Shiki themes are both emitted and the active one is picked by CSS keyed off
- * `<html data-theme>`, so a theme switch never re-tokenizes. Wrapping this in
- * React.memo means an unrelated re-render of the surrounding bubble (e.g. a
- * cross-panel hover) cannot re-run Shiki.
+ * remark-gfm + Shiki + rehype-sanitize pipeline is the expensive part, and its
+ * output depends only on the source text — the dual Shiki themes are both emitted
+ * and the active one is picked by CSS keyed off `<html data-theme>`, so a theme
+ * switch never re-tokenizes. Wrapping this in React.memo means an unrelated
+ * re-render of the surrounding bubble (e.g. a cross-panel hover) cannot re-run
+ * Shiki.
  */
 const MarkdownFull = React.memo(function MarkdownFull({ body }) {
   useAgentChatMdCss();
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      // IMPORTANT: rehype-sanitize must run *after* rehype-pretty-code so
+      // IMPORTANT: rehype-sanitize must run *after* rehypeShikiSync so
       // the syntax-highlighting markup (spans with style + data-* attrs)
       // survives into the rendered output. The custom schema below
       // explicitly allow-lists those attributes.
       rehypePlugins={[
-        [rehypePrettyCode, PRETTY_CODE_OPTIONS],
+        rehypeShikiSync(),
         [rehypeSanitize, SANITIZE_SCHEMA],
       ]}
       components={MARKDOWN_COMPONENTS}
@@ -53,12 +53,9 @@ const MarkdownGfmOnly = React.memo(function MarkdownGfmOnly({ body }) {
 /**
  * Defensive markdown wrapper.
  *
- * `rehype-pretty-code` uses Shiki, which is async; `react-markdown` runs
- * unified synchronously. In some setups this combination throws ("Expected
- * sync transformer") on first render. To avoid taking down the whole chat
- * if that happens, we fall back to GFM-only rendering (with sanitize) and
- * surface a one-line notice in the dev console. The inner renders are
- * memoized (see above) so the error boundary re-rendering never re-runs the
+ * Falls back to GFM-only rendering (with sanitize) if MarkdownFull throws for
+ * any reason, surfacing a one-line notice in the dev console. The inner renders
+ * are memoized (see above) so error-boundary re-rendering never re-runs the
  * markdown pipeline for unchanged text.
  */
 export class SafeMarkdown extends React.Component {
@@ -71,7 +68,7 @@ export class SafeMarkdown extends React.Component {
   }
   componentDidCatch(err) {
     // eslint-disable-next-line no-console
-    console.warn('[agent-chat] rehype-pretty-code render failed; falling back to GFM only:', err?.message || err);
+    console.warn('[agent-chat] markdown render failed; falling back to GFM only:', err?.message || err);
   }
   render() {
     const { body } = this.props;
@@ -82,7 +79,7 @@ export class SafeMarkdown extends React.Component {
       return <MarkdownFull body={body} />;
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn('[agent-chat] rehype-pretty-code threw synchronously; using GFM-only fallback:', err?.message || err);
+      console.warn('[agent-chat] markdown threw synchronously; using GFM-only fallback:', err?.message || err);
       return <MarkdownGfmOnly body={body} />;
     }
   }
@@ -93,12 +90,11 @@ export class SafeMarkdown extends React.Component {
  *
  * - Right-aligned for the user, left-aligned for the agent.
  * - Body rendered with react-markdown + remark-gfm for tables/strikethrough/
- *   task-lists. Code blocks: rehype-pretty-code with dual Shiki themes; the
- *   active theme is selected by CSS rules in `tokens.css` keyed off the
- *   `<html data-theme>` attribute.
+ *   task-lists. Code blocks: rehypeShikiSync (synchronous Shiki wrapper) with
+ *   dual themes; the active theme is selected by CSS rules in `tokens.css`
+ *   keyed off the `<html data-theme>` attribute.
  * - Output is passed through `rehype-sanitize` with a permissive-but-bounded
- *   schema (style + a small set of data-* attrs whitelisted on `span`,
- *   `code`, `pre`, `figure`).
+ *   schema (style + class + data-theme allowed on `span`, `code`, `pre`).
  * - Long code (>40 lines) is wrapped in <details> for cleaner reading.
  * - `thinking` mode replaces the body with an animated three-dot ellipsis.
  *
@@ -111,48 +107,21 @@ export class SafeMarkdown extends React.Component {
  * @param {boolean} [props.thinking]      Show typing-dots placeholder.
  */
 
-const PRETTY_CODE_OPTIONS = {
-  // Dual-theme: rehype-pretty-code emits Shiki output for both themes and
-  // labels each token span with `data-theme="github-dark github-light"`.
-  // tokens.css picks which set of CSS vars wins based on `<html data-theme>`.
-  theme: { light: 'github-light', dark: 'github-dark' },
-  keepBackground: true,
-  defaultLang: 'plaintext',
-};
-
 /**
  * rehype-sanitize schema: defaultSchema (GitHub-flavoured), extended to keep
- * the `style` and rehype-pretty-code data-* attributes that drive code-block
- * presentation. We deliberately do NOT widen this for arbitrary tags — only
- * the small set produced by Shiki/rehype-pretty-code (`span`, `code`, `pre`,
- * `figure`, `div` for line wrappers).
+ * the `style`, `class`, and `data-theme` attributes produced by rehypeShikiSync.
+ * Shiki uses `class` (not `className`) in its hast output, so both names are
+ * listed. We deliberately do NOT widen this for arbitrary tags.
  */
-const PRETTY_CODE_DATA_ATTRS = [
-  'data-line',
-  'data-language',
-  'data-theme',
-  'data-rehype-pretty-code-figure',
-  'data-rehype-pretty-code-fragment',
-  'data-rehype-pretty-code-title',
-  'data-highlighted-line',
-  'data-highlighted-line-id',
-  'data-highlighted-chars',
-  'data-chars-id',
-  'data-line-numbers',
-  'data-line-numbers-max-digits',
-  'data-word',
-  'data-word-id',
-];
+const SHIKI_DATA_ATTRS = ['data-theme'];
 
 const SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...(defaultSchema.attributes || {}),
-    span:   [...((defaultSchema.attributes && defaultSchema.attributes.span)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    code:   [...((defaultSchema.attributes && defaultSchema.attributes.code)   || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    pre:    [...((defaultSchema.attributes && defaultSchema.attributes.pre)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    figure: [...((defaultSchema.attributes && defaultSchema.attributes.figure) || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
-    div:    [...((defaultSchema.attributes && defaultSchema.attributes.div)    || []), 'style', 'className', ...PRETTY_CODE_DATA_ATTRS],
+    span: [...((defaultSchema.attributes && defaultSchema.attributes.span) || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
+    code: [...((defaultSchema.attributes && defaultSchema.attributes.code) || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
+    pre:  [...((defaultSchema.attributes && defaultSchema.attributes.pre)  || []), 'style', 'class', 'className', ...SHIKI_DATA_ATTRS],
   },
 };
 
@@ -313,7 +282,7 @@ function PreWithCollapse({ children, ...rest }) {
   );
 }
 
-/** Walk `children` tree and count `data-line` spans (rehype-pretty-code output). */
+/** Walk `children` tree and count Shiki line spans (class="line"). */
 function countCodeLines(children) {
   let n = 0;
   const visit = (node) => {
@@ -321,7 +290,8 @@ function countCodeLines(children) {
     if (Array.isArray(node)) { node.forEach(visit); return; }
     if (typeof node !== 'object') return;
     const props = node.props || {};
-    if (props['data-line'] !== undefined) n += 1;
+    // Shiki native: class="line" on each line span
+    if (props.className === 'line' || props.class === 'line') n += 1;
     if (props.children) visit(props.children);
   };
   visit(children);

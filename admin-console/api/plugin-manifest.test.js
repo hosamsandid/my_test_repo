@@ -418,3 +418,58 @@ test('the shipped github-issues manifest (plugins/github-issues) is valid', () =
   const board = manifest.ui.routes.find((r) => r.path === '/');
   assert.equal(board && board.minRole, 'team-member');
 });
+
+// ── fetch scaffold (command-only plugin content, #1865) ─────────────────────
+function commandOnlyFetchBase() {
+  return {
+    pluginVersion: 1,
+    id: 'spec-kit',
+    name: 'spec-kit',
+    description: 'Spec-driven development slash commands.',
+    commands: { namespace: 'speckit' },
+    fetch: { source: 'github', repo: 'github/spec-kit', ref: 'v1.0.3', commandsDir: 'templates/commands' },
+  };
+}
+
+test('fetch: scriptVariant + resolveCommands + scaffold normalize when valid', () => {
+  const m = commandOnlyFetchBase();
+  m.fetch.scriptVariant = 'sh';
+  m.fetch.resolveCommands = true;
+  m.fetch.scaffold = [
+    { repoDir: 'scripts/bash', dest: '.specify/scripts/bash', exec: true },
+    { repoDir: 'templates', dest: '.specify/templates', include: '-template\\.md$' },
+  ];
+  const { ok, manifest, errors } = validatePluginManifest(m);
+  assert.equal(ok, true, JSON.stringify(errors));
+  assert.equal(manifest.fetch.scriptVariant, 'sh');
+  assert.equal(manifest.fetch.resolveCommands, true);
+  assert.equal(manifest.fetch.scaffold.length, 2);
+  assert.deepEqual(manifest.fetch.scaffold[0], { repoDir: 'scripts/bash', dest: '.specify/scripts/bash', exec: true });
+  assert.equal(manifest.fetch.scaffold[1].include, '-template\\.md$');
+});
+
+test('fetch.scaffold rejects unsafe repoDir/dest paths', () => {
+  const abs = commandOnlyFetchBase();
+  abs.fetch.scaffold = [{ repoDir: 'scripts', dest: '/etc' }];
+  assert.ok(validatePluginManifest(abs).errors.some((e) => /scaffold\[0\]\.dest/.test(e)));
+
+  const dotdot = commandOnlyFetchBase();
+  dotdot.fetch.scaffold = [{ repoDir: '../secrets', dest: '.specify/x' }];
+  assert.ok(validatePluginManifest(dotdot).errors.some((e) => /scaffold\[0\]\.repoDir/.test(e)));
+});
+
+test('fetch.scaffold rejects non-array + bad entry types', () => {
+  const notArr = commandOnlyFetchBase();
+  notArr.fetch.scaffold = 'nope';
+  assert.ok(validatePluginManifest(notArr).errors.some((e) => /fetch\.scaffold must be an array/.test(e)));
+
+  const badExec = commandOnlyFetchBase();
+  badExec.fetch.scaffold = [{ repoDir: 'scripts', dest: '.specify/scripts', exec: 'yes' }];
+  assert.ok(validatePluginManifest(badExec).errors.some((e) => /scaffold\[0\]\.exec/.test(e)));
+});
+
+test('fetch.resolveCommands must be boolean', () => {
+  const m = commandOnlyFetchBase();
+  m.fetch.resolveCommands = 'true';
+  assert.ok(validatePluginManifest(m).errors.some((e) => /resolveCommands must be a boolean/.test(e)));
+});

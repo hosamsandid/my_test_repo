@@ -6,6 +6,8 @@ const {
   rewriteProjectPaths,
   splitFrontmatter,
   parseScriptsBlock,
+  resolveCommandRefs,
+  hasUnresolvedPlaceholders,
   resolveSpecKitCommand,
 } = require('./speckit-content');
 
@@ -77,4 +79,26 @@ test('resolveSpecKitCommand: {ARGS} embedded in the sh script command is resolve
   const md = '---\nscripts:\n  sh: scripts/bash/x.sh {ARGS}\n---\n`{SCRIPT}`\n';
   const out = resolveSpecKitCommand(md, {});
   assert.match(out, /`\.specify\/scripts\/bash\/x\.sh \$ARGUMENTS`/);
+});
+
+test('resolveCommandRefs maps __SPECKIT_COMMAND_*__ to the /namespace:name invocation', () => {
+  assert.equal(resolveCommandRefs('see __SPECKIT_COMMAND_PLAN__'), 'see /speckit:plan');
+  assert.equal(resolveCommandRefs('run __SPECKIT_COMMAND_GIT_COMMIT__'), 'run /speckit:git-commit');
+  assert.equal(resolveCommandRefs('x __SPECKIT_COMMAND_TASKS__ y', { namespace: 'sk' }), 'x /sk:tasks y');
+});
+
+test('hasUnresolvedPlaceholders detects every placeholder class', () => {
+  assert.equal(hasUnresolvedPlaceholders('a {SCRIPT} b'), true);
+  assert.equal(hasUnresolvedPlaceholders('a {ARGS} b'), true);
+  assert.equal(hasUnresolvedPlaceholders('a __AGENT__ b'), true);
+  assert.equal(hasUnresolvedPlaceholders('a __SPECKIT_COMMAND_PLAN__ b'), true);
+  assert.equal(hasUnresolvedPlaceholders('fully resolved /speckit:plan $ARGUMENTS'), false);
+});
+
+test('resolveSpecKitCommand resolves cross-refs and leaves nothing unresolved', () => {
+  const md = '---\ndescription: Analyze\nscripts:\n  sh: scripts/bash/check-prerequisites.sh --json\n---\nRun `{SCRIPT}`, then __SPECKIT_COMMAND_IMPLEMENT__ with {ARGS} as __AGENT__.\n';
+  const out = resolveSpecKitCommand(md, {});
+  assert.match(out, /Run `\.specify\/scripts\/bash\/check-prerequisites\.sh --json`/);
+  assert.match(out, /then \/speckit:implement with \$ARGUMENTS as claude\./);
+  assert.equal(hasUnresolvedPlaceholders(out), false);
 });

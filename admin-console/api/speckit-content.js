@@ -91,12 +91,32 @@ function parseScriptsBlock(frontmatter) {
   return scripts;
 }
 
+// Resolve `__SPECKIT_COMMAND_<NAME>__` cross-references — a command body that
+// points at a sibling command — to the invocation string an agent actually types.
+// Mirrors upstream `IntegrationBase.resolve_command_refs`: a command is projected
+// at `.claude/commands/<namespace>/<name>.md` and invoked as
+// `<prefix><namespace><separator><name>` (e.g. `/speckit:specify`); a multi-segment
+// token (`__SPECKIT_COMMAND_GIT_COMMIT__`) hyphenates (`/speckit:git-commit`).
+function resolveCommandRefs(text, { prefix = '/', namespace = 'speckit', separator = ':' } = {}) {
+  return String(text || '').replace(
+    /__SPECKIT_COMMAND_([A-Z][A-Z0-9_]*)__/g,
+    (_m, name) => `${prefix}${namespace}${separator}${name.toLowerCase().replace(/_/g, '-')}`,
+  );
+}
+
+// Whether a rendered command body still carries any upstream placeholder — used
+// by the install path to FAIL LOUD rather than seed a broken, half-resolved
+// command (a `{SCRIPT}` with no `scripts.sh`, or an unmapped cross-ref).
+function hasUnresolvedPlaceholders(text) {
+  return /\{SCRIPT\}|\{ARGS\}|__AGENT__|__SPECKIT_COMMAND_[A-Z][A-Z0-9_]*__/.test(String(text || ''));
+}
+
 // Resolve one raw spec-kit command template into the runnable form a generated
 // `specify init --ai claude --script sh` project would contain. The original
 // frontmatter is preserved verbatim (its `description` feeds our seeded-commands
 // manifest, and claude ignores the spec-kit-specific keys); only the body is
 // transformed. Port of the body handling in agents.py (lines ~505-524).
-function resolveSpecKitCommand(rawMd, { scriptVariant = 'sh', agentName = 'claude' } = {}) {
+function resolveSpecKitCommand(rawMd, { scriptVariant = 'sh', agentName = 'claude', namespace = 'speckit' } = {}) {
   if (typeof rawMd !== 'string' || !rawMd) return rawMd;
   const { frontmatter, body: rawBody } = splitFrontmatter(rawMd);
   let body = rawBody;
@@ -108,6 +128,7 @@ function resolveSpecKitCommand(rawMd, { scriptVariant = 'sh', agentName = 'claud
     body = body.split('{SCRIPT}').join(scriptCommand);
   }
   body = body.split('{ARGS}').join('$ARGUMENTS').split('__AGENT__').join(agentName);
+  body = resolveCommandRefs(body, { namespace });
   body = rewriteProjectPaths(body);
 
   // Reassemble with the original frontmatter fence, byte-preserving when there
@@ -120,5 +141,7 @@ module.exports = {
   rewriteProjectPaths,
   splitFrontmatter,
   parseScriptsBlock,
+  resolveCommandRefs,
+  hasUnresolvedPlaceholders,
   resolveSpecKitCommand,
 };

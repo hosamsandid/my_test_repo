@@ -38,6 +38,11 @@ const RETENTION_DAYS = 7;
 // (`pr`|`issue`), number, title and GitHub URL — so the log can surface "which
 // PR/issue" instead of only the raw event type. null for events with no work
 // item (e.g. `push`). See extractWorkItem for the null-safe extraction.
+//
+// `ref` (#1833 AC1.3) captures the git ref a `push`/`create`/`delete` event
+// carries (`payload.ref`, e.g. `refs/heads/main` for a push or the bare branch/
+// tag name for create/delete) so those work-item-less rows can name the branch
+// they touched. null for events that carry no ref.
 function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
   const list = Array.isArray(outcomes) ? outcomes : [];
   return {
@@ -48,6 +53,7 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
     actor: ghEvent.actor?.login || null,
     createdAt: ghEvent.created_at || null,
     label: ghEvent.payload?.label?.name || null,
+    ref: typeof ghEvent.payload?.ref === 'string' ? ghEvent.payload.ref : null,
     workItem: extractWorkItem(ghEvent.payload),
     outcomes: list,
     noMatchingTrigger: list.length === 0,
@@ -61,6 +67,12 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
 // natively. A payload with neither (e.g. `push`), or an oddly-shaped one,
 // yields null — this must never throw, since it feeds the strictly best-effort
 // writer. `title`/`url` may individually be null when the payload is partial.
+//
+// `closesIssues` (#1833 item 3) is carried only for a PR whose enriched
+// `pull_request.closesIssues` holds the issue number(s) it resolves (parsed
+// from the PR body + head branch by the poller — see
+// github-poller._enrichPullRequestPayload). Omitted entirely when there is no
+// parseable linkage, so issue rows and un-enriched PR rows are unaffected.
 function extractWorkItem(payload) {
   try {
     const p = payload || {};
@@ -70,12 +82,17 @@ function extractWorkItem(payload) {
         ? { kind: 'issue', item: p.issue }
         : null;
     if (!src || src.item.number == null) return null;
-    return {
+    const workItem = {
       kind: src.kind,
       number: src.item.number,
       title: typeof src.item.title === 'string' ? src.item.title : null,
       url: typeof src.item.html_url === 'string' ? src.item.html_url : null,
     };
+    if (src.kind === 'pr' && Array.isArray(src.item.closesIssues)) {
+      const closes = src.item.closesIssues.filter((n) => Number.isInteger(n) && n > 0);
+      if (closes.length) workItem.closesIssues = closes;
+    }
+    return workItem;
   } catch {
     return null;
   }

@@ -89,28 +89,77 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
 
 /* ── Work-item cell (#1827) ────────────────────────────────────────────
    The PR/issue an event happened on, as `#<n>` linking to GitHub in a new
-   tab when a URL is present; `—` for events with no work item (push, etc.). */
-function WorkItemCell({ workItem }) {
+   tab when a URL is present; `—` for events with no work item (push, etc.).
+   For a PR that resolves issue(s) (#1833 item 3) a small linked
+   `→ closes #<issue>` trails the number, giving issue → PR → merge traceability
+   without leaving the page. */
+const workItemMono = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' };
+
+// Best-effort GitHub issue URL from the row's `owner/name` repo — the closes
+// numbers are parsed data, not links, so we synthesize the target here. Returns
+// null when the repo isn't a usable `owner/name`, so the reference degrades to
+// plain (unlinked) text rather than a broken link.
+function issueUrl(repo, number) {
+  if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return null;
+  return `https://github.com/${repo}/issues/${number}`;
+}
+
+function ClosesRefs({ closesIssues, repo }) {
+  if (!Array.isArray(closesIssues) || closesIssues.length === 0) return null;
+  return (
+    <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>
+      {' → closes '}
+      {closesIssues.map((n, i) => {
+        const url = issueUrl(repo, n);
+        const text = `#${n}`;
+        return (
+          <React.Fragment key={n}>
+            {i > 0 && ', '}
+            {url ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Open issue ${text} on GitHub`}
+                style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+              >
+                {text}
+              </a>
+            ) : (
+              <span>{text}</span>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </span>
+  );
+}
+
+function WorkItemCell({ workItem, repo }) {
   if (!workItem || workItem.number == null) {
     return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
   }
   const text = `#${workItem.number}`;
   const kindLabel = workItem.kind === 'pr' ? 'PR' : 'issue';
-  const mono = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' };
-  if (workItem.url) {
-    return (
-      <a
-        href={workItem.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        title={`Open ${kindLabel} ${text} on GitHub`}
-        style={{ ...mono, color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
-      >
-        {text}
-      </a>
-    );
-  }
-  return <span style={mono}>{text}</span>;
+  const closes = <ClosesRefs closesIssues={workItem.closesIssues} repo={repo} />;
+  return (
+    <span style={{ whiteSpace: 'nowrap' }}>
+      {workItem.url ? (
+        <a
+          href={workItem.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${kindLabel} ${text} on GitHub`}
+          style={{ ...workItemMono, color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+        >
+          {text}
+        </a>
+      ) : (
+        <span style={workItemMono}>{text}</span>
+      )}
+      {closes}
+    </span>
+  );
 }
 
 /* ── Title cell (#1827) — the work-item title, truncated with the full
@@ -133,20 +182,29 @@ function TitleCell({ title }) {
   );
 }
 
-/* ── Repository cell (#1827) — de-emphasised: the short repo name only, muted
-   and small, with the full `owner/name` on hover. Almost always the same repo,
-   so it should not dominate the row; it stays present for multi-repo stacks. */
+/* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
+   name, full `owner/name` on hover. #1829 pushed this to a trailing muted-xs
+   column where push/create/delete rows (no work item, no title) read as empty;
+   #1833 AC1.1/AC1.2 moves it back to an early column and drops the muted-only
+   styling so every row is identifiable. Still short-name for scannability. */
 function RepoCell({ repo }) {
   if (!repo) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
   const short = String(repo).split('/').pop();
   return (
     <span
       title={repo}
-      style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}
+      style={{ color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)' }}
     >
       {short}
     </span>
   );
+}
+
+/* ── Git ref → short branch/tag name (#1833 AC1.3) — `refs/heads/main` → `main`,
+   `refs/tags/v1` → `v1`; a bare create/delete ref name passes through. */
+function shortRef(ref) {
+  if (typeof ref !== 'string' || !ref) return '';
+  return ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
 }
 
 function NoMatchBadge() {
@@ -251,18 +309,29 @@ function ProcessedEventsView() {
     // friendly way as the credential/connection "Added" columns instead of a
     // raw machine timestamp a new user has to decode.
     { key: 'ts', label: 'Time', render: v => <WhenCell iso={v} /> },
+    // Repository restored to an early, prominent position (#1833 AC1.1): #1829's
+    // trailing muted column left push/create/delete rows (no work item, no
+    // title) reading as empty. Sortable + filterable via the full 'repo' value.
+    { key: 'repo', label: 'Repository', render: v => <RepoCell repo={v} /> },
     // Work item + Title (#1827): the PR/issue the event happened on, so the log
     // reads as a work log rather than a machine feed. Both filter/sort by their
-    // flat key; the cells render the whole workItem object.
-    { key: 'workItemNumber', label: 'Work item', render: (_v, row) => <WorkItemCell workItem={row.workItem} /> },
+    // flat key; the cells render the whole workItem object. The Work-item cell
+    // also trails a linked `→ closes #<issue>` for PRs (#1833 item 3), using the
+    // row's repo to build the issue URL.
+    { key: 'workItemNumber', label: 'Work item', render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
     { key: 'workItemTitle', label: 'Title', render: v => <TitleCell title={v} /> },
     { key: 'event', label: 'Event', render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who
       // doesn't know the GitHub Events API vocabulary. The raw technical event
       // key is no longer shown (#1827) — the friendly name + set label suffice.
+      // For a work-item-less push/create/delete the git ref/branch is appended
+      // (#1833 AC1.3) so those rows say which branch they touched.
       const friendly = eventLabel(v);
-      return <span>{friendly || '—'}{row.label ? ` (${row.label})` : ''}</span>;
+      let suffix = '';
+      if (row.label) suffix = ` (${row.label})`;
+      else if (row.ref) suffix = ` · ${shortRef(row.ref)}`;
+      return <span>{friendly || '—'}{suffix}</span>;
     } },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {
@@ -276,10 +345,6 @@ function ProcessedEventsView() {
         </div>
       );
     } },
-    // Repository is de-emphasised (#1827): moved to the trailing, secondary
-    // position and rendered as the muted short name (full owner/name on hover),
-    // while staying sortable + filterable (key 'repo' holds the full value).
-    { key: 'repo', label: 'Repository', render: v => <RepoCell repo={v} /> },
   ];
 
   return (

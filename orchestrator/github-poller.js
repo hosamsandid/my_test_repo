@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const githubEventLog = require('./github-event-log');
+const { parseCloses } = require('./pr-events-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 
 // Poll cadence. Fixed 30s in production; overridable via
@@ -912,13 +913,30 @@ class GitHubPoller {
 
     if (throttleStateDirty) this._saveThrottleState();
 
+    // #1833 item 2 — enrich EVERY pull_request* event before it is logged,
+    // regardless of trigger outcome. Phase 2 only enriches delivered events, so
+    // a throttled / digested / no-subscriber PR event otherwise reached the log
+    // from the raw payload → bare `#number`, empty title, no PR→issue link.
+    // Reuses the SAME per-event-id cache (AC2.3), so a PR already enriched above
+    // is not re-fetched; non-PR events return identity from the enricher (no
+    // cost). Best-effort — a failed enrich falls back to the raw payload below.
+    for (const entry of eventLogEntries.values()) {
+      const key = entry.key;
+      if (typeof key === 'string' && key.startsWith('pull_request') && !enrichedPayloads.has(entry.ghEvent.id)) {
+        enrichedPayloads.set(
+          entry.ghEvent.id,
+          await this._enrichPullRequestPayload(key, entry.ghEvent.payload, token),
+        );
+      }
+    }
+
     // #469 — persist the transparency log entry for every fresh event in this
     // batch, whether it was delivered, dropped, digested, or matched no
     // subscriber at all. Best-effort (see github-event-log.js); never throws.
     // #1827 — prefer the enriched payload (title/html_url filled in for PR
-    // events during phase 2) so the log captures the work item; a dropped or
-    // no-subscriber event never got enriched, so it falls back to the raw
-    // payload and simply persists a partial/absent work item.
+    // events) so the log captures the work item; #1833 extends that enrichment
+    // to every PR event (loop just above) so throttled/digested/no-subscriber
+    // rows also carry the work item + closes link.
     for (const entry of eventLogEntries.values()) {
       const enriched = enrichedPayloads.get(entry.ghEvent.id);
       const ghEventForLog = enriched && enriched !== entry.ghEvent.payload
@@ -1062,31 +1080,47 @@ class GitHubPoller {
   // and leaves the payload untouched (identity) when there's nothing to add
   // or the event isn't PR-shaped, so non-PR events and already-complete
   // payloads (webhook-shaped fixtures, future API changes) pay no cost.
+  //
+  // #1833 item 3: from that SAME best-effort GET we also read the PR body and
+  // derive the issue(s) this PR resolves — `closesIssues` — via the shared
+  // parseCloses (closes/fixes/resolves #N in the body + `issue-N` in the head
+  // branch), so the event log can show PR→issue traceability. No extra request:
+  // the body rides on the title fetch; the branch is already on the payload.
   async _enrichPullRequestPayload(key, payload, token) {
     if (typeof key !== 'string' || !key.startsWith('pull_request')) return payload;
     const pr = payload && payload.pull_request;
     if (!pr || typeof pr !== 'object') return payload;
-    if (pr.title && pr.html_url) return payload;
 
-    const htmlUrl = pr.html_url || prApiUrlToHtmlUrl(pr.url);
     let title = pr.title || null;
+    let body = typeof pr.body === 'string' ? pr.body : null;
+    const branch = pr.head && typeof pr.head.ref === 'string' ? pr.head.ref : null;
+
+    // Fetch the PR detail once, only when the title is missing (the #496
+    // condition — an already-complete/webhook-shaped payload still pays no
+    // cost). We opportunistically read the body from that response for the
+    // closes parse below, so no second request is ever issued.
     if (!title && typeof pr.url === 'string') {
       try {
         const detail = await this._fetchJson(pr.url, token);
         if (detail && typeof detail.title === 'string') title = detail.title;
+        if (detail && typeof detail.body === 'string') body = detail.body;
       } catch (err) {
-        console.error(`[GH-Poller] PR title fetch failed for ${pr.url}: ${err.message}`);
+        console.error(`[GH-Poller] PR detail fetch failed for ${pr.url}: ${err.message}`);
       }
     }
-    if (!htmlUrl && !title) return payload;
-    return {
-      ...payload,
-      pull_request: {
-        ...pr,
-        ...(htmlUrl ? { html_url: htmlUrl } : {}),
-        ...(title ? { title } : {}),
-      },
+
+    const htmlUrl = pr.html_url || prApiUrlToHtmlUrl(pr.url);
+    const closesIssues = parseCloses(body, branch);
+
+    // Only build a new payload for fields we actually add — an already-complete
+    // payload with nothing new to contribute stays identity (contract kept).
+    const additions = {
+      ...(htmlUrl && !pr.html_url ? { html_url: htmlUrl } : {}),
+      ...(title && !pr.title ? { title } : {}),
+      ...(closesIssues.length ? { closesIssues } : {}),
     };
+    if (Object.keys(additions).length === 0) return payload;
+    return { ...payload, pull_request: { ...pr, ...additions } };
   }
 
   _fetchEvents(repoFullName, token, etag, page = 1) {

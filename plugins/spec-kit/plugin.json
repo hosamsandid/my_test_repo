@@ -14,7 +14,7 @@
     "source": "github",
     "repo": "github/spec-kit",
     "ref": "main",
-    "commandsDir": "commands"
+    "commandsDir": "templates/commands"
   },
   "promptLine": "You have spec-kit slash commands for spec-driven development: `/speckit:specify` (author spec.md), `/speckit:plan` (produce plan.md), `/speckit:tasks` (break down into tasks.md), `/speckit:implement` (execute the plan). Run these in order to drive a feature from specification through to code."
 }

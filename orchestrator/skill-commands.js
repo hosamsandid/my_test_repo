@@ -159,6 +159,86 @@ function commandsListFromManifest(manifest) {
     .sort((a, b) => a.command.localeCompare(b.command));
 }
 
+// The command name (invocation sub-name) derived from a provisioned file name.
+// Unlike `commandNameFromFile` (used when projecting a skill's source file, where
+// slugification guarantees a safe on-disk name), a file that already lives in the
+// agent workspace was named by the projector OR dropped in by hand — Claude Code
+// invokes it by its literal stem, so we preserve it verbatim (minus `.md`).
+function provisionedCommandName(fileName) {
+  return String(fileName).replace(/\.md$/i, '');
+}
+
+// Enumerate the slash commands ACTUALLY provisioned in an agent workspace by
+// walking its `.claude/commands/` tree — the workspace is the source of truth for
+// #1797, so a command dropped in by hand (never in the seed manifest) surfaces
+// too. Layout mirrors the projector: top-level `*.md` are un-namespaced
+// (`/<name>`); each first-level subdirectory is a namespace (`/<namespace>:<name>`).
+// `manifest` (optional, from seeded-commands.json) only enriches the seeded rows
+// with their originating `skill`; a hand-added command has `skill: null`. Pure
+// apart from the injected fs readers (mirrors `readSkillCommands`); returns []
+// when the commands dir is absent/unreadable (the common no-commands case).
+function scanProvisionedCommands(commandsRootDir, {
+  readdirSync = fs.readdirSync,
+  readFileSync = fs.readFileSync,
+  manifest = {},
+} = {}) {
+  const readMd = (absPath) => {
+    try { return readFileSync(absPath, 'utf8'); } catch { return ''; }
+  };
+  const listDir = (dir) => {
+    try { return readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+  };
+  const isFileEnt = (ent) => (ent && typeof ent.isFile === 'function' ? ent.isFile() : true);
+  const isDirEnt = (ent) => (ent && typeof ent.isDirectory === 'function' ? ent.isDirectory() : false);
+  const entName = (ent) => (typeof ent === 'string' ? ent : ent.name);
+
+  const rootEntries = listDir(commandsRootDir);
+  if (!rootEntries) return [];
+
+  const out = [];
+  const push = (namespace, fname, absPath) => {
+    if (!isCommandFile(fname)) return;
+    const name = provisionedCommandName(fname);
+    if (!name) return;
+    const command = namespace ? `${namespace}:${name}` : name;
+    const known = manifest && manifest[command];
+    out.push({
+      command,
+      name,
+      namespace: namespace || null,
+      skill: (known && known.skill) || null,
+      invocation: namespace ? commandInvocation(namespace, name) : `/${name}`,
+      description: parseSkillDescription(readMd(absPath)),
+    });
+  };
+
+  const seen = new Set();
+  for (const ent of rootEntries) {
+    const fname = entName(ent);
+    if (!fname || fname.startsWith('.')) continue;
+    if (isDirEnt(ent)) {
+      const namespace = fname; // literal dir name is the namespace Claude Code uses
+      const sub = listDir(path.join(commandsRootDir, fname));
+      if (!sub) continue;
+      for (const sEnt of sub) {
+        const sName = entName(sEnt);
+        if (!isFileEnt(sEnt) || !sName) continue;
+        const key = `${namespace}:${provisionedCommandName(sName)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        push(namespace, sName, path.join(commandsRootDir, fname, sName));
+      }
+    } else if (isFileEnt(ent)) {
+      const key = provisionedCommandName(fname);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      push(null, fname, path.join(commandsRootDir, fname));
+    }
+  }
+  out.sort((a, b) => a.command.localeCompare(b.command));
+  return out;
+}
+
 // The set of leading `/<token>` command tokens the runtime should treat as
 // "known" (so a chat message is passed to Claude Code verbatim to expand). Built
 // from a seeded-commands manifest. Tokens carry NO leading slash. Mirrors the
@@ -175,9 +255,11 @@ module.exports = {
   isCommandFile,
   slugify,
   commandNameFromFile,
+  provisionedCommandName,
   commandNamespace,
   commandInvocation,
   readSkillCommands,
+  scanProvisionedCommands,
   manifestEntriesFor,
   manifestWithoutSkill,
   commandsListFromManifest,

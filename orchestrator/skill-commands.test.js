@@ -9,9 +9,11 @@ const {
   isCommandFile,
   slugify,
   commandNameFromFile,
+  provisionedCommandName,
   commandNamespace,
   commandInvocation,
   readSkillCommands,
+  scanProvisionedCommands,
   manifestEntriesFor,
   manifestWithoutSkill,
   commandsListFromManifest,
@@ -148,4 +150,80 @@ test('knownCommandTokens is the set of manifest keys (no leading slash)', () => 
   assert.equal(set.has('cobol:build'), true);
   assert.equal(set.has('nope'), false);
   assert.equal(knownCommandTokens(null).size, 0);
+});
+
+// ---- scanProvisionedCommands: workspace is the source of truth (#1797) ----
+
+// Dirent-aware fake fs. `tree` maps a dir path → array of { name, dir? } and a
+// file path → its string content.
+function fakeWorkspaceFs(tree) {
+  const dirent = (e) => ({
+    name: e.name,
+    isFile: () => !e.dir,
+    isDirectory: () => !!e.dir,
+  });
+  return {
+    readdirSync: (dir) => {
+      const list = tree[dir];
+      if (!Array.isArray(list)) { const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err; }
+      return list.map(dirent);
+    },
+    readFileSync: (p) => {
+      if (p in tree) return tree[p];
+      const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err;
+    },
+  };
+}
+
+test('provisionedCommandName preserves the literal stem (no re-slugify)', () => {
+  assert.equal(provisionedCommandName('Plan.md'), 'Plan');
+  assert.equal(provisionedCommandName('my_cmd.MD'), 'my_cmd');
+  assert.equal(provisionedCommandName('deploy'), 'deploy');
+});
+
+test('scanProvisionedCommands returns [] when the commands dir is absent', () => {
+  assert.deepEqual(scanProvisionedCommands('/ws/.claude/commands', fakeWorkspaceFs({})), []);
+});
+
+test('scanProvisionedCommands enumerates namespaced + top-level command files', () => {
+  const root = path.join('/ws', '.claude', 'commands');
+  const nsDir = path.join(root, 'spec-kit');
+  const io = fakeWorkspaceFs({
+    [root]: [{ name: 'spec-kit', dir: true }, { name: 'deploy.md' }, { name: 'notes.txt' }, { name: '.hidden.md' }],
+    [nsDir]: [{ name: 'plan.md' }, { name: 'tasks.md' }, { name: '.keep' }],
+    [path.join(nsDir, 'plan.md')]: '---\ndescription: Make a plan\n---\nBody',
+    [path.join(nsDir, 'tasks.md')]: 'Just a body, no front-matter',
+    [path.join(root, 'deploy.md')]: '---\ndescription: Ship it\n---',
+  });
+  const list = scanProvisionedCommands(root, io);
+  // sorted by command; .txt/.hidden/.keep ignored
+  assert.deepEqual(list.map((c) => c.command), ['deploy', 'spec-kit:plan', 'spec-kit:tasks']);
+  const plan = list.find((c) => c.command === 'spec-kit:plan');
+  assert.deepEqual(plan, {
+    command: 'spec-kit:plan', name: 'plan', namespace: 'spec-kit',
+    skill: null, invocation: '/spec-kit:plan', description: 'Make a plan',
+  });
+  const tasks = list.find((c) => c.command === 'spec-kit:tasks');
+  assert.equal(tasks.description, null); // name-only is valid
+  const deploy = list.find((c) => c.command === 'deploy');
+  assert.equal(deploy.namespace, null);
+  assert.equal(deploy.invocation, '/deploy');
+  assert.equal(deploy.description, 'Ship it');
+});
+
+test('scanProvisionedCommands attributes seeded commands to their skill via the manifest', () => {
+  const root = path.join('/ws', '.claude', 'commands');
+  const nsDir = path.join(root, 'spec-kit');
+  const io = fakeWorkspaceFs({
+    [root]: [{ name: 'spec-kit', dir: true }, { name: 'handmade.md' }],
+    [nsDir]: [{ name: 'plan.md' }],
+    [path.join(nsDir, 'plan.md')]: 'body',
+    [path.join(root, 'handmade.md')]: 'body',
+  });
+  const manifest = { 'spec-kit:plan': { skill: 'spec-kit' } };
+  const list = scanProvisionedCommands(root, { ...io, manifest });
+  const plan = list.find((c) => c.command === 'spec-kit:plan');
+  assert.equal(plan.skill, 'spec-kit'); // seeded → attributed
+  const hand = list.find((c) => c.command === 'handmade');
+  assert.equal(hand.skill, null); // hand-added → surfaces with no skill (AC1)
 });

@@ -11,6 +11,8 @@ import {
 } from './message-send-keybinding.js';
 import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
+import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
+import { apiCall } from '../../hooks/useApi.js';
 
 // OS-aware modifier idiom (shared with RightRail.jsx): Cmd on Mac, Ctrl else.
 const IS_MAC = isMacPlatform();
@@ -102,6 +104,41 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       window.removeEventListener('storage', sync);
     };
   }, []);
+  // Slash-command autocomplete (#1797). The commands provisioned in the selected
+  // agent's workspace, fetched from `GET /api/agents/:id/commands` (name +
+  // optional description). Refetched whenever the agent changes (AC4); starts
+  // empty so an agent with no commands never flashes an empty palette. Fail-soft:
+  // a failed/aborted fetch simply leaves the palette dormant.
+  const [commands, setCommands] = useState([]);
+  useEffect(() => {
+    if (!agentId) { setCommands([]); return undefined; }
+    let alive = true;
+    setCommands([]); // clear stale commands from the previous agent before refetch
+    apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/commands`)
+      .then(resp => { if (alive) setCommands(Array.isArray(resp?.commands) ? resp.commands : []); })
+      .catch(() => { if (alive) setCommands([]); });
+    return () => { alive = false; };
+  }, [agentId]);
+
+  // Palette derivation (pure decisions in command-palette.js). The palette opens
+  // only when the whole composer value is a leading `/token` (AC2) — never for a
+  // slash typed mid-message. `paletteDismissed` lets Esc close it without wiping
+  // the typed text; it re-arms as soon as the query changes.
+  const query = disabled ? null : commandQuery(value);
+  const matches = React.useMemo(
+    () => (query != null ? filterCommands(commands, query) : []),
+    [query, commands],
+  );
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const paletteOpen = query != null && matches.length > 0 && !paletteDismissed;
+  // A new query resets the highlight to the top and re-arms a dismissed palette.
+  useEffect(() => { setActiveIdx(0); setPaletteDismissed(false); }, [query]);
+  const activeRowRef = useRef(null);
+  useEffect(() => {
+    if (paletteOpen) activeRowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeIdx, paletteOpen]);
+
   // Meeting-mode menu (#1296): the mic becomes a split control — plain tap is
   // quick dictation (unchanged), the chevron opens a small menu to start a
   // persistent meeting transcription for this agent.
@@ -169,7 +206,37 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     requestAnimationFrame(() => taRef.current?.focus());
   }
 
+  // Replace the leading `/token` with the picked command's invocation + a
+  // trailing space, caret positioned for arguments (AC3). Closing is implicit —
+  // the inserted trailing space makes `commandQuery` return null.
+  function chooseCommand(cmd) {
+    if (!cmd) return;
+    const { value: next, caret } = commandInsertion(cmd);
+    setValue(next);
+    setPaletteDismissed(true);
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (ta) { ta.focus(); ta.setSelectionRange(caret, caret); }
+    });
+  }
+
   function handleKey(e) {
+    // Command palette owns the arrow/Enter/Esc/Tab keys while it is open (AC5),
+    // so it must run BEFORE the send decision — otherwise the 'chat' preset's
+    // plain-Enter-to-send would fire instead of selecting the highlighted
+    // command. The IME guard mirrors `decideSendKey` so an Enter that commits a
+    // composition candidate never selects.
+    if (paletteOpen) {
+      const composing = composingRef.current || (e.nativeEvent && e.nativeEvent.isComposing);
+      if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx(i => nextIndex(i, 1, matches.length)); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setActiveIdx(i => nextIndex(i, -1, matches.length)); return; }
+      if (e.key === 'Escape')    { e.preventDefault(); setPaletteDismissed(true); return; }
+      if ((e.key === 'Enter' || e.key === 'Tab') && !composing) {
+        e.preventDefault();
+        chooseCommand(matches[activeIdx] || matches[0]);
+        return;
+      }
+    }
     // The IME guard (composing / isComposing / keyCode 229) and the preset
     // decision both live in the pure `decideSendKey`. 'send' ⇒ submit;
     // 'newline' / 'ignore' ⇒ let the textarea insert the newline.
@@ -336,6 +403,77 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             zIndex: 2,
           }}>
             <Paperclip size={16} /> Drop files to attach
+          </div>
+        )}
+
+        {/* Slash-command palette (#1797). Opens upward (the composer sits at the
+            bottom of the chat), filters as the user types after `/`, and inserts
+            `/<command> ` on select. Rows are mouse-selectable (onMouseDown +
+            preventDefault so the textarea keeps focus). Long lists scroll. */}
+        {paletteOpen && (
+          <div
+            role="listbox"
+            aria-label="Slash commands"
+            style={{
+              position: 'absolute',
+              bottom: 'calc(100% + 6px)',
+              left: 0,
+              right: 0,
+              maxHeight: 260,
+              overflowY: 'auto',
+              background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              boxShadow: 'var(--eb-shadow-lg, 0 8px 24px rgba(0,0,0,0.24))',
+              padding: 'var(--eb-space-1)',
+              zIndex: 30,
+            }}
+          >
+            {matches.map((cmd, i) => {
+              const active = i === activeIdx;
+              return (
+                <div
+                  key={cmd.command || cmd.invocation || i}
+                  ref={active ? activeRowRef : null}
+                  role="option"
+                  aria-selected={active}
+                  onMouseDown={(e) => { e.preventDefault(); chooseCommand(cmd); }}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 1,
+                    padding: 'var(--eb-space-2)',
+                    borderRadius: 'var(--eb-radius-sm)',
+                    cursor: 'pointer',
+                    background: active ? 'var(--eb-bg-hover)' : 'transparent',
+                  }}
+                >
+                  <span style={{
+                    fontFamily: 'var(--eb-font-mono, monospace)',
+                    fontSize: 'var(--eb-text-sm)',
+                    color: 'var(--eb-text-primary)',
+                    fontWeight: 'var(--eb-font-medium)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}>
+                    {cmd.invocation || `/${cmd.command}`}
+                  </span>
+                  {cmd.description && (
+                    <span style={{
+                      fontSize: 'var(--eb-text-xs)',
+                      color: 'var(--eb-text-muted)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}>
+                      {cmd.description}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 

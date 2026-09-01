@@ -335,17 +335,22 @@ app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTransc
 
 // Helper Chat tour screenshots (#1736, Phase 2.1). The tour manifest
 // (admin-console/api/helper-chat/tour-manifest.json) references screenshots by
-// relative path ("team-setup/select-process.png"); the PNGs are written by a
-// green journey run under e2e/artifacts/ and served here as static files.
-// express.static normalizes and rejects "../" traversal internally, so the
-// user-controlled URL sub-path cannot escape the artifacts root. Behind the
-// global /api limiter + auth gate above. Development/monorepo layout by default
-// (Option A in #1736); the admin-console image build context is admin-console/
-// and does NOT contain e2e/artifacts/, so for a production build the CI pipeline
-// must copy e2e/artifacts/ into the image or a sibling volume and point
-// TOUR_ARTIFACTS_DIR at it — the route simply 404s until that directory exists.
+// relative path ("team-setup/create-launcher.png"); the PNGs are captured by a
+// green journey run and served here as static files. express.static normalizes
+// and rejects "../" traversal internally, so the user-controlled URL sub-path
+// cannot escape the artifacts root. Behind the global /api limiter + auth gate.
+//
+// The PNGs are committed under api/helper-chat/tour-screenshots/ (alongside the
+// generated tour-manifest.json) precisely so they travel with the image: the
+// Dockerfile's `COPY api/helper-chat ./api/helper-chat` bakes them in, so the
+// route works in every deploy target (local compose + GKE) with no volume or
+// env wiring. They are refreshed from a green journey run by the scheduled
+// tour-screenshots workflow (.github/workflows/tour-screenshots.yml), which
+// copies e2e/artifacts/ into this directory and commits the diff.
+// TOUR_ARTIFACTS_DIR still overrides the source (e.g. a bind-mount pointing at a
+// fresh local `e2e/artifacts/` while iterating on captures).
 const TOUR_ARTIFACTS_DIR = process.env.TOUR_ARTIFACTS_DIR
-  || path.resolve(__dirname, '..', '..', 'e2e', 'artifacts');
+  || path.resolve(__dirname, 'helper-chat', 'tour-screenshots');
 app.use('/api/helper/tour-screenshot', express.static(TOUR_ARTIFACTS_DIR));
 
 // Read recent audit entries (newest first). Protected by the gate above.

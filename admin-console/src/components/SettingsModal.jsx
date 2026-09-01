@@ -11,6 +11,14 @@ import {
   notifySendKeybindingChanged,
   sendKeybindingOptions,
 } from '../pages/agent-chat/message-send-keybinding.js';
+import { useAuth } from '../auth/AuthContext.jsx';
+import useTheme from '../hooks/useTheme.js';
+import { apiCall } from '../hooks/useApi.js';
+import {
+  MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
+  resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
+  notifyFontSizeChanged,
+} from '../pages/agent-chat/chat-font-size.js';
 
 /**
  * SettingsModal — the user Settings dialog (#1802, UX-1 foundation).
@@ -107,9 +115,7 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
               <AssistModelSelector />
             </div>
           ) : (
-            <p style={placeholderStyle}>
-              Settings for this section will appear here.
-            </p>
+            <DisplaySettings />
           )}
         </div>
       </div>
@@ -160,6 +166,124 @@ function BehaviorSettings() {
   );
 }
 
+const THEME_OPTIONS = [
+  { value: 'admin-dark', label: 'Dark' },
+  { value: 'admin-light', label: 'Light' },
+  { value: 'high-contrast', label: 'High contrast' },
+];
+
+/**
+ * Display section — theme selector and chat font-size stepper (UX-8).
+ * Theme changes apply immediately via useTheme's setTheme. Font-size changes
+ * persist to localStorage + server and notify the active ChatPanel via the
+ * FONT_SIZE_CHANGED_EVENT custom event (same pattern as send-keybinding).
+ */
+function DisplaySettings() {
+  const { user } = useAuth();
+  const { theme, setTheme } = useTheme();
+  const username = user?.username;
+  const hasServerRecord = user != null && user.userId != null;
+
+  const [fontSize, setFontSize] = useState(() => resolveInitialFontSize({
+    sessionValue: user?.chatFontSize,
+    storedValue: loadStoredFontSize(username),
+    hasServerRecord,
+  }));
+
+  function changeFontSize(delta) {
+    const next = stepFontSize(fontSize, delta);
+    if (next === fontSize) return;
+    setFontSize(next);
+    saveStoredFontSize(username, next);
+    notifyFontSizeChanged(next);
+    apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
+  }
+
+  return (
+    <>
+      <div style={settingRowStyle}>
+        <div>
+          <div style={settingLabelStyle}>Theme</div>
+          <div style={settingHintStyle}>Choose the console colour scheme.</div>
+        </div>
+        <select
+          value={theme}
+          onChange={(e) => setTheme(e.target.value)}
+          aria-label="Console theme"
+          style={selectStyle}
+        >
+          {THEME_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+      <div style={settingRowStyle}>
+        <div>
+          <div style={settingLabelStyle}>Chat font size</div>
+          <div style={settingHintStyle}>
+            Adjustable {MIN_FONT_SIZE}–{MAX_FONT_SIZE} px. Applies immediately to the message transcript.
+          </div>
+        </div>
+        <div
+          role="group"
+          aria-label="Chat font size"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+        >
+          <button
+            type="button"
+            onClick={() => changeFontSize(-1)}
+            disabled={!canDecrease(fontSize)}
+            aria-label="Decrease chat font size"
+            style={{
+              ...stepBtnStyle,
+              opacity: canDecrease(fontSize) ? 1 : 0.5,
+              cursor: canDecrease(fontSize) ? 'pointer' : 'not-allowed',
+            }}
+          >−</button>
+          <span
+            aria-live="polite"
+            style={{
+              minWidth: 36,
+              textAlign: 'center',
+              fontFamily: 'var(--eb-font-mono)',
+              fontSize: 'var(--eb-text-sm)',
+              color: 'var(--eb-text-secondary)',
+            }}
+          >
+            {fontSize}px
+          </span>
+          <button
+            type="button"
+            onClick={() => changeFontSize(1)}
+            disabled={!canIncrease(fontSize)}
+            aria-label="Increase chat font size"
+            style={{
+              ...stepBtnStyle,
+              opacity: canIncrease(fontSize) ? 1 : 0.5,
+              cursor: canIncrease(fontSize) ? 'pointer' : 'not-allowed',
+            }}
+          >+</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+const stepBtnStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 28,
+  height: 28,
+  padding: 0,
+  fontFamily: 'inherit',
+  fontSize: 'var(--eb-text-md)',
+  background: 'var(--eb-bg-elevated)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-sm)',
+  color: 'var(--eb-text-secondary)',
+};
+
 const layoutStyle = {
   display: 'flex',
   alignItems: 'stretch',
@@ -205,13 +329,6 @@ const paneBlurbStyle = {
   fontSize: 'var(--eb-text-sm)',
   color: 'var(--eb-text-secondary)',
   lineHeight: 1.5,
-};
-
-const placeholderStyle = {
-  margin: 'var(--eb-space-5) 0 0',
-  fontSize: 'var(--eb-text-sm)',
-  color: 'var(--eb-text-muted)',
-  fontStyle: 'italic',
 };
 
 const settingRowStyle = {

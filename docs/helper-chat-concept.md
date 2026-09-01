@@ -35,7 +35,7 @@ Two layers, independently shippable:
 
 ### 3.1 User experience
 
-- A **launcher button** in the Shell header (top-right cluster, next to theme toggle/logout) opens and closes the panel.
+- A **launcher button** in the Shell header (top-right cluster, next to the account menu) opens and closes the panel.
 - The panel docks to the right as a **non-blocking slide-in** — no full-screen backdrop, users keep working in the main area.
 - The panel survives navigation: it is mounted once in `Shell.jsx` above `<main>`, like `<TranscriptionOverlay />`.
 - Users type questions in natural language (any language). Examples:

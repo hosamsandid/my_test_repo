@@ -118,19 +118,27 @@ test('effectiveModelLabel resolves override-then-default against the catalogue (
   assert.equal(effectiveModelLabel(null), null);
 });
 
-test('chatTrigger shows "<Provider> · <model>" on the closed button (#1704)', () => {
-  // Default selection: provider + effective (default) model.
-  assert.equal(chatTrigger(OPTIONS).label, 'Acme · Opus 4.8');
-  assert.match(chatTrigger(OPTIONS).title, /Acme · Opus 4\.8/);
-  // Override changes the model shown immediately (AC2), dot still set (AC3).
+test('chatTrigger shows "<model> · <provider>" on the closed button — model first (#1845)', () => {
+  // Default selection: effective (default) model FIRST, then provider.
+  assert.equal(chatTrigger(OPTIONS).label, 'Opus 4.8 · Acme');
+  // labelParts drives the two-span trigger: lead (model) never truncates, tail
+  // (provider) ellipsises (AC4).
+  assert.deepEqual(chatTrigger(OPTIONS).labelParts, { lead: 'Opus 4.8', tail: 'Acme' });
+  // Title reflects the same model-first ordering (AC7).
+  assert.match(chatTrigger(OPTIONS).title, /Opus 4\.8 · Acme/);
+  // Override changes the model shown immediately, dot still set.
   const ov = chatTrigger({ ...OPTIONS, override: 'm2' });
-  assert.equal(ov.label, 'Acme · Haiku');
+  assert.equal(ov.label, 'Haiku · Acme');
+  assert.deepEqual(ov.labelParts, { lead: 'Haiku', tail: 'Acme' });
   assert.equal(ov.showOverrideDot, true);
-  // Degraded — no provider bound: provider label only, no model segment (AC4).
-  assert.equal(chatTrigger({ ...OPTIONS, endpointId: null }).label, 'Default (.env)');
-  // Degraded — provider bound, empty catalogue: provider only, no "· " (AC4).
+  // Degraded — no provider bound: provider label only, no model segment, no parts (AC6).
+  const noEp = chatTrigger({ ...OPTIONS, endpointId: null });
+  assert.equal(noEp.label, 'Default (.env)');
+  assert.equal(noEp.labelParts, null);
+  // Degraded — provider bound, empty catalogue: provider only, no "· ", no parts (AC6).
   const empty = chatTrigger({ ...OPTIONS, models: [] });
   assert.equal(empty.label, 'Acme');
+  assert.equal(empty.labelParts, null);
   assert.ok(!empty.label.includes('·'));
   assert.equal(empty.title, 'Model provider: Acme');
 });

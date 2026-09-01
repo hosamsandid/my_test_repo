@@ -43,3 +43,16 @@ export function removeSession(sessions, id) {
   if (!Array.isArray(sessions)) return [];
   return sessions.filter((s) => s.id !== id);
 }
+
+/**
+ * True when there is at least one active trigger-initiated session for the
+ * given room. Used by ChatPanel to show the "working…" indicator during
+ * trigger runs (AC1–3 of #1852): the last Matrix transcript entry for a
+ * trigger run is a notice posted by the agent itself, so the usual
+ * "last-message-is-human" heuristic never fires — this predicate provides
+ * the supplementary signal driven by the runtime's running-sessions state.
+ */
+export function hasActiveTriggerSessionForRoom(sessions, roomId) {
+  if (!Array.isArray(sessions) || !roomId) return false;
+  return sessions.some((s) => s.type === 'trigger' && s.roomId === roomId);
+}

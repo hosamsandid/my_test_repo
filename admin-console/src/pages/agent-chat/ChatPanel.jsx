@@ -18,6 +18,8 @@ import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
 import { isAtBottom, isNearTop } from './chat-scroll.js';
 import { latestLoopProgress } from './loop-run-view.js';
+import { useSessionsActive } from './SessionsActiveContext';
+import { hasActiveTriggerSessionForRoom } from './sessions-active';
 import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
   buildAnswerContent, buildMultiAnswerContent, multiAnswerText,
@@ -220,6 +222,13 @@ export default function ChatPanel({
 
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
+
+  // Active-sessions context (#1678, extended in #1852): the one shared poll of
+  // /api/agents/:id/sessions/active (polled at 3 s by SessionsActiveContext in
+  // AgentChat.jsx) is now also available to ChatPanel so it can derive whether
+  // a trigger-initiated run is currently active for this room. Returns a safe
+  // inert default (empty sessions, no-op refresh) when not inside the provider.
+  const { sessions: activeSessions } = useSessionsActive();
 
   // Per-user transcript font size (#1437, control moved to Settings → Display in #1806).
   // Seeded from the user's server-stored preference with a per-username localStorage
@@ -1069,18 +1078,25 @@ export default function ChatPanel({
   const askAnswersByQuestion = useMemo(() => indexAskAnswers(messages), [messages]);
 
   /* ─── Thinking indicator: latest message is from user, no agent reply yet */
+  // For trigger-initiated runs the last transcript entry is the trigger notice
+  // (m.notice, sender = agent.userId), so the original "last-message-is-human"
+  // heuristic never fires. `hasActiveTriggerRun` provides the supplementary
+  // signal: when the shared active-sessions poll sees a trigger session for
+  // this room we show the same animated indicator (#1852 AC1-3).
+  const hasActiveTriggerRun = hasActiveTriggerSessionForRoom(activeSessions, roomId);
   const lastMsg = messages[messages.length - 1];
   const showThinking =
     !!lastMsg &&
     lastMsg.type !== 'context-reset' &&
     lastMsg.type !== 'user-stop' && // a user Stop ends the turn — no thinking
-    lastMsg.sender !== agent.userId &&
+    (lastMsg.sender !== agent.userId || hasActiveTriggerRun) &&
     !lastMsg.isOptimistic && // already covered by sending state below
     !sending;
   const showSendingDots = sending;
   // The agent is busy on something the unified composer Stop (#1427) can abort:
-  // a chat turn in flight (sending or waiting on the reply) or a running loop.
-  const agentBusy = showSendingDots || showThinking || !!activeLoop;
+  // a chat turn in flight (sending or waiting on the reply), a running loop,
+  // or a trigger-initiated run (#1852).
+  const agentBusy = showSendingDots || showThinking || !!activeLoop || hasActiveTriggerRun;
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;

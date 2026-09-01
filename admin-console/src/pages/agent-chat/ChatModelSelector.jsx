@@ -22,6 +22,14 @@ import {
 //                                            non-default model was chosen, PATCH /model
 //   onReset()                              — clear the per-agent override(s)
 //   onOpen()                               — refetch options when the popover opens
+//
+// #1845: the trigger is aligned to the session toolbar buttons (Save & Learn, the
+// `…` overflow) — same `--eb-text-xs` font size (they use `--eb-text-xs` in
+// ChatPanel's sessionBtnStyle) — and widened so a typical `<model> · <provider>`
+// label fits without truncation. Applied only here, so the shared assist selector
+// in Settings → Model keeps its own sizing (AC8).
+const CHAT_TRIGGER_STYLE = { fontSize: 'var(--eb-text-xs)', maxWidth: 420 };
+
 export default function ChatModelSelector({ options, disabled, busy, onModel, onProvider, onReset, onOpen }) {
   const [pending, setPending] = useState(null); // { endpointId, modelId, providerName }
 
@@ -110,6 +118,8 @@ export default function ChatModelSelector({ options, disabled, busy, onModel, on
     <ModelSelectorPopover
       icon={busy ? <Loader2 size={16} className="kf-spin" /> : <Zap size={16} />}
       label={trig.label}
+      labelParts={trig.labelParts}
+      triggerStyle={CHAT_TRIGGER_STYLE}
       title={trig.title}
       ariaLabel="Agent model and provider selector"
       tone={trig.tone}

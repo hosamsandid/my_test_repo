@@ -158,6 +158,14 @@ export default function ModelSelectorPopover({
   // Trigger
   icon,
   label,
+  // Optional structured label: { lead, tail } renders two segments where `lead`
+  // never truncates and `tail` ellipsises (#1845, chat selector — model first,
+  // provider truncates). When null the plain `label` string is rendered.
+  labelParts = null,
+  // Optional per-surface trigger-button style overrides (font size / max width),
+  // merged over the shared triggerBase so one surface can restyle without
+  // regressing the other (#1845 AC8 — chat aligns down + widens; assist unchanged).
+  triggerStyle = null,
   title,
   ariaLabel = 'Model selector',
   tone = 'default',            // 'default' | 'attention' | 'override'
@@ -262,12 +270,20 @@ export default function ModelSelectorPopover({
         aria-label={ariaLabel}
         aria-haspopup="menu"
         aria-expanded={actualOpen}
-        style={{ ...triggerBase, ...toneStyle, opacity: disabled ? 0.6 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+        style={{ ...triggerBase, ...toneStyle, ...(triggerStyle || {}), opacity: disabled ? 0.6 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
         onMouseEnter={e => { if (plain && !disabled) { e.currentTarget.style.background = 'var(--eb-bg-hover)'; e.currentTarget.style.color = 'var(--eb-text-primary)'; } }}
         onMouseLeave={e => { if (plain && !disabled) { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--eb-text-secondary)'; } }}
       >
         {icon}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+        {labelParts ? (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, overflow: 'hidden' }}>
+            <span style={{ flexShrink: 0, whiteSpace: 'nowrap' }}>{labelParts.lead}</span>
+            <span aria-hidden="true" style={{ flexShrink: 0, opacity: 0.6 }}>·</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelParts.tail}</span>
+          </span>
+        ) : (
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+        )}
         {showOverrideDot && (
           <span aria-hidden="true" style={{ flexShrink: 0, color: 'var(--eb-accent-primary)', fontWeight: 700 }}>•</span>
         )}

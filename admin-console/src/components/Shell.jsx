@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import {
-  Users, Zap, Clock, Sparkles, Server,
+  Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
   Sun, Moon, Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
@@ -133,7 +133,6 @@ const NAV_GROUPS = [
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
-    { path: '/jobs',         label: 'Triggers',            Icon: Clock },
   ]},
   // Ordered by a typical setup flow: pick a Model Provider first, then the
   // credentials (SSH keys / GitHub tokens / personal), then MCP servers (an env

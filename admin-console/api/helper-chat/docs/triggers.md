@@ -1,6 +1,6 @@
 # Autonomous Triggers
 
-Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types can be created and managed via the Admin Console — either on the **Scheduled Jobs** page or inline in the **Agent Chat** right rail.
+Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent via the Admin Console — inline in the **Agent Chat** right rail, under the **Triggers** tab.
 
 ## Trigger Types
 

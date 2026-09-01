@@ -204,8 +204,8 @@ your reply still work too.
   `components/IconButton.jsx`'s tooltip.
 - **`components/IconButton.jsx`** is the single shared icon-only action button
   used across all management pages (Agents, WorkingEnvironments, Teams,
-  McpServers, GithubTokens, SshKeys, SkillsRegistry, ModelRegistry,
-  ScheduledJobs). It consolidated four previously-duplicated implementations —
+  McpServers, GithubTokens, SshKeys, SkillsRegistry, ModelRegistry).
+  It consolidated four previously-duplicated implementations —
   any change to icon-button hover/tooltip behaviour belongs **here**, so one fix
   covers every page.
 - **`theme/tokens.css`** is the *only* global stylesheet: all `--eb-*` custom

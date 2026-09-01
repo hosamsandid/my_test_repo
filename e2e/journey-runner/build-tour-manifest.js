@@ -53,7 +53,7 @@ const ARTIFACTS_DIR = path.resolve(__dirname, '..', 'artifacts');
 const ROUTE_MAP = {
   'team-setup': '/team-setup',
   'iban-story': '/chats',
-  triggers: '/jobs',
+  triggers: '/chats',
   'flows-draft': '/flows',
   'agent-templates': '/role-templates',
   'token-usage': '/token-usage',

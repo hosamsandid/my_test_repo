@@ -52,6 +52,34 @@ export function saveSendKeybinding(value, store = typeof localStorage !== 'undef
 }
 
 /**
+ * Same-tab change signal (#1804). The `storage` event only fires in *other*
+ * tabs, so when the Settings → Behavior control changes the preset we broadcast
+ * a window event the composer subscribes to, applying the new send behaviour to
+ * the active chat immediately without a reload (AC3). Mirrors the
+ * PLUGINS_CHANGED_EVENT / notifyPluginsChanged pattern in plugin-nav.js.
+ */
+export const SEND_KEYBINDING_CHANGED_EVENT = 'aee-send-keybinding-changed';
+
+/** Broadcast that the send-keybinding preset changed (same-tab). */
+export function notifySendKeybindingChanged() {
+  if (typeof window !== 'undefined' && window.dispatchEvent) {
+    window.dispatchEvent(new Event(SEND_KEYBINDING_CHANGED_EVENT));
+  }
+}
+
+/**
+ * The `<option>` list for the send-keybinding selector, OS-aware so the
+ * modifier reads `⌘` on Mac and `Ctrl` elsewhere. Shared by the Settings →
+ * Behavior control (#1804) so its labels stay unit-testable.
+ */
+export function sendKeybindingOptions(isMac) {
+  return [
+    { value: 'ide', label: `${sendModifierLabel(isMac)}+↩ sends` },
+    { value: 'chat', label: '↩ sends' },
+  ];
+}
+
+/**
  * Decide what an Enter keypress should do, given the active preset.
  *
  * Returns one of:

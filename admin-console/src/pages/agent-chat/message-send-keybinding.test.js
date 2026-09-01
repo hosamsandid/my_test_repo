@@ -12,6 +12,9 @@ import {
   decideSendKey,
   sendModifierLabel,
   placeholderSendHint,
+  sendKeybindingOptions,
+  SEND_KEYBINDING_CHANGED_EVENT,
+  notifySendKeybindingChanged,
 } from './message-send-keybinding.js';
 
 // A minimal localStorage stand-in.
@@ -109,4 +112,34 @@ test('placeholderSendHint reflects OS and preset', () => {
   assert.equal(placeholderSendHint('ide', false), 'Ctrl+↩ to send');
   assert.equal(placeholderSendHint('chat', true), '↩ to send');
   assert.equal(placeholderSendHint('chat', false), '↩ to send');
+});
+
+test('sendKeybindingOptions are OS-aware and cover both presets (#1804)', () => {
+  const mac = sendKeybindingOptions(true);
+  assert.deepEqual(mac.map((o) => o.value), ['ide', 'chat']);
+  assert.equal(mac[0].label, '⌘+↩ sends');
+  assert.equal(mac[1].label, '↩ sends');
+
+  const win = sendKeybindingOptions(false);
+  assert.equal(win[0].label, 'Ctrl+↩ sends');
+  assert.equal(win[1].label, '↩ sends');
+});
+
+test('notifySendKeybindingChanged dispatches the same-tab change event (#1804)', () => {
+  // Stub a minimal window so the pure module's guarded dispatch fires.
+  const listeners = [];
+  const prevWindow = globalThis.window;
+  globalThis.window = {
+    dispatchEvent: (evt) => { listeners.forEach((cb) => cb(evt)); return true; },
+    addEventListener: (type, cb) => { if (type === SEND_KEYBINDING_CHANGED_EVENT) listeners.push(cb); },
+  };
+  try {
+    let fired = null;
+    globalThis.window.addEventListener(SEND_KEYBINDING_CHANGED_EVENT, (e) => { fired = e; });
+    notifySendKeybindingChanged();
+    assert.ok(fired, 'a change event was dispatched');
+    assert.equal(fired.type, SEND_KEYBINDING_CHANGED_EVENT);
+  } finally {
+    globalThis.window = prevWindow;
+  }
 });

@@ -17,6 +17,13 @@ import { isRowSelected, clampPopoverLeft } from './model-selector-view.js';
 
 const POPOVER_WIDTH = 300;
 
+// The popover is portaled to document.body, so its z-index competes with every
+// other body-level layer — including modals (Modal.jsx / ConfirmDialog use 9999).
+// Since #1805 this selector renders *inside* the Settings modal, so the menu must
+// sit ABOVE that layer or it opens behind the modal (the #1280 body-portal escapes
+// column clipping; this escapes the modal too). Kept above the 9999 modal tier.
+const POPOVER_Z_INDEX = 10000;
+
 const triggerBase = {
   background: 'none',
   border: '1px solid var(--eb-border-default)',
@@ -272,7 +279,7 @@ export default function ModelSelectorPopover({
           ref={popRef}
           role="menu"
           style={{
-            position: 'fixed', top: pos.top, left: pos.left, zIndex: 1000,
+            position: 'fixed', top: pos.top, left: pos.left, zIndex: POPOVER_Z_INDEX,
             width: POPOVER_WIDTH, boxSizing: 'border-box',
             maxHeight: '70vh', overflowY: 'auto',
             background: 'var(--eb-bg-elevated)',

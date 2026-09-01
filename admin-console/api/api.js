@@ -81,7 +81,7 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
-const { resolveSpecKitCommand } = require('./speckit-content');
+const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
 
@@ -7815,7 +7815,7 @@ async function fetchScaffoldTree(repo, repoDir, destAbs, encodedRef, ref, { exec
 // `.md` files (optionally placeholder-resolved for spec-kit, #1865) plus any
 // declared scaffold trees (the `.specify/` project layout). Everything lands in
 // destDir/commands + destDir/scaffold/<dest>, pinned to the manifest ref.
-async function fetchPluginCommandsFromGithub(pluginFetch, destDir) {
+async function fetchPluginCommandsFromGithub(pluginFetch, destDir, { namespace = 'speckit' } = {}) {
   const { repo, ref } = pluginFetch;
   const commandsDir = pluginFetch.commandsDir || 'commands';
   const encodedRef = encodeURIComponent(ref);
@@ -7827,7 +7827,18 @@ async function fetchPluginCommandsFromGithub(pluginFetch, destDir) {
   for (const file of mdFiles) {
     let content = await ghDownloadFile(file);
     if (pluginFetch.resolveCommands) {
-      content = resolveSpecKitCommand(content, { scriptVariant: pluginFetch.scriptVariant || 'sh', agentName: 'claude' });
+      content = resolveSpecKitCommand(content, {
+        scriptVariant: pluginFetch.scriptVariant || 'sh',
+        agentName: 'claude',
+        namespace,
+      });
+      // Fail loud rather than seed a half-resolved command: an unresolved
+      // placeholder (a `{SCRIPT}` with no `scripts.sh`, or an unmapped
+      // `__SPECKIT_COMMAND_*__` cross-ref) means the command would break at
+      // runtime. The install then rolls back (#1865).
+      if (hasUnresolvedPlaceholders(content)) {
+        throw new Error(`unresolved placeholder(s) in ${file.name} after resolution`);
+      }
     }
     fs.writeFileSync(path.join(destDir, 'commands', file.name), content, 'utf8');
   }
@@ -7914,7 +7925,9 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
   let installedVersion = null;
   if (entry.manifest.fetch && entry.manifest.fetch.source === 'github') {
     try {
-      const { fileCount, scaffoldFileCount } = await fetchPluginCommandsFromGithub(entry.manifest.fetch, dest);
+      const { fileCount, scaffoldFileCount } = await fetchPluginCommandsFromGithub(entry.manifest.fetch, dest, {
+        namespace: (entry.manifest.commands && entry.manifest.commands.namespace) || 'speckit',
+      });
       installedVersion = {
         repo: entry.manifest.fetch.repo,
         ref: entry.manifest.fetch.ref,

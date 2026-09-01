@@ -13,8 +13,15 @@
   "fetch": {
     "source": "github",
     "repo": "github/spec-kit",
-    "ref": "main",
-    "commandsDir": "templates/commands"
+    "ref": "v1.0.3",
+    "commandsDir": "templates/commands",
+    "scriptVariant": "sh",
+    "resolveCommands": true,
+    "scaffold": [
+      { "repoDir": "scripts/bash", "dest": ".specify/scripts/bash", "exec": true },
+      { "repoDir": "templates", "dest": ".specify/templates", "include": "-template\\.md$" },
+      { "repoDir": ".specify/memory", "dest": ".specify/memory" }
+    ]
   },
-  "promptLine": "You have spec-kit slash commands for spec-driven development: `/speckit:specify` (author spec.md), `/speckit:plan` (produce plan.md), `/speckit:tasks` (break down into tasks.md), `/speckit:implement` (execute the plan). Run these in order to drive a feature from specification through to code."
+  "promptLine": "You have spec-kit slash commands for spec-driven development: `/speckit:specify` (author spec.md), `/speckit:plan` (produce plan.md), `/speckit:tasks` (break down into tasks.md), `/speckit:implement` (execute the plan). Run these in order to drive a feature from specification through to code. The `.specify/` scaffold they depend on is seeded into your workspace root; run the commands from there."
 }

@@ -82,6 +82,11 @@ function isPlainObject(v) {
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
 }
+// A safe registry/workspace-relative path: non-empty, no absolute prefix, no
+// parent-traversal, no backslash (the discipline cli.entrypoint uses inline).
+function isSafeRelPath(v) {
+  return isNonEmptyString(v) && !v.startsWith('/') && !v.includes('..') && !v.includes('\\');
+}
 
 // A capability is either a bare closed-enum member or a `host-mount:<path>`
 // with a non-empty absolute path.
@@ -155,6 +160,67 @@ function validatePluginManifest(input) {
             errors.push('fetch.commandsDir must be a non-empty string');
           } else {
             pluginFetch.commandsDir = input.fetch.commandsDir.trim();
+          }
+        }
+        // A command-only plugin whose commands need placeholder resolution
+        // (spec-kit, #1865) declares which script flavour to resolve against and
+        // opts into the resolution. `resolveCommands` gates the transform so a
+        // plain command plugin stays byte-passthrough.
+        if (input.fetch.scriptVariant !== undefined) {
+          if (!isNonEmptyString(input.fetch.scriptVariant)) {
+            errors.push('fetch.scriptVariant must be a non-empty string');
+          } else {
+            pluginFetch.scriptVariant = input.fetch.scriptVariant.trim();
+          }
+        }
+        if (input.fetch.resolveCommands !== undefined) {
+          if (typeof input.fetch.resolveCommands !== 'boolean') {
+            errors.push('fetch.resolveCommands must be a boolean');
+          } else {
+            pluginFetch.resolveCommands = input.fetch.resolveCommands;
+          }
+        }
+        // Extra content trees fetched alongside the commands and seeded into the
+        // agent workspace (the `.specify/` scaffold for spec-kit). Each entry
+        // copies a repo directory (`repoDir`) to a workspace-relative `dest`;
+        // `exec` marks a tree whose files get the execute bit; `include` is an
+        // optional filename regex.
+        if (input.fetch.scaffold !== undefined) {
+          if (!Array.isArray(input.fetch.scaffold)) {
+            errors.push('fetch.scaffold must be an array');
+          } else {
+            const scaffold = [];
+            input.fetch.scaffold.forEach((entry, i) => {
+              if (!isPlainObject(entry)) {
+                errors.push(`fetch.scaffold[${i}] must be an object`);
+                return;
+              }
+              if (!isSafeRelPath(entry.repoDir)) {
+                errors.push(`fetch.scaffold[${i}].repoDir must be a safe relative path`);
+                return;
+              }
+              if (!isSafeRelPath(entry.dest)) {
+                errors.push(`fetch.scaffold[${i}].dest must be a safe relative path`);
+                return;
+              }
+              const norm = { repoDir: entry.repoDir.trim(), dest: entry.dest.trim() };
+              if (entry.exec !== undefined) {
+                if (typeof entry.exec !== 'boolean') {
+                  errors.push(`fetch.scaffold[${i}].exec must be a boolean`);
+                  return;
+                }
+                norm.exec = entry.exec;
+              }
+              if (entry.include !== undefined) {
+                if (!isNonEmptyString(entry.include)) {
+                  errors.push(`fetch.scaffold[${i}].include must be a non-empty string`);
+                  return;
+                }
+                norm.include = entry.include.trim();
+              }
+              scaffold.push(norm);
+            });
+            if (scaffold.length) pluginFetch.scaffold = scaffold;
           }
         }
       }

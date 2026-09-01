@@ -464,6 +464,13 @@ function startAgentProcess(config) {
     // to a fresh exec, which is exactly how a granted CLI came to report
     // itself ungranted.
     AEE_WORKSPACE: `/workspace/agents/${id}`,
+    // #1865: spec-kit's bash scripts locate the project by searching upward for
+    // a `.specify/` dir; SPECIFY_INIT_DIR pins that to the workspace root (where
+    // the plugin seeds the scaffold) so a `/speckit:*` command resolves the
+    // project deterministically regardless of which cloned repo the agent has
+    // cd'd into. Harmless for agents without spec-kit granted (only spec-kit's
+    // own scripts read it).
+    SPECIFY_INIT_DIR: `/workspace/agents/${id}`,
     MATRIX_ACCESS_TOKEN: token,
     MATRIX_BOT_USER_ID: userId,
     MATRIX_HOMESERVER: process.env.MATRIX_HOMESERVER,
@@ -2248,6 +2255,48 @@ function projectSkillCommands(id, skillName, srcDir, manifest, { remove = false,
     console.warn(`[Orchestrator] command project ${id}/${skillName}: ${err.message}`);
   }
   return nsRel;
+}
+
+// The distinct top-level workspace roots a command-only plugin's fetched
+// scaffold materialises (e.g. `.specify` for spec-kit, #1865). Derived from the
+// manifest's `fetch.scaffold` dest paths so grant removes exactly what grant
+// created; empty for a plugin with no scaffold.
+function pluginScaffoldRoots(manifest) {
+  const scaffold = manifest && manifest.fetch && Array.isArray(manifest.fetch.scaffold)
+    ? manifest.fetch.scaffold : [];
+  const roots = new Set();
+  for (const e of scaffold) {
+    if (e && typeof e.dest === "string" && e.dest) roots.add(e.dest.split("/")[0]);
+  }
+  return [...roots];
+}
+
+// Copy a command-only plugin's fetched scaffold (registry `<pDir>/scaffold/`,
+// laid out as the workspace-relative `.specify/...` tree by the install-time
+// fetch, #1865) into the agent workspace root — or remove it on revoke. Returns
+// the top-level roots touched (for the isolated-volume reseed). Additive, no
+// respawn; sibling of projectSkillCommands. The scaffold is plugin-owned, so a
+// revoke removes the whole root (matching the additive-sync namespace model).
+function projectPluginScaffold(id, pDir, manifest, { remove = false } = {}) {
+  const roots = pluginScaffoldRoots(manifest);
+  if (roots.length === 0) return [];
+  const workspaceRoot = agentDir(id);
+  if (remove) {
+    for (const root of roots) {
+      try { fs.rmSync(path.join(workspaceRoot, root), { recursive: true, force: true }); }
+      catch (err) { console.warn(`[Orchestrator] scaffold unproject ${id}/${manifest.id}/${root}: ${err.message}`); }
+    }
+    return roots;
+  }
+  const scaffoldSrc = path.join(pDir, "scaffold");
+  try {
+    // fs.cpSync preserves source file modes, so the 0755 the fetch stamped on
+    // the `.sh` scripts rides along into the workspace.
+    if (fs.existsSync(scaffoldSrc)) fs.cpSync(scaffoldSrc, workspaceRoot, { recursive: true, force: true });
+  } catch (err) {
+    console.warn(`[Orchestrator] scaffold project ${id}/${manifest.id}: ${err.message}`);
+  }
+  return roots;
 }
 
 // Per-member skill reconcile state (#776 §3): tracks bounded retry attempts plus
@@ -8370,16 +8419,20 @@ class Orchestrator {
         const inNext = nextPluginIds.has(pluginId);
         const inPrev = prevPluginIds.has(pluginId);
         if (inNext && !inPrev) {
-          // Fresh grant: project this plugin's commands into the workspace.
+          // Fresh grant: project this plugin's commands + any fetched scaffold
+          // (the runnable `.specify/` project layout, #1865) into the workspace.
           const { dir: pDir } = pluginRegistry.readPluginManifest(pluginId);
           const nsRel = projectSkillCommands(id, namespace, pDir, seededCmds, {
             seededAt: new Date().toISOString(),
           });
           if (nsRel) commandReseedPaths.push(nsRel);
+          commandReseedPaths.push(...projectPluginScaffold(id, pDir, pm, { remove: false }));
         } else if (!inNext && inPrev) {
-          // Revocation: remove the plugin's projected commands.
+          // Revocation: remove the plugin's projected commands + scaffold.
+          const { dir: pDir } = pluginRegistry.readPluginManifest(pluginId);
           const nsRel = projectSkillCommands(id, namespace, null, seededCmds, { remove: true });
           if (nsRel) commandReseedPaths.push(nsRel);
+          commandReseedPaths.push(...projectPluginScaffold(id, pDir, pm, { remove: true }));
         }
       }
       writeSeededCommands(id, seededCmds);

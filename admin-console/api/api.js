@@ -81,6 +81,7 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
+const { resolveSpecKitCommand } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
 
@@ -7761,32 +7762,85 @@ function listPluginDirs(baseDir) {
 // Fetch command .md files from GitHub Contents API at install time (#1798).
 // Returns { fileCount } on success; throws on any network or API error.
 // Offline installs are not supported — a network failure rolls back the install.
+const GH_FETCH_HEADERS = { 'User-Agent': 'aee-plugin-install/1', 'Accept': 'application/vnd.github+json' };
+
+// List a repo directory via the GitHub Contents API. Throws with a message that
+// names the directory + ref (so a mis-pointed path reads clearly, cf. #1859).
+async function ghListContents(repo, dirPath, encodedRef, ref) {
+  const url = `https://api.github.com/repos/${repo}/contents/${dirPath}?ref=${encodedRef}`;
+  const resp = await fetch(url, { headers: GH_FETCH_HEADERS, signal: AbortSignal.timeout(30_000) });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`GitHub API ${resp.status} listing ${dirPath}@${ref}: ${body.slice(0, 200)}`);
+  }
+  const listing = await resp.json();
+  if (!Array.isArray(listing)) throw new Error('GitHub Contents API: expected an array for directory listing');
+  return listing;
+}
+
+async function ghDownloadFile(file) {
+  const resp = await fetch(file.download_url, { headers: GH_FETCH_HEADERS, signal: AbortSignal.timeout(30_000) });
+  if (!resp.ok) throw new Error(`GitHub: failed to download ${file.name}: ${resp.status}`);
+  return resp.text();
+}
+
+// Fetch one repo directory tree (recursively) into destAbs, optionally filtered
+// by an `includeRe` filename regex and chmod 0755'd when `exec`. Returns the
+// number of files written.
+async function fetchScaffoldTree(repo, repoDir, destAbs, encodedRef, ref, { exec = false, includeRe = null } = {}) {
+  const listing = await ghListContents(repo, repoDir, encodedRef, ref);
+  fs.mkdirSync(destAbs, { recursive: true });
+  let count = 0;
+  for (const item of listing) {
+    if (item.type === 'dir') {
+      // An `include` filter means the caller is cherry-picking files from THIS
+      // directory (e.g. only `*-template.md` out of a `templates/` dir that also
+      // holds a `commands/` subdir) — so a filtered entry stays flat and never
+      // descends. Unfiltered entries copy the whole tree.
+      if (includeRe) continue;
+      count += await fetchScaffoldTree(repo, `${repoDir}/${item.name}`, path.join(destAbs, item.name), encodedRef, ref, { exec, includeRe });
+    } else if (item.type === 'file' && item.download_url) {
+      if (includeRe && !includeRe.test(item.name)) continue;
+      const content = await ghDownloadFile(item);
+      const dest = path.join(destAbs, item.name);
+      fs.writeFileSync(dest, content, 'utf8');
+      if (exec) { try { fs.chmodSync(dest, 0o755); } catch { /* best effort */ } }
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// Fetch a command-only plugin's install-time content from GitHub: the command
+// `.md` files (optionally placeholder-resolved for spec-kit, #1865) plus any
+// declared scaffold trees (the `.specify/` project layout). Everything lands in
+// destDir/commands + destDir/scaffold/<dest>, pinned to the manifest ref.
 async function fetchPluginCommandsFromGithub(pluginFetch, destDir) {
   const { repo, ref } = pluginFetch;
   const commandsDir = pluginFetch.commandsDir || 'commands';
-  const apiBase = 'https://api.github.com';
   const encodedRef = encodeURIComponent(ref);
-  const listUrl = `${apiBase}/repos/${repo}/contents/${commandsDir}?ref=${encodedRef}`;
-  const headers = { 'User-Agent': 'aee-plugin-install/1', 'Accept': 'application/vnd.github+json' };
 
-  const listResp = await fetch(listUrl, { headers, signal: AbortSignal.timeout(30_000) });
-  if (!listResp.ok) {
-    const body = await listResp.text().catch(() => '');
-    throw new Error(`GitHub API ${listResp.status} listing ${commandsDir}@${ref}: ${body.slice(0, 200)}`);
-  }
-  const listing = await listResp.json();
-  if (!Array.isArray(listing)) throw new Error('GitHub Contents API: expected an array for directory listing');
-
+  // ── commands ──
+  const listing = await ghListContents(repo, commandsDir, encodedRef, ref);
   const mdFiles = listing.filter((f) => f.type === 'file' && f.name.endsWith('.md') && f.download_url);
   fs.mkdirSync(path.join(destDir, 'commands'), { recursive: true });
-
   for (const file of mdFiles) {
-    const fileResp = await fetch(file.download_url, { headers, signal: AbortSignal.timeout(30_000) });
-    if (!fileResp.ok) throw new Error(`GitHub: failed to download ${file.name}: ${fileResp.status}`);
-    const content = await fileResp.text();
+    let content = await ghDownloadFile(file);
+    if (pluginFetch.resolveCommands) {
+      content = resolveSpecKitCommand(content, { scriptVariant: pluginFetch.scriptVariant || 'sh', agentName: 'claude' });
+    }
     fs.writeFileSync(path.join(destDir, 'commands', file.name), content, 'utf8');
   }
-  return { fileCount: mdFiles.length };
+
+  // ── scaffold (the runnable project layout the commands depend on) ──
+  let scaffoldFileCount = 0;
+  for (const entry of pluginFetch.scaffold || []) {
+    const includeRe = entry.include ? new RegExp(entry.include) : null;
+    const destAbs = path.join(destDir, 'scaffold', entry.dest);
+    scaffoldFileCount += await fetchScaffoldTree(repo, entry.repoDir, destAbs, encodedRef, ref, { exec: !!entry.exec, includeRe });
+  }
+
+  return { fileCount: mdFiles.length, scaffoldFileCount };
 }
 
 // Read installed-version.json written by fetchPluginCommandsFromGithub at install time.
@@ -7860,12 +7914,13 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
   let installedVersion = null;
   if (entry.manifest.fetch && entry.manifest.fetch.source === 'github') {
     try {
-      const { fileCount } = await fetchPluginCommandsFromGithub(entry.manifest.fetch, dest);
+      const { fileCount, scaffoldFileCount } = await fetchPluginCommandsFromGithub(entry.manifest.fetch, dest);
       installedVersion = {
         repo: entry.manifest.fetch.repo,
         ref: entry.manifest.fetch.ref,
         fetchedAt: new Date().toISOString(),
         fileCount,
+        ...(scaffoldFileCount ? { scaffoldFileCount } : {}),
       };
       fs.writeFileSync(path.join(dest, 'installed-version.json'), JSON.stringify(installedVersion, null, 2));
     } catch (err) {

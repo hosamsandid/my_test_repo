@@ -11701,8 +11701,12 @@ async function main() {
 
     // ── Provisioned slash commands (#1796, foundation for #1797) ──────────
     // The list of custom slash commands currently provisioned into an agent's
-    // workspace (name + description per command), read from seeded-commands.json.
-    // #1797's composer autocomplete consumes this via the console proxy.
+    // workspace (name + optional description per command). The **workspace is the
+    // source of truth** (#1797): we enumerate the actual `.claude/commands/` tree
+    // so a command dropped in by hand — never recorded in seeded-commands.json —
+    // surfaces too. The manifest is read only to attribute each seeded command to
+    // its originating skill. #1797's composer autocomplete consumes this via the
+    // console proxy.
     const commandsListMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/commands$/);
     if (commandsListMatch) {
       const id = decodeURIComponent(commandsListMatch[1]);
@@ -11712,7 +11716,8 @@ async function main() {
         return;
       }
       try {
-        const commands = skillCommands.commandsListFromManifest(readSeededCommands(id));
+        const commandsRoot = path.join(agentDir(id), skillCommands.AGENT_COMMANDS_DIR);
+        const commands = skillCommands.scanProvisionedCommands(commandsRoot, { manifest: readSeededCommands(id) });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, agentId: id, commands }));
       } catch (err) {

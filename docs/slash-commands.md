@@ -81,6 +81,15 @@ GET /api/agents/:agentId/commands
 
 (the console proxy over the orchestrator's `GET /internal/agents/:id/commands`).
 
+**The workspace is the source of truth (#1797).** The read endpoint enumerates
+the agent's actual `.claude/commands/` tree (`scanProvisionedCommands` in
+`skill-commands.js`) rather than reading the manifest alone, so a command **added
+by hand** — never recorded in `seeded-commands.json` — surfaces too (with
+`skill: null`). The manifest is consulted only to attribute each *seeded* command
+to its originating `skill`. Layout mirrors the projector: top-level `*.md` are
+un-namespaced (`/<name>`); each first-level subdirectory is a namespace
+(`/<namespace>:<name>`); each command's `description` is re-parsed from the file.
+
 ## Invoking from chat
 
 Invocation is **human chat messages only** for now. Trigger-invoked commands

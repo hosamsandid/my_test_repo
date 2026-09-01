@@ -59,8 +59,12 @@ steps:
       label: All time
     assert:
       do: usage.expectStatistics
-      totalTokens: "7,000"
-      inputTokens: "3,900"
+      # Summary tiles render abbreviated notation (#1656, formatTileCount): the
+      # 7,000 grand total shows as "7k" and the 3,900 input split as "3.9k". The
+      # breakdown table below still shows full integers (asserted by
+      # expectGroupRow), so only the tile assertions use the compact form.
+      totalTokens: "7k"
+      inputTokens: "3.9k"
       primaryKey: token-usage-alpha
       secondaryKey: token-usage-beta
     screenshot: token-usage-statistics

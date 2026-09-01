@@ -93,15 +93,15 @@ async function selectGrouping(ctx, { label }) {
  * AC2): the summary totals, the class split, the per-day chart (not its empty
  * placeholder), and a breakdown row for each expected group key.
  *
- * @param {string} params.totalTokens - Formatted "Total tokens" value (e.g. "7,000").
- * @param {string} params.inputTokens - Formatted "Input" class value (e.g. "3,900").
+ * @param {string} params.totalTokens - Abbreviated "Total tokens" tile value (#1656, formatTileCount; e.g. "7k").
+ * @param {string} params.inputTokens - Abbreviated "Input" tile value (e.g. "3.9k").
  * @param {string} params.primaryKey - A breakdown row key that must be present (e.g. an agent id).
  * @param {string} [params.secondaryKey] - A second breakdown row key that must be present.
  * @example
  * - assert:
  *     do: usage.expectStatistics
- *     totalTokens: "7,000"
- *     inputTokens: "3,900"
+ *     totalTokens: "7k"
+ *     inputTokens: "3.9k"
  *     primaryKey: token-usage-alpha
  *     secondaryKey: token-usage-beta
  */

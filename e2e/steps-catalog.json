@@ -1938,13 +1938,13 @@
           "name": "totalTokens",
           "required": true,
           "type": "string",
-          "description": "Formatted \"Total tokens\" value (e.g. \"7,000\")."
+          "description": "Abbreviated \"Total tokens\" tile value (#1656, formatTileCount; e.g. \"7k\")."
         },
         {
           "name": "inputTokens",
           "required": true,
           "type": "string",
-          "description": "Formatted \"Input\" class value (e.g. \"3,900\")."
+          "description": "Abbreviated \"Input\" tile value (e.g. \"3.9k\")."
         },
         {
           "name": "primaryKey",
@@ -1959,7 +1959,7 @@
           "description": "A second breakdown row key that must be present."
         }
       ],
-      "example": "- assert:\n    do: usage.expectStatistics\n    totalTokens: \"7,000\"\n    inputTokens: \"3,900\"\n    primaryKey: token-usage-alpha\n    secondaryKey: token-usage-beta"
+      "example": "- assert:\n    do: usage.expectStatistics\n    totalTokens: \"7k\"\n    inputTokens: \"3.9k\"\n    primaryKey: token-usage-alpha\n    secondaryKey: token-usage-beta"
     },
     {
       "name": "usage.openTokenUsagePage",

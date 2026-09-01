@@ -1,0 +1,116 @@
+name: Tour screenshots (refresh)
+
+# Keeps the Helper Chat tour's screenshots current (#1736). The tour serves PNGs
+# that are committed under admin-console/api/helper-chat/tour-screenshots/ and
+# baked into the admin-console image (see api.js TOUR_ARTIFACTS_DIR) — so a UI
+# change silently ages those shots until someone re-captures them. This workflow
+# re-runs the journey screenshot pass on a schedule, re-vendors the referenced
+# PNGs + regenerates the manifest, and opens a PR when anything changed. A human
+# merges it (the same "committing generated media stays a human step" convention
+# as the docgen guide) so the binary churn is reviewed and rides normal CI.
+#
+# Runs on podman like e2e.yml — the journeys need the disposable aee-e2e stack,
+# which global-setup.js brings up (fake-claude + in-stack git remote, no external
+# LLM/GitHub). Manual dispatch is available for an on-demand refresh.
+on:
+  schedule:
+    - cron: '41 4 * * 1'   # weekly, Monday 04:41 (off the :00 mark, after nightly e2e)
+  workflow_dispatch:
+
+concurrency:
+  group: tour-screenshots
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # push the refresh branch
+  pull-requests: write   # open/update the PR
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install jq (setup.sh prerequisite)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Ensure ~/.gitconfig is a file (podman bind-mount guard)
+        # docker-compose.yml bind-mounts ~/.gitconfig into the orchestrator (:ro).
+        # On CI the file doesn't exist, so podman auto-creates the bind source as a
+        # DIRECTORY when the stack comes up, breaking later git/gh calls. Pre-create
+        # it as a real file (identical to ui-screenshots.yml).
+        run: |
+          set -euo pipefail
+          [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Start rootless podman API socket
+        run: |
+          set -euo pipefail
+          systemctl --user enable --now podman.socket \
+            || podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          for i in $(seq 1 20); do
+            [ -S "$SOCK" ] && break
+            sleep 0.5
+          done
+          echo "PODMAN_HOST_SOCKET=${SOCK}" >> "$GITHUB_ENV"
+
+      - name: Run journey screenshot pass
+        # ONLY the journeys Playwright project — its exit code reflects journey
+        # health, not the broader suite. global-setup.js brings the aee-e2e stack
+        # up; global-teardown tears it down. A green run writes the PNGs under
+        # e2e/artifacts/<journey>/.
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test --project=journeys
+
+      - name: Regenerate manifest + vendor screenshots
+        # Rebuild the manifest from the fresh captures (drops any step whose PNG is
+        # missing), then copy the referenced PNGs into the committed dir.
+        run: make tour-screenshots
+
+      - name: Force teardown (safety net)
+        if: always()
+        run: ./e2e/scripts/stack-down.sh || true
+
+      - name: Open a PR if the tour screenshots changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Only the committed tour surface — never the gitignored e2e/artifacts/.
+          git add admin-console/api/helper-chat/tour-screenshots \
+                  admin-console/api/helper-chat/tour-manifest.json
+          if git diff --cached --quiet; then
+            echo "tour screenshots unchanged — nothing to do"
+            exit 0
+          fi
+          branch="chore/refresh-tour-screenshots"
+          git checkout -B "$branch"
+          git commit -m "chore: refresh Helper Chat tour screenshots" \
+            -m "Automated re-capture of the narrated journey screenshots baked into the tour (.github/workflows/tour-screenshots.yml)."
+          # Dedicated bot branch only this workflow ever writes, and the run is
+          # serialized by the concurrency group — a plain force-push is safe and
+          # avoids force-with-lease refusing when the fresh checkout has no
+          # remote-tracking ref for the branch yet.
+          git push --force origin "$branch"
+          # PR body via a file so the multi-line text never has to be an inline
+          # (and awkwardly indented) shell argument inside this YAML block.
+          printf '%s\n\n%s\n' \
+            'Automated weekly re-capture of the Helper Chat tour screenshots (#1736) from a green journey run. Review the visual diff and merge to publish the refreshed tour.' \
+            'Generated by `.github/workflows/tour-screenshots.yml`.' > /tmp/pr-body.md
+          # Reuse an open PR from a prior run if present, else open one.
+          if ! gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr create --base main --head "$branch" \
+              --title "chore: refresh Helper Chat tour screenshots" \
+              --body-file /tmp/pr-body.md
+          else
+            echo "existing PR for ${branch} updated by the force-push above"
+          fi

@@ -7758,6 +7758,44 @@ function listPluginDirs(baseDir) {
   } catch { return []; }
 }
 
+// Fetch command .md files from GitHub Contents API at install time (#1798).
+// Returns { fileCount } on success; throws on any network or API error.
+// Offline installs are not supported — a network failure rolls back the install.
+async function fetchPluginCommandsFromGithub(pluginFetch, destDir) {
+  const { repo, ref } = pluginFetch;
+  const commandsDir = pluginFetch.commandsDir || 'commands';
+  const apiBase = 'https://api.github.com';
+  const encodedRef = encodeURIComponent(ref);
+  const listUrl = `${apiBase}/repos/${repo}/contents/${commandsDir}?ref=${encodedRef}`;
+  const headers = { 'User-Agent': 'aee-plugin-install/1', 'Accept': 'application/vnd.github+json' };
+
+  const listResp = await fetch(listUrl, { headers, signal: AbortSignal.timeout(30_000) });
+  if (!listResp.ok) {
+    const body = await listResp.text().catch(() => '');
+    throw new Error(`GitHub API ${listResp.status} listing ${commandsDir}@${ref}: ${body.slice(0, 200)}`);
+  }
+  const listing = await listResp.json();
+  if (!Array.isArray(listing)) throw new Error('GitHub Contents API: expected an array for directory listing');
+
+  const mdFiles = listing.filter((f) => f.type === 'file' && f.name.endsWith('.md') && f.download_url);
+  fs.mkdirSync(path.join(destDir, 'commands'), { recursive: true });
+
+  for (const file of mdFiles) {
+    const fileResp = await fetch(file.download_url, { headers, signal: AbortSignal.timeout(30_000) });
+    if (!fileResp.ok) throw new Error(`GitHub: failed to download ${file.name}: ${fileResp.status}`);
+    const content = await fileResp.text();
+    fs.writeFileSync(path.join(destDir, 'commands', file.name), content, 'utf8');
+  }
+  return { fileCount: mdFiles.length };
+}
+
+// Read installed-version.json written by fetchPluginCommandsFromGithub at install time.
+function readInstalledVersion(registryDir, id) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(registryDir, id, 'installed-version.json'), 'utf8'));
+  } catch { return null; }
+}
+
 async function notifyPluginReconcile() {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -7790,7 +7828,10 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
   } catch { /* orchestrator unreachable — report unknown rather than false */ }
 
   res.json({
-    installed: installed.map((p) => ({ ...p, installed: true, sidecarRunning: running[p.id] ?? null })),
+    installed: installed.map((p) => {
+      const iv = readInstalledVersion(REGISTRY_PLUGINS_DIR, p.id);
+      return { ...p, installed: true, sidecarRunning: running[p.id] ?? null, ...(iv ? { installedVersion: iv } : {}) };
+    }),
     available: available.map((p) => ({ ...p, installed: false, sidecarRunning: false })),
     canManage: !!getScope(req).all,
   });
@@ -7812,8 +7853,29 @@ app.post('/api/plugins/:id/install', heavyLimiter, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `install failed: ${err.message}` });
   }
+
+  // Fetch-at-install: if the manifest declares a fetch source, download command
+  // files from GitHub now and pin the version. Offline installs are not supported
+  // (docs/plugin-system-concept.md §4.9). Roll back on any failure.
+  let installedVersion = null;
+  if (entry.manifest.fetch && entry.manifest.fetch.source === 'github') {
+    try {
+      const { fileCount } = await fetchPluginCommandsFromGithub(entry.manifest.fetch, dest);
+      installedVersion = {
+        repo: entry.manifest.fetch.repo,
+        ref: entry.manifest.fetch.ref,
+        fetchedAt: new Date().toISOString(),
+        fileCount,
+      };
+      fs.writeFileSync(path.join(dest, 'installed-version.json'), JSON.stringify(installedVersion, null, 2));
+    } catch (err) {
+      try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* noop */ }
+      return res.status(502).json({ error: `command fetch failed: ${err.message}` });
+    }
+  }
+
   const reconcile = await notifyPluginReconcile();
-  res.json({ id, installed: true, manifest: entry.manifest, reconcile });
+  res.json({ id, installed: true, manifest: entry.manifest, ...(installedVersion ? { installedVersion } : {}), reconcile });
 });
 
 app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {

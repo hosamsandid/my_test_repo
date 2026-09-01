@@ -1,0 +1,20 @@
+{
+  "pluginVersion": 1,
+  "id": "spec-kit",
+  "name": "spec-kit",
+  "description": "GitHub's spec-driven development toolkit. Provides /speckit:specify, /speckit:plan, /speckit:tasks, and /speckit:implement slash commands that guide an agent from a written specification through planning, task breakdown, and implementation. Works with any existing repository (greenfield or brownfield). Installed once by a System Admin, then activated per Agent Team via a grant. Content is fetched from GitHub at install time and pinned to a specific version; upgrading requires a deliberate re-install. Offline installs are not supported.",
+  "credentials": [],
+  "platforms": ["any"],
+  "scopes": ["team"],
+  "defaultScopeGranularity": "team",
+  "commands": {
+    "namespace": "speckit"
+  },
+  "fetch": {
+    "source": "github",
+    "repo": "github/spec-kit",
+    "ref": "main",
+    "commandsDir": "commands"
+  },
+  "promptLine": "You have spec-kit slash commands for spec-driven development: `/speckit:specify` (author spec.md), `/speckit:plan` (produce plan.md), `/speckit:tasks` (break down into tasks.md), `/speckit:implement` (execute the plan). Run these in order to drive a feature from specification through to code."
+}

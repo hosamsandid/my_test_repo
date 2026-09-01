@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Gauge, Trash2, ArrowRight, Plus, Minus, Type } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, GraduationCap, Gauge, Trash2, ArrowRight } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -32,8 +32,7 @@ import { maintenanceBannerText } from './maintenance-banner';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import {
-  MIN_FONT_SIZE, MAX_FONT_SIZE, stepFontSize, canIncrease, canDecrease,
-  resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
+  resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
 
 // Default prompt sent when the user clicks "Save & Learn". The agent
@@ -222,10 +221,10 @@ export default function ChatPanel({
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
 
-  // Per-user transcript font size (#1437). Default 12px (was 14px). Seeded from
-  // the user's server-stored preference (authoritative, cross-device) with a
-  // per-username localStorage fallback for the env single-admin (no user
-  // record). Adjusted live by the +/- control in the session toolbar.
+  // Per-user transcript font size (#1437, control moved to Settings → Display in #1806).
+  // Seeded from the user's server-stored preference with a per-username localStorage
+  // fallback for the env single-admin. Live changes arrive via the FONT_SIZE_CHANGED_EVENT
+  // dispatched by SettingsModal's Display section.
   const { user } = useAuth();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
@@ -235,8 +234,7 @@ export default function ChatPanel({
     hasServerRecord,
   }));
   // Re-seed only when the logged-in identity changes (login / logout / initial
-  // session load) — keyed on the stable username, so an optimistic +/- press is
-  // never clobbered by an unrelated re-render.
+  // session load) — keyed on the stable username.
   useEffect(() => {
     setFontSize(resolveInitialFontSize({
       sessionValue: user?.chatFontSize,
@@ -245,17 +243,12 @@ export default function ChatPanel({
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
-
-  const changeFontSize = useCallback((delta) => {
-    const next = stepFontSize(fontSize, delta);
-    if (next === fontSize) return;
-    setFontSize(next);                       // live apply
-    saveStoredFontSize(username, next);       // instant + env-admin fallback store
-    // Best-effort server persistence (follows the user across devices). The env
-    // single-admin has no record → the route returns {persisted:false} and the
-    // localStorage mirror above is the store; a transient failure is non-fatal.
-    apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
-  }, [fontSize, username]);
+  // Pick up live font-size changes dispatched by SettingsModal → Display section.
+  useEffect(() => {
+    const handler = (e) => setFontSize(e.detail.size);
+    window.addEventListener(FONT_SIZE_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(FONT_SIZE_CHANGED_EVENT, handler);
+  }, []);
 
   /* ─── 1. Lazy DM-room creation ───────────────────────────────────── */
   useEffect(() => {
@@ -1217,7 +1210,6 @@ export default function ChatPanel({
           onReset={handleModelReset}
           onOpen={refreshModelOptions}
         />
-        <FontSizeControl size={fontSize} onChange={changeFontSize} />
         <div style={{ flex: 1 }} />
         {/* #1718: compact context-usage indicator (used / real window · %, or the
             used count alone when the window is unknown). The session id, price and
@@ -1682,72 +1674,4 @@ function sessionBtnStyle(isDisabled) {
   };
 }
 
-// Per-user transcript font-size stepper (#1437). A compact −/+ pair with the
-// current size shown between them; each press adjusts the chat font live within
-// [MIN,MAX] px. Stays on the toolbar (which flexWraps) at any layout width.
-function FontSizeControl({ size, onChange }) {
-  const stepBtn = (enabled) => ({
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 20,
-    height: 18,
-    padding: 0,
-    color: enabled ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
-    background: 'transparent',
-    border: 'none',
-    cursor: enabled ? 'pointer' : 'not-allowed',
-    opacity: enabled ? 1 : 0.5,
-    fontFamily: 'inherit',
-  });
-  const canDec = canDecrease(size);
-  const canInc = canIncrease(size);
-  return (
-    <div
-      role="group"
-      aria-label="Chat font size"
-      title={`Chat font size: ${size}px (adjustable ${MIN_FONT_SIZE}–${MAX_FONT_SIZE}px)`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 2,
-        padding: '2px 4px',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-sm)',
-        color: 'var(--eb-text-muted)',
-      }}
-    >
-      <Type size={11} style={{ flexShrink: 0 }} />
-      <button
-        type="button"
-        onClick={() => onChange(-1)}
-        disabled={!canDec}
-        aria-label="Decrease chat font size"
-        title="Decrease chat font size"
-        style={stepBtn(canDec)}
-      >
-        <Minus size={12} />
-      </button>
-      <span
-        aria-live="polite"
-        style={{
-          minWidth: 26, textAlign: 'center', fontFamily: 'var(--eb-font-mono)',
-          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
-        }}
-      >
-        {size}px
-      </span>
-      <button
-        type="button"
-        onClick={() => onChange(1)}
-        disabled={!canInc}
-        aria-label="Increase chat font size"
-        title="Increase chat font size"
-        style={stepBtn(canInc)}
-      >
-        <Plus size={12} />
-      </button>
-    </div>
-  );
-}
 

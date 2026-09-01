@@ -96,3 +96,15 @@ export function saveStoredFontSize(username, size, store) {
     /* ignore */
   }
 }
+
+// Cross-component notification: SettingsModal's Display section dispatches this
+// when the user changes the font size so the active ChatPanel can update its
+// own state and re-apply the CSS var without a remount or a shared context.
+// Mirrors the SEND_KEYBINDING_CHANGED_EVENT pattern in message-send-keybinding.js.
+export const FONT_SIZE_CHANGED_EVENT = 'aee:chatfontsize';
+
+export function notifyFontSizeChanged(size) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(FONT_SIZE_CHANGED_EVENT, { detail: { size } }));
+  }
+}

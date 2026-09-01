@@ -4,9 +4,8 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Sun, Moon, Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
-import useTheme from '../hooks/useTheme';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeChatCounts } from '../context/agent-statuses';
@@ -183,7 +182,6 @@ export default function Shell({ children }) {
   const { registerOpenSettings } = useModelSelection();
   const navigate = useNavigate();
   const location = useLocation();
-  const { theme, toggleLightDark } = useTheme();
   const { user, logout } = useAuth();
   // Helper Chat (#1735): the header Help button toggles the app-level panel.
   const { isOpen: helpOpen, toggle: toggleHelp } = useHelperChat();
@@ -641,32 +639,6 @@ export default function Shell({ children }) {
             >
               <HelpCircle size={16} />
               <span>Help</span>
-            </button>
-            <button
-              onClick={toggleLightDark}
-              title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
-              aria-label={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
-              style={{
-                background: 'none',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-md)',
-                color: 'var(--eb-text-secondary)',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                padding: 'var(--eb-space-1) var(--eb-space-2)',
-                transition: 'background var(--eb-transition-fast), color var(--eb-transition-fast)',
-              }}
-              onMouseEnter={e => {
-                e.currentTarget.style.background = 'var(--eb-bg-hover)';
-                e.currentTarget.style.color = 'var(--eb-text-primary)';
-              }}
-              onMouseLeave={e => {
-                e.currentTarget.style.background = 'none';
-                e.currentTarget.style.color = 'var(--eb-text-secondary)';
-              }}
-            >
-              {theme === 'admin-light' ? <Moon size={16} /> : <Sun size={16} />}
             </button>
             <AccountMenu
               username={user?.username}

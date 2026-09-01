@@ -817,3 +817,105 @@ test("_fanOutBatch: label-filter-dropped outcome carries no wakeLabel", async ()
     githubEventLog.record = origRecord;
   }
 });
+
+// ── _fanOutBatch: internal fast-path dedup (#1858) ───────────────────────────
+//
+// When a human-applied label was already delivered internally (Admin Console →
+// /internal/github-label-applied wrote a dedup marker), the later Events-API
+// delivery of the SAME label must be dropped (reason: 'internal-dedup') instead
+// of waking the agent a second time — and recorded as such in the event log.
+
+const { LabelDedupMarkers } = require("./label-dedup-markers");
+
+test("_fanOutBatch: drops a labeled event already delivered internally (AC3)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const markers = new LabelDedupMarkers();
+    const poller = new GitHubPoller({ labelMarkers: markers });
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const createdAt = new Date().toISOString();
+    // The internal path delivered this exact wake and armed a marker.
+    markers.add({
+      agentId: "developer", triggerId: "t-ready",
+      repo: "org/repo", kind: "issue", number: 1858, label: "ready",
+      appliedAt: createdAt,
+    });
+
+    const ghEvent = {
+      id: "dedup-1",
+      actor: { login: "thorsten" },
+      created_at: createdAt,
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        issue: { number: 1858, title: "Test", html_url: "https://github.com/org/repo/issues/1858" },
+      },
+    };
+    const subscribers = [{
+      agentId: "developer", triggerId: "t-ready",
+      events: new Set(["issues.labeled"]), labelFilter: "ready", horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 0, "the duplicate poller event must NOT be enqueued");
+    assert.equal(recorded.length, 1);
+    const outcome = recorded[0].outcomes[0];
+    assert.equal(outcome.status, "dropped");
+    assert.equal(outcome.reason, "internal-dedup");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: a legitimate later re-label still fires (marker outside window / consumed) (AC4)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const markers = new LabelDedupMarkers();
+    const poller = new GitHubPoller({ labelMarkers: markers });
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // The first apply was delivered internally an hour ago.
+    const firstApply = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    markers.add({
+      agentId: "developer", triggerId: "t-ready",
+      repo: "org/repo", kind: "issue", number: 1858, label: "ready",
+      appliedAt: firstApply,
+    });
+
+    // A poller event for a fresh re-label now (remove → re-add) — newer
+    // created_at, outside the marker's match window → must deliver.
+    const ghEvent = {
+      id: "relabel-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        issue: { number: 1858, title: "Test", html_url: "https://github.com/org/repo/issues/1858" },
+      },
+    };
+    const subscribers = [{
+      agentId: "developer", triggerId: "t-ready",
+      events: new Set(["issues.labeled"]), labelFilter: "ready", horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1, "the legitimate re-label must be enqueued");
+    assert.equal(recorded[0].outcomes[0].status, "delivered");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});

@@ -550,6 +550,81 @@ def _load_dm_agent_config() -> dict:
         return {}
 
 
+# ---------------------------------------------------------------------------
+# Custom slash commands (#1796)
+# ---------------------------------------------------------------------------
+#
+# Claude Code loads reusable slash commands from `.claude/commands/*.md` (a human
+# types `/name`). Command files are provisioned into an agent's workspace by the
+# orchestrator when a skill that carries them is granted (see
+# orchestrator/skill-commands.js) — this runtime does NOT author them.
+#
+# Verified against `claude --print` (headless, prompt on stdin, the exact
+# condition of the chat path): a KNOWN command expands and runs its prompt
+# (including `$ARGUMENTS`), so AC1 needs no runtime change. The one headless gap
+# is AC2: a message that begins with `/` but matches NO command makes the CLI
+# short-circuit with "Unknown command: /foo" (exit 0, no crash) WITHOUT passing
+# the text to the model — so the user's message is neither run nor answered.
+# Remedy (verified deterministic): prepend a single space, which turns the
+# unknown-command short-circuit into ordinary plain-text processing while leaving
+# a genuine command's expansion untouched. We only apply it to the chat path and
+# only when the leading token is not a provisioned command, so a real command is
+# byte-identical to feeding it verbatim.
+
+
+def _list_slash_command_tokens(commands_dir: Path) -> set[str]:
+    """Discover the provisioned slash-command tokens (WITHOUT the leading '/')
+    under an agent's `.claude/commands/` tree, mirroring how Claude Code resolves
+    them: a top-level `foo.md` → `foo`; a one-level namespaced `ns/bar.md` →
+    `ns:bar`. Best-effort — a missing/unreadable dir yields an empty set."""
+    tokens: set[str] = set()
+    try:
+        for entry in commands_dir.iterdir():
+            name = entry.name
+            if name.startswith("."):
+                continue
+            if entry.is_file() and name.endswith(".md"):
+                tokens.add(name[:-3])
+            elif entry.is_dir():
+                for sub in entry.iterdir():
+                    sname = sub.name
+                    if sname.startswith(".") or not sname.endswith(".md"):
+                        continue
+                    if sub.is_file():
+                        tokens.add(f"{name}:{sname[:-3]}")
+    except OSError:
+        return set()
+    return tokens
+
+
+def _leading_slash_token(body: str) -> str | None:
+    """The command token of a message whose first non-whitespace char is '/'
+    (no leading slash, up to the first whitespace), else None. A bare '/' → ''."""
+    if not isinstance(body, str) or not body:
+        return None
+    stripped = body.lstrip()
+    if not stripped.startswith("/"):
+        return None
+    return re.split(r"\s", stripped[1:], maxsplit=1)[0]
+
+
+def _prepare_chat_prompt(body: str, known_tokens: set[str]) -> dict:
+    """Decide how a human chat message is fed to `claude` (#1796). Returns
+    { prompt, isSlash, command, recognized }:
+      - not a slash message      → prompt=body unchanged, isSlash=False
+      - a provisioned command    → prompt=body verbatim (CLI expands it), recognized=True
+      - an unknown '/token'      → prompt=' '+body (plain-text passthrough, AC2), recognized=False
+    Pure; the caller supplies the known-token set from _list_slash_command_tokens."""
+    token = _leading_slash_token(body)
+    if token is None:
+        return {"prompt": body, "isSlash": False, "command": None, "recognized": False}
+    if token and token in known_tokens:
+        return {"prompt": body, "isSlash": True, "command": token, "recognized": True}
+    # Unknown command (or a bare '/') → neutralize so the CLI doesn't swallow it
+    # as "Unknown command" but passes it to the model as ordinary text.
+    return {"prompt": " " + body, "isSlash": True, "command": token or None, "recognized": False}
+
+
 def _knowledge_team_id() -> str:
     """The KB team for knowledge writes from this runtime. An explicit
     KNOWLEDGE_TEAM_ID (orchestrator spawn injection) wins; otherwise fall back to
@@ -6687,10 +6762,34 @@ async def run_dm_listener() -> None:
                 "from": sender,
                 "body": body[:4000],
             })
+
+            # Custom slash commands (#1796): recognise a provisioned `/command`
+            # so it is fed verbatim (Claude Code expands it), and neutralise an
+            # unknown `/token` so it is answered as plain text instead of the CLI
+            # short-circuiting with "Unknown command" (AC2). Chat path only —
+            # trigger prompts are deliberately untouched (out of scope).
+            known_commands = _list_slash_command_tokens(
+                _agent_workdir() / ".claude" / "commands")
+            prepared = _prepare_chat_prompt(body, known_commands)
+            send_body = prepared["prompt"]
+            if prepared["isSlash"]:
+                _append_event(room_id, {
+                    "type": "slash.command",
+                    "correlationId": correlation_id,
+                    "command": prepared["command"],
+                    "recognized": prepared["recognized"],
+                })
+                print(
+                    f"[Runner:{agent_id}] slash command "
+                    f"{'recognized' if prepared['recognized'] else 'unknown → plain text'}: "
+                    f"/{prepared['command']}",
+                    file=sys.stderr,
+                )
+
             _append_event(room_id, {
                 "type": "claude.invoke",
                 "correlationId": correlation_id,
-                "promptChars": len(body),
+                "promptChars": len(send_body),
             })
 
             session = _new_session("dm", room_id=room_id, label="Direct message",
@@ -6705,7 +6804,7 @@ async def run_dm_listener() -> None:
                 # matrix-nio can keep syncing (otherwise no follow-on messages
                 # arrive while a turn is in flight).
                 result = await asyncio.to_thread(
-                    _call_claude, body, room_id, correlation_id, blueprint_id,
+                    _call_claude, send_body, room_id, correlation_id, blueprint_id,
                     CLAUDE_TIMEOUT_SEC, dm_run_context,
                 )
             finally:

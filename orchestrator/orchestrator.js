@@ -116,6 +116,7 @@ const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-a
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
+const skillCommands = require("./skill-commands");
 const usageLog = require("./usage-log");
 const usageQuery = require("./usage-query");
 const prEventsLog = require("./pr-events-log");
@@ -2177,6 +2178,70 @@ function writeSeededSkills(id, manifest) {
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
 }
 
+// ── Custom slash-command provisioning (#1796) ──────────────────────────────
+// A granted skill may ship a `commands/*.md` subdir; those command files are
+// projected into the agent workspace's `.claude/commands/<namespace>/` so Claude
+// Code loads them (invoked as `/<namespace>:<name>`). The per-agent manifest
+// `seeded-commands.json` (name + description per command) is the truth a
+// downstream reader (#1797 autocomplete) consumes and the runtime reads to
+// distinguish a known command from an unknown `/token`.
+function readSeededCommands(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), skillCommands.SEEDED_COMMANDS_FILE), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSeededCommands(id, manifest) {
+  const p = path.join(agentStateDir(id), skillCommands.SEEDED_COMMANDS_FILE);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
+// Project (or, with remove, unproject) one skill's bundled commands into the
+// agent workspace, mutating `manifest` in place. Returns the workspace-relative
+// `.claude/commands/<namespace>` dir touched (for the reseed mirror), or null
+// when the skill ships no commands and none were previously seeded. Best-effort:
+// a copy failure is logged and skipped so it never fails the whole skill sync.
+function projectSkillCommands(id, skillName, srcDir, manifest, { remove = false, seededAt } = {}) {
+  const namespace = skillCommands.commandNamespace(skillName);
+  const nsRel = path.join(skillCommands.AGENT_COMMANDS_DIR, namespace);
+  const nsAbs = path.join(agentDir(id), nsRel);
+  const hadEntries = Object.values(manifest).some((v) => v && v.skill === skillName);
+
+  if (remove) {
+    try { fs.rmSync(nsAbs, { recursive: true, force: true }); }
+    catch (err) { console.warn(`[Orchestrator] command unproject ${id}/${skillName}: ${err.message}`); }
+    for (const k of Object.keys(manifest)) {
+      if (manifest[k] && manifest[k].skill === skillName) delete manifest[k];
+    }
+    return hadEntries ? nsRel : null;
+  }
+
+  const records = srcDir ? skillCommands.readSkillCommands(srcDir, skillName) : [];
+  // Drop any stale entries for this skill first (a re-sync may have removed a
+  // command file from the source), then rewrite its namespace dir from scratch.
+  for (const k of Object.keys(manifest)) {
+    if (manifest[k] && manifest[k].skill === skillName) delete manifest[k];
+  }
+  if (records.length === 0) {
+    // Skill has no commands now — clear a previously-projected namespace dir.
+    if (hadEntries) { try { fs.rmSync(nsAbs, { recursive: true, force: true }); } catch { /* noop */ } }
+    return hadEntries ? nsRel : null;
+  }
+  try {
+    fs.rmSync(nsAbs, { recursive: true, force: true }); // replace wholesale (idempotent)
+    fs.mkdirSync(nsAbs, { recursive: true });
+    for (const r of records) {
+      fs.writeFileSync(path.join(agentDir(id), r.targetPath), r.content, "utf8");
+    }
+    Object.assign(manifest, skillCommands.manifestEntriesFor(records, seededAt || new Date().toISOString()));
+  } catch (err) {
+    console.warn(`[Orchestrator] command project ${id}/${skillName}: ${err.message}`);
+  }
+  return nsRel;
+}
+
 // Per-member skill reconcile state (#776 §3): tracks bounded retry attempts plus
 // the last error + timestamp for a pending skill the auto-reconcile loop is
 // trying to heal. Keyed by skill name. Read by the admin-console graph overlay so
@@ -2268,6 +2333,9 @@ function seedAgentWorkspace(id, env, opts = {}) {
   const skillsDst = path.join(dest, "skills");
   fs.mkdirSync(skillsDst, { recursive: true });
   const seededManifest = {};
+  // #1796: accumulate the slash commands each granted skill ships, projected
+  // into .claude/commands/<namespace>/ below.
+  const commandManifest = {};
   if (selectedSkills.length > 0) {
     // #750: team-tier skills live in the pool keyed by the AGENT team
     // (agentKnowledgeTeamId → parentTeamId, or a team agent's own id) — the SAME
@@ -2300,12 +2368,20 @@ function seedAgentWorkspace(id, env, opts = {}) {
         }
       }
       seededManifest[skillName] = { tier: skillTierForSource(src), seededAt, ...skillSourceIdentity(src) };
+      // #1796: project any commands/ this skill ships into .claude/commands/.
+      try { projectSkillCommands(id, skillName, src, commandManifest, { seededAt }); }
+      catch (err) { warnings.push(`skill ${skillName} commands: ${err.message}`); }
     }
   }
   // Always write the manifest (even empty): its absence means "pre-manifest
   // workspace", its presence is the activation truth for this agent.
   try { writeSeededSkills(id, seededManifest); }
   catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
+  // #1796: the slash-command provisioning manifest (name + description per
+  // command) — the truth #1797 reads and the runtime uses to recognise a
+  // provisioned command. Always written (even empty) for the same reason.
+  try { writeSeededCommands(id, commandManifest); }
+  catch (err) { warnings.push(`seeded-commands manifest: ${err.message}`); }
 
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
@@ -2720,6 +2796,7 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
   // Copy selected skills
   const selectedSkills = Array.isArray(skills) ? skills : [];
   const seededManifest = {};
+  const commandManifest = {}; // #1796: slash commands the granted skills ship
   if (selectedSkills.length > 0) {
     const skillsSrc = path.join(TEMPLATE_WORKSPACE, "skills");
     const skillsDst = path.join(dest, "skills");
@@ -2732,10 +2809,14 @@ function seedAgentWorkspaceForInstance(id, env, blueprintId, skills = []) {
       try { fs.cpSync(skillSrc, skillDst, { recursive: true }); }
       catch (err) { warnings.push(`skill ${skillName}: ${err.message}`); continue; }
       seededManifest[skillName] = { tier: "global", seededAt, ...skillSourceIdentity(skillSrc) };
+      try { projectSkillCommands(id, skillName, skillSrc, commandManifest, { seededAt }); }
+      catch (err) { warnings.push(`skill ${skillName} commands: ${err.message}`); }
     }
   }
   try { writeSeededSkills(id, seededManifest); }
   catch (err) { warnings.push(`seeded-skills manifest: ${err.message}`); }
+  try { writeSeededCommands(id, commandManifest); }
+  catch (err) { warnings.push(`seeded-commands manifest: ${err.message}`); }
 
   // Create local memory dir (used as staging area; content synced from blueprint API at session start)
   fs.mkdirSync(path.join(dest, "memory"), { recursive: true });
@@ -7807,6 +7888,7 @@ class Orchestrator {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     const dst = path.join(agentDir(id), "skills", skillName);
     const manifest = readSeededSkills(id);
+    let commandSrc = null; // resolved skill source dir, for command projection (#1796)
     if (remove) {
       // Never remove an agent-authored (agent-tier) skill: the workspace dir
       // IS the agent pool — deactivation only withdraws the grant.
@@ -7824,6 +7906,7 @@ class Orchestrator {
       // condition (recoverable via restore/re-promote, not a retry) from a
       // generic copy failure (#739 AC4).
       if (!src) return { agentId: id, status: "error", error: `skill not found in pool: ${skillName}`, reason: "source-missing" };
+      commandSrc = src;
       if (path.resolve(src) !== path.resolve(dst)) {
         try { fs.cpSync(src, dst, { recursive: true, force: true }); }
         catch (err) { return { agentId: id, status: "error", error: err.message, reason: "copy-failed" }; }
@@ -7831,6 +7914,18 @@ class Orchestrator {
       manifest[skillName] = { tier: skillTierForSource(src), seededAt: new Date().toISOString(), ...skillSourceIdentity(src) };
     }
     try { writeSeededSkills(id, manifest); } catch { /* best effort */ }
+    // #1796: project (or remove) this skill's bundled slash commands into
+    // .claude/commands/ as an additive file sync — no respawn, exactly like the
+    // skill files themselves. The namespace dir is mirrored into an isolated
+    // volume alongside CLAUDE.md below.
+    let commandNsRel = null;
+    try {
+      const commandManifest = readSeededCommands(id);
+      commandNsRel = projectSkillCommands(id, skillName, commandSrc, commandManifest, { remove });
+      writeSeededCommands(id, commandManifest);
+    } catch (err) {
+      console.warn(`[Orchestrator] command sync ${id}/${skillName}: ${err.message}`);
+    }
     // Rebuild CLAUDE.md from the (already saved) config so the Skills section
     // gate + list reflect the new grant. AGENT-PROMPT.md is left untouched.
     try {
@@ -7846,7 +7941,14 @@ class Orchestrator {
     // Removal can't be mirrored file-wise — the stale copy disappears at the
     // next respawn; the rebuilt CLAUDE.md (which no longer lists the skill) IS
     // mirrored, so the agent stops being told about it immediately.
-    await reseedAgent(id, remove ? ["CLAUDE.md"] : ["skills/" + skillName, "CLAUDE.md"]);
+    // Mirror the skill files (add only), the rebuilt CLAUDE.md, the projected
+    // command namespace dir and the commands manifest into the isolated volume.
+    // On removal the stale skill/command dirs can't be file-mirrored away, but
+    // the rebuilt CLAUDE.md + manifest are, and they disappear at next respawn.
+    const reseedPaths = remove ? ["CLAUDE.md"] : ["skills/" + skillName, "CLAUDE.md"];
+    if (commandNsRel && !remove) reseedPaths.push(commandNsRel);
+    reseedPaths.push(path.join(".agent-studio", skillCommands.SEEDED_COMMANDS_FILE));
+    await reseedAgent(id, reseedPaths);
     return { agentId: id, status: remove ? "removed" : "seeded" };
   }
 
@@ -11590,6 +11692,29 @@ async function main() {
         const roster = computeTeamRoster(id, configs);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, ...roster }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // ── Provisioned slash commands (#1796, foundation for #1797) ──────────
+    // The list of custom slash commands currently provisioned into an agent's
+    // workspace (name + description per command), read from seeded-commands.json.
+    // #1797's composer autocomplete consumes this via the console proxy.
+    const commandsListMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/commands$/);
+    if (commandsListMatch) {
+      const id = decodeURIComponent(commandsListMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const commands = skillCommands.commandsListFromManifest(readSeededCommands(id));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, agentId: id, commands }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: err.message }));

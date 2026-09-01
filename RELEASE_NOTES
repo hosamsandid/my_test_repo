@@ -4,6 +4,8 @@
 
 ### New Features
 
+- **Custom slash commands for agents (foundation)** — a granted skill can now carry Claude Code **slash commands** (a `commands/*.md` subdirectory). Its command files are provisioned into the agent workspace's `.claude/commands/` — namespaced per skill, invoked in chat as `/<skill>:<command> [args]` — as an additive file sync that applies without an agent respawn, exactly like the skill files themselves. A message that begins with `/` but matches no known command is passed through and answered as ordinary text (no crash). Each command's optional `description` is parsed and exposed via `GET /api/agents/:id/commands` for a future composer autocomplete. Chat-message invocation only for now. (#1796)
+
 - **Knowledge page: Review mode** — a guided, one-at-a-time triage flow over suggested knowledge candidates. Navigate with keyboard shortcuts (`P` promote · `M` add to merge · `D` dismiss · `→`/`Enter` skip · `Esc` close) and track progress via an "n of m" indicator. Accessible via **Start review** on the Suggested tab. (#787)
 
 - **Multi-candidate knowledge merge** — an **Add to merge** basket lets you queue multiple suggestion cards (from the list or inside review mode), then promote them all into a single skill in one step. The resulting skill's Origin tab records every contributing lesson. (#787)

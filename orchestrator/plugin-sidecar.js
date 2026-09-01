@@ -38,6 +38,24 @@ function sidecarPluginId(container) {
   return (container && container.Labels && container.Labels[PLUGIN_ID_LABEL]) || null;
 }
 
+// Does this plugin run a broker sidecar at all? A command-only plugin (#1798)
+// declares `commands` and no `sidecar` — the manifest validator makes `sidecar`
+// optional in that case (plugin-manifest.js) and the normalizer omits the block
+// entirely. Both reconcile paths filter on this so a command-only plugin is
+// never handed to startSidecar (which would dereference `sidecar.capabilities`
+// on undefined and log a spurious "sidecar start failed" — #1861).
+function manifestHasSidecar(manifest) {
+  return !!(manifest && manifest.sidecar);
+}
+
+// The subset of installed plugin ids that actually run a broker sidecar — the
+// input reconcileSidecars must key on so command-only plugins are neither
+// started nor reported as orphaned stop targets. Pure so both runtimes share
+// one filter (Podman plugin-runtime.js + the k8s sibling).
+function sidecarPluginIds(manifests) {
+  return Object.keys(manifests || {}).filter((id) => manifestHasSidecar((manifests || {})[id]));
+}
+
 // Given the ids of currently-installed plugins and the set of live sidecar
 // containers, decide what to start and what to stop.
 //   installedPluginIds : string[]
@@ -136,6 +154,8 @@ module.exports = {
   sidecarContainerName,
   sidecarLabels,
   sidecarPluginId,
+  manifestHasSidecar,
+  sidecarPluginIds,
   reconcileSidecars,
   reconcileAttachments,
   capabilityAttachments,

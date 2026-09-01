@@ -107,6 +107,30 @@ test('unknown broker status is distinct from stopped', () => {
   assert.equal(sidecarStatus({ installed: false }).state, 'not-installed');
 });
 
+test('a command-only plugin reports a neutral broker status, not "not running" (#1861)', () => {
+  // No `sidecar` block → nothing to run. `sidecarRunning` is null (the
+  // orchestrator never lists a broker-less plugin), which would otherwise read
+  // as "Broker status unknown" — the command-only branch must win first.
+  const commandOnly = {
+    installed: true,
+    sidecarRunning: null,
+    manifest: { pluginVersion: 1, id: 'spec-kit', name: 'Spec Kit', commands: { namespace: 'speckit' } },
+  };
+  const s = sidecarStatus(commandOnly);
+  assert.equal(s.state, 'none');
+  assert.equal(s.tone, 'muted');
+  assert.match(s.label, /command-only/i);
+  assert.doesNotMatch(s.label, /not running/i);
+
+  // A broker-backed plugin is unchanged whether the manifest is present or not.
+  assert.equal(sidecarStatus({ installed: true, sidecarRunning: true, manifest: manifest() }).state, 'running');
+  assert.equal(sidecarStatus({ installed: true, sidecarRunning: false, manifest: manifest() }).state, 'stopped');
+  assert.equal(sidecarStatus({ installed: true, sidecarRunning: null, manifest: manifest() }).state, 'unknown');
+  // An unreadable manifest (invalid plugin) can't be classified command-only —
+  // it must fall through to the existing running/unknown logic.
+  assert.equal(sidecarStatus({ installed: true, sidecarRunning: false, manifest: null }).state, 'stopped');
+});
+
 test('pluginRegistryRow folds an entry into a renderable row', () => {
   const entry = { id: 'podman-sandbox', ok: true, errors: [], manifest: manifest(), installed: true, sidecarRunning: true };
   const row = pluginRegistryRow(entry, { canManage: true, stackRuntime: 'podman' });

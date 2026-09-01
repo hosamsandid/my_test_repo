@@ -121,6 +121,54 @@ test('extractWorkItem returns null for absent/oddly-shaped payloads without thro
   assert.equal(eventLog.extractWorkItem({ pull_request: 'not-an-object' }), null);
 });
 
+test('extractWorkItem carries closesIssues for a PR whose enriched payload holds them (#1833)', () => {
+  const workItem = eventLog.extractWorkItem({
+    pull_request: {
+      number: 1828, title: 'Fix the thing', html_url: 'https://github.com/org/repo/pull/1828',
+      closesIssues: [1796],
+    },
+  });
+  assert.deepEqual(workItem, {
+    kind: 'pr', number: 1828, title: 'Fix the thing',
+    url: 'https://github.com/org/repo/pull/1828', closesIssues: [1796],
+  });
+});
+
+test('extractWorkItem omits closesIssues when absent/empty and never carries it for an issue (#1833)', () => {
+  // A PR with no closes linkage — the key is omitted entirely (issue rows and
+  // un-enriched PR rows stay byte-identical to their pre-#1833 shape).
+  assert.deepEqual(
+    eventLog.extractWorkItem({ pull_request: { number: 5, closesIssues: [] } }),
+    { kind: 'pr', number: 5, title: null, url: null },
+  );
+  // An issue payload is never given closesIssues even if one leaked onto it.
+  assert.deepEqual(
+    eventLog.extractWorkItem({ issue: { number: 9, closesIssues: [1] } }),
+    { kind: 'issue', number: 9, title: null, url: null },
+  );
+});
+
+test('extractWorkItem drops non-positive/non-integer closes and never throws (#1833)', () => {
+  assert.deepEqual(
+    eventLog.extractWorkItem({ pull_request: { number: 5, closesIssues: [1796, 0, -3, 2.5, '7', 1797] } }),
+    { kind: 'pr', number: 5, title: null, url: null, closesIssues: [1796, 1797] },
+  );
+});
+
+test('buildEventEntry captures the git ref for push/create/delete rows, null otherwise (#1833 AC1.3)', () => {
+  const push = eventLog.buildEventEntry({
+    ghEvent: { id: '3001', payload: { ref: 'refs/heads/feat/x' } },
+    repoFullName: 'org/repo', key: 'push', outcomes: [],
+  });
+  assert.equal(push.ref, 'refs/heads/feat/x');
+  // A PR labeled event carries no ref.
+  const pr = eventLog.buildEventEntry({
+    ghEvent: { id: '3002', payload: { pull_request: { number: 1, title: 't', html_url: 'u' } } },
+    repoFullName: 'org/repo', key: 'pull_request.labeled', outcomes: [],
+  });
+  assert.equal(pr.ref, null);
+});
+
 test('record + file round-trip: one JSONL line per entry, day-bucketed', () => {
   eventLog.record(eventLog.buildEventEntry({
     ghEvent: { id: '1', actor: { login: 'a' }, created_at: '2026-06-30T10:00:00Z' },

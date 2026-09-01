@@ -562,6 +562,54 @@ test("_enrichPullRequestPayload: missing pull_request is untouched", async () =>
   assert.equal(out, payload);
 });
 
+// ── closesIssues enrichment (#1833 item 3) ──────────────────────────────────
+test("_enrichPullRequestPayload: derives closesIssues from the fetched body (#1833)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => ({ title: "Fix it", body: "Some work.\n\nCloses #1796 and fixes #1797." });
+  const out = await poller._enrichPullRequestPayload(
+    "pull_request.opened", LIVE_SHAPED_PR_PAYLOAD, "tok",
+  );
+  assert.deepEqual(out.pull_request.closesIssues, [1796, 1797]);
+  assert.equal(out.pull_request.title, "Fix it");
+  assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
+});
+
+test("_enrichPullRequestPayload: derives closesIssues from the head branch name without a body (#1833)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => ({ title: "Fix it" }); // no body in the detail
+  const payload = {
+    pull_request: {
+      url: "https://api.github.com/repos/o/r/pulls/500", number: 500,
+      head: { ref: "feat/issue-1833-thing" },
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
+  assert.deepEqual(out.pull_request.closesIssues, [1833]);
+});
+
+test("_enrichPullRequestPayload: no closesIssues key when nothing is parseable (#1833)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => ({ title: "Fix it", body: "Just a change, no keywords." });
+  const out = await poller._enrichPullRequestPayload(
+    "pull_request.opened", LIVE_SHAPED_PR_PAYLOAD, "tok",
+  );
+  assert.equal("closesIssues" in out.pull_request, false);
+});
+
+test("_enrichPullRequestPayload: a fetch failure still parses closes from the branch (#1833)", async () => {
+  const poller = new GitHubPoller();
+  poller._fetchJson = async () => { throw new Error("HTTP 502"); };
+  const payload = {
+    pull_request: {
+      url: "https://api.github.com/repos/o/r/pulls/500", number: 500,
+      head: { ref: "fix/issue-42" },
+    },
+  };
+  const out = await poller._enrichPullRequestPayload("pull_request.opened", payload, "tok");
+  assert.deepEqual(out.pull_request.closesIssues, [42]);
+  assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
+});
+
 // ── pollerSubscribes (#1173): internal-channel triggers never enter the plan ─
 //
 // The exclusion below is the SINGLE dedup mechanism of the internal-channels

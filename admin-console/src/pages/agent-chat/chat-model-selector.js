@@ -90,11 +90,13 @@ export function effectiveModelLabel(options) {
 }
 
 // Trigger button view model: label, tone (override → accent) and the override
-// dot. The label shows the effective model alongside the provider — the
-// "<Provider> · <model>" convention the app-header assist selector uses (#1704),
-// so a user can tell at a glance which model the agent runs on without opening
-// the popover. The model segment is dropped in degraded states (no provider
-// bound, empty catalogue) so the button never shows a dangling "· ".
+// dot. The label shows the effective model alongside the provider as
+// "<model> · <provider>" — model name FIRST (#1845), so the model (the segment
+// the user most needs) is identifiable even when width is tight, and the trailing
+// provider is what truncates. `labelParts` ({ lead, tail }) drives the two-span
+// trigger where the leading model never truncates and the trailing provider
+// ellipsises (AC4); it is null in degraded states (no provider bound, empty
+// catalogue) so the button renders the single value with no dangling "· " (AC6).
 export function chatTrigger(options) {
   const hasEndpoint = !!(options && options.endpointId);
   const overridden = !!(options && (options.endpointOverride || options.override));
@@ -102,9 +104,11 @@ export function chatTrigger(options) {
     ? (options.endpointName || options.endpointId)
     : 'Default (.env)';
   const modelLabel = hasEndpoint ? effectiveModelLabel(options) : null;
-  const label = modelLabel ? `${provider} · ${modelLabel}` : provider;
+  const label = modelLabel ? `${modelLabel} · ${provider}` : provider;
+  const labelParts = modelLabel ? { lead: modelLabel, tail: provider } : null;
   return {
     label,
+    labelParts,
     tone: overridden ? 'override' : 'default',
     showOverrideDot: overridden,
     hasEndpoint,

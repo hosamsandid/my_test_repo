@@ -6,6 +6,7 @@ import {
   headerContextIndicator,
   sessionPriceLabel,
   tokenBreakdownRows,
+  repoBranchRows,
 } from './session-info.js';
 
 test('formatContextWindow — K/M compact, null when unknown (AC1/AC8)', () => {
@@ -86,4 +87,27 @@ test('tokenBreakdownRows — empty when no data at all / fresh session all-zero 
   assert.deepEqual(tokenBreakdownRows({}), []);
   // a fresh session reports all-zero classes → no zero placeholder section
   assert.deepEqual(tokenBreakdownRows({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }), []);
+});
+
+test('repoBranchRows — formats git repos for About-this-chat popover (AC6)', () => {
+  const rows = repoBranchRows([
+    { repoPath: 'my-repo', branch: 'main', isDirty: false, changesCount: 0 },
+    { repoPath: 'other', branch: 'feat/foo', isDirty: true, changesCount: 3 },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { repoPath: 'my-repo', branch: 'main', isDirty: false, changesCount: 0 });
+  assert.deepEqual(rows[1], { repoPath: 'other', branch: 'feat/foo', isDirty: true, changesCount: 3 });
+});
+
+test('repoBranchRows — null/undefined/empty returns []', () => {
+  assert.deepEqual(repoBranchRows(null), []);
+  assert.deepEqual(repoBranchRows(undefined), []);
+  assert.deepEqual(repoBranchRows([]), []);
+});
+
+test('repoBranchRows — null branch → detached; missing changesCount → 0', () => {
+  const rows = repoBranchRows([{ repoPath: 'r', branch: null }]);
+  assert.equal(rows[0].branch, 'detached');
+  assert.equal(rows[0].changesCount, 0);
+  assert.equal(rows[0].isDirty, false);
 });

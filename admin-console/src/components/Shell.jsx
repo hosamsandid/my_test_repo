@@ -24,6 +24,7 @@ import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
 import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
+import { useModelSelection } from '../context/ModelSelectionContext';
 import { breadcrumbFor } from './breadcrumbs';
 import { formatVersionLabel } from './version-info';
 import { formatCommitTimestamp } from './version-info';
@@ -176,6 +177,11 @@ export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   // User Settings modal (#1802) — opened from the header account menu.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Optional deep-link section for the Settings modal: the assist-error nudge
+  // (#1805) opens it straight on Model; a plain account-menu open passes null
+  // and lands on the default first section.
+  const [settingsSection, setSettingsSection] = useState(null);
+  const { registerOpenSettings } = useModelSelection();
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleLightDark } = useTheme();
@@ -187,6 +193,14 @@ export default function Shell({ children }) {
   // subscribing surface.
   const statuses = useAgentStatuses();
   const chatCounts = useMemo(() => computeChatCounts(statuses, loadLastViewed()), [statuses]);
+
+  // Register how the assist-error nudge surfaces the (now modal-hosted) model
+  // picker: open Settings deep-linked to Model so setPickerOpen(true) has a
+  // mounted component to act on (#1805 error-nudge fix).
+  useEffect(() => registerOpenSettings(() => {
+    setSettingsSection('model');
+    setSettingsOpen(true);
+  }), [registerOpenSettings]);
 
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
@@ -657,7 +671,7 @@ export default function Shell({ children }) {
             </button>
             <AccountMenu
               username={user?.username}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={() => { setSettingsSection(null); setSettingsOpen(true); }}
               onLogout={logout}
             />
           </div>
@@ -679,7 +693,11 @@ export default function Shell({ children }) {
 
       {/* User Settings modal (#1802) — opened from the header account menu;
           mounted once here so it overlays every route. */}
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal
+        open={settingsOpen}
+        requestedSectionId={settingsSection}
+        onClose={() => { setSettingsOpen(false); setSettingsSection(null); }}
+      />
     </div>
   );
 }

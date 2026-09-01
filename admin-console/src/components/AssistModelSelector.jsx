@@ -5,8 +5,8 @@ import { selectionLabel, assistGroups } from '../context/assist-model-selection.
 import { exclusionMessage } from '../context/assist-selector-exclusion.js';
 import ModelSelectorPopover from './ModelSelectorPopover.jsx';
 
-// Header control for the global assist model selector (#1212, concept §4.3).
-// Sits in the Shell right-cluster left of the theme toggle. Since #1670 the
+// Global assist model selector (#1212, concept §4.3). Lives in the Settings
+// modal's Model section since #1805 (moved out of the Shell header). Since #1670 the
 // popover itself is the shared ModelSelectorPopover, so it reads identically to
 // the Agent-Chat runtime selector — this wrapper keeps the assist surface's own
 // data (the per-user provider selection), its billing hint, its attention styling

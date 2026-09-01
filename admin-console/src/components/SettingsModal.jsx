@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import Modal from './Modal.jsx';
 import {
   SETTINGS_SECTIONS, defaultSectionId, resolveSectionId, adjacentSectionId, sectionById,
@@ -13,11 +13,20 @@ import AssistModelSelector from './AssistModelSelector.jsx';
  * so every section renders an empty placeholder for now. The overlay behaviour
  * (centred, focus-trapped, Esc / ✕ / backdrop dismiss) is owned by <Modal>.
  */
-export default function SettingsModal({ open, onClose }) {
+export default function SettingsModal({ open, onClose, requestedSectionId = null }) {
   const [activeId, setActiveId] = useState(defaultSectionId());
   const tabRefs = useRef({});
 
   const active = sectionById(resolveSectionId(activeId));
+
+  // On open, land on the requested section when the caller deep-links to one
+  // (e.g. the assist-error nudge opens Settings → Model, #1805); otherwise the
+  // default first section. Keyed on [open, requestedSectionId] so a fresh open
+  // — or a nudge arriving while the modal is already open — jumps correctly.
+  useEffect(() => {
+    if (!open) return;
+    setActiveId(requestedSectionId ? resolveSectionId(requestedSectionId) : defaultSectionId());
+  }, [open, requestedSectionId]);
 
   // Arrow keys move between tabs on the vertical rail (roving focus).
   function onTabKeyDown(e) {

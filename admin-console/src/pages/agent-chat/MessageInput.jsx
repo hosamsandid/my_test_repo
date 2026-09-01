@@ -8,7 +8,6 @@ import {
   saveSendKeybinding,
   decideSendKey,
   placeholderSendHint,
-  helperSendKeys,
 } from './message-send-keybinding.js';
 import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
@@ -255,14 +254,6 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   const placeholder = agentDisplayName
     ? `Message ${agentDisplayName}…  (${sendHint})`
     : `Message…  (${sendHint})`;
-  const keys = helperSendKeys(sendKeybinding, IS_MAC);
-
-  // Loop launcher discoverability (#1120): name the otherwise icon-only loop
-  // control in the composer helper line so newcomers know what it does.
-  const loopHint = onLoopClick
-    ? <> · <Repeat size={11} style={{ verticalAlign: '-1px' }} /> runs a loop until a goal is met</>
-    : null;
-
   const canAttach = !!onUpload && !disabled && !uploading;
   // The loop control is a launcher only (#1427): stopping a running loop moves
   // to the unified Stop button in the primary-action position, so the loop
@@ -345,26 +336,27 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
               hidden
               onChange={e => { doUpload(e.target.files); e.target.value = ''; }}
             />
-            <button
-              onClick={() => fileRef.current?.click()}
-              disabled={!canAttach}
-              aria-label="Attach files"
-              title="Attach files"
-              style={{
-                width: 32, height: 32,
-                background: 'transparent',
-                color: canAttach ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
-                border: 'none',
-                borderRadius: 'var(--eb-radius-md)',
-                cursor: canAttach ? 'pointer' : 'not-allowed',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
-              {uploading
-                ? <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
-                : <Paperclip size={16} />}
-            </button>
+            <ButtonTooltip label={IS_MAC ? 'Attach file — drag & drop or paste (⌘+V)' : 'Attach file — drag & drop or paste (Ctrl+V)'}>
+              <button
+                onClick={() => fileRef.current?.click()}
+                disabled={!canAttach}
+                aria-label={IS_MAC ? 'Attach file — drag & drop or paste (⌘+V)' : 'Attach file — drag & drop or paste (Ctrl+V)'}
+                style={{
+                  width: 32, height: 32,
+                  background: 'transparent',
+                  color: canAttach ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+                  border: 'none',
+                  borderRadius: 'var(--eb-radius-md)',
+                  cursor: canAttach ? 'pointer' : 'not-allowed',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                {uploading
+                  ? <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
+                  : <Paperclip size={16} />}
+              </button>
+            </ButtonTooltip>
           </>
         )}
 
@@ -395,30 +387,35 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
           }}
         />
         {onLoopClick && (
-          <button
-            onClick={() => canLoop && onLoopClick()}
-            disabled={!canLoop}
-            aria-label="Start a loop"
-            title={loopRunning
-              ? 'A loop is running — use Stop to end it'
-              : busy
-                ? 'Agent is busy — wait for the turn to finish'
-                : 'Start a loop — run this agent until the goal is met'}
-            style={{
-              width: 32, height: 32,
-              background: 'transparent',
-              color: canLoop ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
-              border: 'none',
-              borderRadius: 'var(--eb-radius-md)',
-              cursor: canLoop ? 'pointer' : 'not-allowed',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            {loopBusy
-              ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
-              : <Repeat size={15} />}
-          </button>
+          <ButtonTooltip label={
+            loopRunning ? 'A loop is running — use Stop to end it' :
+            busy ? 'Agent is busy — wait for the turn to finish' :
+            'Run a loop — repeats until the goal is met'
+          }>
+            <button
+              onClick={() => canLoop && onLoopClick()}
+              disabled={!canLoop}
+              aria-label={
+                loopRunning ? 'A loop is running — use Stop to end it' :
+                busy ? 'Agent is busy — wait for the turn to finish' :
+                'Run a loop — repeats until the goal is met'
+              }
+              style={{
+                width: 32, height: 32,
+                background: 'transparent',
+                color: canLoop ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)',
+                border: 'none',
+                borderRadius: 'var(--eb-radius-md)',
+                cursor: canLoop ? 'pointer' : 'not-allowed',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              {loopBusy
+                ? <Loader2 size={15} style={{ animation: 'spin 0.8s linear infinite' }} />
+                : <Repeat size={15} />}
+            </button>
+          </ButtonTooltip>
         )}
         <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
           {voiceState === 'recording' && (
@@ -432,13 +429,21 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             </span>
           )}
           <div ref={micGroupRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <ButtonTooltip label={
+              meetingActive ? 'A transcription is already running' :
+              voiceState === 'recording' ? 'Stop recording' :
+              voiceState === 'transcribing' ? 'Transcribing…' :
+              'Dictate message'
+            }>
             <button
               onClick={toggleRecording}
               disabled={disabled || voiceState === 'transcribing' || meetingActive}
-              aria-label={voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Record voice message'}
-              title={meetingActive
-                ? 'A transcription is already running'
-                : voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : 'Voice input (tap to dictate)'}
+              aria-label={
+                voiceState === 'recording' ? 'Stop recording' :
+                voiceState === 'transcribing' ? 'Transcribing…' :
+                meetingActive ? 'A transcription is already running' :
+                'Dictate message'
+              }
               style={{
                 width: 32, height: 32,
                 background: voiceState === 'recording' ? 'var(--eb-status-error-bg, #fef2f2)' : 'transparent',
@@ -461,6 +466,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
                   ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
                   : <Mic size={14} />}
             </button>
+            </ButtonTooltip>
             {/* Meeting-mode chevron (#1296). Only when the host wires meetings. */}
             {onStartMeeting && (
               <button
@@ -530,36 +536,43 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
             )}
           </div>
         </div>
-        <button
-          onClick={showStop ? (() => primary.enabled && onStop?.()) : submit}
-          disabled={!primary.enabled}
-          aria-label={showStop ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn') : 'Send message'}
-          title={showStop
+        <ButtonTooltip label={
+          showStop
             ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn')
-            : (sendKeybinding === 'chat' ? 'Send (Enter)' : 'Send (Cmd/Ctrl + Enter)')}
-          style={{
-            width: 32, height: 32,
-            background: showStop
-              ? 'var(--eb-status-error-bg, #fef2f2)'
-              : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
-            color: showStop
-              ? 'var(--eb-status-error-text, #dc2626)'
-              : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
-            border: 'none',
-            borderRadius: 'var(--eb-radius-md)',
-            cursor: primary.enabled ? 'pointer' : 'not-allowed',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0,
-            transition: 'background var(--eb-transition-fast)',
-            animation: (showStop && primary.enabled) ? 'stt-pulse 1.6s ease-in-out infinite' : 'none',
-          }}
-        >
-          {showStop
-            ? (stopBusy
-                ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
-                : <Square size={14} />)
-            : <Send size={14} />}
-        </button>
+            : sendKeybinding === 'chat' ? 'Send — ↵' : IS_MAC ? 'Send — ⌘+↵' : 'Send — Ctrl+↵'
+        }>
+          <button
+            onClick={showStop ? (() => primary.enabled && onStop?.()) : submit}
+            disabled={!primary.enabled}
+            aria-label={
+              showStop
+                ? (loopRunning ? 'Stop the running loop' : 'Stop the running turn')
+                : sendKeybinding === 'chat' ? 'Send — ↵' : IS_MAC ? 'Send — ⌘+↵' : 'Send — Ctrl+↵'
+            }
+            style={{
+              width: 32, height: 32,
+              background: showStop
+                ? 'var(--eb-status-error-bg, #fef2f2)'
+                : primary.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-active)',
+              color: showStop
+                ? 'var(--eb-status-error-text, #dc2626)'
+                : primary.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
+              border: 'none',
+              borderRadius: 'var(--eb-radius-md)',
+              cursor: primary.enabled ? 'pointer' : 'not-allowed',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+              transition: 'background var(--eb-transition-fast)',
+              animation: (showStop && primary.enabled) ? 'stt-pulse 1.6s ease-in-out infinite' : 'none',
+            }}
+          >
+            {showStop
+              ? (stopBusy
+                  ? <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                  : <Square size={14} />)
+              : <Send size={14} />}
+          </button>
+        </ButtonTooltip>
       </div>
 
       <div style={{
@@ -580,12 +593,9 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
               ? 'Transcribing…'
               : uploading
                 ? 'Uploading attachment…'
-                : onUpload
-                  ? <>Markdown supported · attach with <Paperclip size={11} style={{ verticalAlign: '-1px' }} />, drag &amp; drop, or paste (<kbd style={kbdStyle}>⌘</kbd>/<kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd>) · {renderKbd(keys.send)} to send{loopHint}</>
-                  : <>Markdown supported · {renderKbd(keys.send)} to send · {renderKbd(keys.newline)} for newline{loopHint}</>}
+                : null}
         </span>
-        {/* Discoverable per-user send-behaviour toggle (#1354). Kept in the
-            composer so the hints above always match the live choice. */}
+        {/* Per-user send-behaviour toggle (#1354). */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, whiteSpace: 'nowrap' }}>
           <span>Enter:</span>
           <select
@@ -604,16 +614,6 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   );
 }
 
-// Render an ordered list of key tokens as <kbd> chips joined by '+'.
-function renderKbd(tokens) {
-  return tokens.map((k, i) => (
-    <React.Fragment key={`${k}-${i}`}>
-      {i > 0 && '+'}
-      <kbd style={kbdStyle}>{k}</kbd>
-    </React.Fragment>
-  ));
-}
-
 function autoResize(el) {
   if (!el) return;
   // Reset to min so shrinking works after deletion.
@@ -622,14 +622,42 @@ function autoResize(el) {
   el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
 }
 
-const kbdStyle = {
-  fontFamily: 'var(--eb-font-mono)',
-  fontSize: '0.85em',
-  padding: '0 4px',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-sm)',
-};
+function ButtonTooltip({ label, children }) {
+  const [visible, setVisible] = React.useState(false);
+  return (
+    <span
+      style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}
+      onMouseEnter={() => setVisible(true)}
+      onMouseLeave={() => setVisible(false)}
+      onFocus={() => setVisible(true)}
+      onBlur={() => setVisible(false)}
+    >
+      {children}
+      {visible && (
+        <span
+          role="tooltip"
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 6px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'var(--eb-bg-inverted, #1a1a1a)',
+            color: 'var(--eb-text-inverted, #fff)',
+            fontSize: 'var(--eb-text-xs)',
+            padding: '4px 8px',
+            borderRadius: 'var(--eb-radius-sm)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            zIndex: 100,
+            boxShadow: 'var(--eb-shadow-sm, 0 2px 8px rgba(0,0,0,0.18))',
+          }}
+        >
+          {label}
+        </span>
+      )}
+    </span>
+  );
+}
 
 const selectStyle = {
   fontFamily: 'inherit',

@@ -12,7 +12,6 @@ import {
   decideSendKey,
   sendModifierLabel,
   placeholderSendHint,
-  helperSendKeys,
 } from './message-send-keybinding.js';
 
 // A minimal localStorage stand-in.
@@ -110,11 +109,4 @@ test('placeholderSendHint reflects OS and preset', () => {
   assert.equal(placeholderSendHint('ide', false), 'Ctrl+↩ to send');
   assert.equal(placeholderSendHint('chat', true), '↩ to send');
   assert.equal(placeholderSendHint('chat', false), '↩ to send');
-});
-
-test('helperSendKeys returns OS/preset-aware kbd token pairs', () => {
-  assert.deepEqual(helperSendKeys('ide', true), { send: ['⌘', '↩'], newline: ['↩'] });
-  assert.deepEqual(helperSendKeys('ide', false), { send: ['Ctrl', '↩'], newline: ['↩'] });
-  assert.deepEqual(helperSendKeys('chat', true), { send: ['↩'], newline: ['Shift', '↩'] });
-  assert.deepEqual(helperSendKeys('chat', false), { send: ['↩'], newline: ['Shift', '↩'] });
 });

@@ -102,17 +102,3 @@ export function placeholderSendHint(keybinding, isMac) {
   if (normalizeSendKeybinding(keybinding) === 'chat') return '↩ to send';
   return isMac ? '⌘↩ to send' : 'Ctrl+↩ to send';
 }
-
-/**
- * The <kbd> key-label pairs for the helper row, as plain tokens the JSX maps
- * into <kbd> chips. Returns `{ send: string[], newline: string[] }`.
- *   IDE  → send: [mod, '↩'],   newline: ['↩']
- *   chat → send: ['↩'],        newline: ['Shift', '↩']
- */
-export function helperSendKeys(keybinding, isMac) {
-  const mod = sendModifierLabel(isMac);
-  if (normalizeSendKeybinding(keybinding) === 'chat') {
-    return { send: ['↩'], newline: ['Shift', '↩'] };
-  }
-  return { send: [mod, '↩'], newline: ['↩'] };
-}

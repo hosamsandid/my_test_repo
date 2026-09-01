@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, CheckCircle2, XCircle, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -357,11 +357,25 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
         }}>
           {schedule}
         </code>
+        {/* Enabled toggle — moved into the header cluster next to Edit/Delete
+            (the slot the old check-circle status icon used to occupy). The
+            toggle is the single state indicator now; the in-flight Loader2
+            spinner replaces it while a PUT is in flight. */}
         {toggling
-          ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: 'var(--eb-text-muted)', flexShrink: 0 }} />
-          : trigger.enabled !== false
-            ? <CheckCircle2 size={14} style={{ color: 'var(--eb-status-success)', flexShrink: 0 }} title="Enabled" />
-            : <XCircle     size={14} style={{ color: 'var(--eb-text-muted)',      flexShrink: 0 }} title="Disabled" />
+          ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: 'var(--eb-text-muted)', flexShrink: 0 }} title="Updating…" />
+          : (
+            <span
+              title={trigger.enabled !== false
+                ? 'Disable this trigger — it will stop firing'
+                : 'Enable this trigger — it will start firing again'}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}
+            >
+              <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', width: 18 }}>
+                {trigger.enabled !== false ? 'On' : 'Off'}
+              </span>
+            </span>
+          )
         }
         <button onClick={() => onEdit(trigger)} title="Edit trigger" style={iconBtn}>
           <Pencil size={11} />
@@ -402,13 +416,6 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
           {trigger.description}
         </div>
       )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 2 }}>
-        <ToggleSwitch checked={trigger.enabled !== false} onChange={handleToggle} />
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          {trigger.enabled !== false ? 'Enabled' : 'Disabled'}
-        </span>
-      </div>
 
       {trigger.preCheckScript && (
         <div style={{

@@ -169,7 +169,10 @@ export default function SessionInfoPopover({
                   fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
                 }}>
                   <Server size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <span
+                    title={environmentName}
+                    style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
                     {environmentName}
                   </span>
                 </div>
@@ -181,10 +184,13 @@ export default function SessionInfoPopover({
                   fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
                 }}>
                   <GitBranch size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
-                  <span style={{
-                    fontFamily: 'var(--eb-font-mono)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
+                  <span
+                    title={repoRows.length > 1 ? `${r.repoPath}: ${r.branch}` : r.branch}
+                    style={{
+                      fontFamily: 'var(--eb-font-mono)',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                  >
                     {repoRows.length > 1 && `${r.repoPath}: `}{r.branch}
                     {r.isDirty && (
                       <span

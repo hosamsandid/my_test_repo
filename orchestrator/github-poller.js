@@ -915,10 +915,18 @@ class GitHubPoller {
     // #469 — persist the transparency log entry for every fresh event in this
     // batch, whether it was delivered, dropped, digested, or matched no
     // subscriber at all. Best-effort (see github-event-log.js); never throws.
+    // #1827 — prefer the enriched payload (title/html_url filled in for PR
+    // events during phase 2) so the log captures the work item; a dropped or
+    // no-subscriber event never got enriched, so it falls back to the raw
+    // payload and simply persists a partial/absent work item.
     for (const entry of eventLogEntries.values()) {
+      const enriched = enrichedPayloads.get(entry.ghEvent.id);
+      const ghEventForLog = enriched && enriched !== entry.ghEvent.payload
+        ? { ...entry.ghEvent, payload: enriched }
+        : entry.ghEvent;
       githubEventLog.record(
         githubEventLog.buildEventEntry({
-          ghEvent: entry.ghEvent,
+          ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
           outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest }) => ({

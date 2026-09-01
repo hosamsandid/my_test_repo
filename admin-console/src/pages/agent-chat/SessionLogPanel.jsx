@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2, PanelRightClose, Info } from 'lucide-react';
 import { useSSE } from '../../hooks/useSSE';
+import { useAuth } from '../../auth/AuthContext';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import VirtualList from '../../components/VirtualList.jsx';
@@ -8,6 +9,11 @@ import { sumContextTokens, resolveContextTokensForResult } from './context-windo
 import { mergeThinkingTokens } from './system-event.js';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { annotateTaskRows } from './task-todo.js';
+import {
+  HOVER_CORRELATION_COACHMARK,
+  hasSeenCoachmark,
+  markCoachmarkSeen,
+} from './coachmark.js';
 
 /**
  * Right-rail panel showing the structured timeline of internal agent
@@ -75,6 +81,22 @@ export default function SessionLogPanel({
 
   const scrollerRef = useRef(null);
   const [atBottom, setAtBottom]   = useState(true);
+
+  // One-time hover-correlation coachmark (#1808): the cross-panel hover tip used
+  // to be a permanent caption; it now shows once per user and is dismissed with
+  // "Got it", remembered across sessions in localStorage. Start "seen" so a
+  // returning user never gets a flash; the effect flips it on for a newcomer.
+  const { user } = useAuth();
+  const username = user?.username;
+  const [coachmarkSeen, setCoachmarkSeen]           = useState(true);
+  const [coachmarkDismissed, setCoachmarkDismissed] = useState(false);
+  useEffect(() => {
+    setCoachmarkSeen(hasSeenCoachmark(HOVER_CORRELATION_COACHMARK, username));
+  }, [username]);
+  const dismissCoachmark = useCallback(() => {
+    markCoachmarkSeen(HOVER_CORRELATION_COACHMARK, username);
+    setCoachmarkDismissed(true);
+  }, [username]);
 
   // `scopeCorrelationId` may be a single id (a running sub-tab) or an array of
   // every run in a finished Claude session (#555). Normalise to an array (or
@@ -381,25 +403,54 @@ export default function SessionLogPanel({
         </div>
       )}
 
-      {/* Discoverability hint for the cross-panel hover correlation: hovering a
-          chat message dims the log rows it did NOT produce (and vice-versa).
-          Without this caption the dimming reads like a random flicker. Shown
-          only once there is activity to correlate. */}
-      {!loading && agentId && roomId && renderable.length > 0 && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 'var(--eb-space-2)',
-          padding: 'var(--eb-space-2) var(--eb-space-3)',
-          borderBottom: '1px solid var(--eb-border-default)',
-          background: 'var(--eb-bg-surface)',
-          fontSize: 'var(--eb-text-xs)',
-          color: 'var(--eb-text-muted)',
-          flexShrink: 0,
-          lineHeight: 1.4,
-        }}>
-          <Info size={12} style={{ flexShrink: 0 }} />
-          <span>Hover a chat message to highlight the events that produced it — and hover a log entry to highlight its message.</span>
+      {/* Discoverability coachmark for the cross-panel hover correlation:
+          hovering a chat message dims the log rows it did NOT produce (and
+          vice-versa). Without this hint the dimming reads like a random
+          flicker. Shown ONCE per user (dismissed with "Got it", remembered
+          across sessions — #1808), and only once there is activity to
+          correlate. `role="status"` announces it to screen readers on appear;
+          the "Got it" button is natively keyboard-focusable. */}
+      {!loading && agentId && roomId && renderable.length > 0
+        && !coachmarkSeen && !coachmarkDismissed && (
+        <div
+          role="status"
+          aria-label="Tip"
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2) var(--eb-space-3)',
+            borderBottom: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-surface)',
+            fontSize: 'var(--eb-text-xs)',
+            color: 'var(--eb-text-muted)',
+            flexShrink: 0,
+            lineHeight: 1.4,
+          }}
+        >
+          <Info size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
+          <span style={{ flex: 1 }}>
+            Hover a chat message to highlight the events that produced it — and hover a log entry to highlight its message.
+          </span>
+          <button
+            type="button"
+            onClick={dismissCoachmark}
+            style={{
+              flexShrink: 0,
+              background: 'none',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-sm)',
+              color: 'var(--eb-text-secondary)',
+              cursor: 'pointer',
+              fontSize: 'var(--eb-text-xs)',
+              padding: '2px 8px',
+              lineHeight: 1.4,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+          >
+            Got it
+          </button>
         </div>
       )}
 

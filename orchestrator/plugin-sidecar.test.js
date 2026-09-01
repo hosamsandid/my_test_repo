@@ -6,6 +6,8 @@ const {
   sidecarContainerName,
   sidecarLabels,
   sidecarPluginId,
+  manifestHasSidecar,
+  sidecarPluginIds,
   reconcileSidecars,
   reconcileAttachments,
   capabilityAttachments,
@@ -21,6 +23,31 @@ test('sidecar name + labels are deterministic', () => {
 function sidecar(pluginId, name) {
   return { Id: name, Names: [name], Labels: { [PLUGIN_ID_LABEL]: pluginId } };
 }
+
+test('manifestHasSidecar distinguishes broker plugins from command-only ones (#1861)', () => {
+  assert.equal(manifestHasSidecar({ id: 'p', sidecar: { image: 'i', internalPort: 4004 } }), true);
+  // A command-only plugin (#1798): no `sidecar`, declares `commands`.
+  assert.equal(manifestHasSidecar({ id: 'spec-kit', commands: { namespace: 'speckit' } }), false);
+  assert.equal(manifestHasSidecar({ id: 'p' }), false);
+  assert.equal(manifestHasSidecar(null), false);
+});
+
+test('sidecarPluginIds filters command-only plugins out of the reconcile set (#1861)', () => {
+  const manifests = {
+    'podman-sandbox': { id: 'podman-sandbox', sidecar: { image: 'i', internalPort: 4004 } },
+    'spec-kit': { id: 'spec-kit', commands: { namespace: 'speckit' } },
+    netzplan: { id: 'netzplan', sidecar: { image: 'j', internalPort: 4006 } },
+  };
+  assert.deepEqual(sidecarPluginIds(manifests).sort(), ['netzplan', 'podman-sandbox']);
+  // The filtered set is what reconcileSidecars keys on — a command-only plugin
+  // with no live sidecar is therefore never a start target...
+  const { toStart } = reconcileSidecars(sidecarPluginIds(manifests), []);
+  assert.ok(!toStart.includes('spec-kit'));
+  assert.deepEqual(toStart.sort(), ['netzplan', 'podman-sandbox']);
+  // ...and never mistaken for an orphan to stop either.
+  assert.deepEqual(sidecarPluginIds({}), []);
+  assert.deepEqual(sidecarPluginIds(null), []);
+});
 
 test('reconcileSidecars starts installed-but-absent plugins', () => {
   const { toStart, toStop } = reconcileSidecars(['a', 'b'], [sidecar('a', 'aee-plugin-a')]);

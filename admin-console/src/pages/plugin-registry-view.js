@@ -121,6 +121,14 @@ export function installAction(entry, { canManage = false, stackRuntime = null } 
 // The status chip for an installed plugin's broker.
 export function sidecarStatus(entry) {
   if (!entry || !entry.installed) return { state: 'not-installed', label: 'Not installed', tone: 'muted' };
+  // A command-only plugin (#1798) ships no broker sidecar — its manifest omits
+  // the `sidecar` block. There is nothing to run, so a broker-status chip is
+  // misleading: report a neutral state rather than "Broker not running" (#1861).
+  // Only decide this when the manifest is readable; an invalid one (no manifest)
+  // falls through to the running/unknown logic below.
+  if (entry.manifest && !entry.manifest.sidecar) {
+    return { state: 'none', label: 'No broker (command-only)', tone: 'muted' };
+  }
   if (entry.sidecarRunning === true) return { state: 'running', label: 'Broker running', tone: 'ok' };
   if (entry.sidecarRunning === null || entry.sidecarRunning === undefined) {
     // Distinct from "stopped": we could not ask the orchestrator, and claiming

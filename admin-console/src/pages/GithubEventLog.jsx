@@ -87,6 +87,68 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
   return <span style={baseStyle} title={explain || undefined}>{label}</span>;
 }
 
+/* ── Work-item cell (#1827) ────────────────────────────────────────────
+   The PR/issue an event happened on, as `#<n>` linking to GitHub in a new
+   tab when a URL is present; `—` for events with no work item (push, etc.). */
+function WorkItemCell({ workItem }) {
+  if (!workItem || workItem.number == null) {
+    return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  }
+  const text = `#${workItem.number}`;
+  const kindLabel = workItem.kind === 'pr' ? 'PR' : 'issue';
+  const mono = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-sm)' };
+  if (workItem.url) {
+    return (
+      <a
+        href={workItem.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`Open ${kindLabel} ${text} on GitHub`}
+        style={{ ...mono, color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+      >
+        {text}
+      </a>
+    );
+  }
+  return <span style={mono}>{text}</span>;
+}
+
+/* ── Title cell (#1827) — the work-item title, truncated with the full
+   text on hover so a long title never wraps and stretches the row. */
+function TitleCell({ title }) {
+  if (!title) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  return (
+    <span
+      title={title}
+      style={{
+        display: 'block',
+        maxWidth: 340,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {title}
+    </span>
+  );
+}
+
+/* ── Repository cell (#1827) — de-emphasised: the short repo name only, muted
+   and small, with the full `owner/name` on hover. Almost always the same repo,
+   so it should not dominate the row; it stays present for multi-repo stacks. */
+function RepoCell({ repo }) {
+  if (!repo) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  const short = String(repo).split('/').pop();
+  return (
+    <span
+      title={repo}
+      style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}
+    >
+      {short}
+    </span>
+  );
+}
+
 function NoMatchBadge() {
   return (
     <span
@@ -173,7 +235,15 @@ function ProcessedEventsView() {
   const url = `/api/github-events?since=${encodeURIComponent(since)}&limit=2000`;
   const { data, loading, error, refetch } = useApi(url);
 
-  const events = data || [];
+  // Flatten the work-item fields onto each row (#1827) so the DataTable's
+  // text filter and sort — both key-based (row[col.key]) — reach the number
+  // and title, while the cell renderers read the whole `workItem` object.
+  // Best-effort: entries logged before this change simply have no workItem.
+  const rows = useMemo(() => (data || []).map(e => ({
+    ...e,
+    workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
+    workItemTitle: e.workItem ? e.workItem.title : null,
+  })), [data]);
 
   const COLS = [
     // Show a scannable relative phrase ("2 minutes ago") with the exact local
@@ -181,26 +251,18 @@ function ProcessedEventsView() {
     // friendly way as the credential/connection "Added" columns instead of a
     // raw machine timestamp a new user has to decode.
     { key: 'ts', label: 'Time', render: v => <WhenCell iso={v} /> },
-    { key: 'repo', label: 'Repository' },
+    // Work item + Title (#1827): the PR/issue the event happened on, so the log
+    // reads as a work log rather than a machine feed. Both filter/sort by their
+    // flat key; the cells render the whole workItem object.
+    { key: 'workItemNumber', label: 'Work item', render: (_v, row) => <WorkItemCell workItem={row.workItem} /> },
+    { key: 'workItemTitle', label: 'Title', render: v => <TitleCell title={v} /> },
     { key: 'event', label: 'Event', render: (v, row) => {
-      // Lead with the plain-language event name (single source of truth: the
-      // shared eventLabel map used by the trigger editor) so this log reads
-      // for someone who doesn't know the GitHub Events API vocabulary; keep
-      // the raw key as a muted technical sub-line for exact matching. When the
-      // key is unknown, eventLabel() returns the raw key unchanged, so we skip
-      // the duplicate sub-line.
+      // Plain-language event name (single source of truth: the shared eventLabel
+      // map used by the trigger editor) so this log reads for someone who
+      // doesn't know the GitHub Events API vocabulary. The raw technical event
+      // key is no longer shown (#1827) — the friendly name + set label suffice.
       const friendly = eventLabel(v);
-      const showRaw = !!v && friendly !== v;
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-          <span>{friendly || '—'}{row.label ? ` (${row.label})` : ''}</span>
-          {showRaw && (
-            <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              {v}
-            </span>
-          )}
-        </div>
-      );
+      return <span>{friendly || '—'}{row.label ? ` (${row.label})` : ''}</span>;
     } },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {
@@ -214,6 +276,10 @@ function ProcessedEventsView() {
         </div>
       );
     } },
+    // Repository is de-emphasised (#1827): moved to the trailing, secondary
+    // position and rendered as the muted short name (full owner/name on hover),
+    // while staying sortable + filterable (key 'repo' holds the full value).
+    { key: 'repo', label: 'Repository', render: v => <RepoCell repo={v} /> },
   ];
 
   return (
@@ -238,7 +304,7 @@ function ProcessedEventsView() {
       ) : (
         <DataTable
           columns={COLS}
-          data={events}
+          data={rows}
           pageSize={25}
           getRowKey={(r, i) => `${r.eventId}/${i}`}
           emptyText="No GitHub events recorded in this time range."

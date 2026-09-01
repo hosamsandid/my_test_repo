@@ -69,6 +69,58 @@ test('buildEventEntry leaves label null for events without a label payload', () 
   assert.equal(entry.label, null);
 });
 
+test('buildEventEntry captures a PR work item (kind/number/title/url) from payload.pull_request', () => {
+  const ghEvent = {
+    id: '2001', actor: { login: 'frank' }, created_at: '2026-08-01T10:00:00Z',
+    payload: { pull_request: { number: 1817, title: 'Remove the global Triggers page', html_url: 'https://github.com/org/repo/pull/1817' } },
+  };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'pull_request.labeled', outcomes: [] });
+  assert.deepEqual(entry.workItem, {
+    kind: 'pr',
+    number: 1817,
+    title: 'Remove the global Triggers page',
+    url: 'https://github.com/org/repo/pull/1817',
+  });
+});
+
+test('buildEventEntry captures an issue work item from payload.issue', () => {
+  const ghEvent = {
+    id: '2002', actor: { login: 'gina' }, created_at: '2026-08-01T10:05:00Z',
+    payload: { issue: { number: 42, title: 'Surface the work item', html_url: 'https://github.com/org/repo/issues/42' } },
+  };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'issues.opened', outcomes: [] });
+  assert.deepEqual(entry.workItem, {
+    kind: 'issue',
+    number: 42,
+    title: 'Surface the work item',
+    url: 'https://github.com/org/repo/issues/42',
+  });
+});
+
+test('buildEventEntry sets workItem null for an event with no work item (e.g. push)', () => {
+  const ghEvent = { id: '2003', actor: { login: 'hank' }, created_at: '2026-08-01T10:10:00Z', payload: { ref: 'refs/heads/main' } };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'push', outcomes: [] });
+  assert.equal(entry.workItem, null);
+});
+
+test('buildEventEntry work item is null-safe: partial payload never throws, missing fields are null', () => {
+  const ghEvent = { id: '2004', payload: { pull_request: { number: 7 } } };
+  const entry = eventLog.buildEventEntry({ ghEvent, repoFullName: 'org/repo', key: 'pull_request.reopened', outcomes: [] });
+  assert.deepEqual(entry.workItem, { kind: 'pr', number: 7, title: null, url: null });
+  // A pull_request object without a number carries no identifiable work item.
+  assert.equal(
+    eventLog.buildEventEntry({ ghEvent: { id: '2005', payload: { pull_request: {} } }, repoFullName: 'org/repo', key: 'pull_request.opened', outcomes: [] }).workItem,
+    null,
+  );
+});
+
+test('extractWorkItem returns null for absent/oddly-shaped payloads without throwing', () => {
+  assert.equal(eventLog.extractWorkItem(undefined), null);
+  assert.equal(eventLog.extractWorkItem(null), null);
+  assert.equal(eventLog.extractWorkItem({}), null);
+  assert.equal(eventLog.extractWorkItem({ pull_request: 'not-an-object' }), null);
+});
+
 test('record + file round-trip: one JSONL line per entry, day-bucketed', () => {
   eventLog.record(eventLog.buildEventEntry({
     ghEvent: { id: '1', actor: { login: 'a' }, created_at: '2026-06-30T10:00:00Z' },

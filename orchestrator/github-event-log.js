@@ -33,6 +33,11 @@ const RETENTION_DAYS = 7;
 // events (issues and, where GitHub delivers them, PRs) — the same field the
 // poller's labelFilter gate already reads. null for event types that don't
 // carry a label.
+//
+// `workItem` (#1827) captures the PR/issue an event happened on — its kind
+// (`pr`|`issue`), number, title and GitHub URL — so the log can surface "which
+// PR/issue" instead of only the raw event type. null for events with no work
+// item (e.g. `push`). See extractWorkItem for the null-safe extraction.
 function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
   const list = Array.isArray(outcomes) ? outcomes : [];
   return {
@@ -43,9 +48,37 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
     actor: ghEvent.actor?.login || null,
     createdAt: ghEvent.created_at || null,
     label: ghEvent.payload?.label?.name || null,
+    workItem: extractWorkItem(ghEvent.payload),
     outcomes: list,
     noMatchingTrigger: list.length === 0,
   };
+}
+
+// Pull the work item (PR or issue) out of an event payload, best-effort and
+// null-safe (#1827). PR events carry `payload.pull_request` (the poller enriches
+// it with `title`/`html_url` before this runs — see
+// github-poller._enrichPullRequestPayload); issue events carry `payload.issue`
+// natively. A payload with neither (e.g. `push`), or an oddly-shaped one,
+// yields null — this must never throw, since it feeds the strictly best-effort
+// writer. `title`/`url` may individually be null when the payload is partial.
+function extractWorkItem(payload) {
+  try {
+    const p = payload || {};
+    const src = (p.pull_request && typeof p.pull_request === 'object')
+      ? { kind: 'pr', item: p.pull_request }
+      : (p.issue && typeof p.issue === 'object')
+        ? { kind: 'issue', item: p.issue }
+        : null;
+    if (!src || src.item.number == null) return null;
+    return {
+      kind: src.kind,
+      number: src.item.number,
+      title: typeof src.item.title === 'string' ? src.item.title : null,
+      url: typeof src.item.html_url === 'string' ? src.item.html_url : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Append one entry as a JSONL line to the current day's file. Never throws.
@@ -89,6 +122,7 @@ module.exports = {
   EVENT_LOG_DIR,
   RETENTION_DAYS,
   buildEventEntry,
+  extractWorkItem,
   record,
   expiredDayFiles,
   cleanupOldEntries,

@@ -176,6 +176,16 @@ function eventKey(ev) {
 // counts events per (agent, conversationKey), not raw events — so legitimate
 // activity across many PRs doesn't trip the limit, but a back-and-forth on
 // a single PR does.
+// The PR/issue number an event happened on, or null (#1858 — used by the
+// internal-fast-path dedup to key a marker to its work item). Mirrors the
+// synthetic-event shape the fast-path builds (payload.issue.number /
+// payload.pull_request.number).
+function workItemNumber(ghEvent) {
+  const p = ghEvent?.payload || {};
+  const n = p.issue?.number ?? p.pull_request?.number;
+  return Number.isInteger(n) ? n : null;
+}
+
 function conversationKey(ghEvent) {
   const p = ghEvent?.payload || {};
   if (p.pull_request?.number != null) return `pr:${p.pull_request.number}`;
@@ -447,9 +457,15 @@ function requestWithDeadline(makeRequest, { deadlineMs = REQUEST_DEADLINE_MS } =
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
+    // #1858: shared dedup-marker store for the internal label fast-path. When a
+    // human-applied label was already delivered internally (via the Admin
+    // Console → /internal/github-label-applied), the later Events-API delivery
+    // of the same label is dropped here as `internal-dedup`. Absent in unit
+    // tests → no dedup (the poller behaves exactly as before).
+    this.labelMarkers = labelMarkers || null;
     // #678: best-effort callback fired once per merged PR seen in a poll, so the
     // orchestrator can post the work item's token summary. Independent of
     // subscriber fan-out (a merge is a human action nobody need subscribe to).
@@ -848,6 +864,35 @@ class GitHubPoller {
         // listeners (no labelFilter). Not set for history-horizon or
         // label-filter drops, which continue before reaching this point.
         outcome.wakeLabel = sub.labelFilter || null;
+
+        // Internal fast-path dedup (#1858): if this exact (agent, trigger, repo,
+        // number, label) wake was already delivered internally by the plugin
+        // path within the match window, drop this later Events-API duplicate.
+        // Scoped to `*.labeled` — the only events the fast-path delivers. A
+        // consumed marker is time-bounded + consume-once, so a legitimate later
+        // re-label (newer created_at) still fires normally.
+        if (this.labelMarkers && typeof key === 'string' && key.endsWith('.labeled')) {
+          const wl = sub.labelFilter || ghEvent.payload?.label?.name || null;
+          const num = workItemNumber(ghEvent);
+          if (wl && num != null) {
+            const consumed = this.labelMarkers.consume({
+              agentId: sub.agentId, triggerId: sub.triggerId,
+              repo: repoFullName,
+              kind: key.startsWith('pull_request') ? 'pr' : 'issue',
+              number: num, label: wl,
+              eventCreatedAt: ghEvent.created_at,
+            });
+            if (consumed) {
+              console.log(
+                `[GH-Poller] internal-dedup: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+                `(already delivered internally, ${repoFullName}#${num} +${wl})`,
+              );
+              outcome.status = 'dropped';
+              outcome.reason = 'internal-dedup';
+              continue;
+            }
+          }
+        }
 
         deliverables.push({
           agentId: sub.agentId,
@@ -1324,6 +1369,7 @@ module.exports = {
   prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
+  workItemNumber,
   labelFilterMatches,
   detectMergedPrs,
   effectiveHorizon,

@@ -7929,6 +7929,24 @@ async function orchestratorGetJson(pathname) {
   return { status: resp.status, ok: resp.ok, body };
 }
 
+// Internal label fast-path (#1858): after a human-applied flow label is written
+// through the GitHub Issues plugin (writeLabel(...,'add')), tell the
+// orchestrator so it wakes the poller-subscribed listener immediately rather
+// than waiting on the flaky GitHub Events API. Best-effort, fire-and-forget —
+// the label is already on GitHub, so a failure here just falls back to the
+// poller (the pre-#1858 behaviour). Label→trigger resolution stays entirely in
+// the orchestrator (single source of truth); the console only reports the fact.
+function notifyGithubLabelApplied({ repo, number, label, kind, actor }) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  fetch(`${orchestratorUrl}/internal/github-label-applied`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo, number, label, kind: kind || 'issue', actor: actor || null }),
+  })
+    .then((r) => { if (!r.ok) console.warn(`[label-fastpath] orchestrator responded ${r.status}`); })
+    .catch((err) => console.warn(`[label-fastpath] notify failed: ${err.message}`));
+}
+
 // GET /api/plugins/:id/scopes — the scopes the plugin was granted to, derived
 // (in plugin-ui-proxy.deriveScopeList) ONLY from grants that already exist and
 // then narrowed to the scopes the caller can see. Discovery is not a new read
@@ -8053,9 +8071,34 @@ function pluginUiProxy(req, res) {
       headers['content-length'] = String(payload.length);
     }
 
+    // #1858: a successful label-ADD through the GitHub Issues plugin (its UI
+    // posts to `/api/label` with { repo, number, label, action }) is the fast-
+    // path trigger. Detected here on the request so both the #1730 workflow-
+    // trigger buttons and manual labeling — both go through writeLabel — are
+    // covered; the orchestrator is notified only once the upstream write
+    // succeeds (2xx). Scoped to the github-issues plugin (the dominant human-
+    // labeling path); labels set in the GitHub web UI stay poller-only.
+    const isLabelAdd = id === 'github-issues'
+      && req.method === 'POST'
+      && subPath === '/api/label'
+      && parsedBody
+      && req.body && req.body.action === 'add'
+      && typeof req.body.repo === 'string'
+      && Number.isInteger(req.body.number)
+      && typeof req.body.label === 'string' && req.body.label.trim();
+
     const upstream = lib.request(
       { hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers },
       (up) => {
+        if (isLabelAdd && up.statusCode >= 200 && up.statusCode < 300) {
+          notifyGithubLabelApplied({
+            repo: req.body.repo,
+            number: req.body.number,
+            label: String(req.body.label).trim(),
+            kind: 'issue', // the GitHub Issues plugin lists issues
+            actor: viewer.sub || null,
+          });
+        }
         res.status(up.statusCode || 502);
         for (const [k, v] of Object.entries(up.headers || {})) {
           if (k.toLowerCase() === 'transfer-encoding') continue;

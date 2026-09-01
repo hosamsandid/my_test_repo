@@ -33,7 +33,15 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const flowEmit = require("./flow-emit");
+const labelFastPath = require("./github-label-fastpath");
+const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+
+// Shared in-memory dedup markers for the internal label fast-path (#1858). The
+// POST /internal/github-label-applied handler writes a marker per woken
+// listener; the poller (given the same instance) consumes it in _fanOutBatch so
+// the later Events-API delivery of the same label doesn't wake the agent twice.
+const labelDedupMarkers = new LabelDedupMarkers();
 const hillClimbMetrics = require("./hill-climb-metrics");
 const hillClimbSweep = require("./hill-climb-sweep");
 const hillClimbCards = require("./hill-climb-cards");
@@ -11707,6 +11715,88 @@ async function main() {
       return;
     }
 
+    // ── Internal label fast-path (#1858) ──────────────────────────────────
+    // POST /internal/github-label-applied { repo, number, kind, label, actor }.
+    // The Admin Console calls this right after a human-applied label write
+    // succeeds through the GitHub Issues plugin (writeLabel(...,'add')). The
+    // GitHub Events API drops/coalesces label events under churn, so instead of
+    // waiting for the poller to (maybe) see the `*.labeled` event, we wake the
+    // POLLER-SUBSCRIBED listener directly and leave a dedup marker so the
+    // poller drops the later duplicate. The label itself is unchanged on GitHub
+    // (the human already applied it) — this path does NOT stamp any label. The
+    // target trigger stays transport:'github' (no config change).
+    if (req.method === 'POST' && req.url === '/internal/github-label-applied') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', async () => {
+        let parsed;
+        try {
+          parsed = labelFastPath.validateLabelAppliedRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { repo, number, kind, label, actor } = parsed.value;
+          const key = labelFastPath.eventKeyForKind(kind);
+          const agents = listAgentIds().map((aid) => ({
+            agentId: aid,
+            enabled: loadAgentConfig(aid)?.enabled !== false,
+            triggers: loadTriggers(aid),
+          }));
+          const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+          const now = new Date().toISOString();
+          const ghEvent = labelFastPath.buildSyntheticEvent({
+            repo, label, kind, number, actor,
+            eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
+            now,
+          });
+          for (const l of listeners) {
+            // Enqueue first (immediate wake), then arm the dedup marker so the
+            // poller's later delivery of the same label is dropped.
+            enqueuePending(l.agentId, {
+              ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+              source: 'internal-plugin',
+            });
+            labelDedupMarkers.add({
+              agentId: l.agentId, triggerId: l.triggerId,
+              repo, kind, number, label, appliedAt: now,
+            });
+            console.log(
+              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} ` +
+              `by ${actor || 'console'} → agent=${l.agentId} trigger=${l.triggerId}`);
+          }
+          // Same transparency log the poller writes, tagged with the delivery
+          // path so operators see an honest "delivered internally" line.
+          githubEventLog.record({
+            ...githubEventLog.buildEventEntry({
+              ghEvent, repoFullName: repo, key,
+              outcomes: listeners.map((l) => ({
+                agentId: l.agentId, triggerId: l.triggerId,
+                status: 'delivered', reason: null, digest: false, wakeLabel: label,
+              })),
+            }),
+            source: 'internal-plugin',
+          });
+          if (listeners.length === 0) {
+            console.log(
+              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, matched: listeners.length, listeners }));
+        } catch (err) {
+          console.error(`[Orchestrator] label-fastpath error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Team roster for the loop verifier (#933) ──────────────────────────
     // A team loop agent with an empty `verify` reads its sibling roster to
     // enforce a *different* verifier (concept §4.6 decision 1). Read-only.
@@ -14582,6 +14672,7 @@ async function main() {
     enqueuePending, // #185 Phase 2: orchestrator owns the queue (control plane when isolated)
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
+    labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
   });
   ghPoller.start();
 

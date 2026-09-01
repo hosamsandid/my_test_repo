@@ -4375,6 +4375,27 @@ app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
   });
 });
 
+// Provisioned custom slash commands for an agent (#1796, foundation for #1797).
+// Returns [{ command, name, namespace, skill, invocation, description }] read
+// from the agent's seeded-commands.json — the truth the composer autocomplete
+// (#1797) consumes. Proxies the orchestrator, which owns the manifest and its
+// state-dir migration; a downstream reader gets name + description per command.
+app.get('/api/agents/:agentId/commands', apiLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/commands`);
+    const body = await resp.json().catch(() => null);
+    if (!resp.ok || !body || body.ok === false) {
+      return res.status(resp.status === 200 ? 502 : resp.status).json({ error: (body && body.error) || 'Reading provisioned commands failed' });
+    }
+    res.json({ agentId, commands: Array.isArray(body.commands) ? body.commands : [] });
+  } catch (err) {
+    console.error(`[api] commands ${agentId} failed: ${err.message}`);
+    res.status(502).json({ error: 'Reading provisioned commands failed' });
+  }
+});
+
 // Directory listing inside the mounted folder.
 app.get('/api/agents/:agentId/context/tree', apiLimiter, async (req, res) => {
   const { agentId } = req.params;

@@ -92,6 +92,7 @@ shipped behaviour.
 | [process-template-format.md](process-template-format.md) | Schema of the portable process-template bundle |
 | [wizard-flow-integration.md](wizard-flow-integration.md) | How the Team wizard and the Flow designer share one artifact |
 | [per-agent-volume-isolation.md](per-agent-volume-isolation.md) | Per-agent filesystem and volume isolation |
+| [slash-commands.md](slash-commands.md) | Custom Claude Code slash commands: skill-carried provisioning, `.claude/commands/` projection, headless verification |
 | [agent-knowledge/](agent-knowledge/) | Seeded conventions, entities and facts for agent knowledge bases |
 
 ### The knowledge subsystem

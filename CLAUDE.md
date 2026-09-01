@@ -311,6 +311,7 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `orchestrator/agent-delete-plan.js` | Pure fast/background-delete decisions (#1791): `isGracefulDeleteRole(role)` (only `bp-instance` keeps the graceful container-exit window) + `TeardownRegistry` (in-memory "teardown in progress" guard the delete fast phase arms and the background phase clears, so a same-id re-create can't collide with an in-flight teardown whose config.json is already gone — #1525). `DELETE /internal/agents/:id` returns after a fast phase (stop → plugin reap → delete config), reaping network/volume/Matrix in the background |
 | `orchestrator/teams-store.js` | Source of truth for the human **Team** data model (pure factory) |
 | `orchestrator/skill-grants.js` | Source of truth for the team-owned skill grant (`effectiveSkills`) |
+| `orchestrator/skill-commands.js` | Pure core for custom slash-command provisioning (#1796): parse a `commands/*.md` command's `description`, namespace + project it into `.claude/commands/<skill>/`, build the `seeded-commands.json` manifest + the `GET /api/agents/:id/commands` list |
 | `orchestrator/credential-resolution.js` | Pure personal-credential resolution decision core (#1569 Phase 3): `resolveAgentOwnerId` (owner from persisted config; team-member resolves to parent team's owner), `findPersonalCredential` (owner's usable personal index entry), `resolveCredential` (personal-preference + refuse-on-missing for attributed writes; shared-eligible for reads/polling; no-op when no `ownerId`), `selectAgentIdsForOwner` (#1570 Phase 4: owner-scoped respawn selection — the agents whose resolved credential is a given human's personal one), `selectPersonalCredentialIds` (#1571 Phase 5: offboarding — the ids of a departing human's personal credentials to auto-delete; a team/system entry is never selected) |
 | `orchestrator/prompt-assembly.js` | Pure single source for system-prompt composition (ordering, gating, memory hint) |
 | `orchestrator/context-browse.js` | Pure guard/program/parsing for browsing the `/context` mount |
@@ -386,6 +387,26 @@ Skills live in the skill-pool volume (`agent-studio_claude-workspace`) under `sk
 ### Two-tier skill pool
 
 Resolved **team-first then global** at seeding. **Global**: `/template-workspace/skills/` (orchestrator RO) = `/pool/skills/` (admin-console RW), System-Admin-managed, all teams. **Team**: `/workspace/teams/<teamId>/skills/` (RW), Team-Admin-managed, that team only. `orchestrator/skill-source.js` (`makeSkillSourceResolver`) copies each grant name from the team's pool when present, else global. `/api/skills` tags `source` = `pool`/`team`/`agent`; `POST /api/skills/promote-to-global` lifts a team skill into the global pool.
+
+### Custom slash commands (#1796)
+
+A granted skill may **carry Claude Code slash commands**: a `commands/*.md`
+subdirectory in the skill dir. Wherever the skill is seeded or (de)activated, the
+pure `orchestrator/skill-commands.js` projects those command files into the
+agent workspace's `.claude/commands/<skill-slug>/<name>.md` (invoked as
+`/<skill>:<name>`) as an **additive file sync, no respawn** — same path as skill
+files (`seedAgentWorkspace` / `_syncSkillIntoWorkspace`, mirrored into the
+isolated volume). The optional `description` front-matter is parsed and written
+to `/workspace/agents/<id>/.agent-studio/seeded-commands.json`, exposed via
+`GET /api/agents/:id/commands` for the #1797 autocomplete. There is **no** new
+grant type and no ad-hoc authoring — commands ride the team-scoped skill grant.
+On the **chat path only** (`agent-entrypoint.py`), a provisioned `/command`
+expands natively in `claude --print` (verified — unlike the interactive-only
+`AskUserQuestion`, #1712), and an **unknown** `/token` is neutralised (a leading
+space is prepended) so it is answered as plain text instead of the CLI's
+`Unknown command` short-circuit (AC2); a `slash.command` session-log event
+records recognised/unknown. Full reference + headless findings:
+`docs/slash-commands.md`.
 
 ### Knowledge digest (guaranteed context injection)
 

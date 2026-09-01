@@ -3963,5 +3963,74 @@ class MigrateStateDir(unittest.TestCase):
         self.assertTrue((ws / ".agent-studio" / "f.json").exists())
 
 
+class SlashCommands(unittest.TestCase):
+    """Custom slash-command discovery + chat-prompt preparation (#1796)."""
+
+    def _commands_dir(self):
+        d = Path(tempfile.mkdtemp()) / ".claude" / "commands"
+        d.mkdir(parents=True)
+        return d
+
+    def test_list_tokens_flat_and_namespaced(self):
+        d = self._commands_dir()
+        (d / "greet.md").write_text("body", encoding="utf-8")
+        (d / ".hidden.md").write_text("body", encoding="utf-8")   # ignored
+        (d / "notes.txt").write_text("body", encoding="utf-8")     # ignored
+        ns = d / "spec-kit"
+        ns.mkdir()
+        (ns / "plan.md").write_text("body", encoding="utf-8")
+        (ns / "review.md").write_text("body", encoding="utf-8")
+        tokens = entrypoint._list_slash_command_tokens(d)
+        self.assertEqual(tokens, {"greet", "spec-kit:plan", "spec-kit:review"})
+
+    def test_list_tokens_missing_dir_is_empty(self):
+        self.assertEqual(
+            entrypoint._list_slash_command_tokens(Path("/no/such/dir/commands")),
+            set(),
+        )
+
+    def test_leading_slash_token(self):
+        self.assertEqual(entrypoint._leading_slash_token("/greet Alice"), "greet")
+        self.assertEqual(entrypoint._leading_slash_token("/spec-kit:plan a b"), "spec-kit:plan")
+        self.assertEqual(entrypoint._leading_slash_token("  /greet\nx"), "greet")
+        self.assertEqual(entrypoint._leading_slash_token("/greet"), "greet")
+        self.assertEqual(entrypoint._leading_slash_token("/"), "")
+        self.assertIsNone(entrypoint._leading_slash_token("please 3/greet"))
+        self.assertIsNone(entrypoint._leading_slash_token("hello"))
+        self.assertIsNone(entrypoint._leading_slash_token(""))
+
+    def test_prepare_known_command_passes_verbatim(self):
+        out = entrypoint._prepare_chat_prompt("/spec-kit:plan payments", {"spec-kit:plan"})
+        self.assertEqual(out, {
+            "prompt": "/spec-kit:plan payments", "isSlash": True,
+            "command": "spec-kit:plan", "recognized": True,
+        })
+
+    def test_prepare_unknown_command_is_neutralized(self):
+        out = entrypoint._prepare_chat_prompt("/nope do a thing", {"spec-kit:plan"})
+        self.assertEqual(out["prompt"], " /nope do a thing")  # AC2 plain-text passthrough
+        self.assertTrue(out["isSlash"])
+        self.assertFalse(out["recognized"])
+        self.assertEqual(out["command"], "nope")
+
+    def test_prepare_bare_slash_is_neutralized(self):
+        out = entrypoint._prepare_chat_prompt("/ what", set())
+        self.assertEqual(out["prompt"], " / what")
+        self.assertIsNone(out["command"])
+        self.assertFalse(out["recognized"])
+
+    def test_prepare_plain_message_untouched(self):
+        out = entrypoint._prepare_chat_prompt("compute 3/4 please", {"greet"})
+        self.assertEqual(out, {
+            "prompt": "compute 3/4 please", "isSlash": False,
+            "command": None, "recognized": False,
+        })
+
+    def test_prepare_multiline_first_line_command(self):
+        out = entrypoint._prepare_chat_prompt("/greet Bob\nsecond line", {"greet"})
+        self.assertTrue(out["recognized"])
+        self.assertEqual(out["prompt"], "/greet Bob\nsecond line")
+
+
 if __name__ == "__main__":
     unittest.main()

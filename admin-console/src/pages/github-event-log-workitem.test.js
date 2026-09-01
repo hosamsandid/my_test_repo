@@ -19,7 +19,7 @@ test('AC3: the Event cell no longer renders the raw event-key sub-line', () => {
 });
 
 test('AC4: a Work item column links the PR/issue via WorkItemCell', () => {
-  assert.match(src, /label: 'Work item', render: \(_v, row\) => <WorkItemCell workItem={row\.workItem} \/>/);
+  assert.match(src, /label: 'Work item', render: \(_v, row\) => <WorkItemCell workItem={row\.workItem} repo={row\.repo} \/>/);
   // The link opens in a new tab with rel="noopener".
   assert.match(src, /target="_blank"\s*\n\s*rel="noopener noreferrer"/);
 });

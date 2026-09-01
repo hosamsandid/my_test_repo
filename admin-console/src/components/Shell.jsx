@@ -19,7 +19,6 @@ import {
   PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
 } from './plugin-nav';
 import BrandMark from './BrandMark';
-import AssistModelSelector from './AssistModelSelector';
 import AccountMenu from './AccountMenu';
 import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
@@ -630,7 +629,6 @@ export default function Shell({ children }) {
               <HelpCircle size={16} />
               <span>Help</span>
             </button>
-            <AssistModelSelector />
             <button
               onClick={toggleLightDark}
               title={theme === 'admin-light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}

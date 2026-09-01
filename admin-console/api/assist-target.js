@@ -101,7 +101,7 @@ function resolveAssistSelection({ scope, endpoints = [], selection = {}, require
     // fall back to endpoints[0]; that silent default is the billing bug (§4.5.4).
     return { selectionError: {
       status: 400, code: 'assist-model-not-selected',
-      error: 'Select an assist model in the header before running AI helpers.',
+      error: 'Select an assist model in Settings → Model before running AI helpers.',
     } };
   }
   // Providers are registered but none is selectable for this caller — fail

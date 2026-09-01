@@ -132,6 +132,10 @@ Pure decision logic is unit-tested both sides: `orchestrator/skill-commands.js`
 - Trigger-invoked slash commands (deferred; the design does not preclude them).
 - Composer autocomplete / discoverability UI → **#1797** (consumes the
   provisioning output above).
-- Packaging a specific command set such as spec-kit → **#1798** (ships as a
-  bundle carrying `commands/`, riding this same seam).
+- Packaging a specific command set such as spec-kit → **shipped in #1798**,
+  though not as a skill-carried bundle: spec-kit ships as a **command-only
+  plugin** (a new `commands`/`fetch` plugin-manifest variant, no sidecar/CLI —
+  see `docs/plugin-system-concept.md`), which reuses *this* projection machinery
+  (`projectSkillCommands` → `.claude/commands/<ns>/`, invoked `/speckit:…`) but
+  drives it from the plugin grant rather than the skill grant.
 - A console authoring UI for creating/editing command files.

@@ -66,10 +66,16 @@ export default function VirtualList({
     if (!scroller || !inner) return;
     const scRect = scroller.getBoundingClientRect();
     const inRect = inner.getBoundingClientRect();
-    const scrollTop = scRect.top - inRect.top;
+    // getBoundingClientRect returns sub-pixel floats; round to integers and
+    // compare with a 1px tolerance. Without this, tiny fractional jitter
+    // (accumulated fractional row heights, HiDPI/zoom device-pixel rounding)
+    // makes the strict `===` below never reach a fixed point, so the
+    // per-commit re-pin below setMetrics → re-render → measure loops forever
+    // → React #185 "Maximum update depth exceeded" (#1710 regression).
+    const scrollTop = Math.round(scRect.top - inRect.top);
     const viewportHeight = scroller.clientHeight;
     setMetrics(prev =>
-      prev.scrollTop === scrollTop && prev.viewportHeight === viewportHeight
+      Math.abs(prev.scrollTop - scrollTop) < 1 && prev.viewportHeight === viewportHeight
         ? prev
         : { scrollTop, viewportHeight });
   }, [scrollerRef]);
@@ -158,8 +164,18 @@ export default function VirtualList({
     if (stickToBottom) {
       const scroller = scrollerRef.current;
       if (scroller) {
-        scroller.scrollTop = scroller.scrollHeight;
-        measureViewport();
+        // Only re-pin while we are still measurably short of the bottom. The
+        // distance-to-bottom strictly shrinks as off-screen rows mount and are
+        // measured, so this terminates at ≤1px — a hard bound on the
+        // re-pin → measureViewport → setMetrics → re-render loop. Writing
+        // scrollTop unconditionally every commit (and always re-measuring)
+        // could otherwise never settle on a sub-pixel/fractional layout and
+        // exceed React's update-depth limit (#185).
+        const maxTop = scroller.scrollHeight - scroller.clientHeight;
+        if (maxTop - scroller.scrollTop > 1) {
+          scroller.scrollTop = scroller.scrollHeight;
+          measureViewport();
+        }
       }
     }
     if (changed) setMeasureTick(t => t + 1);

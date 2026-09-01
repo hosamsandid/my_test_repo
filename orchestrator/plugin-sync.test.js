@@ -109,6 +109,66 @@ test('same id at the same granularity is a no-op (already synced)', () => {
   assert.deepEqual(out, { write: [], remove: [], connect: [], disconnect: [] });
 });
 
+// ── Command-only plugins (#1798): planWorkspaceSync skips them ────────────────
+// Command-only plugins have no sidecar/cli: command file projection is done by
+// _syncPluginIntoWorkspace (orchestrator.js) AFTER planWorkspaceSync runs; the
+// planner itself must produce empty writes/removes/connect/disconnect for them.
+
+const COMMAND_MANIFEST = {
+  id: 'spec-kit',
+  commands: { namespace: 'speckit' },
+  fetch: { source: 'github', repo: 'github/spec-kit', ref: 'main' },
+  // intentionally no cli / no sidecar
+};
+const COMMAND_MANIFESTS = { 'spec-kit': COMMAND_MANIFEST };
+
+function commandPlan(prevGrant, nextGrant, agentCfg = MEMBER) {
+  return planWorkspaceSync({ agentCfg, prevGrant, nextGrant, manifests: COMMAND_MANIFESTS, resolveScopeId, mintToken, networkNameFor });
+}
+
+test('command-only plugin grant produces no writes, no removes, no network connect', () => {
+  const out = commandPlan([], [{ id: 'spec-kit', scopeGranularity: 'team' }]);
+  assert.deepEqual(out.write, []);
+  assert.deepEqual(out.remove, []);
+  assert.deepEqual(out.connect, []);
+  assert.deepEqual(out.disconnect, []);
+});
+
+test('command-only plugin revoke produces no removes, no network disconnect', () => {
+  const out = commandPlan([{ id: 'spec-kit', scopeGranularity: 'team' }], []);
+  assert.deepEqual(out.write, []);
+  assert.deepEqual(out.remove, []);
+  assert.deepEqual(out.connect, []);
+  assert.deepEqual(out.disconnect, []);
+});
+
+test('command-only plugin same-granularity is a no-op', () => {
+  const g = [{ id: 'spec-kit', scopeGranularity: 'team' }];
+  const out = commandPlan(g, g);
+  assert.deepEqual(out, { write: [], remove: [], connect: [], disconnect: [] });
+});
+
+test('mixed manifest set: cli plugin handled normally alongside a command-only plugin', () => {
+  const mixed = { 'dummy-echo': MANIFEST, 'spec-kit': COMMAND_MANIFEST };
+  const out = planWorkspaceSync({
+    agentCfg: MEMBER,
+    prevGrant: [],
+    nextGrant: [
+      { id: 'dummy-echo', scopeGranularity: 'team' },
+      { id: 'spec-kit', scopeGranularity: 'team' },
+    ],
+    manifests: mixed,
+    resolveScopeId, mintToken, networkNameFor,
+  });
+  // Only the cli plugin produces writes + network.
+  const writePaths = out.write.map((w) => w.path);
+  assert.ok(writePaths.includes('.agent-studio/bin/aee-echo'));
+  assert.ok(writePaths.includes('.agent-studio/plugins/dummy-echo.json'));
+  // No spec-kit bin or config.
+  assert.ok(!writePaths.some((p) => p.includes('spec-kit')));
+  assert.deepEqual(out.connect, [{ pluginId: 'dummy-echo', network: 'aee-net-t1-dev' }]);
+});
+
 test('granularity flip re-mints the token + rewrites ONLY the config — additive, no orphan-removal, network kept', () => {
   const out = plan(
     [{ id: 'dummy-echo', scopeGranularity: 'team' }],

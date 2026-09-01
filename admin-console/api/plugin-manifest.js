@@ -26,8 +26,8 @@
 //   {
 //     pluginVersion: 1,
 //     id, name, description,
-//     sidecar: { image, env?, capabilities?, internalPort },
-//     cli: { name, entrypoint, runtime },
+//     sidecar: { image, env?, capabilities?, internalPort },  // required unless commands present
+//     cli: { name, entrypoint, runtime },                     // required unless commands present
 //     credentials?: [ { key, description?, required? } ],
 //     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
@@ -36,6 +36,8 @@
 //     requiresApproval?: [ "<subcommand>" ],
 //     policy?: { "<subcommand>": { scopes?: ["team"|"agent"], requiresFlowFinal?: bool } },
 //     ui?: { title?, global?, routes?: [ { path, minRole } ] },
+//     commands?: { namespace?: string },       // command-only plugin (#1798): no sidecar/cli needed
+//     fetch?: { source: "github", repo: string, ref: string, commandsDir?: string },
 //     companionSkill?, promptLine?, version?,
 //   }
 
@@ -67,8 +69,12 @@ const UI_ROLES = Object.freeze(['team-member', 'team-admin', 'system-admin']);
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;               // registry dir name
 const CLI_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;         // agent-facing command
+const COMMANDS_NAMESPACE_RE = /^[a-z0-9][a-z0-9-]{0,62}$/; // command namespace slug
 const PORT_MIN = 1;
 const PORT_MAX = 65535;
+
+// Allowed content sources for install-time fetch (#1798).
+const FETCH_SOURCES = Object.freeze(['github']);
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -106,12 +112,61 @@ function validatePluginManifest(input) {
   if (!isNonEmptyString(input.name)) errors.push('name is required');
   if (!isNonEmptyString(input.description)) errors.push('description is required');
 
+  // ── commands (optional; makes sidecar+cli optional) ──────────────────────
+  // A "command-only" plugin (#1798) ships .claude/commands/* files on grant and
+  // carries no broker sidecar or CLI facade — spec-kit is the first example.
+  // When `commands` is present, `sidecar` and `cli` become optional.
+  let commands;
+  if (input.commands !== undefined) {
+    if (!isPlainObject(input.commands)) {
+      errors.push('commands must be an object');
+    } else {
+      commands = {};
+      if (input.commands.namespace !== undefined) {
+        if (!isNonEmptyString(input.commands.namespace) || !COMMANDS_NAMESPACE_RE.test(input.commands.namespace)) {
+          errors.push('commands.namespace must be a slug matching /^[a-z0-9][a-z0-9-]{0,62}$/');
+        } else {
+          commands.namespace = input.commands.namespace;
+        }
+      }
+    }
+  }
+  const isCommandOnly = commands !== undefined && !isPlainObject(input.sidecar);
+
+  // ── fetch (optional; install-time content source) ────────────────────────
+  // Declares where the orchestrator fetches command files at install time so
+  // the content is pinned to a specific version and not pre-baked into the image.
+  let pluginFetch;
+  if (input.fetch !== undefined) {
+    if (!isPlainObject(input.fetch)) {
+      errors.push('fetch must be an object');
+    } else {
+      const fetchErrors = [];
+      if (!isNonEmptyString(input.fetch.source) || !FETCH_SOURCES.includes(input.fetch.source)) {
+        fetchErrors.push(`fetch.source must be one of: ${FETCH_SOURCES.join(', ')}`);
+      }
+      if (!isNonEmptyString(input.fetch.repo)) fetchErrors.push('fetch.repo is required');
+      if (!isNonEmptyString(input.fetch.ref)) fetchErrors.push('fetch.ref is required');
+      for (const e of fetchErrors) errors.push(e);
+      if (fetchErrors.length === 0) {
+        pluginFetch = { source: input.fetch.source, repo: input.fetch.repo.trim(), ref: input.fetch.ref.trim() };
+        if (input.fetch.commandsDir !== undefined) {
+          if (!isNonEmptyString(input.fetch.commandsDir)) {
+            errors.push('fetch.commandsDir must be a non-empty string');
+          } else {
+            pluginFetch.commandsDir = input.fetch.commandsDir.trim();
+          }
+        }
+      }
+    }
+  }
+
   // ── sidecar ────────────────────────────────────────────────────────────
   const sc = input.sidecar;
   const sidecar = {};
-  if (!isPlainObject(sc)) {
-    errors.push('sidecar is required and must be an object');
-  } else {
+  if (!isCommandOnly && !isPlainObject(sc)) {
+    errors.push('sidecar is required and must be an object (omit for command-only plugins that declare commands)');
+  } else if (isPlainObject(sc)) {
     if (!isNonEmptyString(sc.image)) errors.push('sidecar.image is required');
     else sidecar.image = sc.image.trim();
 
@@ -153,10 +208,11 @@ function validatePluginManifest(input) {
 
   // ── cli ────────────────────────────────────────────────────────────────
   const cliIn = input.cli;
-  const cli = {};
-  if (!isPlainObject(cliIn)) {
-    errors.push('cli is required and must be an object');
-  } else {
+  let cli;
+  if (!isCommandOnly && !isPlainObject(cliIn)) {
+    errors.push('cli is required and must be an object (omit for command-only plugins that declare commands)');
+  } else if (isPlainObject(cliIn)) {
+    cli = {};
     if (!isNonEmptyString(cliIn.name) || !CLI_NAME_RE.test(cliIn.name)) {
       errors.push('cli.name must be a slug matching /^[a-z0-9][a-z0-9-]{0,62}$/');
     } else cli.name = cliIn.name;
@@ -397,13 +453,15 @@ function validatePluginManifest(input) {
     id: input.id,
     name: input.name.trim(),
     description: input.description.trim(),
-    sidecar,
-    cli,
     credentials,
     platforms,
     scopes,
     requiresApproval,
   };
+  if (sidecar && Object.keys(sidecar).length > 0) manifest.sidecar = sidecar;
+  if (cli) manifest.cli = cli;
+  if (commands !== undefined) manifest.commands = commands;
+  if (pluginFetch) manifest.fetch = pluginFetch;
   if (defaultScopeGranularity) manifest.defaultScopeGranularity = defaultScopeGranularity;
   if (quota) manifest.quota = quota;
   if (policy) manifest.policy = policy;
@@ -449,6 +507,7 @@ module.exports = {
   PLATFORMS,
   SCOPE_GRANULARITIES,
   UI_ROLES,
+  FETCH_SOURCES,
   validatePluginManifest,
   grantableGranularities,
   defaultGranularity,

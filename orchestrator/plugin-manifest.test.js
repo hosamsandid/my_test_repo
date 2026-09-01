@@ -398,6 +398,117 @@ test('the shipped dummy-echo manifest (plugins/dummy-echo) is valid', () => {
   assert.equal(manifest.cli.name, 'aee-echo');
 });
 
+// ── Command-only plugin (#1798): no sidecar / no cli ─────────────────────────
+
+function commandOnlyBase() {
+  return {
+    pluginVersion: 1,
+    id: 'spec-kit',
+    name: 'spec-kit',
+    description: 'Spec-driven development toolkit.',
+    commands: { namespace: 'speckit' },
+    fetch: { source: 'github', repo: 'github/spec-kit', ref: 'main' },
+    scopes: ['team'],
+  };
+}
+
+test('accepts a command-only manifest with commands + fetch (no sidecar / no cli)', () => {
+  const { ok, errors, manifest } = validatePluginManifest(commandOnlyBase());
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  assert.equal('sidecar' in manifest, false);
+  assert.equal('cli' in manifest, false);
+  assert.deepEqual(manifest.commands, { namespace: 'speckit' });
+  assert.deepEqual(manifest.fetch, { source: 'github', repo: 'github/spec-kit', ref: 'main' });
+});
+
+test('commands with no explicit namespace is accepted and carries an empty commands object', () => {
+  const input = { ...commandOnlyBase() };
+  delete input.commands.namespace;
+  const { ok, manifest } = validatePluginManifest(input);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.commands, {});
+});
+
+test('commands.namespace must be a valid slug', () => {
+  const r = validatePluginManifest({ ...commandOnlyBase(), commands: { namespace: 'Bad Ns!' } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /commands.namespace/.test(e)));
+});
+
+test('rejects commands as a non-object', () => {
+  const r = validatePluginManifest({ ...commandOnlyBase(), commands: 'speckit' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /commands must be an object/.test(e)));
+});
+
+test('fetch.source must be a known value', () => {
+  const r = validatePluginManifest({ ...commandOnlyBase(), fetch: { source: 'bitbucket', repo: 'x/y', ref: 'main' } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /fetch.source/.test(e)));
+});
+
+test('fetch.repo and fetch.ref are required', () => {
+  const noRepo = validatePluginManifest({ ...commandOnlyBase(), fetch: { source: 'github', ref: 'main' } });
+  assert.ok(noRepo.errors.some((e) => /fetch.repo is required/.test(e)));
+
+  const noRef = validatePluginManifest({ ...commandOnlyBase(), fetch: { source: 'github', repo: 'x/y' } });
+  assert.ok(noRef.errors.some((e) => /fetch.ref is required/.test(e)));
+});
+
+test('fetch.commandsDir is accepted when a non-empty string', () => {
+  const { ok, manifest } = validatePluginManifest({ ...commandOnlyBase(), fetch: { source: 'github', repo: 'x/y', ref: 'v1', commandsDir: '.claude/commands' } });
+  assert.equal(ok, true);
+  assert.equal(manifest.fetch.commandsDir, '.claude/commands');
+});
+
+test('rejects fetch.commandsDir as an empty string', () => {
+  const r = validatePluginManifest({ ...commandOnlyBase(), fetch: { source: 'github', repo: 'x/y', ref: 'v1', commandsDir: '' } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /fetch.commandsDir/.test(e)));
+});
+
+test('rejects fetch as a non-object', () => {
+  const r = validatePluginManifest({ ...commandOnlyBase(), fetch: 'github:main' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /fetch must be an object/.test(e)));
+});
+
+test('sidecar-only manifest still rejects missing cli', () => {
+  const noCli = { ...commandOnlyBase() };
+  delete noCli.commands;
+  noCli.sidecar = { image: 'img:1', internalPort: 8080 };
+  const r = validatePluginManifest(noCli);
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /cli is required/.test(e)));
+});
+
+test('a full sidecar+cli plugin still includes sidecar and cli on the normalized manifest', () => {
+  const { ok, manifest } = validatePluginManifest(base());
+  assert.equal(ok, true);
+  assert.ok(manifest.sidecar && manifest.sidecar.image);
+  assert.ok(manifest.cli && manifest.cli.name);
+});
+
+// ── ACCEPTANCE: the shipped spec-kit manifest validates end to end ────────────
+test('the shipped spec-kit manifest (plugins/spec-kit) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'spec-kit', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // Command-only: no sidecar, no cli.
+  assert.equal('sidecar' in manifest, false);
+  assert.equal('cli' in manifest, false);
+  // Privilege-less: empty credentials, team scope.
+  assert.deepEqual(manifest.credentials, []);
+  assert.deepEqual(manifest.scopes, ['team']);
+  // Commands and fetch wired up.
+  assert.ok(manifest.commands && typeof manifest.commands === 'object');
+  assert.equal(manifest.fetch && manifest.fetch.source, 'github');
+  assert.ok(manifest.fetch.repo && manifest.fetch.ref);
+});
+
 // ── ACCEPTANCE: the shipped github-issues manifest validates end to end ───────
 test('the shipped github-issues manifest (plugins/github-issues) is valid', () => {
   const p = path.join(__dirname, '..', 'plugins', 'github-issues', 'plugin.json');

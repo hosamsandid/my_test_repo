@@ -8345,6 +8345,40 @@ class Orchestrator {
       }
     }
 
+    // ── Command-only plugin provisioning (#1798) ──────────────────────────
+    // Plugins with `commands` field ship .claude/commands/* files (same
+    // additive-sync seam as skill commands, #1796). planWorkspaceSync skips
+    // them (no bin/config), so we project/unproject them here.
+    const commandReseedPaths = [];
+    try {
+      const seededCmds = readSeededCommands(id);
+      const prevPluginIds = new Set((prevGrant || []).map((g) => g.id));
+      const nextPluginIds = new Set((nextGrant || []).map((g) => g.id));
+
+      for (const [pluginId] of Object.entries(manifests)) {
+        const pm = manifests[pluginId];
+        if (!pm || !pm.commands) continue;
+        const namespace = pm.commands.namespace || pluginId;
+        const inNext = nextPluginIds.has(pluginId);
+        const inPrev = prevPluginIds.has(pluginId);
+        if (inNext && !inPrev) {
+          // Fresh grant: project this plugin's commands into the workspace.
+          const { dir: pDir } = pluginRegistry.readPluginManifest(pluginId);
+          const nsRel = projectSkillCommands(id, namespace, pDir, seededCmds, {
+            seededAt: new Date().toISOString(),
+          });
+          if (nsRel) commandReseedPaths.push(nsRel);
+        } else if (!inNext && inPrev) {
+          // Revocation: remove the plugin's projected commands.
+          const nsRel = projectSkillCommands(id, namespace, null, seededCmds, { remove: true });
+          if (nsRel) commandReseedPaths.push(nsRel);
+        }
+      }
+      writeSeededCommands(id, seededCmds);
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin command sync ${id}: ${err.message}`);
+    }
+
     // Rebuild CLAUDE.md so the Plugin Capabilities gate + lines match the new
     // grant (the config is already saved by the caller, as for skills).
     try {
@@ -8358,7 +8392,7 @@ class Orchestrator {
       console.warn(`[Orchestrator] plugin sync ${id}: CLAUDE.md rebuild failed: ${err.message}`);
     }
 
-    await reseedAgent(id, ["CLAUDE.md", ".agent-studio"]);
+    await reseedAgent(id, ["CLAUDE.md", ".agent-studio", ...commandReseedPaths]);
     return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
   }
 

@@ -102,6 +102,7 @@ function planWorkspaceSync({
   for (const [id, grant] of nextById) {
     const manifest = manifests[id];
     if (!manifest) continue; // uninstalled out from under the grant — skip, nothing to seed
+    if (!manifest.cli) continue; // command-only plugin — command files projected separately in orchestrator
     const prev = prevById.get(id);
     const { binPath, configPath } = agentPluginPaths(id, manifest.cli.name);
     const scopeId = resolveScopeId(agentCfg, grant.scopeGranularity);
@@ -135,6 +136,7 @@ function planWorkspaceSync({
     // Prefer the live manifest for the CLI name; fall back to a stored one on
     // the grant so an uninstalled plugin can still be cleaned up.
     const manifest = manifests[id];
+    if (manifest && !manifest.cli) continue; // command-only plugin — no bin/config/network to remove
     const cliName = (manifest && manifest.cli && manifest.cli.name) || grant.cliName || id;
     const { binPath, configPath } = agentPluginPaths(id, cliName);
     remove.push(binPath, configPath);

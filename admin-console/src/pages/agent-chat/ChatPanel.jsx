@@ -12,6 +12,7 @@ import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import ChatModelSelector from './ChatModelSelector.jsx';
+import HeaderOverflowMenu from './HeaderOverflowMenu.jsx';
 import { chatResetAction } from './chat-model-selector.js';
 import { TriggerForm } from './TriggersPanel';
 import { isLaunchedLoop } from './trigger-summary.js';
@@ -1164,30 +1165,33 @@ export default function ChatPanel({
             : <GraduationCap size={11} />}
           Save &amp; Learn
         </button>
-        <button
-          type="button"
-          onClick={handleResetSession}
-          disabled={!sessionId || resetting || learnPending || disabled}
-          title="This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one."
-          style={sessionBtnStyle(!sessionId || resetting || learnPending || disabled)}
-        >
-          {resetting
-            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-            : <RotateCcw size={11} />}
-          Reset Session
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowClearConfirm(true)}
-          disabled={!roomId || clearingHistory || disabled}
-          title="Permanently delete all messages in this chat"
-          style={sessionBtnStyle(!roomId || clearingHistory || disabled)}
-        >
-          {clearingHistory
-            ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-            : <Trash2 size={11} />}
-          Clear History
-        </button>
+        {/* #1810: the rare, destructive session actions (Reset Session /
+            Clear History) live behind a `…` overflow menu so they sit apart
+            from the primary Save & Learn action. Each keeps its own guard
+            state, busy spinner, and confirmation (Clear History's dialog). */}
+        <HeaderOverflowMenu
+          buttonStyle={sessionBtnStyle}
+          items={[
+            {
+              key: 'reset',
+              label: 'Reset Session',
+              icon: <RotateCcw size={13} />,
+              onClick: handleResetSession,
+              disabled: !sessionId || resetting || learnPending || disabled,
+              busy: resetting,
+              title: 'This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one.',
+            },
+            {
+              key: 'clear',
+              label: 'Clear History',
+              icon: <Trash2 size={13} />,
+              onClick: () => setShowClearConfirm(true),
+              disabled: !roomId || clearingHistory || disabled,
+              busy: clearingHistory,
+              title: 'Permanently delete all messages in this chat',
+            },
+          ]}
+        />
         {agent?.role === 'bp-instance' && (
           <button
             type="button"

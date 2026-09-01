@@ -148,6 +148,16 @@ files ship alongside the existing `helper-chat/docs/**`, `system-prompt.md` and
   its `seeAlso` links, and its `askPrompts` chips. No topic for the route → render **Overview**.
 - **Overview** face renders the former Getting Started content (the six concept cards + "where
   to go next" + a "Take the tour" CTA calling the existing `openTour()`).
+- **Overview / Home affordance.** The "This page" face carries an explicit **Home** control
+  (e.g. a small "← Overview" link in the face header) that returns to the Overview from any page,
+  so a user who lands on a specific page can still reach the big-picture concept overview without
+  hunting. (Resolved decision — see §9.)
+- **First-run auto-open.** The **first** time a user visits a given route in a session, the panel
+  auto-opens on that route's "This page" face **once** (dismissible; never re-opens for the same
+  route). "Seen" routes are tracked in `localStorage` (a per-user set, e.g.
+  `help.seenRoutes.<username>`), so the nudge fires once per page and never fights a user who has
+  closed it. Routes with no topic (Overview fallback only) do not auto-open. (Resolved decision —
+  see §9.)
 
 ---
 
@@ -167,8 +177,10 @@ files ship alongside the existing `helper-chat/docs/**`, `system-prompt.md` and
   (`breadcrumbs.js:6–29`) and `ROUTE_TITLES` (`route-title.js`) drop `/getting-started`.
 
 `/plugin-system` (`PluginSystemHelp.jsx`) is folded into the **Plugins** topic as a "deep dive"
-section; the route is retired or redirected to `/plugins` (the "Learn about plugins" link
-becomes the Plugins page's "?" affordance). See E5.
+section; the route is **removed outright** (no redirect — resolved decision, §9). The "Learn
+about plugins" link on the Plugins page (`Plugins.jsx:257–263`) and the `PluginSystemHelp` page
+component both go away; the Plugins page's "?" affordance replaces them. `BREADCRUMBS` and
+`ROUTE_TITLES` drop `/plugin-system`. See E5.
 
 ---
 
@@ -216,9 +228,11 @@ Every Phase-3 ticket follows the same shape:
 - **C1 — Content model, per-route registry, endpoint, chat grounding.** `help-topics/` format;
   `help-registry.js` (pure) + `page-help-view.js` (pure); `GET /api/helper/page-help`; fold
   topics into `corpus.js`; seed **one** pilot topic (Overview) end-to-end. Unit tests.
-- **C2 — Panel "This page" face + entry points.** `mode:'page'`; tab bar `[This page][Ask][Tour]`;
-  header Help defaults to page face; `openHelpFor(route)`; `PageHelpButton`; page-scoped
-  `askPrompts` → Ask hand-off; Overview fallback rendering.
+- **C2 — Panel "This page" face + entry points.** `mode:'page'`; tab bar `[This page][Ask][Tour]`
+  (the `Chat` tab is **renamed to `Ask`**); header Help defaults to page face; `openHelpFor(route)`;
+  `PageHelpButton`; page-scoped `askPrompts` → Ask hand-off; Overview fallback rendering; the
+  **Home/Overview** affordance inside the face; **first-run auto-open** (once per route,
+  `localStorage`-tracked).
 
 ### Phase 2 — Retire Getting Started
 
@@ -234,7 +248,7 @@ Every Phase-3 ticket follows the same shape:
 | **E2** | Flows | "Welcome to Flows" banner + the existing Flows help panel + EdgeDialogs / LabelRegistry / HumanRegistry / RoutingSection / Copilot / toolbar-hint concept help |
 | **E3** | Knowledge | The large "How it works" intro + autonomy/gates config explainer + domain primer + InfoTips |
 | **E4** | Skills | 4-paragraph concept intro + "See how the knowledge system works →" jump-off + overwrite/merge dialog prose |
-| **E5** | Plugins (+ Plugin System) | Plugins page intro + **fold `/plugin-system` in as a deep-dive**; retire/redirect the route; install/uninstall modal explainers |
+| **E5** | Plugins (+ Plugin System) | Plugins page intro + **fold `/plugin-system` in as a deep-dive**; **remove the route outright** (no redirect) + the `PluginSystemHelp` page + the "Learn about plugins" link; install/uninstall modal explainers |
 | **E6** | Working Environments | Top intro box ("a reusable workspace recipe") |
 | **E7** | Access & Users | Top intro box incl. the **Team vs Agent Team** distinction; roles (System/Team Admin/Member) |
 | **E8** | Model Providers | Top intro + the two auth-type descriptions + OAuth/probe dialog prose |
@@ -250,16 +264,19 @@ Total: **2 (foundation) + 1 (Getting Started) + 15 (extraction) = 18 child ticke
 
 ---
 
-## 9. Open questions
+## 9. Resolved decisions
 
-- **Tab label rename** "Chat" → "Ask": cosmetic — confirm the wording (or keep "Chat").
-- **`/plugin-system` route**: retire outright or 301-style redirect to `/plugins` for existing
-  bookmarks?
-- **First-run behaviour**: should Help auto-open on "This page" the first time a user lands on a
-  page (once, dismissible), or stay strictly user-invoked?
-- **Overview reachability**: besides being the no-topic fallback, should there be an explicit
-  "Overview / Home" affordance inside the "This page" face to get back to it from any page?
-- **Search**: out of scope for v1 (Ask covers free-text). Revisit if the topic set grows.
+1. **Tab label** — the `Chat` tab is **renamed to `Ask`** (faces: `This page · Ask · Tour`).
+2. **`/plugin-system`** — **removed outright** (no redirect). The `PluginSystemHelp` page, its
+   route, and the "Learn about plugins" link all go; its content becomes the Plugins topic
+   deep-dive (E5).
+3. **First-run** — the panel **auto-opens once per route** on first visit (dismissible,
+   `localStorage`-tracked); routes with no topic do not auto-open (C2).
+4. **Overview reachability** — the "This page" face carries an explicit **Home/Overview**
+   affordance to return to the overview from any page (C2/§4).
+
+**Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
+if the topic set grows large.
 
 ---
 

@@ -5572,6 +5572,33 @@ class TriggerScheduler:
 
     # -- execute -------------------------------------------------------------
 
+    # Friendly labels for GitHub event keys — mirrors GITHUB_EVENT_OPTIONS in
+    # admin-console/src/pages/agent-chat/trigger-summary.js (keep in sync).
+    _GITHUB_EVENT_LABELS: dict[str, str] = {
+        'push':                                 'Push',
+        'pull_request.opened':                  'PR opened',
+        'pull_request.closed':                  'PR closed (without merge)',
+        'pull_request.merged':                  'PR merged',
+        'pull_request.reopened':                'PR reopened',
+        'pull_request.labeled':                 'PR labeled',
+        'pull_request.unlabeled':               'PR unlabeled',
+        'pull_request_review.submitted':        'PR review submitted',
+        'pull_request_review_comment.created':  'PR review comment',
+        'issue_comment.created':                'Issue / PR comment',
+        'issues.opened':                        'Issue opened',
+        'issues.closed':                        'Issue closed',
+        'issues.labeled':                       'Issue labeled',
+        'issues.unlabeled':                     'Issue unlabeled',
+        'release.published':                    'Release published',
+    }
+    # Events that carry payload.label.name — the triggering label is shown.
+    _LABEL_FILTERABLE_EVENTS: frozenset[str] = frozenset([
+        'issues.labeled',
+        'issues.unlabeled',
+        'pull_request.labeled',
+        'pull_request.unlabeled',
+    ])
+
     @staticmethod
     def _github_event_detail(event_key: str, payload: dict) -> str | None:
         """Best-effort human-readable detail for a `github-event` trigger notice.
@@ -5613,27 +5640,49 @@ class TriggerScheduler:
           io.aee.trigger.triggerType (string)
           io.aee.trigger.event       (string|None — None for non-github triggers)
         """
-        desc = f" — {trigger['description']}" if trigger.get("description") else ""
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
         gh = (ctx or {}).get("github") or {}
 
-        if ttype == "cron":
-            body = f"⚡ Trigger fired (cron: `{tid}`){desc} — starting work…"
+        if ttype in ("cron", "once"):
+            phrase = trigger.get("description") or "Scheduled trigger"
+            body = f"⚡ Trigger fired — {phrase} — starting work…"
         elif ttype == "github-event":
-            event_key = gh.get("event") or tid
+            event_key = gh.get("event") or ""
             repo = gh.get("repo") or ""
             payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
-            detail = self._github_event_detail(gh.get("event") or "", payload)
-            detail_suffix = f" — {detail}" if detail else ""
-            body = (
-                f"⚡ Trigger fired (GitHub: `{event_key}` on `{repo}`)"
-                f"{detail_suffix}{desc} — starting work…"
-            )
+
+            friendly = self._GITHUB_EVENT_LABELS.get(event_key) or event_key or "GitHub event"
+
+            # For label events, surface the specific label that fired.
+            label_name: str | None = None
+            if event_key in self._LABEL_FILTERABLE_EVENTS:
+                try:
+                    label_info = payload.get("label")
+                    if isinstance(label_info, dict):
+                        label_name = label_info.get("name") or None
+                except Exception:
+                    pass
+
+            repo_short = repo.split("/")[-1] if repo else ""
+
+            parts: list[str] = [friendly]
+            if label_name:
+                parts.append(f"`{label_name}`")
+            if repo_short:
+                parts.append(f"`{repo_short}`")
+            detail = self._github_event_detail(event_key, payload)
+            if detail:
+                parts.append(detail)
+
+            desc = f" — {trigger['description']}" if trigger.get("description") else ""
+            body = f"⚡ Trigger fired — {' · '.join(parts)}{desc} — starting work…"
         elif ttype == "http":
-            body = f"⚡ Trigger fired (HTTP: `{tid}`){desc} — starting work…"
+            phrase = trigger.get("description") or "Webhook trigger"
+            body = f"⚡ Trigger fired — {phrase} — starting work…"
         else:
-            body = f"⚡ Trigger fired ({ttype}: `{tid}`){desc} — starting work…"
+            phrase = trigger.get("description") or "Trigger"
+            body = f"⚡ Trigger fired — {phrase} — starting work…"
 
         content = {
             "msgtype": "m.notice",

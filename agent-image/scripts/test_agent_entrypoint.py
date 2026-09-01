@@ -384,6 +384,193 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
             send_formatted=None, blueprint_id=None,
         ), client
 
+    # -- AC1: friendly event name -----------------------------------------------
+
+    async def test_friendly_event_name_replaces_raw_key(self):
+        """AC1: raw event key replaced with a human-readable phrase."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {"event": "pull_request.labeled", "repo": "o/r", "payload": {}}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("PR labeled", body)
+        self.assertNotIn("pull_request.labeled", body)
+
+    async def test_unknown_event_key_falls_back_to_raw_key(self):
+        """AC1: unknown event key falls back to the raw key, never blank."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {"event": "workflow_run.completed", "repo": "o/r", "payload": {}}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("workflow_run.completed", body)
+        self.assertTrue(body.startswith("⚡ Trigger fired"))
+
+    # -- AC2: triggering label surfaced for label events -----------------------
+
+    async def test_label_name_shown_for_pr_labeled(self):
+        """AC2: label name from payload.label.name appears in the notice."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {
+            "event": "pull_request.labeled",
+            "repo": "owner/my-repo",
+            "payload": {"label": {"name": "docs:sync"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`docs:sync`", body)
+
+    async def test_label_name_shown_for_issues_labeled(self):
+        """AC2: label events surface the label for issues.labeled too."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {
+            "event": "issues.labeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "ready"}, "issue": {}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready`", body)
+
+    async def test_label_name_shown_for_unlabeled_events(self):
+        """AC2: *.unlabeled events also surface the label name."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {
+            "event": "pull_request.unlabeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "wip"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`wip`", body)
+
+    # -- AC3: graceful label fallback ------------------------------------------
+
+    async def test_missing_label_name_omits_label_portion(self):
+        """AC3: when payload.label.name is absent, no label appears and no exception."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {
+            "event": "issues.labeled",
+            "repo": "o/r",
+            "payload": {"issue": {"number": 1, "title": "T", "html_url": "https://x/1"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("Issue labeled", body)
+        self.assertIn("Issue #1: T", body)
+
+    async def test_non_dict_label_in_payload_does_not_raise(self):
+        """AC3: a malformed payload.label does not crash the notice."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {"github": {
+            "event": "pull_request.labeled",
+            "repo": "o/r",
+            "payload": {"label": "not-a-dict"},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertTrue(body.startswith("⚡ Trigger fired"))
+
+    # -- AC4: trigger ID hidden from body --------------------------------------
+
+    async def test_trigger_id_absent_from_github_event_body(self):
+        """AC4: auto-generated trigger ID is not in the visible body."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1785499975906589", "type": "github-event"}
+        ctx = {"github": {"event": "pull_request.labeled", "repo": "o/r", "payload": {}}}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertNotIn("t1785499975906589", body)
+
+    async def test_trigger_id_absent_from_cron_body(self):
+        """AC4: cron trigger ID is not in the visible body."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "c1785499975906589", "type": "cron", "description": "nightly"},
+            None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertNotIn("c1785499975906589", body)
+
+    async def test_trigger_id_absent_from_http_body(self):
+        """AC4: http trigger ID is not in the visible body."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "h1785499975906589", "type": "http", "description": "hook"},
+            None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertNotIn("h1785499975906589", body)
+
+    async def test_trigger_id_absent_from_generic_body(self):
+        """AC4: generic trigger type does not expose the ID either."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "x-secret-id", "type": "custom-thing"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertNotIn("x-secret-id", body)
+
+    # -- AC5: trigger ID preserved in structured content -----------------------
+
+    async def test_io_aee_trigger_content_unchanged(self):
+        scheduler, client = self._scheduler()
+        ctx = {"github": {"event": "issues.opened", "repo": "o/r",
+                           "payload": {"issue": {"number": 1, "title": "T",
+                                                  "html_url": "https://x/1"}}}}
+        await scheduler._post_trigger_notice(
+            {"id": "g1", "type": "github-event"}, ctx, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertEqual(content["io.aee.trigger"],
+                          {"triggerId": "g1", "triggerType": "github-event",
+                           "event": "issues.opened"})
+
+    # -- AC6: cron / once / http description-vs-generic fallback ---------------
+
+    async def test_cron_with_description_uses_description(self):
+        """AC6: cron body is the trigger description when present."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "c1", "type": "cron", "description": "nightly"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(body, "⚡ Trigger fired — nightly — starting work…")
+
+    async def test_cron_without_description_uses_generic_phrase(self):
+        """AC6: cron with no description falls back to 'Scheduled trigger'."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "c1", "type": "cron"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(body, "⚡ Trigger fired — Scheduled trigger — starting work…")
+
+    async def test_once_without_description_uses_scheduled_generic(self):
+        """AC6: once trigger with no description uses 'Scheduled trigger'."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "o1", "type": "once"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(body, "⚡ Trigger fired — Scheduled trigger — starting work…")
+
+    async def test_http_with_description_uses_description(self):
+        """AC6: http body is the trigger description when present."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "h1", "type": "http", "description": "hook"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(body, "⚡ Trigger fired — hook — starting work…")
+
+    async def test_http_without_description_uses_generic_phrase(self):
+        """AC6: http with no description falls back to 'Webhook trigger'."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "h1", "type": "http"}, None, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertEqual(body, "⚡ Trigger fired — Webhook trigger — starting work…")
+
+    # -- detail + description preserved for github-event -----------------------
+
     async def test_issues_event_body_includes_detail_and_description(self):
         scheduler, client = self._scheduler()
         trigger = {"id": "t1", "type": "github-event", "description": "BA marked ready"}
@@ -398,6 +585,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Issue #470: Fix login bug", body)
         self.assertIn("https://github.com/o/r/issues/470", body)
         self.assertIn("BA marked ready", body)
+        self.assertNotIn("t1", body)
 
     async def test_push_event_body_includes_branch(self):
         scheduler, client = self._scheduler()
@@ -408,38 +596,18 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertIn("branch `feature/x`", body)
 
-    async def test_missing_payload_falls_back_to_legacy_body(self):
+    async def test_missing_payload_uses_friendly_name_and_no_detail(self):
+        """No detail when payload is absent — but friendly name still shown."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t1", "type": "github-event", "description": "desc"}
         ctx = {"github": {"event": "release.published", "repo": "o/r"}}
         await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertEqual(
-            body, "⚡ Trigger fired (GitHub: `release.published` on `o/r`) — desc — starting work…")
-
-    async def test_cron_and_http_notices_unchanged(self):
-        scheduler, client = self._scheduler()
-        await scheduler._post_trigger_notice(
-            {"id": "c1", "type": "cron", "description": "nightly"}, None, "!room:local")
-        cron_body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertEqual(cron_body, "⚡ Trigger fired (cron: `c1`) — nightly — starting work…")
-
-        await scheduler._post_trigger_notice(
-            {"id": "h1", "type": "http", "description": "hook"}, None, "!room:local")
-        http_body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertEqual(http_body, "⚡ Trigger fired (HTTP: `h1`) — hook — starting work…")
-
-    async def test_io_aee_trigger_content_unchanged(self):
-        scheduler, client = self._scheduler()
-        ctx = {"github": {"event": "issues.opened", "repo": "o/r",
-                           "payload": {"issue": {"number": 1, "title": "T",
-                                                  "html_url": "https://x/1"}}}}
-        await scheduler._post_trigger_notice(
-            {"id": "g1", "type": "github-event"}, ctx, "!room:local")
-        content = client.room_send.call_args.kwargs["content"]
-        self.assertEqual(content["io.aee.trigger"],
-                          {"triggerId": "g1", "triggerType": "github-event",
-                           "event": "issues.opened"})
+        self.assertIn("Release published", body)
+        self.assertIn("`r`", body)
+        self.assertIn("desc", body)
+        self.assertNotIn("t1", body)
+        self.assertNotIn("release.published", body)
 
 
 class DescribeInFlightMarker(unittest.TestCase):

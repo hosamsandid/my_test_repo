@@ -369,28 +369,6 @@ export default function RightRail({
         </div>
       </div>
 
-      {/* Always-visible caption so the toggle shortcut is discoverable without
-          having to hover the collapse chevron (#1118). */}
-      <div style={{
-        flexShrink: 0,
-        padding: 'var(--eb-space-1) var(--eb-space-3)',
-        borderTop: '1px solid var(--eb-border-default)',
-        background: 'var(--eb-bg-surface)',
-        fontSize: 'var(--eb-text-xs)',
-        color: 'var(--eb-text-muted)',
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-      }}>
-        Press <kbd style={{
-          fontFamily: 'var(--eb-font-mono, monospace)',
-          fontSize: 'var(--eb-text-xs)',
-          padding: '0 4px',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-sm)',
-          background: 'var(--eb-bg-app)',
-        }}>{TOGGLE_SHORTCUT}</kbd> to show or hide this panel
-      </div>
     </div>
   );
 }

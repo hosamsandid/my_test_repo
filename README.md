@@ -11,6 +11,7 @@
 | **Run it on your laptop** | [macOS setup](./docs/guides/mac-setup.md) · [Windows setup](./docs/guides/windows-setup.md) | 45–60 min |
 | **Run it for a team** — hosting options and their limits | [Deployment & hosting](./docs/deployment.md) | 20 min |
 | **Use it** — build your first agent team, narrated | [Walkthrough ch. 1](./docs/walkthrough/01-team-setup.md) | 30 min |
+| **Go deep** — how it works under the hood (context, state, cost, integration) | [Architecture & technical FAQ](./docs/architecture-faq.md) | 15 min |
 | **Find any document** | [Documentation index](./docs/README.md) | — |
 
 ---

@@ -61,6 +61,7 @@ story end to end and are the closest thing to a user manual.
 | [persistent-memory.md](persistent-memory.md) | What an agent remembers, in which files, and how to inspect it |
 | [admin-console.md](admin-console.md) | Page-by-page reference for the console at `:4000` |
 | [banking-insurance-use-case.md](banking-insurance-use-case.md) | A worked domain example: regulatory change management with an agent team |
+| [architecture-faq.md](architecture-faq.md) | **Architecture & technical FAQ** — deep answers on context/knowledge management, state durability, cost/model governance, and integration/extensibility |
 
 ## Operating it
 

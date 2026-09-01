@@ -43,6 +43,11 @@ steps:
       "Describe what you need" is the conversational way in — you say what you want and the Flow Copilot drafts a flow with a live preview before anything is created. "Start from a ready-made setup" is the fastest way to a working team when a proven pattern fits — it opens the guided wizard on its template gallery. "Build it yourself" opens a blank canvas for full control. And "Just give me one assistant to chat with" is the fast lane to a single assistant — framed as a team of one that you can grow into a full team later.
 
       For this demo we take the most complete path — "Start from a ready-made setup" — which runs the five-step wizard.
+    # Open the launcher first (the intro above is narrative-only and never runs, so
+    # nothing has navigated yet); create.open goes to /create and confirms all four
+    # tiles, then expectEntry spot-checks the "ready-made setup" tile we'll take.
+    action:
+      do: create.open
     assert:
       do: create.expectEntry
       entry: template

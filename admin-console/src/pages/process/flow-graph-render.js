@@ -11,11 +11,12 @@
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
 //   g.fit(); g.cleanup();
 
-import { computeFlowLayout, assignCrossCoords } from './flow-layout';
+import { computeFlowLayout, assignCrossCoords, wrapColumns } from './flow-layout';
 import { routeOrthogonalEdges, roundedPathD, laneLoadByChannel } from './edge-router';
 import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './outcome-port-layout';
 import { previewStrokeColor, portRectAnchor, screenPointToCanvas } from './drag-preview-anchor';
 import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
+import { clampPan } from './pan-clamp';
 
 // Single source of truth for edge colours and legend names (#402, #1009).
 // Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
@@ -68,6 +69,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   ];
 
   const ARROW_SIZE = 12; // arrowhead length in px (#402 — was 7, hard to see)
+
+  // How far a single column may run along the CROSS axis before it wraps into
+  // stacked sub-rows (see wrapColumns in flow-layout.js). One column is one
+  // layer of the flow, which for a hierarchy is every sibling of one parent — a
+  // BriefingPack pack with a wide root used to lay 270+ cards out in a single
+  // line, giving a canvas ~100 000px wide that "Fit to view" could not fit even
+  // at the 10% zoom floor. 6 000px is ~16 cards across: wide enough that every
+  // hand-authored flow is unaffected, narrow enough that a wrapped block fits a
+  // normal viewport at a readable zoom.
+  const WRAP_MAX_CROSS = 6000;
+  // Sub-rows of ONE column sit closer together than two different columns do:
+  // no edge channel runs between them (they are the same layer), and the tight
+  // spacing is what makes the block read as one group of siblings.
+  const WRAP_ROW_GAP = 40;
 
   // ─── DOM structure ──────────────────────────────────────────────────
   // Build canvas-viewport → canvas → svg#edges structure inside the
@@ -360,7 +375,50 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     showStages:         localStorage.getItem('flow-graph-show-stages') === 'true', // #362 E stage bands
     stageOrder:         [],     // ordered stage names — drives layered layout order
     layeredInfo:        null,   // { vertical, colOf } while the layered layout is active
+    // ── Measured card / artifact heights, keyed by id ──────────────────────
+    // The layout needs a height for every node on every pass. Reading it back
+    // off the DOM each time cost one `canvas.querySelector` per node per call —
+    // and `assignCrossCoords` calls it ~28× per node — so a real pack spent
+    // thousands of selector matches, plus a forced reflow, on numbers that had
+    // not changed. The cards are measured once per render pass instead (see
+    // measureHeights) and every consumer reads the cache.
+    nodeHeights:        new Map(), // nodeId → measured px
+    artifactHeights:    new Map(), // artifact path → measured px
+    // Cached extent of the drawn graph; null = needs recomputing.
+    contentBounds:      null,
+    // Cached viewport size. Reading clientWidth/clientHeight forces a synchronous
+    // layout flush, and the pan clamp needs it on every mousemove — ~400 per
+    // second during a drag, each one a reflow over 81 cards and 500 SVG nodes.
+    // The ResizeObserver below is the authority on when it changes.
+    viewportSize:       { w: 0, h: 0 },
+    rafScheduled:       false,         // dedup guard: one rAF in flight at most
   };
+
+  function viewportSize() {
+    const s = state.viewportSize;
+    if (s.w <= 0 || s.h <= 0) { s.w = viewport.clientWidth; s.h = viewport.clientHeight; }
+    return s;
+  }
+
+  const DEFAULT_NODE_H = 90;
+
+  // ─── Pan / zoom frame coalescing ──────────────────────────────────────
+  // Pan and zoom are a single CSS transform on `canvas`, and a wheel gesture
+  // does NOT arrive as one event: a notched wheel delivers 10–20 and a
+  // precision wheel or trackpad hundreds. Writing the transform per event asks
+  // the compositor to re-tile and re-raster the whole canvas that many times in
+  // one gesture — on a real BriefingPack pack the canvas is tens of thousands of
+  // pixels wide, so the pipeline never catches up. The pointer maths stays
+  // per-event (so the zoom lands exactly where today's does); only the DOM write
+  // is coalesced to at most one per animation frame.
+  let viewFrame = 0;
+  function scheduleTransform() {
+    if (viewFrame) return;
+    viewFrame = requestAnimationFrame(() => {
+      viewFrame = 0;
+      applyTransform();
+    });
+  }
 
   // ─── Data Loading ────────────────────────────────────────────────────
 
@@ -649,10 +707,30 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     return paths;
   }
 
+  // A node's card height — the measurement cached by measureHeights(), or the
+  // default before the first pass has run (which is what the DOM lookup used to
+  // fall back to anyway, since `render()` lays out before it mounts the cards).
   function getNodeHeight(id) {
-    const el = canvas.querySelector(`.bp-node[data-id="${id}"]`);
-    if (el) return el.offsetHeight;
-    return 90;
+    const h = state.nodeHeights.get(id);
+    return h > 0 ? h : DEFAULT_NODE_H;
+  }
+
+  function getArtifactHeight(path) {
+    const h = state.artifactHeights.get(path);
+    return h > 0 ? h : ARTIFACT_H;
+  }
+
+  // Re-read the real heights of every mounted card / artifact. One forced
+  // reflow per render pass, from which every later read is served.
+  function measureHeights() {
+    canvas.querySelectorAll('.bp-node').forEach(el => {
+      const h = el.offsetHeight;
+      if (h > 0) state.nodeHeights.set(el.dataset.id, h);
+    });
+    canvas.querySelectorAll('.artifact-node').forEach(el => {
+      const h = el.offsetHeight;
+      if (h > 0) state.artifactHeights.set(el.dataset.path, h);
+    });
   }
 
   function layout() {
@@ -660,6 +738,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     if (visible.length === 0) return;
     layoutLayered(visible);
     layoutActors();
+    state.contentBounds = null;   // positions moved — the cached extent is stale
   }
 
   // Which actor pseudo-nodes to show (#410): an actor appears when it has at
@@ -769,7 +848,19 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
     const sizeOf = vertical ? (id => getNodeHeight(id)) : (() => NODE_W);
     const crossGap = vertical ? 34 : H_GAP;
-    const center = assignCrossCoords(columns, edges, sizeOf, { gap: crossGap });
+
+    // Wrap over-wide columns into sub-rows BEFORE assigning cross coordinates,
+    // so each sub-row gets its own overlap-free line. `colOf` is deliberately
+    // left alone: a wrapped column is still one column to the layering, the
+    // crossing reduction and the channel/lane router — only its pixels move.
+    const wrapped = wrapColumns(columns, {
+      crossExtentOf: col => (vertical
+        ? Math.max(DEFAULT_NODE_H, ...col.map(getNodeHeight)) + crossGap
+        : NODE_W + crossGap),
+      maxCrossExtent: WRAP_MAX_CROSS,
+    });
+    const lines = wrapped.flat();
+    const center = assignCrossCoords(lines, edges, sizeOf, { gap: crossGap });
 
     // The orthogonal router (drawEdges) lays the cross runs of the edges into
     // the channel between two columns, one lane per overlapping run. Reserve
@@ -796,25 +887,40 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         if (text) boundaryNeed[lo] = Math.max(boundaryNeed[lo], estChipWidth(text));
       });
       let x = 0;
-      for (let c = 0; c < columns.length; c++) {
+      const mainOf = new Map();
+      for (let c = 0; c < wrapped.length; c++) {
         colMain[c] = x;
         // gap = space between this card's right edge and the next card's left edge.
         const gap = Math.max(H_GAP * 2, (boundaryNeed[c] || 0) + 40, laneNeed(c));
-        x += NODE_W + gap;
+        const rows = wrapped[c];
+        rows.forEach((row, r) => {
+          row.forEach(id => mainOf.set(id, x));
+          // Only the LAST sub-row is followed by the channel gap — that is where
+          // this column's outgoing edges actually run.
+          x += NODE_W + (r < rows.length - 1 ? WRAP_ROW_GAP : gap);
+        });
       }
       ids.forEach(id => {
-        const c = colOf.get(id) || 0;
-        pos[id] = { x: colMain[c], y: (center.get(id) || 0) - getNodeHeight(id) / 2 };
+        const main = mainOf.has(id) ? mainOf.get(id) : (colMain[colOf.get(id) || 0] || 0);
+        pos[id] = { x: main, y: (center.get(id) || 0) - getNodeHeight(id) / 2 };
       });
     } else {
       let y = 0;
-      for (let c = 0; c < columns.length; c++) {
-        const maxH = Math.max(90, ...columns[c].map(getNodeHeight));
-        colMain[c] = y; y += maxH + Math.max(V_GAP, laneNeed(c));
+      const mainOf = new Map();
+      for (let c = 0; c < wrapped.length; c++) {
+        colMain[c] = y;
+        const rows = wrapped[c];
+        rows.forEach((row, r) => {
+          const maxH = Math.max(DEFAULT_NODE_H, ...row.map(getNodeHeight));
+          row.forEach(id => mainOf.set(id, y));
+          // Only the LAST sub-row is followed by the channel gap — that is where
+          // this column's outgoing edges actually run.
+          y += maxH + (r < rows.length - 1 ? WRAP_ROW_GAP : Math.max(V_GAP, laneNeed(c)));
+        });
       }
       ids.forEach(id => {
-        const c = colOf.get(id) || 0;
-        pos[id] = { x: (center.get(id) || 0) - NODE_W / 2, y: colMain[c] };
+        const main = mainOf.has(id) ? mainOf.get(id) : (colMain[colOf.get(id) || 0] || 0);
+        pos[id] = { x: (center.get(id) || 0) - NODE_W / 2, y: main };
       });
     }
 
@@ -1409,8 +1515,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // Actor pseudo-nodes (#410)
     renderActorNodes();
 
-    // Re-layout with actual DOM heights, then reposition
+    // Re-layout with actual DOM heights, then reposition. The heights are read
+    // into the cache FIRST, because the layout no longer touches the DOM for
+    // them. Guard prevents multiple rapid render() calls from piling up rAF callbacks.
+    if (state.rafScheduled) return;
+    state.rafScheduled = true;
     requestAnimationFrame(() => {
+      state.rafScheduled = false;
+      measureHeights();
       layout();
       canvas.querySelectorAll('.bp-node').forEach(el => {
         const id  = el.dataset.id;
@@ -1436,6 +1548,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         }
       });
       drawEdges();
+      state.contentBounds = null;   // drawEdges filled in state.edgeBounds
       drawStages();
       drawArtifactLane();
       if (state.pendingFit) {
@@ -1502,8 +1615,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     paths.forEach(path => {
       const pos = state.artifactPositions[path];
       if (!pos) return;
-      const el = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
-      const h  = el ? el.offsetHeight : ARTIFACT_H;
+      const h  = getArtifactHeight(path);
       minX = Math.min(minX, pos.x);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
       minY = Math.min(minY, pos.y);
@@ -1740,8 +1852,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     visible.forEach(n => {
       const p = state.positions[n.id];
       if (!p) return;
-      const el = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-      labelObstacles.push({ x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : 90 });
+      labelObstacles.push({ x: p.x, y: p.y, w: NODE_W, h: getNodeHeight(n.id) });
     });
     const placedLabels = [];
     const rectsOverlap = (a, b) =>
@@ -1786,8 +1897,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       visible.forEach(n => {
         const p = state.positions[n.id];
         if (!p) return;
-        const el = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-        nodes.push({ id: n.id, x: p.x, y: p.y, w: NODE_W, h: el ? el.offsetHeight : getNodeHeight(n.id) });
+        nodes.push({ id: n.id, x: p.x, y: p.y, w: NODE_W, h: getNodeHeight(n.id) });
       });
 
       // Actor pseudo-nodes join the routed graph as column 0 (their placement
@@ -1957,10 +2067,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       const pPos = state.positions[bp.parent];
       const cPos = state.positions[n.id];
       if (!pPos || !cPos) return;
-      const pEl = canvas.querySelector(`.bp-node[data-id="${bp.parent}"]`);
-      const cEl = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-      const pH = pEl ? pEl.offsetHeight : getNodeHeight(bp.parent);
-      const cH = cEl ? cEl.offsetHeight : getNodeHeight(n.id);
+      const pH = getNodeHeight(bp.parent);
+      const cH = getNodeHeight(n.id);
       const d = vertical
         // flow left→right: parent's right face → child's left face
         ? drawBezierEdge(pPos.x + NODE_W, pPos.y + pH / 2, cPos.x, cPos.y + cH / 2,
@@ -2135,7 +2243,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ~1.7×. Used both to size the chip and to widen the column gap so it fits.
   function estChipWidth(text) {
     let n = 0;
-    for (const ch of String(text || '')) n += /[ -ÿ]/.test(ch) ? 1 : 1.7;
+    for (const ch of String(text || '')) n += /[\u0000-\u00ff]/.test(ch) ? 1 : 1.7;
     return Math.max(24, n * 6.4 + 16);
   }
 
@@ -2175,7 +2283,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // right-column (vertical flow) — fanned toward each node so the two arms
     // stay distinct.
     const ANCHOR_MARGIN = 16;
-    const artEl = path => canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
     const topAnchorX = (artPos, nodeCx) =>
       Math.max(artPos.x + ANCHOR_MARGIN,
         Math.min(artPos.x + ARTIFACT_W - ANCHOR_MARGIN, nodeCx));
@@ -2187,17 +2294,15 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       const reg    = state.artifactRegistry[path];
       const artPos = state.artifactPositions[path];
       if (!reg || !artPos) return;
-      const el   = artEl(path);
-      const artH = el ? el.offsetHeight : ARTIFACT_H;
+      const artH = getArtifactHeight(path);
 
       // Output edges: BP → artifact (green), into the lane.
       reg.producers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
-        const bpEl  = canvas.querySelector(`.bp-node[data-id="${bpId}"]`);
-        if (!bpPos || !bpEl) return;
+        if (!bpPos) return;
 
-        const bpH  = bpEl.offsetHeight;
+        const bpH  = getNodeHeight(bpId);
         const bpCx = bpPos.x + NODE_W / 2;
         const bpCy = bpPos.y + bpH / 2;
         const d = vertical
@@ -2238,10 +2343,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       reg.consumers.forEach(bpId => {
         if (!visibleBpIds.has(bpId)) return;
         const bpPos = state.positions[bpId];
-        const bpEl  = canvas.querySelector(`.bp-node[data-id="${bpId}"]`);
-        if (!bpPos || !bpEl) return;
+        if (!bpPos) return;
 
-        const bpH  = bpEl.offsetHeight;
+        const bpH  = getNodeHeight(bpId);
         const bpCx = bpPos.x + NODE_W / 2;
         const bpCy = bpPos.y + bpH / 2;
         const d = vertical
@@ -2388,18 +2492,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     render();
   }
 
-  function fitToView() {
-    state.userTransform = false;
+  // The measured extent of everything drawn, in canvas coordinates. Shared by
+  // "Fit to view" and the pan clamp so the two can never disagree about where
+  // the graph actually is. Returns null when there is nothing to measure.
+  //
+  // CACHED (state.contentBounds): the pan clamp needs this on every mousemove —
+  // ~400 per second during a drag — and walking the visible tree that often cost
+  // more than the clamp saves. It only changes when the layout does, so it is
+  // invalidated by layout() and by the edge pass that fills in state.edgeBounds.
+  function contentBounds() {
+    if (state.contentBounds === null) state.contentBounds = computeContentBounds();
+    return state.contentBounds;
+  }
+
+  function computeContentBounds() {
     const visible = getVisibleNodes();
-    if (visible.length === 0) return;
+    if (visible.length === 0) return null;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
     visible.forEach(n => {
       const pos = state.positions[n.id];
       if (!pos) return;
-      const el = canvas.querySelector(`.bp-node[data-id="${n.id}"]`);
-      const h  = el ? el.offsetHeight : 90;
+      const h  = getNodeHeight(n.id);
       minX = Math.min(minX, pos.x);
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + NODE_W);
@@ -2407,8 +2522,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     });
 
     for (const [path, pos] of Object.entries(state.artifactPositions)) {
-      const el = canvas.querySelector(`.artifact-node[data-path="${CSS.escape(path)}"]`);
-      const h  = el ? el.offsetHeight : ARTIFACT_H;
+      const h  = getArtifactHeight(path);
       minX = Math.min(minX, pos.x);
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + ARTIFACT_W);
@@ -2431,6 +2545,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       maxX = Math.max(maxX, state.edgeBounds.maxX);
       maxY = Math.max(maxY, state.edgeBounds.maxY);
     }
+
+    return minX === Infinity ? null : { minX, minY, maxX, maxY };
+  }
+
+  // Bound the pan to the content (see pan-clamp.js): repeated same-direction
+  // dragging used to push the offset past a million pixels, losing the board and
+  // handing the compositor a layer nowhere near the screen.
+  function clampStatePan() {
+    const c = contentBounds();
+    if (!c) return;
+    const vs = viewportSize();
+    const p = clampPan(state.pan, {
+      zoom: state.zoom, viewportW: vs.w, viewportH: vs.h, content: c,
+    });
+    state.pan.x = p.x;
+    state.pan.y = p.y;
+  }
+
+  function fitToView() {
+    state.userTransform = false;
+    const bounds = contentBounds();
+    if (!bounds) return;
+    const { minX, minY, maxX, maxY } = bounds;
 
     const vw       = viewport.clientWidth;
     const vh       = viewport.clientHeight;
@@ -2471,7 +2608,8 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     if (!state.dragging) return;
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
     state.pan.y = state.panStart.y + (e.clientY - state.dragStart.y);
-    applyTransform();
+    clampStatePan();
+    scheduleTransform();
   }
 
   function onMouseup(e) {
@@ -2525,10 +2663,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         y1 = actorPos.y + ACTOR_H / 2;
       } else {
         const pos = state.positions[fromId];
-        const el = canvas.querySelector(`.bp-node[data-id="${fromId}"]`);
-        if (!pos || !el) return;
+        if (!pos) return;
         x1 = pos.x + NODE_W;
-        y1 = pos.y + el.offsetHeight / 2;
+        y1 = pos.y + getNodeHeight(fromId) / 2;
       }
     }
     const p = toCanvas(clientX, clientY);
@@ -2553,10 +2690,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     else if (onConnect) onConnect(fromId, toId);
   }
 
+  // Cache the viewport rect so wheel events don't force a layout reflow on every tick.
+  // Invalidated by onResize so it stays accurate after layout changes.
+  let cachedViewportRect = null;
   function onWheel(e) {
     e.preventDefault();
-    const rect = viewport.getBoundingClientRect();
-    setZoom(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - rect.left, e.clientY - rect.top);
+    if (!cachedViewportRect) cachedViewportRect = viewport.getBoundingClientRect();
+    setZoom(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - cachedViewportRect.left, e.clientY - cachedViewportRect.top);
   }
 
   // Zoom to an absolute factor, keeping the viewport point (cx, cy) fixed —
@@ -2571,12 +2711,21 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       state.pan.x = mx - (mx - state.pan.x) * (state.zoom / oldZoom);
       state.pan.y = my - (my - state.pan.y) * (state.zoom / oldZoom);
     }
-    applyTransform();
+    clampStatePan();
+    scheduleTransform();
   }
 
+  // Throttle all DOM writes to one per animation frame — pan and wheel both
+  // call this at raw pointer-event rate, which far exceeds display refresh.
+  let transformRaf = 0;
   function applyTransform() {
-    canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-    if (document.activeElement !== zoomInput) zoomInput.value = Math.round(state.zoom * 100) + '%';
+    if (transformRaf) return;
+    transformRaf = requestAnimationFrame(() => {
+      transformRaf = 0;
+      canvas.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
+      const pct = Math.round(state.zoom * 100) + '%';
+      if (document.activeElement !== zoomInput && zoomInput.value !== pct) zoomInput.value = pct;
+    });
   }
 
   // ─── Utilities ────────────────────────────────────────────────────────
@@ -2591,6 +2740,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ─── Resize observer ─────────────────────────────────────────────────
 
   function onResize() {
+    cachedViewportRect = null;
+    state.viewportSize.w = viewport.clientWidth;
+    state.viewportSize.h = viewport.clientHeight;
     layout();
     render();
   }
@@ -2680,6 +2832,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // ─── Public API ─────────────────────────────────────────────────────────
 
   function cleanup() {
+    if (viewFrame) { cancelAnimationFrame(viewFrame); viewFrame = 0; }
     viewport.removeEventListener('mousedown', onMousedown);
     window.removeEventListener('mousemove', onMousemove);
     window.removeEventListener('mouseup', onMouseup);

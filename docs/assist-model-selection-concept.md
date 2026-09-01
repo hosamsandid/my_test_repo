@@ -23,7 +23,7 @@ Three orchestrator-side autonomous synthesis features (`_synthesizeSkillMd`, `or
 
 ## 2. Goals
 
-- One **global assist model selector** in the console header (next to the theme toggle and logout button): current Model Provider + model, always visible, always switchable.
+- One **global assist model selector** (originally in the console header; **moved to Settings → Model** in #1805, reached via the account-menu **Settings** item): current Model Provider + model, always switchable.
 - The selectable list is **restricted to the providers the logged-in user may use** (team-visibility rules), enforced **server-side** on every assist call — the client selection is a convenience, never the authority.
 - Every assist feature uses the selected provider + model, so **all assist API costs land on the selected provider's key**.
 - Works for future assist features by default (central plumbing, not per-feature wiring).
@@ -123,6 +123,8 @@ function assistSelectableEndpoint(scope, ep) {
 
 ### 4.3 Header UI
 
+> **Update (#1805):** this control was later moved out of the Shell header into **Settings → Model** (`SettingsModal.jsx` Model section, opened from the account-menu **Settings** item). The placement described below is the original #1212 design; the popover markup, states, and `ModelSelectionProvider` wiring are unchanged by the move.
+
 - New control in the header right-cluster (`admin-console/src/components/Shell.jsx:395-456`), left of the theme toggle, styled like the existing bordered icon-buttons: a compact button showing `<Provider name> · <model displayName>` (truncated), with a sparkle/cpu icon.
 - Click opens a popover: providers as groups (with a `team`/`system` badge), models as radio items, provider-default model marked. One click selects provider+model; selecting a provider without expanding models takes its default model.
 - States:
@@ -148,7 +150,7 @@ function assistSelectableEndpoint(scope, ep) {
 1. Parse `X-Assist-Model` (fallback: legacy `req.body.llmEndpointId` for API compatibility).
 2. `getScope(req)`; look up the endpoint; **403 `assist-endpoint-not-permitted`** if it fails `assistSelectableEndpoint` — a client can never spend on a provider its user cannot see.
 3. Validate `modelId` against the provider's `models[]`; unknown/absent → provider `defaultModelId` (else first model). **The hardcoded sonnet-kind preference is dropped when an explicit model is given**; it remains only as the default-pick heuristic.
-4. No header and **≥ 1 selectable provider exists** → **400 `assist-model-not-selected`** ("Select an assist model in the header"). We deliberately do *not* fall back to `endpoints[0]` — that silent default is precisely the billing bug this concept removes.
+4. No header and **≥ 1 selectable provider exists** → **400 `assist-model-not-selected`** ("Select an assist model in Settings → Model", #1805). We deliberately do *not* fall back to `endpoints[0]` — that silent default is precisely the billing bug this concept removes.
 5. No header and **zero providers registered platform-wide** → `.env` fallback exactly as today (bootstrap installs keep working with no configuration).
 6. Return `{ baseUrl, token, model, endpointId, endpointName }`; the HTTP call itself (`buildMessagesUrl` + `httpPostJson`) is unchanged.
 

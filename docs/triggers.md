@@ -1,6 +1,6 @@
 # Autonomous Triggers
 
-Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types can be created and managed via the Admin Console — either on the **Scheduled Jobs** page or inline in the **Agent Chat** right rail.
+Agents are driven by triggers defined in a per-agent `triggers.json` file. The scheduler syncs changes every 60 seconds. All trigger types are created and managed per agent via the Admin Console — inline in the **Agent Chat** right rail, under the **Triggers** tab.
 
 ## Trigger Types
 
@@ -9,7 +9,6 @@ Agents are driven by triggers defined in a per-agent `triggers.json` file. The s
 | **cron** | Recurring execution on a 5-field cron expression. Skips if the previous run is still in progress. |
 | **once** | Fires once at a specific ISO timestamp, then removes itself automatically. |
 | **http** | Fired by an external `POST /hooks/:agentId/:triggerId` with an `X-Hook-Secret` header. Every trigger carries its own auto-generated secret — there is no global open mode. |
-| **jira-event** | Fired by the built-in Jira poller when an issue in a bound Jira project transitions status. Requires a Jira credential bound to a project key on the Working Environment (see **Jira Projects**). Optional `statusFilter` fires only on transitions into an exact status name. |
 | **github-event** | Fired by the built-in GitHub poller when the GitHub Events API reports a matching event (e.g. `pull_request.opened`, `push`). Requires a GitHub token on the Working Environment. The full event payload is appended to the agent prompt as JSON. Supports an optional `claim` field (`{"remove": "<wakeLabel>", "add": "<wakeLabel>:wip"}`) — the runner swaps the labels before invoking the agent so "in progress" is visible on GitHub, and rolls the swap back automatically if the run fails both attempts (which re-fires the chain via the poller). The `add` value **must** follow the `<wakeLabel>:wip` convention (enforced by the bundle validator). For **channel-derived** label listeners (`expandGithubChannels`) the claim is stamped automatically — zero authoring cost; opt out per channel port with `autoClaim: false`. |
 | **loop** | Runs the agent's prompt repeatedly — each try starts fresh — stopping once the goal is met or the maximum number of tries is reached. See [Loop triggers](#loop-triggers) below. |
 
@@ -53,16 +52,6 @@ The webhook secret is generated automatically when the trigger is created. It is
 The built-in GitHub poller queries the GitHub Events API every 30 seconds for all repositories referenced in Working Environments. It uses `If-None-Match` ETags so unchanged repositories cost no rate-limit budget — 304 responses are free. Per-repository state (ETag, last event ID) persists across restarts. The first poll records a baseline so there is no event flood on startup.
 
 **Loop protection:** Agents that take GitHub actions via the `gh-as-agent` wrapper stamp commits with `<agentId>@agents.local` and PR/review bodies with `<!-- agent: <id> -->`. The poller reads these markers and drops events that originate from the same agent, preventing feedback loops.
-
-## Jira Poller
-
-The built-in Jira poller queries Jira Cloud's JQL search every 60 seconds (configurable) for every project bound to a credential on a Working Environment. Jira Cloud has no discrete events feed like GitHub's, so instead the poller diffs each matching issue's changelog for status-field transitions since the last poll. State (which changes have already been seen) persists across restarts, and the first poll for a project records a baseline so there is no event flood on startup.
-
-Because a Jira project key (e.g. `ENG`) is not globally unique the way a GitHub `owner/repo` is, project resolution is scoped to each agent's own Working Environment — the same key bound to two different Jira sites on two different environments is never conflated.
-
-**v1 scope: `jira-event` is a wake source, not a flow participant.** Unlike `github-event`, a `jira-event` trigger today has no `claim` label swap, no channel/graph/human-touchpoint wiring in the Process Canvas, no flow-anomaly-detector integration, and no event-transparency log (the GitHub Event Log has no Jira equivalent). It fires the trigger's prompt with the Jira event payload and nothing more. See [docs/jira-integration-concept.md](./jira-integration-concept.md#v1-scope-boundary) for what's deferred and why.
-
-See [docs/jira-integration-concept.md](./jira-integration-concept.md) for the full design rationale.
 
 ## Operational note: host clock skew (Podman machine)
 

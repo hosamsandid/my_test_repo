@@ -6,6 +6,9 @@ import {
   ASK_ANSWER_FIELD,
   normalizeAskQuestion,
   buildAnswerContent,
+  buildMultiAnswerContent,
+  multiAnswerText,
+  questionProgressLabel,
   indexAskAnswers,
   questionState,
 } from './ask-question-view.js';
@@ -89,7 +92,7 @@ test('indexAskAnswers maps question event ids to their first answer', () => {
 
 test('questionState: last unanswered question is answerable', () => {
   const s = questionState({ index: 2, messageCount: 3, answer: undefined });
-  assert.deepEqual(s, { answerable: true, answeredOptionId: null, answeredLabel: null });
+  assert.deepEqual(s, { answerable: true, answeredOptionId: null, answeredLabel: null, multiAnswers: null });
 });
 
 test('questionState: a later message makes buttons inert (superseded/answered)', () => {
@@ -110,4 +113,84 @@ test('questionState: an answered question is inert and exposes the choice', () =
 test('questionState: disabled composer blocks an otherwise-answerable question', () => {
   const s = questionState({ index: 0, messageCount: 1, answer: undefined, disabled: true });
   assert.equal(s.answerable, false);
+});
+
+test('questionState: single-question answer has null multiAnswers', () => {
+  const s = questionState({
+    index: 0, messageCount: 1,
+    answer: { optionId: '0:0', label: 'A', questionEventId: '$q' },
+  });
+  assert.equal(s.multiAnswers, null);
+});
+
+test('questionState: consolidated multi-answer exposes answers array', () => {
+  const s = questionState({
+    index: 0, messageCount: 2,
+    answer: {
+      questionEventId: '$q',
+      answers: [
+        { questionId: 'q0', optionId: '0:0', label: 'OAuth' },
+        { questionId: 'q1', optionId: '1:1', label: 'Staging' },
+      ],
+    },
+  });
+  assert.equal(s.answerable, false);
+  assert.equal(s.answeredOptionId, null);
+  assert.equal(s.answeredLabel, null);
+  assert.equal(s.multiAnswers.length, 2);
+  assert.equal(s.multiAnswers[0].label, 'OAuth');
+});
+
+test('buildMultiAnswerContent builds consolidated ask-answer payload', () => {
+  const answers = [
+    { questionId: 'q0', optionId: '0:0', label: 'OAuth' },
+    { questionId: 'q1', optionId: '1:1', label: 'Staging' },
+  ];
+  const content = buildMultiAnswerContent('$evt', answers);
+  assert.deepEqual(content, {
+    'io.aee.ask-answer': { questionEventId: '$evt', answers },
+  });
+});
+
+test('multiAnswerText joins labels with newlines', () => {
+  const answers = [
+    { questionId: 'q0', optionId: '0:0', label: 'OAuth' },
+    { questionId: 'q1', optionId: '1:0', label: 'Staging' },
+  ];
+  assert.equal(multiAnswerText(answers), 'OAuth\nStaging');
+});
+
+test('multiAnswerText with one answer returns its label', () => {
+  assert.equal(multiAnswerText([{ label: 'Yes' }]), 'Yes');
+});
+
+test('questionProgressLabel returns null for single question', () => {
+  assert.equal(questionProgressLabel(0, 1), null);
+});
+
+test('questionProgressLabel returns "Question X of N" for multi', () => {
+  assert.equal(questionProgressLabel(0, 3), 'Question 1 of 3');
+  assert.equal(questionProgressLabel(1, 3), 'Question 2 of 3');
+  assert.equal(questionProgressLabel(2, 3), 'Question 3 of 3');
+});
+
+test('indexAskAnswers indexes consolidated multi-answer by questionEventId', () => {
+  const messages = [
+    { event_id: '$q', 'io.aee.ask-question': { questions: [] } },
+    {
+      event_id: '$a',
+      'io.aee.ask-answer': {
+        questionEventId: '$q',
+        answers: [
+          { questionId: 'q0', optionId: '0:0', label: 'OAuth' },
+          { questionId: 'q1', optionId: '1:1', label: 'Staging' },
+        ],
+      },
+    },
+  ];
+  const map = indexAskAnswers(messages);
+  assert.equal(map.size, 1);
+  const a = map.get('$q');
+  assert.ok(Array.isArray(a.answers));
+  assert.equal(a.answers[0].label, 'OAuth');
 });

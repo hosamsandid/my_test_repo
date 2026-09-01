@@ -19,7 +19,7 @@ const path = require('path');
 const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 // Trigger types the runtime understands (see CLAUDE.md → Autonomous Triggers).
-const TRIGGER_TYPES = new Set(['cron', 'once', 'http', 'github-event', 'jira-event']);
+const TRIGGER_TYPES = new Set(['cron', 'once', 'http', 'github-event']);
 
 // Catalog-v2 pattern roles (mirrors catalog-ports.js).
 const PATTERN_ROLES = ['scout', 'author', 'companion', 'intake', 'standalone'];

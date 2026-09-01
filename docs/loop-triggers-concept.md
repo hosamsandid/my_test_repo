@@ -203,8 +203,7 @@ The trigger model already unifies the two surfaces, so this is **not** an either
   single source of truth for editing every trigger type and is reused by the canvas
   `EdgeDialogs.jsx`. Adding `type: "loop"` (with `until` / `verify` / `maxIterations`
   / `maxTokens` fields) there makes it available **for free** in both the chat
-  right-rail Triggers panel and the Flows canvas edge dialog. Also mirror the new
-  type into `ScheduledJobs.jsx`'s own `TriggerForm`.
+  right-rail Triggers panel and the Flows canvas edge dialog.
 - **Visualising — a self-edge, following the cron precedent.** `cron`/`once` already
   render as a self-edge today (`process-graph.js:219` → `{from: n.id, to: n.id,
   kind: 'timer'}`). A loop is the same shape (an agent re-arming itself), so emit a

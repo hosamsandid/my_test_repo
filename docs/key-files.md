@@ -25,7 +25,6 @@
 | `orchestrator/orchestrator.js` | Agent lifecycle management, child-process spawning, environment seeding, internal HTTP API |
 | `agent-image/scripts/agent-entrypoint.py` | Per-agent runtime: Matrix client, Claude CLI invocations, trigger scheduler |
 | `orchestrator/github-poller.js` | GitHub Events API poller; fan-out to agents via pending-triggers |
-| `orchestrator/jira-poller.js` | Jira Cloud JQL/changelog poller for issue status changes; shares dedup/throttle/digest primitives with the GitHub poller via `event-poller-shared.js` |
 | `orchestrator/setup.sh` | First-time setup: registers the admin Matrix user, prints the access token |
 | `orchestrator/CLAUDE-template.md` | Base `CLAUDE.md` template baked into the image as a fallback |
 | `admin-console/api/api.js` | Express API covering all admin operations (~60 endpoints) |
@@ -37,11 +36,9 @@
 
 **Add an agent:** Admin Console → Agents → New Agent. Choose a role, pick a Working Environment, write a system prompt, save.
 
-**Schedule autonomous work:** Agent Chat → right rail → Triggers tab. Or manage globally via Scheduled Jobs.
+**Schedule autonomous work:** Agent Chat → right rail → Triggers tab.
 
 **React to GitHub events:** Add a GitHub token, attach it to a Working Environment, add a `github-event` trigger to an autonomous agent.
-
-**React to Jira status changes:** Add a Jira credential, bind a project key to it on a Working Environment, add a `jira-event` trigger to an autonomous agent.
 
 **Add a webhook trigger:** Add an `http` trigger in the console; it generates a secret automatically. POST to the webhook endpoint with the `X-Hook-Secret` header.
 

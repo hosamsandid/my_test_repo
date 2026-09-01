@@ -57,11 +57,9 @@ const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
-const JiraTokens          = lazy(() => import('./pages/JiraTokens'));
 const MyCredentials       = lazy(() => import('./pages/MyCredentials'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
-const ScheduledJobs       = lazy(() => import('./pages/ScheduledJobs'));
 const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
 const TokenUsage          = lazy(() => import('./pages/TokenUsage'));
 const ModelRegistry       = lazy(() => import('./pages/ModelRegistry'));
@@ -153,13 +151,11 @@ export default function App() {
           <Route path="/environments" element={<WorkingEnvironments />} />
           <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
           <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
-          <Route path="/jira-tokens"  element={<CredentialRoute><JiraTokens /></CredentialRoute>} />
           {/* Self-service personal credentials (#1568) — open to any authenticated
               human, NOT gated on credAdmin (the personal tier is owner-only). */}
           <Route path="/my-credentials" element={<MyCredentials />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
-          <Route path="/jobs"         element={<ScheduledJobs />} />
           <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
           <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />

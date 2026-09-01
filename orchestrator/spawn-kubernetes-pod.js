@@ -589,6 +589,9 @@ async function libpodRequest(method, urlPath) {
 // isolation is the PVC subPath in buildPodManifest and network segmentation is
 // a NetworkPolicy applied by the operator — nothing to provision per spawn.
 async function removePerAgentVolume() { return { skipped: 'kubernetes-shared-pvc' }; }
+// The `{ graceful }` option (#1791) is Podman-only — an agent Pod has no
+// per-agent network to reap and is deleted through the k8s API path — so it is
+// accepted for signature parity with spawn-container.js and ignored here.
 async function removePerAgentNetwork() { return { skipped: 'kubernetes-service-network' }; }
 async function reseedPerAgentVolume() { return { skipped: 'kubernetes-subpath' }; }
 

@@ -9,13 +9,6 @@
 /.claude/settings.local.json
 __pycache__/
 
-# Any node_modules/ anywhere in the tree — orchestrator/, broker-sdk/, each
-# plugin broker/, e2e/fake-github/, etc. all run their own `npm install` for
-# tests and CI; this one rule covers every current and future location
-# instead of a per-directory .gitignore (admin-console/.gitignore's own
-# node_modules/ line predates this and is now redundant but harmless).
-node_modules/
-
 # E2E (Playwright) local artifacts
 /e2e/node_modules/
 /e2e/test-results/

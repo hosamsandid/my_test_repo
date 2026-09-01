@@ -17,7 +17,6 @@ export const BREADCRUMBS = {
   '/my-credentials': 'My Credentials',
   '/skills':       'Skills Registry',
   '/role-templates': 'Agent Templates',
-  '/jobs':         'Triggers',
   '/github-events': 'GitHub Event Log',
   '/token-usage':  'Token Usage',
   '/models':       'Model Providers',

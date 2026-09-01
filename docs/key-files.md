@@ -36,7 +36,7 @@
 
 **Add an agent:** Admin Console → Agents → New Agent. Choose a role, pick a Working Environment, write a system prompt, save.
 
-**Schedule autonomous work:** Agent Chat → right rail → Triggers tab. Or manage globally via Scheduled Jobs.
+**Schedule autonomous work:** Agent Chat → right rail → Triggers tab.
 
 **React to GitHub events:** Add a GitHub token, attach it to a Working Environment, add a `github-event` trigger to an autonomous agent.
 

@@ -25,7 +25,6 @@ export const ROUTE_TITLES = {
   '/role-templates': 'Agent Templates',
   '/skills': 'Skills',
   '/knowledge': 'Knowledge',
-  '/jobs': 'Triggers',
   '/models': 'Model Providers',
   '/ssh-keys': 'SSH Keys',
   '/github-tokens': 'GitHub Tokens',

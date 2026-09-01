@@ -588,6 +588,15 @@ export default function AgentChat() {
 
       <ResizeDivider onMouseDown={startDrag('left')} />
 
+      {/* One shared poll of /api/agents/:id/sessions/active (#1678, extended
+          in #1852 to also cover ChatPanel). Originally scoped only to RightRail;
+          now wraps the entire chat+rail block so ChatPanel can read active
+          trigger sessions and show the "working…" indicator during trigger-
+          initiated runs (AC1–3). The poll cadence and provider semantics are
+          unchanged; useSessionsActive() returns a safe inert default when used
+          outside the provider, so any consumer not inside this tree is unharmed. */}
+      <SessionsActiveProvider agentId={selectedAgent?.id || null}>
+
       {/* Chat panel */}
       <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {selectedAgent ? (
@@ -631,36 +640,31 @@ export default function AgentChat() {
           ? 'none'
           : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
       }}>
-        {/* One shared poll of /api/agents/:id/sessions/active for the selected
-            agent (#1678): the RightRail badge, SessionsPanel list and DiffView
-            running-probe (all descendants of RightRail) subscribe to it instead
-            of each running their own timer. Scoped to the selected agent and
-            kept mounted across a rail collapse, so the badge stays current. */}
-        <SessionsActiveProvider agentId={selectedAgent?.id || null}>
-          <RightRail
-            agentId={selectedAgent?.id || null}
-            // Outcomes are team hand-offs, so that tab only applies to a team
-            // member (#963 AC1). `/api/matrix/agents` already carries the
-            // membership, so the rail needs no extra fetch to decide.
-            agentTeamId={selectedAgent?.parentTeamId || null}
-            roomId={effectiveRoomId}
-            hoveredCorrelationId={hoveredCorrelationId}
-            onHoverCorrelation={setHoveredCorrelationId}
-            collapsed={!logOpen}
-            onClose={() => setLogOpen(false)}
-            onOpen={() => setLogOpen(true)}
-            onCostUpdate={handleCostUpdate}
-            onContextUpdate={handleContextUpdate}
-            todoCloseSignal={todoCloseSignal}
-            workspaceRefreshKey={workspaceRefreshKey}
-            knowledgeRefreshKey={knowledgeRefreshKey}
-            openTabRequest={railTabRequest}
-            onResumeSession={handleResumeSession}
-            sessionSelectRequest={sessionSelectRequest}
-            onReferenceInChat={handleReferenceInChat}
-          />
-        </SessionsActiveProvider>
+        <RightRail
+          agentId={selectedAgent?.id || null}
+          // Outcomes are team hand-offs, so that tab only applies to a team
+          // member (#963 AC1). `/api/matrix/agents` already carries the
+          // membership, so the rail needs no extra fetch to decide.
+          agentTeamId={selectedAgent?.parentTeamId || null}
+          roomId={effectiveRoomId}
+          hoveredCorrelationId={hoveredCorrelationId}
+          onHoverCorrelation={setHoveredCorrelationId}
+          collapsed={!logOpen}
+          onClose={() => setLogOpen(false)}
+          onOpen={() => setLogOpen(true)}
+          onCostUpdate={handleCostUpdate}
+          onContextUpdate={handleContextUpdate}
+          todoCloseSignal={todoCloseSignal}
+          workspaceRefreshKey={workspaceRefreshKey}
+          knowledgeRefreshKey={knowledgeRefreshKey}
+          openTabRequest={railTabRequest}
+          onResumeSession={handleResumeSession}
+          sessionSelectRequest={sessionSelectRequest}
+          onReferenceInChat={handleReferenceInChat}
+        />
       </div>
+
+      </SessionsActiveProvider>
     </div>
   );
 }

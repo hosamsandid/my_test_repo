@@ -5,6 +5,7 @@ import {
   activeSessionCount,
   isAgentRunning,
   removeSession,
+  hasActiveTriggerSessionForRoom,
 } from './sessions-active.js';
 
 test('sessionsFromResponse returns the sessions array', () => {
@@ -50,4 +51,44 @@ test('removeSession is a no-op for an absent id', () => {
 
 test('removeSession tolerates a non-array', () => {
   assert.deepEqual(removeSession(null, 'a'), []);
+});
+
+// hasActiveTriggerSessionForRoom
+test('hasActiveTriggerSessionForRoom returns true when a trigger session matches the room', () => {
+  const sessions = [
+    { id: '1', type: 'trigger', roomId: '!abc:local' },
+    { id: '2', type: 'dm',      roomId: '!abc:local' },
+  ];
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!abc:local'), true);
+});
+
+test('hasActiveTriggerSessionForRoom returns false when type is not trigger', () => {
+  const sessions = [{ id: '1', type: 'dm', roomId: '!abc:local' }];
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!abc:local'), false);
+});
+
+test('hasActiveTriggerSessionForRoom returns false when roomId differs', () => {
+  const sessions = [{ id: '1', type: 'trigger', roomId: '!other:local' }];
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!abc:local'), false);
+});
+
+test('hasActiveTriggerSessionForRoom returns false on empty sessions', () => {
+  assert.equal(hasActiveTriggerSessionForRoom([], '!abc:local'), false);
+});
+
+test('hasActiveTriggerSessionForRoom returns false on null/missing args', () => {
+  assert.equal(hasActiveTriggerSessionForRoom(null, '!abc:local'), false);
+  assert.equal(hasActiveTriggerSessionForRoom(undefined, '!abc:local'), false);
+  assert.equal(hasActiveTriggerSessionForRoom([{ id: '1', type: 'trigger', roomId: '!abc:local' }], null), false);
+  assert.equal(hasActiveTriggerSessionForRoom([{ id: '1', type: 'trigger', roomId: '!abc:local' }], ''), false);
+});
+
+test('hasActiveTriggerSessionForRoom handles concurrent runs with different rooms', () => {
+  const sessions = [
+    { id: '1', type: 'trigger', roomId: '!room1:local' },
+    { id: '2', type: 'trigger', roomId: '!room2:local' },
+  ];
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!room1:local'), true);
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!room2:local'), true);
+  assert.equal(hasActiveTriggerSessionForRoom(sessions, '!room3:local'), false);
 });

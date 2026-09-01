@@ -74,6 +74,18 @@ function groupThousands(n) {
   return out;
 }
 
+// Normalises a gitInfo array for the About-this-chat popover (#1807).
+// Returns one entry per repo with null-safe defaults. Returns [] when empty.
+export function repoBranchRows(gitInfo) {
+  if (!Array.isArray(gitInfo) || gitInfo.length === 0) return [];
+  return gitInfo.map(r => ({
+    repoPath: r.repoPath ?? '',
+    branch: r.branch ?? 'detached',
+    isDirty: Boolean(r.isDirty),
+    changesCount: typeof r.changesCount === 'number' ? r.changesCount : 0,
+  }));
+}
+
 // The popover's four-class token breakdown (AC4). Takes the raw per-class
 // totals { input, output, cacheWrite, cacheRead } and returns one row per class
 // in a fixed order with a human label and a grouped count. Returns [] when the

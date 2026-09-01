@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Info, Copy, Check } from 'lucide-react';
+import { Info, Copy, Check, Server, GitBranch } from 'lucide-react';
 import {
-  formatContextWindow, sessionPriceLabel, tokenBreakdownRows,
+  formatContextWindow, sessionPriceLabel, tokenBreakdownRows, repoBranchRows,
 } from './session-info.js';
 
 // The Agent-Chat header "info" popover (#1718). A small (i) icon opens a
@@ -50,6 +50,8 @@ export default function SessionInfoPopover({
   sessionCost,               // { usd, breakdown } | null
   contextWindowTokens,       // number | null — selected model's real window
   maxOutputTokens,           // number | null — only when discovery provided it
+  environmentName,           // string | null — Working Environment name (#1807)
+  gitInfo,                   // array | null — repo/branch data (#1807)
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -108,7 +110,8 @@ export default function SessionInfoPopover({
   const breakdown = tokenBreakdownRows(sessionCost?.breakdown);
   const windowLabel = formatContextWindow(contextWindowTokens);
   const maxOut = formatContextWindow(maxOutputTokens);
-  const hasBody = sessionId || priceLabel || breakdown.length > 0 || windowLabel || maxOut;
+  const repoRows = repoBranchRows(gitInfo);
+  const hasBody = environmentName || repoRows.length > 0 || sessionId || priceLabel || breakdown.length > 0 || windowLabel || maxOut;
 
   return (
     <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
@@ -116,8 +119,8 @@ export default function SessionInfoPopover({
         ref={triggerRef}
         type="button"
         onClick={() => setOpen(o => !o)}
-        title="Session & model details"
-        aria-label="Session and model details"
+        title="About this chat"
+        aria-label="About this chat"
         aria-haspopup="dialog"
         aria-expanded={open}
         style={{
@@ -135,7 +138,7 @@ export default function SessionInfoPopover({
         <div
           ref={popRef}
           role="dialog"
-          aria-label="Session and model details"
+          aria-label="About this chat"
           style={{
             position: 'fixed', top: pos.top, left: pos.left, zIndex: 1000,
             width: POPOVER_WIDTH, boxSizing: 'border-box',
@@ -154,6 +157,49 @@ export default function SessionInfoPopover({
             }}>
               No session details yet.
             </div>
+          )}
+
+          {(environmentName || repoRows.length > 0) && (
+            <>
+              <SectionTitle>About</SectionTitle>
+              {environmentName && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '2px var(--eb-space-2)',
+                  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+                }}>
+                  <Server size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {environmentName}
+                  </span>
+                </div>
+              )}
+              {repoRows.map(r => (
+                <div key={r.repoPath} style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '2px var(--eb-space-2)',
+                  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+                }}>
+                  <GitBranch size={11} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+                  <span style={{
+                    fontFamily: 'var(--eb-font-mono)',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {repoRows.length > 1 && `${r.repoPath}: `}{r.branch}
+                    {r.isDirty && (
+                      <span
+                        title={`${r.changesCount} uncommitted change${r.changesCount !== 1 ? 's' : ''}`}
+                        style={{
+                          display: 'inline-block', width: 6, height: 6,
+                          borderRadius: '50%', background: 'var(--eb-color-warning, #f59e0b)',
+                          marginLeft: 4, verticalAlign: 'middle', flexShrink: 0,
+                        }}
+                      />
+                    )}
+                  </span>
+                </div>
+              ))}
+            </>
           )}
 
           {sessionId && (

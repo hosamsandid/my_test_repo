@@ -199,6 +199,56 @@ test('expiredDayFiles keeps files inside the retention window and flags older on
   assert.deepEqual(expired.sort(), ['github-events-2026-01-01.jsonl', 'github-events-2026-06-30.jsonl'].sort());
 });
 
+// ── wakeLabel (#1846) — per-outcome attribution ───────────────────────────────
+
+test('buildEventEntry passes wakeLabel through outcomes — matched labelFilter', () => {
+  const ghEvent = {
+    id: '5001', actor: { login: 'alice' }, created_at: '2026-09-01T10:00:00Z',
+    payload: { label: { name: 'ux' }, labels: [{ name: 'ux' }, { name: 'ready' }] },
+  };
+  const entry = eventLog.buildEventEntry({
+    ghEvent,
+    repoFullName: 'org/repo',
+    key: 'issues.labeled',
+    outcomes: [
+      { agentId: 'developer', triggerId: 't1', status: 'delivered', reason: null, digest: false, wakeLabel: 'ready' },
+    ],
+  });
+  // event-level label stays as the raw collapsed value
+  assert.equal(entry.label, 'ux');
+  // per-outcome wakeLabel carries the subscriber's matched filter
+  assert.equal(entry.outcomes[0].wakeLabel, 'ready');
+});
+
+test('buildEventEntry passes wakeLabel through outcomes — null for any-label listener', () => {
+  const ghEvent = {
+    id: '5002', actor: { login: 'bob' }, created_at: '2026-09-01T10:05:00Z',
+    payload: { label: { name: 'ready' } },
+  };
+  const entry = eventLog.buildEventEntry({
+    ghEvent,
+    repoFullName: 'org/repo',
+    key: 'issues.labeled',
+    outcomes: [
+      { agentId: 'any-listener', triggerId: 't2', status: 'delivered', reason: null, digest: false, wakeLabel: null },
+    ],
+  });
+  assert.equal(entry.outcomes[0].wakeLabel, null);
+});
+
+test('buildEventEntry preserves absent wakeLabel on legacy / label-filter-dropped outcomes', () => {
+  const ghEvent = { id: '5003', actor: { login: 'carol' }, created_at: '2026-09-01T10:10:00Z' };
+  const entry = eventLog.buildEventEntry({
+    ghEvent,
+    repoFullName: 'org/repo',
+    key: 'issues.labeled',
+    outcomes: [
+      { agentId: 'other', triggerId: 't3', status: 'dropped', reason: 'label-filter', digest: false },
+    ],
+  });
+  assert.equal(entry.outcomes[0].wakeLabel, undefined);
+});
+
 test('expiredDayFiles returns nothing for an empty or all-fresh file list', () => {
   const now = Date.parse('2026-07-08T12:00:00Z');
   assert.deepEqual(eventLog.expiredDayFiles([], now, 7), []);

@@ -34,18 +34,22 @@ const controlStyle = {
 // admin's attention — "nobody's listening" per issue #469 AC #4).
 function OutcomeChip({ outcome, eventId, onOpenSession }) {
   let bg, color, label;
+  // wakeLabel is set when the subscriber's labelFilter matched (#1846). null
+  // means any-label listener; undefined means a legacy row or a drop before
+  // the label gate (history-horizon). Show it only when it's a real string.
+  const wakeSuffix = typeof outcome.wakeLabel === 'string' ? ` (${outcome.wakeLabel})` : '';
   if (outcome.status === 'delivered') {
     bg = 'var(--eb-status-success-bg)';
     color = 'var(--eb-status-success)';
-    label = `delivered → ${outcome.agentName || outcome.agentId}`;
+    label = `delivered${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
   } else if (outcome.status === 'digest') {
     bg = 'var(--eb-status-info-bg)';
     color = 'var(--eb-status-info)';
-    label = `digested → ${outcome.agentName || outcome.agentId}`;
+    label = `digested${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
   } else {
     bg = 'var(--eb-bg-elevated)';
     color = 'var(--eb-text-secondary)';
-    label = `dropped (${outcome.reason || 'unknown'}) → ${outcome.agentName || outcome.agentId}`;
+    label = `dropped (${outcome.reason || 'unknown'})${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
   }
 
   const baseStyle = {
@@ -329,7 +333,11 @@ function ProcessedEventsView() {
       // (#1833 AC1.3) so those rows say which branch they touched.
       const friendly = eventLabel(v);
       let suffix = '';
-      if (row.label) suffix = ` (${row.label})`;
+      // Show the raw event-level label only for no-subscriber rows (#1846): when
+      // someone was listening, attribution moves to per-outcome wakeLabel chips.
+      // For historical rows (no wakeLabel on outcomes) we also omit the suffix
+      // rather than show a potentially-wrong collapsed label.
+      if (row.noMatchingTrigger && row.label) suffix = ` (${row.label})`;
       else if (row.ref) suffix = ` · ${shortRef(row.ref)}`;
       return <span>{friendly || '—'}{suffix}</span>;
     } },

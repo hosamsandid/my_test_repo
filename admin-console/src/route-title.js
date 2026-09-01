@@ -33,6 +33,7 @@ export const ROUTE_TITLES = {
   '/environments': 'Working Environments',
   '/github-events': 'GitHub Event Log',
   '/teams': 'Access & Users',
+  '/users': 'Users',
   '/token-usage': 'Token Usage',
   '/plugins': 'Plugins',
   '/maintenance-mode': 'Maintenance Mode',

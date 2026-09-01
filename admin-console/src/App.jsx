@@ -68,6 +68,7 @@ const Plugins             = lazy(() => import('./pages/Plugins'));
 const PluginUiPage        = lazy(() => import('./pages/PluginUiPage'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Teams               = lazy(() => import('./pages/Teams'));
+const Users               = lazy(() => import('./pages/Users'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
@@ -167,6 +168,7 @@ export default function App() {
           <Route path="/plugins/:id/view" element={<PluginUiPage />} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
           <Route path="/teams"        element={<Teams />} />
+          <Route path="/users"        element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/knowledge"     element={<KnowledgeFlow />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />

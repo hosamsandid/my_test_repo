@@ -356,10 +356,14 @@ function createTeamsStore({ root } = {}) {
   }
 
   // Strip the password hash (and any future secret) before a record leaves the
-  // process. Apply at every API response that carries a user.
+  // process. Apply at every API response that carries a user. The raw hash is
+  // replaced by a boolean `hasPassword` so a client (the Users page, #1844) can
+  // reflect whether a local login password is set — reflecting the set/clear
+  // affordance's current state — without ever seeing the secret itself.
   function sanitizeUser(u) {
     if (!u || typeof u !== 'object') return u;
     const { passwordHash, ...rest } = u;
+    rest.hasPassword = !!passwordHash;
     return rest;
   }
 

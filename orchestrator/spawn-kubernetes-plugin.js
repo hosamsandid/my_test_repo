@@ -55,6 +55,7 @@ const {
   reconcileSidecars,
   sidecarContainerName,
   brokerEnvContract,
+  manifestHasSidecar,
 } = require('./plugin-sidecar');
 const { PLUGIN_ID_LABEL } = require('./plugin-scope');
 const { installedManifests, readOrCreateSigningSecret, REGISTRY_DIR } = require('./plugin-registry');
@@ -455,8 +456,11 @@ async function selfHealStatePvcs(ids, manifests, opts = {}) {
 async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
   const manifests = installedManifests(dir);
   // Only k8s-eligible plugins count as "installed" here: a podman-only plugin
-  // must not get a Deployment (and any stray one is torn down as an orphan).
-  const eligibleIds = Object.keys(manifests).filter((id) => manifestSupportsK8s(manifests[id]));
+  // must not get a Deployment (and any stray one is torn down as an orphan). A
+  // command-only plugin (#1798) declares no `sidecar`, so it is excluded too —
+  // starting one would dereference `manifest.sidecar.image` on undefined (#1861).
+  const eligibleIds = Object.keys(manifests)
+    .filter((id) => manifestHasSidecar(manifests[id]) && manifestSupportsK8s(manifests[id]));
   const existing = await listPluginDeployments();
   // reconcileSidecars keys on Labels['aee.plugin.id'] — hand it the deployment
   // labels in the shape it expects.

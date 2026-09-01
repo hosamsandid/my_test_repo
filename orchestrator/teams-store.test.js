@@ -23,17 +23,21 @@ test('passwords: set, verify, and never leak the hash', () => {
   const { store } = freshStore();
   const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
   assert.equal(u.passwordHash, undefined); // not set yet
+  assert.equal(store.sanitizeUser(u).hasPassword, false); // sanitized flag reflects no password
 
   // No password yet → cannot log in.
   assert.equal(store.verifyUserCredentials('jane@corp.com', 'whatever'), null);
 
   const updated = store.setUserPassword(u.id, 's3cret-pass');
   assert.equal(updated.passwordHash, undefined); // sanitized return
+  assert.equal(updated.hasPassword, true);       // now reflects a set password
 
-  // The raw stored record carries a scrypt hash, but sanitizeUser hides it.
+  // The raw stored record carries a scrypt hash, but sanitizeUser hides it
+  // behind the boolean flag.
   const raw = store.listUsers().find(x => x.id === u.id);
   assert.match(raw.passwordHash, /^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
   assert.equal(store.sanitizeUser(raw).passwordHash, undefined);
+  assert.equal(store.sanitizeUser(raw).hasPassword, true);
 
   // Correct password → authenticated (matched by subject), wrong → null.
   const ok = store.verifyUserCredentials('jane@corp.com', 's3cret-pass');
@@ -48,7 +52,8 @@ test('passwords: clearing disables login again', () => {
   const u = store.createUser({ subject: 'bob@corp.com' });
   store.setUserPassword(u.id, 'pw');
   assert.ok(store.verifyUserCredentials('bob@corp.com', 'pw'));
-  store.clearUserPassword(u.id);
+  const cleared = store.clearUserPassword(u.id);
+  assert.equal(cleared.hasPassword, false); // flag flips back after a clear
   assert.equal(store.verifyUserCredentials('bob@corp.com', 'pw'), null);
 });
 

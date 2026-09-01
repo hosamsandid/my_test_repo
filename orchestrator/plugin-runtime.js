@@ -53,6 +53,7 @@ const {
   sidecarContainerName,
   sidecarLabels,
   reconcileSidecars,
+  sidecarPluginIds,
   reconcileAttachments,
   capabilityAttachments,
   brokerEnvContract,
@@ -282,7 +283,11 @@ async function reconcilePluginSidecars(dir = REGISTRY_DIR) {
   if (!PLUGIN_SIDECARS_SUPPORTED) return { started: [], stopped: [], errors: [], ...UNSUPPORTED };
   const manifests = installedManifests(dir);
   const { running, stale } = splitByRunning(await listSidecarContainers());
-  const { toStart, toStop } = reconcileSidecars(Object.keys(manifests), running);
+  // Only broker-backed plugins are reconciled here — a command-only plugin
+  // (#1798) declares no `sidecar`, so starting one would dereference
+  // `manifest.sidecar.capabilities` on undefined and log a spurious failure
+  // (#1861). Filtering the ids keeps it out of both start and orphan-stop.
+  const { toStart, toStop } = reconcileSidecars(sidecarPluginIds(manifests), running);
 
   const started = [];
   const stopped = [];

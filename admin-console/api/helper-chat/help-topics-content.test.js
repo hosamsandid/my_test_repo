@@ -333,10 +333,44 @@ const TOPIC_CONTENT = [
       'not team-scoped',
     ],
   },
+  {
+    id: 'maintenance-mode',
+    routes: ['/maintenance-mode'],
+    // #1887 lifted the page intro and the bordered "While active" box (the
+    // cron catch-up, the durable http/github-event queue, nothing-force-stopped)
+    // and adds what neither said: the console-wide chat lock, the skipped
+    // orchestrator passes, the advisory-only session counter, and the fact that
+    // the grace period is a display countdown no backend component enforces.
+    concepts: [
+      'signal, not an action',
+      'manual, external step',
+      'Nothing auto-deactivates',
+      'across every team and user',
+      'advisory',
+      'Trigger possibly lost',
+      'enforcement timer',
+      'stays active',
+      '24 hours',
+      'cron',
+      'exactly one',
+      'once',
+      'loop',
+      'github-event',
+      'nothing is dropped',
+      'not auto-retried',
+      'read-only',
+      'refuses to send',
+      'hill-climb metrics',
+      'flow-anomaly history',
+      'natural end',
+      'End Maintenance Mode',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users, E8 models, E9 mcp …), never by dropping one.
+  // E6 environments, E7 access-users, E8 models, E9 mcp, E12 github-events,
+  // E13 maintenance-mode …), never by dropping one.
 ];
 
 const registry = loadRegistry();

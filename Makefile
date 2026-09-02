@@ -278,8 +278,9 @@ seed-plugins:
 # `make e2e`      → FULL suite (F0–F4) — the nightly lane (#668).
 # `make e2e-gate` → F0+F1 only — the burn-in PR gate scope (concept §8 phase 2/3:
 #                   "PR gate stays F0+F1"). Kept a separate target so promoting
-#                   the gate to a required PR check never drags in F2 (expected
-#                   red until #253) or the slower F3/F4 flows.
+#                   the gate to a required PR check never drags in the slower
+#                   F3/F4 flows. (F2 is now green — #253 is fixed — so keeping it
+#                   out of the gate is just scope, not a known-red exclusion.)
 e2e:
 	cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test
 

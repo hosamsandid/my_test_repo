@@ -120,6 +120,41 @@ const TOPIC_CONTENT = [
       'un-retired',
     ],
   },
+  {
+    id: 'skills',
+    routes: ['/skills'],
+    // #1878 lifted these from the Skills page: the four-paragraph concept intro
+    // (what a skill is, the Global/Team/Agent tiers and their resolution order,
+    // grant vs seeding/activation vs one-off install, the tier-moving verbs, and
+    // Skills vs Knowledge vs Memory) plus the merge dialog's rationale about
+    // provenance, carried-over files and migrated grants.
+    concepts: [
+      'SKILL.md',
+      'Global',
+      'Team',
+      'Agent',
+      'read-only',
+      'then from the global pool',
+      'Grant',
+      'activation',
+      'Install into agent',
+      'workspace reset',
+      'Promote to global',
+      'Move to global',
+      'Adopt',
+      'Move to team',
+      'Distill',
+      'Merge',
+      'Import / Export',
+      'replaces the entire',
+      'provenance',
+      'migrated to the target',
+      'Retire source skills',
+      'Memory',
+      'Knowledge',
+      'distilled from the best knowledge',
+    ],
+  },
 ];
 
 const registry = loadRegistry();

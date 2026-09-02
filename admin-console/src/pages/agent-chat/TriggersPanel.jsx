@@ -5,6 +5,7 @@ import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
+import PageHelpButton from '../../components/PageHelpButton';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -891,17 +892,19 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'loop' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-          {/* Plain-language banner — no CLI terms (#1083 AC5). */}
+          {/* Plain-language one-liner — no CLI terms (#1083 AC5). What a loop is
+              for, that each try starts fresh, and how it ends now lives in the
+              Agent Chat help topic (E15 #1889); this form is shared with the Flow
+              Editor, whose own route resolves to a different topic, so the "?"
+              affordance sits on the surfaces that host the form on /chats. */}
           <div style={{
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <Repeat size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-status-warning)' }} />
-            A <strong>loop</strong> runs this agent again and again, feeding each run's
-            result into the next, and stops once the work is done or it reaches the
-            maximum number of tries you set. Use it for tasks that take several passes
-            to finish — like working through a checklist or refining a result.
+            A <strong>loop</strong> re-runs this agent until the work is done or it
+            runs out of tries.
           </div>
 
           {/* ── Core fields (#1083 AC1): iterations + verifier. Everything else
@@ -969,10 +972,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
             {form.verifyMode === 'flow' && (
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                No inline check between tries: each try ends by handing its work to
-                the flow (opening a PR, setting a label), and the reviewers wired
-                downstream verify it there. Use this when the loop is the start of a
-                QS chain — otherwise the same reviewer would check the work twice.
+                No inline check between tries — the reviewers wired downstream in the
+                flow verify each hand-off.
               </div>
             )}
 
@@ -1094,17 +1095,17 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {isDataFlow && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          {/* One-liner keeps the surprising half (it fires for this agent's own
+              pushes too); what the wake instruction should therefore tell the
+              agent to do is in the Agent Chat help topic (E15 #1889). */}
           <div style={{
             padding: 'var(--eb-space-2) var(--eb-space-3)',
             background: 'var(--eb-accent-muted)', border: '1px solid var(--eb-accent-primary)',
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <GitBranch size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-            This agent is woken on <strong>any push</strong> to the team repo (a
-            teammate's committed work is the hand-off). It fires regardless of who
-            pushed — including this agent's own pushes — so the woken agent should
-            <code> git pull</code>, check whether the change is relevant, and reply
-            <code> [PASS]</code> if there's nothing to do.
+            Woken by <strong>any push</strong> to the team repo — including this
+            agent's own.
           </div>
 
           {isDraftMode ? (
@@ -1555,6 +1556,10 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       >
         <RefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : {}} />
       </button>
+      {/* E15 (#1889): the trigger-type concept prose moved into the Agent Chat
+          help topic. This panel only ever renders on /chats, so the shared "?"
+          resolves to that topic. */}
+      <PageHelpButton label="What the trigger types do" size={13} style={{ padding: 2 }} />
       <button
         onClick={() => setAddOpen(true)}
         disabled={!agentId}

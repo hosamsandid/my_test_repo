@@ -79,9 +79,12 @@ again when you enable it.
 
 Hand-offs travel on GitHub labels, so two teams on the *same* repository would wake
 each other's agents with the same label. The optional **Label suffix** (up to eight
-lowercase letters or digits — the suggest button proposes a random four-character
-one) is stamped onto every label the team uses: trigger filters, channel labels,
-the label registry and the wake instructions the agents read.
+lowercase letters, digits and single inner dashes — so `team-1` or `pre-prod` reads
+as well as `k3f9`; a leading, trailing or doubled dash is refused, because it would
+produce `ready-x-` or `ready--x`) is stamped onto every label the team uses: trigger
+filters, channel labels, the label registry and the wake instructions the agents
+read. The suggest button still proposes a random four-character one — an
+auto-generated token has no words to separate.
 
 Leave it blank unless another Agent Team already uses that repository. When you
 re-run the wizard to *extend* an existing team, the suffix must match the one

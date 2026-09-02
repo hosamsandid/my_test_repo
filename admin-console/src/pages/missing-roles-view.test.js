@@ -107,6 +107,16 @@ test('inferMissingRoles: suffix-stamped team labels still match the source templ
   assert.equal(res.templateId, 'dispatched-sdlc');
 });
 
+// #1934 — a label suffix may now carry inner hyphens (`team-1`). The strip is
+// length-based, so template inference must be unaffected by the extra dash.
+test('inferMissingRoles: a hyphen-bearing suffix is stripped just as cleanly', () => {
+  const suffixed = DISPATCHED.labels.map(l => ({ name: `${l.name}-team-1` }));
+  const team = { id: 't3h', labels: suffixed, labelSuffix: 'team-1' };
+  const members = [{ id: 't3h-developer' }, { id: 't3h-code-reviewer' }];
+  const res = inferMissingRoles(team, members, TEMPLATES);
+  assert.equal(res.templateId, 'dispatched-sdlc');
+});
+
 test('inferMissingRoles: no label registry falls back to a clear role-id overlap', () => {
   const team = { id: 't4' }; // no labels
   const members = [

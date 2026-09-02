@@ -11,7 +11,15 @@
 // "logical" vs "physical" label — what's in the config is what's in the prompt
 // is what's on GitHub. (#902)
 
-const SUFFIX_RE = /^[a-z0-9]{1,8}$/;
+// Character class: lowercase base36 plus SINGLE INNER hyphens, 1–8 chars
+// (#1934). The suffix is appended to GitHub label tokens
+// (`ready-for-review` → `ready-for-review-team-1`) and GitHub label names allow
+// hyphens, so a readable `team-1` / `pre-prod` is legal — but a leading,
+// trailing or doubled hyphen would produce `ready--x` / `ready-x-`, so those
+// stay rejected. Kept byte-identical to the client's SUFFIX_RE in
+// admin-console/src/pages/process/launch-team.js.
+const SUFFIX_RE = /^(?=.{1,8}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SUFFIX_RULE = 'labelSuffix must be 1–8 chars of [a-z0-9] with single inner hyphens (e.g. k3f9, team-1, pre-prod)';
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -23,13 +31,14 @@ function validateSuffix(suffix) {
   if (suffix === undefined || suffix === null || suffix === '') return { ok: true };
   if (typeof suffix !== 'string') return { ok: false, error: 'labelSuffix must be a string' };
   if (!SUFFIX_RE.test(suffix)) {
-    return { ok: false, error: 'labelSuffix must be 1–8 lowercase base36 chars [a-z0-9]' };
+    return { ok: false, error: SUFFIX_RULE };
   }
   return { ok: true };
 }
 
 /**
- * Generate a random 4-char base36 suggestion.
+ * Generate a random 4-char base36 suggestion. Deliberately hyphen-free — an
+ * auto-generated token has no words to separate (#1934 AC8).
  */
 function suggestSuffix() {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -238,4 +247,4 @@ function dedupe(arr) {
   return [...new Set(arr)];
 }
 
-module.exports = { SUFFIX_RE, validateSuffix, suggestSuffix, collectLabelTokens, applyLabelSuffix };
+module.exports = { SUFFIX_RE, SUFFIX_RULE, validateSuffix, suggestSuffix, collectLabelTokens, applyLabelSuffix };

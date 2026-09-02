@@ -29,12 +29,29 @@ describe('validateSuffix', () => {
     assert.equal(validateSuffix('K3F9').ok, false);
   });
 
-  it('rejects dashes', () => {
-    assert.equal(validateSuffix('a-b').ok, false);
+  // #1934 AC4/AC5 — hyphens are legal in GitHub label names, so a readable
+  // suffix is allowed; only a hyphen that would produce `ready--x` / `ready-x-`
+  // is refused.
+  it('accepts single inner dashes', () => {
+    assert.deepEqual(validateSuffix('team-1'), { ok: true });
+    assert.deepEqual(validateSuffix('stack-a'), { ok: true });
+    assert.deepEqual(validateSuffix('pre-prod'), { ok: true });
+    assert.deepEqual(validateSuffix('a-b-c-d'), { ok: true });
   });
 
-  it('rejects longer than 8', () => {
+  it('rejects leading, trailing and doubled dashes', () => {
+    for (const bad of ['-x', 'x-', 'a--b', '-', '--']) {
+      assert.equal(validateSuffix(bad).ok, false, `'${bad}' should be rejected`);
+    }
+  });
+
+  it('names the dash rule in the error', () => {
+    assert.match(validateSuffix('x-').error, /hyphen/i);
+  });
+
+  it('rejects longer than 8, dashes included', () => {
     assert.equal(validateSuffix('abcdefghi').ok, false);
+    assert.equal(validateSuffix('stack-alpha').ok, false);
   });
 
   it('rejects non-string', () => {
@@ -232,6 +249,42 @@ describe('applyLabelSuffix', () => {
     const { members: out } = applyLabelSuffix(members, [], 'xy');
     assert.equal(out[0].triggers[0].labelFilter, 'ready-for-review-xy');
     assert.deepEqual(out[0].emits, ['ready-xy', 'ready-for-review-xy']);
+  });
+
+  // #1934 AC7 — a hyphen-bearing suffix must not break the two mechanics that
+  // are written in terms of dashes: the `-<suffix>` idempotency guard and the
+  // longest-first token matching.
+  it('handles a hyphen-bearing suffix (idempotency + longest-first)', () => {
+    const members = [{
+      emits: ['ready', 'ready-for-review'],
+      triggers: [
+        { id: 't1', labelFilter: 'ready' },
+        { id: 't2', labelFilter: 'ready-for-review', promptTemplate: 'Wait for ready-for-review, then act' },
+      ],
+      channels: [{ artifact: 'pr', from: 'developer', label: 'ready' }],
+      promptTemplate: 'Set `ready` when done; reviewers watch ready-for-review.',
+    }];
+    const bundleLabels = [{ name: 'ready', humanGate: true }, { name: 'ready-for-review' }];
+
+    const first = applyLabelSuffix(members, bundleLabels, 'team-1');
+    const m = first.members[0];
+    assert.deepEqual(m.emits, ['ready-team-1', 'ready-for-review-team-1']);
+    assert.equal(m.triggers[0].labelFilter, 'ready-team-1');
+    assert.equal(m.triggers[1].labelFilter, 'ready-for-review-team-1');
+    assert.equal(m.channels[0].label, 'ready-team-1');
+    // Longest-first: 'ready' must not be found inside 'ready-for-review'.
+    assert.equal(m.triggers[1].promptTemplate, 'Wait for ready-for-review-team-1, then act');
+    assert.equal(m.promptTemplate, 'Set `ready-team-1` when done; reviewers watch ready-for-review-team-1.');
+    assert.deepEqual(first.bundleLabels.map(l => l.name), ['ready-team-1', 'ready-for-review-team-1']);
+    assert.ok(first.tokenSet.has('ready-team-1'));
+    assert.ok(first.tokenSet.has('ready-for-review-team-1'));
+
+    // Idempotency guard: re-stamping the already-stamped output is a no-op —
+    // `ready-team-1`.endsWith('-team-1') must be recognised even though the
+    // suffix itself contains a dash.
+    const second = applyLabelSuffix(first.members, first.bundleLabels, 'team-1');
+    assert.deepEqual(second.members, first.members);
+    assert.deepEqual(second.bundleLabels, first.bundleLabels);
   });
 
   // Golden test: no suffix → byte-identical output

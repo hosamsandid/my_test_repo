@@ -120,12 +120,14 @@ const ALLOWLIST = new Set([
 // Phase-3 extraction tickets in flight at the time of writing; each has an open
 // PR authoring exactly these routes' topic.
 const TOPIC_PENDING = {
-  '/chats': '#1889 (E15 Agent Chat side-panels)',
   // Discharged as their topics landed: E10 (#1884) covers /ssh-keys,
-  // /github-tokens and /my-credentials (credentials.md), and E14 (#1888) covers
+  // /github-tokens and /my-credentials (credentials.md), E14 (#1888) covers
   // /create + /quickstart (create.md), /team-setup (team-setup.md, with
-  // /wizard/team as its alias) and /role-templates (role-templates.md).
-  // /chats above is the last one owing a topic.
+  // /wizard/team as its alias) and /role-templates (role-templates.md), and
+  // E15 (#1889) covers /chats (agent-chat.md, which /chats/:agentId collapses
+  // onto) — the last route that owed a topic. Empty is the goal state: every
+  // page route now resolves to an authored topic, so the coverage test accepts
+  // no Overview fallback at all.
 };
 
 // The full set of routes the help system knows about — every App.jsx path must

@@ -520,6 +520,55 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'agent-chat',
+    routes: ['/chats'],
+    // #1889 lifted the Agent Chat side-panel explainers: the trigger-type concept
+    // banners (loop, data-flow, the flow-verifier rationale), what a structured
+    // outcome is, and why retiring a learning is a reversible archive. It also
+    // writes down what no panel said: a loop is a launched run and therefore never
+    // appears in the Triggers list, the workspace gate that makes everything else
+    // wait while a loop holds it, and that an entry backing a promoted skill
+    // cannot be retired at all.
+    concepts: [
+      'one long-running Claude session',
+      'Reset Session',
+      'one workspace',
+      'wake instruction',
+      'Cron (recurring)',
+      'Once (one-shot)',
+      'HTTP webhook',
+      'X-Hook-Secret',
+      'GitHub event',
+      'Data flow (agent dependency)',
+      'Loop (re-run until done)',
+      'container clock',
+      "the agent's own pushes",
+      '[PASS]',
+      'claim',
+      'not a subscription',
+      'fresh context window',
+      'exhausted',
+      'paused',
+      'stopped',
+      'separate',
+      'durably queued',
+      'Stop always works',
+      'Maintenance Mode',
+      'Outcome → Label → Consumer',
+      'exactly one',
+      'any of',
+      'read-only on purpose',
+      'flat labels',
+      'digest',
+      'Propose as skill',
+      'reversible',
+      'committed to git',
+      'un-retired',
+      'backs a promoted skill',
+      'validity window',
+    ],
+  },
+  {
     id: 'users',
     routes: ['/users'],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
@@ -593,8 +642,8 @@ const TOPIC_CONTENT = [
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
   // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
   // E11 token-usage, E12 github-events, E13 maintenance-mode, E14 create /
-  // team-setup / role-templates, E16 users / about, E17 settings …), never by
-  // dropping one.
+  // team-setup / role-templates, E15 agent-chat, E16 users / about, E17 settings
+  // …), never by dropping one.
 ];
 
 const registry = loadRegistry();

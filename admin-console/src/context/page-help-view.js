@@ -18,11 +18,14 @@ export const ALIASES = {
   '/wizard/team': '/team-setup',
 };
 
-// Redirect sources → their destination (App.jsx <Navigate to=…>).
+// Redirect sources → their destination (App.jsx <Navigate to=…>). `/getting-started`
+// is one since G1 (#1874) retired the page — an old bookmark lands on the app home,
+// whose topic-less route resolves to the Overview that now carries its content.
 export const REDIRECTS = {
   '/': '/chats',
   '/blueprints': '/agents',
   '/briefings': '/flows',
+  '/getting-started': '/chats',
   '/process': '/flows',
 };
 
@@ -115,6 +118,28 @@ export function seeAlsoLinks(topic) {
   return topic.seeAlso
     .filter((s) => s && s.to)
     .map((s) => ({ label: s.label || s.to, to: s.to }));
+}
+
+// Normalize a topic's `actions` into safe call-to-action rows (#1874, concept §5)
+// — the "where to go next" buttons the retired Getting Started page carried.
+// Each row is either a navigation (`to`) or a panel verb (`action: 'tour'`, which
+// the face wires to openTour()); a row missing a label or both targets is dropped
+// so a malformed topic can never render a dead button. `to` wins over `action`.
+export const TOPIC_CTA_ACTIONS = ['tour'];
+
+export function topicActions(topic) {
+  if (!topic || !Array.isArray(topic.actions)) return [];
+  const out = [];
+  for (const a of topic.actions) {
+    if (!a || typeof a !== 'object') continue;
+    const label = typeof a.label === 'string' ? a.label.trim() : '';
+    const to = typeof a.to === 'string' ? a.to.trim() : '';
+    const action = typeof a.action === 'string' ? a.action.trim() : '';
+    if (!label) continue;
+    if (to) out.push({ label, to, action: '', primary: a.primary === true });
+    else if (TOPIC_CTA_ACTIONS.includes(action)) out.push({ label, to: '', action, primary: a.primary === true });
+  }
+  return out;
 }
 
 // Normalize a topic's askPrompts into a de-duplicated, non-empty string list.

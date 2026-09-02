@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
 import ConfirmDialog from '../components/ConfirmDialog';
 import PageHelpButton from '../components/PageHelpButton';
+import { usePageActions } from '../context/PageActionsContext';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
@@ -18,6 +19,27 @@ const SIDEBAR_MIN = 160;
 const SIDEBAR_MAX = 600;
 const DETAILS_MIN = 300;
 const DIVIDER_W = 12;
+
+// Header page-actions styling (#1912) — the convention the other #1847-migrated
+// pages use: accent for the page's main create action, bordered/elevated for
+// the secondary ones (mirrors Teams.jsx `primaryBtn` and Agents.jsx's Import).
+const HEADER_PRIMARY_BTN = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: '6px 12px',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+  border: 'none', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+};
+
+const HEADER_SECONDARY_BTN = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: '6px 12px',
+  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+  cursor: 'pointer', whiteSpace: 'nowrap',
+};
 
 function loadSidebarWidth() {
   try {
@@ -484,17 +506,70 @@ export default function Briefings() {
 
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 
+  // The three create actions live in the unified top-bar header (#1912),
+  // through the same `usePageActions()` slot every other migrated page uses
+  // (#1847) — so they keep their placement/styling convention and stay
+  // reachable while the left flows list is collapsed.
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+      <input
+        ref={importInputRef} type="file" accept="application/json,.json"
+        onChange={onImportFile} style={{ display: 'none' }}
+      />
+      <button
+        onClick={() => importInputRef.current?.click()}
+        disabled={importBusy}
+        style={{ ...HEADER_SECONDARY_BTN, cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1 }}
+      >
+        <Upload size={14} /> {importBusy ? 'Importing…' : 'Import'}
+      </button>
+      <button onClick={describeFlow} style={HEADER_SECONDARY_BTN}>
+        <Sparkles size={14} /> Describe flow…
+      </button>
+      <button onClick={newProcess} style={HEADER_PRIMARY_BTN}>
+        <Plus size={15} /> New flow
+      </button>
+    </div>
+  );
+
   return (
-    <div
-      ref={containerRef}
-      style={{
-        display: 'flex',
-        height: 'calc(100vh - var(--eb-header-height))',
-        margin: 'calc(-1 * var(--eb-space-6))',
-        background: 'var(--eb-bg-app)',
-        overflow: 'hidden',
-      }}
-    >
+    <>
+    {headerAction}
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: 'calc(100vh - var(--eb-header-height))',
+      margin: 'calc(-1 * var(--eb-space-6))',
+      background: 'var(--eb-bg-app)',
+      overflow: 'hidden',
+    }}>
+      {/* Import status belongs at the top of the page content area, directly
+          below the header the Import button now lives in — not in the left
+          panel, which no longer owns the action (#1912). */}
+      {(importBusy || importError) && (
+        <div
+          role="status"
+          style={{
+            flexShrink: 0,
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            borderBottom: '1px solid var(--eb-border-default)',
+            background: 'var(--eb-bg-surface)',
+            fontSize: 'var(--eb-text-xs)',
+            color: importError ? 'var(--eb-status-error)' : 'var(--eb-text-secondary)',
+          }}
+        >
+          {importError || 'Importing…'}
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        style={{
+          display: 'flex',
+          flex: 1,
+          minHeight: 0,
+          overflow: 'hidden',
+        }}
+      >
       {/* Left column: Flow list */}
       <div style={{
         width: effSidebarWidth,
@@ -533,7 +608,10 @@ export default function Briefings() {
           </button>
         ) : (
           <>
-            {/* Header: title + help icon + collapse button */}
+            {/* Header: help icon + collapse button. The panel's own "Flows"
+                heading is gone (#1912) — the page title lives exactly once, in
+                the unified top bar (#1847), and the create actions moved there
+                too, so collapsing this panel no longer hides flow creation. */}
             <div style={{
               padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-3) var(--eb-space-4)',
               borderBottom: '1px solid var(--eb-border-default)',
@@ -543,15 +621,6 @@ export default function Briefings() {
               justifyContent: 'space-between',
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
-                <div>
-                  <div style={{
-                    fontSize: 'var(--eb-text-md)',
-                    fontWeight: 'var(--eb-font-semibold)',
-                    color: 'var(--eb-text-primary)',
-                  }}>
-                    Flows
-                  </div>
-                </div>
                 {/* The Welcome banner and this page's own help drawer moved into
                     the `flows` help topic (#1876) — the "?" opens the Help panel
                     on its "This page" face. */}
@@ -574,63 +643,9 @@ export default function Briefings() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              {/* Start a new process (a draft) from scratch, or import a
-                  previously-exported one (#512) — both create flows, so both
-                  live here, side by side, rather than Import being reachable
-                  only from inside an already-open flow. */}
-              <div style={{ padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)', display: 'flex', gap: 'var(--eb-space-2)' }}>
-                <button
-                  onClick={newProcess}
-                  style={{
-                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
-                    border: 'none', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
-                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  <Plus size={15} /> New flow
-                </button>
-                <input
-                  ref={importInputRef} type="file" accept="application/json,.json"
-                  onChange={onImportFile} style={{ display: 'none' }}
-                />
-                <button
-                  onClick={() => importInputRef.current?.click()}
-                  disabled={importBusy}
-                  style={{
-                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
-                    border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-                    cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1,
-                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  <Upload size={15} /> {importBusy ? 'Importing…' : 'Import'}
-                </button>
-              </div>
-              {/* Third creation entry (#1069): describe the flow in plain
-                  language — opens a fresh draft with the Copilot panel focused. */}
-              <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-1)' }}>
-                <button
-                  onClick={describeFlow}
-                  style={{
-                    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    padding: 'var(--eb-space-2) var(--eb-space-1)', background: 'var(--eb-bg-surface)', color: 'var(--eb-accent-primary)',
-                    border: '1px solid var(--eb-accent-primary)', borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
-                    fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  <Sparkles size={15} /> Describe flow…
-                </button>
-              </div>
-              {importError && (
-                <div style={{ padding: '0 var(--eb-space-3) var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
-                  {importError}
-                </div>
-              )}
+              {/* The three create actions (New flow / Describe flow… / Import)
+                  used to sit here, above the list. They moved into the unified
+                  top-bar header (#1912) — see `headerAction` below. */}
 
               {/* Teams — each team is a process (live orchestration graph) */}
               <SectionHeader>Teams</SectionHeader>
@@ -779,6 +794,8 @@ export default function Briefings() {
         onConfirm={confirmDeleteDraft}
         onCancel={() => setDeleteTarget(null)}
       />
+      </div>
     </div>
+    </>
   );
 }

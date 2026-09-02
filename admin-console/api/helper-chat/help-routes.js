@@ -9,17 +9,17 @@
 // CI failure, so a future new page cannot ship silently help-less.
 //
 // Two ways a route is "covered":
-//   • PAGE_ROUTES  — a page that shows help. It renders its own authored topic
-//                    when one exists, else the always-present Overview fallback
-//                    (concept §2 — "Overview is the fallback content of the
-//                    This page face"). Both states are legitimate coverage, so a
-//                    page route needs no per-route topic to be considered covered
-//                    at the foundation stage; the extraction tickets (E1–E15)
-//                    author the specific topics later.
+//   • PAGE_ROUTES  — a page that shows help. Since E16 (#1891) every page route
+//                    must resolve to an authored topic; the Overview fallback is
+//                    no longer accepted as permanent coverage, so a route whose
+//                    topic is still owned by an in-flight ticket has to say so
+//                    explicitly in TOPIC_PENDING below. That is the "works for
+//                    all pages" guarantee of concept §3.4 — a page can only be
+//                    help-less on purpose, with an owner named.
 //   • ALLOWLIST    — a structural route that intentionally has NO page help of
-//                    its own: redirect sources, the /wizard/team alias, dynamic
-//                    child routes that inherit their parent's help, and stubs.
-//                    These never auto-open the panel (concept §4, C2).
+//                    its own: redirect sources, dynamic child routes that
+//                    inherit their parent's help, and stubs. These never
+//                    auto-open the panel (concept §4, C2).
 //
 // This module is pure data + three tiny resolvers (aliases / redirects / dynamic
 // collapse) shared by help-registry.js. The parallel client-side copy lives in
@@ -28,6 +28,9 @@
 // duplication is by design, kept small and guarded by tests on both sides).
 
 // Alias routes render the same page as their target and resolve to its topic.
+// `/wizard/team` and `/team-setup` are literally the same element in App.jsx, so
+// the alias is what registers the team-setup topic for both (E16 #1891, AC2) —
+// the topic itself only has to declare the canonical route.
 const ALIASES = {
   '/wizard/team': '/team-setup',
 };
@@ -61,12 +64,17 @@ const DYNAMIC = [
 // this list: `/getting-started` in G1 (#1874) — the page is gone and it is now a
 // redirect source above — and `/plugin-system` in E5 (#1879), removed outright
 // (no redirect, concept §9) with its content folded into the Plugins topic.
+// `/wizard/team` lives here rather than in ALLOWLIST since E16 (#1891): it is not
+// a structural route at all — it renders the whole Agent Team Wizard and shows
+// that page's help through the alias above, so classifying it as "no help of its
+// own" was the one place the topology mis-described what a user sees.
 const PAGE_ROUTES = new Set([
   '/agents',
   '/chats',
   '/create',
   '/quickstart',
   '/team-setup',
+  '/wizard/team',
   '/environments',
   '/ssh-keys',
   '/github-tokens',
@@ -98,9 +106,32 @@ const ALLOWLIST = new Set([
   '/process/:teamId',
   '/chats/:agentId',
   '/plugins/:id/view',
-  '/wizard/team',
   '/orchestrator-wizard',
 ]);
+
+// ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────
+//
+// A page route with no authored topic yet, mapped to the ticket that owns it.
+// The coverage test requires every OTHER page route to resolve to a real topic,
+// so this list is the only way a page can stay on the Overview fallback — and
+// each entry names who is fixing that. **Delete the entry when the topic lands**
+// (a stale entry does not fail CI, but it silently lowers the bar).
+//
+// Phase-3 extraction tickets in flight at the time of writing; each has an open
+// PR authoring exactly these routes' topic.
+const TOPIC_PENDING = {
+  '/chats': '#1889 (E15 Agent Chat side-panels)',
+  '/create': '#1888 (E14 Creation & onboarding)',
+  '/quickstart': '#1888 (E14 Creation & onboarding)',
+  '/team-setup': '#1888 (E14 Creation & onboarding)',
+  '/wizard/team': '#1888 (E14 Creation & onboarding) — via the /team-setup alias',
+  '/role-templates': '#1888 (E14 Creation & onboarding)',
+  '/ssh-keys': '#1884 (E10 Credentials & GitHub access)',
+  '/github-tokens': '#1884 (E10 Credentials & GitHub access)',
+  '/my-credentials': '#1884 (E10 Credentials & GitHub access)',
+  '/token-usage': '#1885 (E11 Token Usage)',
+  '/maintenance-mode': '#1887 (E13 Maintenance Mode)',
+};
 
 // The full set of routes the help system knows about — every App.jsx path must
 // be in here (as a page or a structural allowlist entry) and nothing else.
@@ -130,13 +161,32 @@ function extractAppRoutes(appJsxSource) {
   return [...out];
 }
 
+// Classify an App.jsx source against this module's route topology. Pure, so the
+// CI guard runs it on the real file and its own regression test runs it on a
+// synthetic source that proves the guard actually fires (E16 #1891, AC4 — an
+// assertion nobody has ever seen fail is not a guard).
+//   • unclassified — routes App.jsx renders that are in neither PAGE_ROUTES nor
+//                    ALLOWLIST (a new page shipping help-less).
+//   • stale        — routes this module still lists that App.jsx no longer has.
+function classifyAppRoutes(appJsxSource) {
+  const live = extractAppRoutes(appJsxSource);
+  const liveSet = new Set(live);
+  return {
+    routes: live,
+    unclassified: live.filter((r) => !KNOWN_ROUTE_PATHS.has(r)),
+    stale: [...KNOWN_ROUTE_PATHS].filter((r) => !liveSet.has(r)),
+  };
+}
+
 module.exports = {
   ALIASES,
   REDIRECTS,
   DYNAMIC,
   PAGE_ROUTES,
   ALLOWLIST,
+  TOPIC_PENDING,
   KNOWN_ROUTE_PATHS,
   canonicalRoute,
   extractAppRoutes,
+  classifyAppRoutes,
 };

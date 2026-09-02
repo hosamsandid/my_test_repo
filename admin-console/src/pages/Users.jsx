@@ -308,7 +308,7 @@ export default function Users() {
       }}>
         Manage the <strong>human users</strong> of this platform end-to-end: create, edit their details and
         System-Admin status, set or clear a login password, and delete. <strong>System Admins</strong> have
-        global access. Team membership &amp; access scopes are managed on the <strong>Access &amp; Users</strong> page.
+        global access. Team membership &amp; access scopes are managed on the <strong>Access</strong> page.
       </div>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />

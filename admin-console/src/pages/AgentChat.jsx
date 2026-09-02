@@ -462,27 +462,25 @@ export default function AgentChat() {
         overflow: 'hidden',
         flexShrink: 0,
       }}>
-        <div style={{
-          padding: 'var(--eb-space-4)',
-          borderBottom: '1px solid var(--eb-border-default)',
-          flexShrink: 0,
-        }}>
-          <h2 style={{
-            fontSize: 'var(--eb-text-md)',
-            fontWeight: 'var(--eb-font-semibold)',
-            margin: 0,
-            color: 'var(--eb-text-primary)',
+        {/*
+          Filter row only — the former "Agents (N)" heading was dropped (#1921):
+          the context is obvious and the count added nothing. The whole row is
+          conditional on there being agents to filter, so an empty/loading list
+          leaves no blank padded strip where the heading used to sit.
+        */}
+        {agents && agents.length > 0 && (
+          <div style={{
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+            borderBottom: '1px solid var(--eb-border-default)',
+            flexShrink: 0,
           }}>
-            {loading || !agents ? 'Agents' : `Agents (${agents.length})`}
-          </h2>
-          {agents && agents.length > 0 && (
             <FilterSelect
               agents={agents}
               filter={listFilter}
               onChange={setListFilter}
             />
-          )}
-        </div>
+          </div>
+        )}
 
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {loading && !agents && (
@@ -692,7 +690,8 @@ function FilterSelect({ agents, filter, onChange }) {
       onChange={handleChange}
       title="Filter agent list"
       style={{
-        marginTop: 'var(--eb-space-2)',
+        // No top margin: since #1921 removed the "Agents (N)" heading above it,
+        // the select is the row's only child and its own padding does the work.
         width: '100%',
         padding: '4px 6px',
         fontSize: 'var(--eb-text-xs)',

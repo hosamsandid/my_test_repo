@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { RefreshCw, Trash2 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
+import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
 import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
@@ -381,9 +382,11 @@ function ProcessedEventsView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {/* One-line tab lead (#1886): the outcome enumeration it used to spell out
+          is the help topic's table, and each chip still explains itself via
+          `outcomeTooltip` plus the legend below. */}
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        History of events the poller already processed — each was delivered, folded into a digest, dropped by a
-        protection layer, or matched no trigger. Read-only; nothing here can be acted on.
+        Events already handled, one outcome per subscriber. Read-only.
       </p>
       <OutcomeLegend />
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
@@ -531,9 +534,11 @@ function PendingQueueView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {/* One-line tab lead (#1886): why a backlog builds up (Maintenance Mode, a
+          busy agent) is the help topic's job; the Cancel button keeps its own
+          point-of-action tooltip. */}
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        Events accepted but not yet delivered to their agent. The queue drains every few seconds; a backlog only
-        builds up during Maintenance Mode or while an agent is busy. Cancel an entry to stop it before it fires.
+        Events accepted but not yet delivered to their agent — cancellable until they fire.
       </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
         <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
@@ -568,6 +573,8 @@ function PendingQueueView() {
 }
 
 /* ── Main page ─────────────────────────────────────────────────────── */
+const PAGE_DESCRIPTION = 'A read-only record of every GitHub event and what happened to it.';
+
 const TABS = [
   { key: 'processed', label: 'Processed events' },
   { key: 'pending', label: 'Pending queue' },
@@ -578,13 +585,17 @@ export default function GithubEventLog() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-          What the GitHub poller saw and what happened to each event — purely observational.
-          <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Processed events</strong> is the history;
-          <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Pending queue</strong> is the actionable backlog waiting to be delivered.
-        </p>
-      </div>
+      {/* Title comes from the Shell header, so the one-line description plus the
+          shared help affordance is this page body's first child (#1886, epic
+          #1870 Phase 3 — the multi-clause intro now lives in the
+          `github-events` help topic). */}
+      <p style={{
+        margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+      }}>
+        {PAGE_DESCRIPTION}
+        <PageHelpButton label="How events reach an agent" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-1)', borderBottom: '1px solid var(--eb-border-default)' }}>
         {TABS.map(t => (

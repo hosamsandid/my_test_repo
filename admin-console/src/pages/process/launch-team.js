@@ -11,16 +11,95 @@
 // React-free and fs-free so it runs under `node --test` (#651 convention); the
 // shared JSX (`LaunchStep`) is a thin renderer over it.
 
-// Slug rules shared by both entry points (was duplicated in MaterializeDialog +
-// TeamSetup): lowercase, dashes for runs of non-[a-z0-9], no leading/trailing
-// dash, max 40 chars.
+// The team-id rule, byte-identical to the server's TEAM_ID_RE (api.js) so the
+// client can never bless a value the API then refuses with an opaque 400
+// (#1934 AC2). Hyphens are legal *inside* the slug — the id is composed into
+// member ids as `<teamId>-<roleId>` — but not at either end.
+export const TEAM_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+export const TEAM_ID_MAX = 40;
+
+// The label-suffix rule, byte-identical to the server's SUFFIX_RE
+// (admin-console/api/label-suffix.js). The suffix is appended to GitHub label
+// tokens (`ready-for-review` → `ready-for-review-team-1`), so single inner
+// hyphens are fine — but a leading/trailing/doubled hyphen would produce
+// `ready--x` / `ready-x-` (#1934 AC4).
+export const SUFFIX_RE = /^(?=.{1,8}$)[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const SUFFIX_MAX = 8;
+
+// One wording per rule, used by the field hints (AC9) and the error messages
+// alike, so a hint can never describe something the validation doesn't enforce.
+export const TEAM_ID_HINT = 'Lowercase letters, digits and inner dashes, 1–40 chars (must start and end with a letter or digit).';
+export const SUFFIX_HINT = 'Up to 8 lowercase letters, digits and single inner dashes — e.g. k3f9, team-1, pre-prod.';
+export const TEAM_ID_ERROR = `Team id: ${TEAM_ID_HINT}`;
+export const SUFFIX_ERROR = `Label suffix: ${SUFFIX_HINT}`;
+
+// Slug rules shared by both entry points (was duplicated in MaterializeDialog,
+// TeamSetup and LaunchStep's own `slugifyLocal`, all collapsed onto this one —
+// #1934): lowercase, dashes for runs of non-[a-z0-9], no leading/trailing
+// dash, max 40 chars. The 40-char cap is applied BEFORE the trailing-dash strip
+// so truncating a long name can never re-introduce a trailing dash the server
+// would then reject (#1934 AC3).
 export function slugify(s) {
   return String(s == null ? '' : s)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
+    .slice(0, TEAM_ID_MAX)
     .replace(/^-+/, '')
-    .replace(/-+$/, '')
-    .slice(0, 40);
+    .replace(/-+$/, '');
+}
+
+// Keystroke-level sanitiser for the team-id field. Deliberately gentler than
+// `slugify`: it drops what can never be legal (uppercase, illegal characters,
+// a leading dash) but KEEPS a trailing dash, because while you are typing
+// `acme-web` the dash is legitimately the last character (#1934 AC1). The
+// trailing dash is normalised away on blur (`normalizeTeamId`) and, as a
+// backstop, rejected by `validateLaunch`.
+export function sanitizeTeamIdInput(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, TEAM_ID_MAX);
+}
+
+// Settle a mid-edit team id into a submittable one (on blur): same cap-then-trim
+// order as `slugify`, so it is idempotent and never yields a trailing dash.
+export function normalizeTeamId(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .slice(0, TEAM_ID_MAX)
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
+}
+
+// Keystroke-level sanitiser for the label-suffix field: keeps the characters the
+// rule allows (including the dash) and lets validation explain a misplaced one
+// inline, rather than silently swallowing the keystroke (#1934 AC4/AC5).
+export function sanitizeLabelSuffixInput(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '')
+    .slice(0, SUFFIX_MAX);
+}
+
+// Per-field messages for immediate inline feedback while editing. Both return
+// null for a value that is fine (an empty one included — emptiness is reported
+// by `validateLaunch` at submit, not nagged at while the field is still blank).
+// Judged on the SETTLED value, not the raw one: a dash that merely happens to
+// be the last character typed is removed on blur, so nagging about it mid-word
+// would be exactly the behaviour #1934 AC1 asks us to stop. What survives is
+// the honest case — a value that cannot become a valid id at all (`---`).
+export function teamIdError(teamId) {
+  const v = String(teamId == null ? '' : teamId);
+  if (!v || TEAM_ID_RE.test(normalizeTeamId(v))) return null;
+  return TEAM_ID_ERROR;
+}
+
+export function labelSuffixError(labelSuffix) {
+  const v = String(labelSuffix == null ? '' : labelSuffix);
+  if (!v || SUFFIX_RE.test(v)) return null;
+  return SUFFIX_ERROR;
 }
 
 // A Working Environment carries a `repositories: [...]` array; legacy single
@@ -43,14 +122,10 @@ export function isRepoLessEnv(env) {
 // NOT require a repository — a repo-less environment is a valid launch target
 // (AC6). Returns the first error string, or null when the inputs are launchable.
 export function validateLaunch({ teamId, teamName, environmentId, labelSuffix } = {}) {
-  if (!/^[a-z0-9-]{1,40}$/.test(String(teamId || ''))) {
-    return 'Team id must be a lowercase slug [a-z0-9-], 1–40 chars.';
-  }
+  if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
   if (!environmentId) return 'Pick a working environment.';
-  if (labelSuffix && !/^[a-z0-9]{1,8}$/.test(labelSuffix)) {
-    return 'Label suffix must be 1–8 lowercase base36 chars [a-z0-9].';
-  }
+  if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
   return null;
 }
 

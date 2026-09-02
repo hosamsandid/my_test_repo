@@ -120,6 +120,34 @@ const TOPIC_CONTENT = [
       'un-retired',
     ],
   },
+  {
+    id: 'access-users',
+    routes: ['/teams'],
+    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
+    // definition, the explicit *this is not an Agent Team* distinction and the
+    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
+    // records what a scope actually gates (list filtering, private agents, the
+    // 403 on management calls) and the default-team / still-owns-resources
+    // delete rules, which the page never spelled out.
+    concepts: [
+      'access scope',
+      'Agent Team',
+      'Agent Team Wizard',
+      'exactly one',
+      'System Admin',
+      'Team Admin',
+      'Team Member',
+      'default',
+      'fail-closed',
+      'updates their role in place',
+      'Lists are filtered',
+      'Private agents',
+      '403',
+      'Manage Users',
+      'Resource ownership',
+      'reassign',
+    ],
+  },
 ];
 
 const registry = loadRegistry();

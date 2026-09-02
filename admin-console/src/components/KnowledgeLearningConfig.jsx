@@ -18,27 +18,15 @@ import React from 'react';
  *   - Wizard extend: `readOnly` — the existing team's values, no editing.
  */
 
+// One SHORT line per level (#1877). The long per-level explanation lives in the
+// Knowledge help topic (help-topics/knowledge.md) — single-sourced, so both this
+// panel and the wizard's Knowledge step point at the same copy instead of
+// carrying two divergent tooltips.
 export const AUTONOMY_LEVELS = [
-  {
-    level: 0, label: 'Off',
-    desc: 'Agents keep lessons to themselves — nothing is shared.',
-    tip: 'Each agent keeps what it learns in its own private memory. Nothing enters the shared team knowledge base.',
-  },
-  {
-    level: 1, label: 'Share',
-    desc: 'Agents pool their lessons into the shared team knowledge.',
-    tip: 'Every lesson an agent records is shared with the whole team, so all agents benefit from it. Nothing is turned into a skill automatically.',
-  },
-  {
-    level: 2, label: 'Suggest',
-    desc: 'Like Share — plus suggestions when knowledge converges. You confirm each.',
-    tip: 'Like Share — and when several agents learn the same thing independently, you get a suggestion to turn it into a reusable skill. Nothing happens without your confirmation.',
-  },
-  {
-    level: 3, label: 'Auto-curate',
-    desc: 'The team promotes converged knowledge to skills on its own, within the gates.',
-    tip: 'The team curates itself: knowledge several agents converged on becomes a team skill automatically — but only where the promotion gates allow it. Promotion to the global pool always waits for your review.',
-  },
+  { level: 0, label: 'Off', desc: 'Agents keep lessons to themselves — nothing is shared.' },
+  { level: 1, label: 'Share', desc: 'Agents pool their lessons into the shared team knowledge.' },
+  { level: 2, label: 'Suggest', desc: 'Like Share — plus suggestions when knowledge converges. You confirm each.' },
+  { level: 3, label: 'Auto-curate', desc: 'The team promotes converged knowledge to skills on its own, within the gates.' },
 ];
 
 export const GATE_ORDER = ['team>team', 'agent>team', 'team>global'];
@@ -115,9 +103,9 @@ export default function KnowledgeLearningSections({
       {/* Autonomy */}
       <PanelSection
         title="Autonomy"
-        blurb="How much this team may do on its own with what its agents learn. At 0 every agent keeps its lessons private; at 1 lessons are pooled into shared team knowledge; at 2 you also get suggestions when several agents learn the same thing; at 3 the team promotes converged knowledge into skills by itself, within the gates below. You can change this at any time — higher levels never bypass the gates.">
+        blurb="How much this team may do on its own with what its agents learn. You can change this at any time — higher levels never bypass the gates below.">
         <div style={{ display: 'inline-flex', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', overflow: 'hidden' }}>
-          {AUTONOMY_LEVELS.map(({ level, label, tip }) => {
+          {AUTONOMY_LEVELS.map(({ level, label, desc }) => {
             const active = level === autonomy;
             const disabled = readOnly || busy === 'autonomy';
             return (
@@ -125,7 +113,7 @@ export default function KnowledgeLearningSections({
                 key={level}
                 type="button"
                 disabled={disabled}
-                title={tip}
+                title={desc}
                 onClick={() => !active && !disabled && onAutonomy(level)}
                 style={{
                   padding: '4px 12px', border: 'none', cursor: disabled ? 'default' : 'pointer', fontSize: 'var(--eb-text-xs)', fontWeight: 600,
@@ -150,7 +138,7 @@ export default function KnowledgeLearningSections({
       {/* Review */}
       <PanelSection
         title="Review"
-        blurb="Whether new lessons wait for your approval before they enter the shared team knowledge. When on, each lesson is held in a review queue until you approve it; when off, lessons are shared as soon as an agent records them (you can still retire any of them later). Review needs autonomy 1 or higher — at level 0 nothing is shared in the first place, so it is unavailable.">
+        blurb="Whether new lessons wait for your approval before they enter the shared team knowledge. Needs autonomy 1 or higher.">
         <button
           type="button"
           disabled={reviewDisabled}
@@ -176,7 +164,7 @@ export default function KnowledgeLearningSections({
       {/* Promotion gates */}
       <PanelSection
         title="Promotion gates"
-        blurb="Checkpoints for turning knowledge into skills. Each gate decides whether that promotion step may run on its own (“automatic”) or waits for you (“needs review”). Gates only take effect at autonomy 3 (Auto-curate) — at lower levels every promotion waits for you anyway. Promotion to all teams always waits for your review and cannot be automated.">
+        blurb="Checkpoints for turning knowledge into skills — each gate runs on its own (“automatic”) or waits for you (“needs review”). Gates only take effect at autonomy 3.">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
           {GATE_ORDER.map(tr => {
             const mode2 = g[tr] || 'review';

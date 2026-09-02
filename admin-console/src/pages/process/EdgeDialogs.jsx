@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2, ArrowUpRight } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
@@ -355,6 +356,12 @@ export function CreateEdgeDialog({
   return (
     <SidePanel open onClose={onClose} title={`How does ${B} learn about ${A}'s work?`} width="520px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        {/* Each tile keeps its one-line blurb; the full hand-off-kind catalogue
+            lives in the `flows` help topic (#1876). */}
+        <div style={{ ...small, display: 'flex', alignItems: 'center', gap: 4 }}>
+          Pick how the hand-off travels.
+          <PageHelpButton label="What the hand-off kinds mean" size={13} style={{ padding: 0 }} />
+        </div>
         {outcomeTiles.length > 0 && (
           <>
             <div style={{ ...small, fontWeight: 'var(--eb-font-medium)' }}>{A}'s existing outcomes</div>

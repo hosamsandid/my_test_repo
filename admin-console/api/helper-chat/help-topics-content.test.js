@@ -50,6 +50,77 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'flows',
+    routes: ['/flows'],
+    // #1876 lifted these from the Flows page: the "Welcome to Flows" banner and
+    // the page's own help drawer, plus the long concept prose out of the
+    // hand-off chooser, the label registry and the human-role registry.
+    concepts: [
+      'flow graphs',
+      'Drafts',
+      'Outcome',
+      'Label',
+      'Consumer',
+      'Materialize',
+      'Flow Copilot',
+      'Import / Export',
+      'Label hand-off',
+      'Issue channel',
+      'Pull-request channel',
+      'File artifact',
+      'GitHub trigger',
+      'Webhook',
+      'Dependency',
+      'Parent / child',
+      'Human gate',
+      'Brake',
+      'Human roles',
+      'exactly one',
+      'any of',
+      'Inputs',
+      'Stages',
+      'Anomalies',
+      'BriefingPack',
+      'Briefings Path',
+    ],
+  },
+  {
+    id: 'knowledge',
+    routes: ['/knowledge'],
+    // #1877 lifted these from the Knowledge page: the "How it works" intro box
+    // (Memory vs Knowledge vs Skills, the three-step learning flow, the kinds,
+    // digests, the domains/consolidate/distill power tools) and the long
+    // autonomy / review / promotion-gate copy out of KnowledgeLearningConfig —
+    // which the wizard's Knowledge step renders too, so this is now the only
+    // place that explains what a level or a gate does.
+    concepts: [
+      'Memory',
+      'Knowledge',
+      'Skills',
+      'Fact',
+      'Entity',
+      'Convention',
+      'converged',
+      'digest',
+      'Domains',
+      'Consolidate',
+      'Distill',
+      'playbook',
+      'Autonomy',
+      'Off',
+      'Share',
+      'Suggest',
+      'Auto-curate',
+      'Review',
+      'Promotion gates',
+      'Knowledge → team skill',
+      'Agent skill → team skill',
+      'Team skill → all teams',
+      'Forgetting',
+      'un-retired',
+    ],
+  },
+  {
     id: 'environments',
     routes: ['/environments'],
     // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe

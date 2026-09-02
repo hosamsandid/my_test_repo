@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, OctagonPause } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
 
 // Label registry editor (#981) — per routing label, WHO sets it and who reacts.
 // Gate/brake-ness is CONFIGURATION, not naming (#928), and the two flags encode
@@ -50,15 +51,14 @@ export default function LabelRegistryPanel({ labels = [], ops, onClose, onChange
 
   return (
     <SidePanel open onClose={onClose} title="Label registry" width="520px">
+      {/* The gate-vs-brake explanation moved into the `flows` help topic
+          (#1876) — the "?" is how you reach it from inside the panel. */}
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-        Per label: <strong>who sets it, and who reacts</strong>. The two human kinds are the two
-        directions of a hand-off:
-        <br />
-        <ShieldCheck size={13} style={{ verticalAlign: '-2px' }} /> <strong>Human gate</strong> (👤 → flow) —
-        only a person applies it, to admit or approve work. Agents setting it is a hard error.
-        <br />
-        <OctagonPause size={13} style={{ verticalAlign: '-2px' }} /> <strong>Brake</strong> (flow → 👤) —
-        an <em>agent</em> applies it to pause the flow and hand the decision to a person.
+        Per label: <strong>who sets it, and who reacts</strong>. A{' '}
+        <ShieldCheck size={13} style={{ verticalAlign: '-2px' }} /> <strong>gate</strong> is set only by a
+        person, a <OctagonPause size={13} style={{ verticalAlign: '-2px' }} /> <strong>brake</strong> only by
+        an agent.
+        <PageHelpButton label="How gates and brakes work" size={13} style={{ padding: 0, verticalAlign: '-2px' }} />
       </p>
       {error && (
         <div style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>{error}</div>

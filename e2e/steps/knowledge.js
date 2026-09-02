@@ -37,12 +37,12 @@ async function deleteGlobalSkill(ctx, { name }) {
 }
 
 /**
- * Open the Knowledge page's overview with the "How the knowledge system works"
- * explainer visible — the tour's opening beat. Navigates to /knowledge (no team
- * selected), waits for the team selector to confirm the page has loaded, and
- * ensures the explainer panel is shown (it is shown by default until dismissed,
- * persisted in `localStorage['kf.introSeen']`; we click "How it works" only if a
- * prior dismissal hid it, so the step is robust to storage state).
+ * Open the Knowledge page and its page help — the tour's opening beat. Navigates
+ * to /knowledge (no team selected), waits for the team selector to confirm the
+ * page has loaded, then opens the Help panel's "This page" face via the "?" next
+ * to the title, where the knowledge model now lives (#1877 replaced the page's
+ * own "How it works" box with the shared help topic). Clicking "?" is idempotent
+ * with the first-run auto-open, so the step is robust to storage state.
  *
  * @example
  * - action:
@@ -55,29 +55,10 @@ async function openOverview(ctx) {
   // The mandatory team selector anchors the page — its presence confirms the
   // team list has loaded (and that we are not stuck in the initial spinner).
   await expect(page.locator('#kf-team-select')).toBeVisible();
-  const explainer = page.getByText('How the knowledge system works', { exact: true });
-  if (!(await explainer.isVisible().catch(() => false))) {
-    await page.getByRole('button', { name: /How it works/ }).click();
-  }
-  await expect(explainer).toBeVisible();
-}
-
-/**
- * Plumbing: dismiss the "How it works" explainer for the remaining beats by
- * setting the same `localStorage['kf.introSeen']` flag the "Got it — hide this"
- * button sets, so the following team-flow / activation screenshots aren't topped
- * by the (already-captured) explainer. The flag is read on the next navigation,
- * so this must run while the page is already on the console origin (e.g. right
- * after `openOverview`). Carries no screenshot of its own.
- *
- * @example
- * - action:
- *     do: knowledge.hideIntro
- */
-async function hideIntro(ctx) {
-  await ctx.page.evaluate(() => {
-    try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
-  });
+  await page.getByRole('button', { name: 'Help for Knowledge' }).click();
+  // A heading from the shipped topic — its presence confirms the panel resolved
+  // /knowledge to help-topics/knowledge.md rather than the Overview fallback.
+  await expect(page.getByText('Memory vs Knowledge vs Skills')).toBeVisible();
 }
 
 /**
@@ -175,7 +156,6 @@ module.exports = {
   createGlobalSkill,
   deleteGlobalSkill,
   openOverview,
-  hideIntro,
   openTeam,
   activateGlobalSkill,
   expectAllMembersActive,

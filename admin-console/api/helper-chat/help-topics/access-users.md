@@ -1,7 +1,7 @@
 ---
 id: access-users
 routes: ["/teams"]
-title: Access & Users
+title: Access
 summary: Human access scopes — internally called Teams — are the tenants that own your agents, environments and credentials, plus the people who may see and manage them.
 seeAlso:
   - { label: "Users", to: "/users" }

@@ -19,6 +19,25 @@ import { buildReviewFields } from './team-setup/review-fields';
 // its earlier steps and shows only the extend / materialize-now toggles here.
 import LaunchStep from './process/LaunchStep';
 import { useHelpSubject } from '../context/HelperChatContext.jsx';
+// The id/suffix rules live in the shared launch core (single source with the
+// Materialize dialog AND, byte-identically, with the server's TEAM_ID_RE /
+// SUFFIX_RE) so the wizard can never drift from either (#1934 AC2/AC5).
+import {
+  slugify,
+  sanitizeTeamIdInput,
+  normalizeTeamId,
+  sanitizeLabelSuffixInput,
+  teamIdError,
+  labelSuffixError,
+  TEAM_ID_RE,
+  SUFFIX_RE,
+  TEAM_ID_HINT,
+  SUFFIX_HINT,
+  TEAM_ID_ERROR,
+  SUFFIX_ERROR,
+  TEAM_ID_MAX,
+  SUFFIX_MAX,
+} from './process/launch-team.js';
 
 const inputStyle = {
   width: '100%',
@@ -160,10 +179,6 @@ function StepIndicator({ current, onStepClick }) {
   );
 }
 
-function slugify(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-}
-
 // Suggest a team name + id derived from a Working Environment's name, made
 // unique against every existing agent id (the teamId doubles as the team
 // agent's id) and every existing team display name. "Acme" taken → "Acme 2" /
@@ -181,7 +196,9 @@ function suggestTeamNaming(envName, agents) {
   for (let n = 2; n < 100; n++) {
     const name = `${baseName} ${n}`;
     const suffix = `-${n}`;
-    const slug = baseSlug.slice(0, 40 - suffix.length) + suffix;
+    // Trim a dash the truncation may have landed on, so the counter suffix
+    // can't produce a doubled dash (`acme--2`).
+    const slug = baseSlug.slice(0, TEAM_ID_MAX - suffix.length).replace(/-+$/, '') + suffix;
     if (free(name, slug)) return { teamName: name, teamId: slug };
   }
   return { teamName: baseName, teamId: baseSlug };
@@ -271,10 +288,19 @@ function StepProject({ form, setForm, environments, takenAgentIds, takenTeamName
             type="text"
             placeholder="acme-demo"
             value={form.teamId}
-            onChange={e => setForm(f => ({ ...f, teamId: slugify(e.target.value), teamIdManuallyEdited: true }))}
+            maxLength={TEAM_ID_MAX}
+            // Gentle live sanitising only — a dash you just typed stays put
+            // (#1934 AC1); the value is settled on blur.
+            onChange={e => setForm(f => ({ ...f, teamId: sanitizeTeamIdInput(e.target.value), teamIdManuallyEdited: true }))}
+            onBlur={e => setForm(f => ({ ...f, teamId: normalizeTeamId(e.target.value) }))}
             style={inputStyle}
           />
-          <div style={hintStyle}>Lowercase, dashes only. 1–40 chars. Resources will be named <code>{form.teamId || '<slug>'}-developer</code>, etc.</div>
+          <div style={hintStyle}>{TEAM_ID_HINT} Resources will be named <code>{form.teamId || '<slug>'}-developer</code>, etc.</div>
+          {teamIdError(form.teamId) && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0 }} /> {teamIdError(form.teamId)}
+            </div>
+          )}
           {takenAgentIds?.has(form.teamId) && (
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
               <AlertCircle size={12} /> This ID is already used by an existing agent or team — pick a different one.
@@ -290,17 +316,22 @@ function StepProject({ form, setForm, environments, takenAgentIds, takenTeamName
             <input
               id="ts-label-suffix"
               type="text"
-              placeholder="e.g. k3f9"
+              placeholder="e.g. team-1"
               value={form.labelSuffix}
-              maxLength={8}
-              onChange={e => setForm(f => ({ ...f, labelSuffix: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, '') }))}
+              maxLength={SUFFIX_MAX}
+              onChange={e => setForm(f => ({ ...f, labelSuffix: sanitizeLabelSuffixInput(e.target.value) }))}
               style={{ ...inputStyle, flex: 1 }}
             />
             <SuggestSuffixButton onSuggest={suffix => setForm(f => ({ ...f, labelSuffix: suffix }))} />
           </div>
           <div style={hintStyle}>
-            <strong>Leave this blank</strong> unless another agent team already uses the <strong>same GitHub repo</strong>. In that case, a short suffix is added to every label this team uses so the two teams&apos; issue/PR labels don&apos;t wake each other&apos;s agents.
+            <strong>Leave this blank</strong> unless another agent team already uses the <strong>same GitHub repo</strong>. In that case, a short suffix is added to every label this team uses so the two teams&apos; issue/PR labels don&apos;t wake each other&apos;s agents. {SUFFIX_HINT}
           </div>
+          {labelSuffixError(form.labelSuffix) && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-2)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0 }} /> {labelSuffixError(form.labelSuffix)}
+            </div>
+          )}
         </div>
 
         <ErrorBox message={error} />
@@ -854,27 +885,27 @@ export default function TeamSetup() {
 
   // Create mode composes the team via the Process step (#422).
 
-  function validateStep() {
+  function validateStep(f = form) {
     if (step === 0) {
-      if (!form.processBundle || (form.processBundle.roles || []).length === 0) {
+      if (!f.processBundle || (f.processBundle.roles || []).length === 0) {
         return 'Pick a process template or saved draft first';
       }
-      if ((form.processLints || []).some(l => l.severity === 'error')) {
+      if ((f.processLints || []).some(l => l.severity === 'error')) {
         return 'The process has wiring errors — fix them before continuing';
       }
       return null;
     }
     if (step === 1) {
-      if (!form.environmentId) return 'Pick a working environment';
+      if (!f.environmentId) return 'Pick a working environment';
       // A repo-less environment is a valid target (#1623 / #1668 AC6) — no repo
       // requirement here.
       return null;
     }
     if (step === 2) {
-      if (!form.teamName.trim()) return 'Team name required';
-      if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(form.teamId)) return 'Team ID must be 1–40 chars, [a-z0-9-]';
-      if (takenAgentIds.has(form.teamId)) return `Team ID '${form.teamId}' is already used by an existing agent or team — pick a different one (to add agents to an existing team, open it in the Flow Editor)`;
-      if (form.labelSuffix && !/^[a-z0-9]{1,8}$/.test(form.labelSuffix)) return 'Label suffix must be 1–8 lowercase base36 chars [a-z0-9]';
+      if (!f.teamName.trim()) return 'Team name required';
+      if (!TEAM_ID_RE.test(f.teamId)) return TEAM_ID_ERROR;
+      if (takenAgentIds.has(f.teamId)) return `Team ID '${f.teamId}' is already used by an existing agent or team — pick a different one (to add agents to an existing team, open it in the Flow Editor)`;
+      if (f.labelSuffix && !SUFFIX_RE.test(f.labelSuffix)) return SUFFIX_ERROR;
       return null;
     }
     // Step 3 — Knowledge sources are inherited from the environment and
@@ -883,7 +914,12 @@ export default function TeamSetup() {
   }
 
   function next() {
-    const err = validateStep();
+    // Settle a mid-edit team id first (a dash typed last is legal while typing
+    // but not at submit position, #1934 AC1) and validate the settled value, so
+    // "Next" doesn't report a trailing dash the blur has already removed.
+    const settled = { ...form, teamId: normalizeTeamId(form.teamId) };
+    if (settled.teamId !== form.teamId) setForm(f => ({ ...f, teamId: normalizeTeamId(f.teamId) }));
+    const err = validateStep(settled);
     if (err) { setStepError(err); return; }
     setStepError(null);
     setStep(s => Math.min(s + 1, STEPS.length - 1));

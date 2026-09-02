@@ -7,6 +7,16 @@ import {
   buildLaunchBody,
   launchSubmitLabel,
   runLaunchStream,
+  slugify,
+  sanitizeTeamIdInput,
+  normalizeTeamId,
+  sanitizeLabelSuffixInput,
+  teamIdError,
+  labelSuffixError,
+  TEAM_ID_HINT,
+  SUFFIX_HINT,
+  TEAM_ID_MAX,
+  SUFFIX_MAX,
 } from './launch-team.js';
 import { describeMaterializeError } from './materialize-error.js';
 
@@ -86,18 +96,25 @@ export default function LaunchStep({
   }
 
   async function submit(mode) {
-    const err = validateLaunch(values);
+    // Settle a mid-edit team id first: a dash typed last is legal while typing
+    // but not at submit position (#1934 AC1). `normalizeTeamId` is idempotent,
+    // so this is a no-op for a value that is already fine (the wizard, which
+    // doesn't render the id field here, included).
+    const settledId = normalizeTeamId(values.teamId);
+    if (settledId !== values.teamId) set({ teamId: settledId });
+    const settled = { ...values, teamId: settledId };
+    const err = validateLaunch(settled);
     if (err) { setError(err); setErrorDetail(null); return; }
     setError(null); setErrorDetail(null);
     setCollisionInfo(null); setProgressError(null); setProgressSteps(null); setMatWarnings([]);
     setSubmitting(true); onBusyChange?.(true);
     const body = buildLaunchBody({
-      teamId: values.teamId,
-      teamName: values.teamName,
-      environmentId: values.environmentId,
+      teamId: settled.teamId,
+      teamName: settled.teamName,
+      environmentId: settled.environmentId,
       mode,
-      labelSuffix: values.labelSuffix,
-      materializeNow: values.materializeNow,
+      labelSuffix: settled.labelSuffix,
+      materializeNow: settled.materializeNow,
       processTemplate: bundle,
       extra: extraBody,
     });
@@ -115,6 +132,10 @@ export default function LaunchStep({
 
   const primaryLabel = launchSubmitLabel({ saving: submitting, extend: values.extend, materializeNow: values.materializeNow });
   const envBlocking = has('environment') && !values.environmentId;
+  // Inline, immediate format feedback so a rule violation is visible while
+  // typing instead of surfacing as an opaque 400 from the API (#1934).
+  const idFieldError = teamIdError(values.teamId);
+  const suffixFieldError = labelSuffixError(values.labelSuffix);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
@@ -128,17 +149,25 @@ export default function LaunchStep({
                 value={values.teamName}
                 onChange={e => {
                   const teamName = e.target.value;
-                  set({ teamName, ...(values.teamIdManuallyEdited ? {} : { teamId: slugifyLocal(teamName) }) });
+                  set({ teamName, ...(values.teamIdManuallyEdited ? {} : { teamId: slugify(teamName) }) });
                 }}
                 style={input}
               />
             </Field>
           )}
           {has('id') && (
-            <Field label="Team id (slug)" hint="Auto-generated from the name; edit to override.">
+            <Field
+              label="Team id (slug)"
+              hint={`Auto-generated from the name; edit to override. ${TEAM_ID_HINT}`}
+              error={idFieldError}
+            >
               <input
                 value={values.teamId}
-                onChange={e => set({ teamId: slugifyLocal(e.target.value), teamIdManuallyEdited: true })}
+                maxLength={TEAM_ID_MAX}
+                // Gentle live sanitising only — a dash you just typed stays put
+                // (#1934 AC1); the value is settled on blur.
+                onChange={e => set({ teamId: sanitizeTeamIdInput(e.target.value), teamIdManuallyEdited: true })}
+                onBlur={e => set({ teamId: normalizeTeamId(e.target.value) })}
                 style={input}
               />
             </Field>
@@ -146,14 +175,15 @@ export default function LaunchStep({
           {has('labelSuffix') && (
             <Field
               label={<>Label suffix <span style={{ fontWeight: 'normal', opacity: 0.7 }}>(optional)</span></>}
-              hint="Appended to every label — isolates parallel stacks on one repo. Leave blank for the template's default names."
+              hint={`Appended to every label — isolates parallel stacks on one repo. Leave blank for the template's default names. ${SUFFIX_HINT}`}
+              error={suffixFieldError}
             >
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
                   value={values.labelSuffix || ''}
-                  maxLength={8}
-                  placeholder="e.g. k3f9"
-                  onChange={e => set({ labelSuffix: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, '') })}
+                  maxLength={SUFFIX_MAX}
+                  placeholder="e.g. team-1"
+                  onChange={e => set({ labelSuffix: sanitizeLabelSuffixInput(e.target.value) })}
                   style={{ ...input, flex: 1 }}
                 />
                 <button
@@ -350,12 +380,6 @@ export default function LaunchStep({
   );
 }
 
-// Local slug helper (kept identical to launch-team.slugify's rules) — used for
-// the live name→id derivation while typing.
-function slugifyLocal(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').replace(/-+$/, '').slice(0, 40);
-}
-
 function ProgressList({ steps, error }) {
   return (
     <div style={{ ...infoBox, gap: 'var(--eb-space-2)' }}>
@@ -378,12 +402,14 @@ function StepIcon({ status }) {
   return <Circle size={14} style={{ color: 'var(--eb-text-muted)' }} />;
 }
 
-function Field({ label, hint, children }) {
+function Field({ label, hint, error, children }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{label}</span>
       {children}
-      {hint && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{hint}</span>}
+      {error
+        ? <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>{error}</span>
+        : hint && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{hint}</span>}
     </label>
   );
 }

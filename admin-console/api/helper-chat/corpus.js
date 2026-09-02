@@ -78,14 +78,19 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 }
 
 // Guard on the assembled grounding prompt (docs corpus + the folded page-help
-// topics), ~65 000 tokens at the common 4-chars/token heuristic — same order as
-// flow-copilot.js's 200 000. Raised from 180 000 in #1879 (epic #1870): the
-// per-page topics are a deliberate, growing part of this corpus, and E5 alone
-// added the whole build-a-plugin reference because it DELETED the standalone
-// /plugin-system page that used to carry it. Trimming a topic to fit would
-// degrade the panel too — the topic files are the single source both the panel
-// and this prompt read — so the budget, not the content, is what gives.
-const SYSTEM_PROMPT_CHAR_LIMIT = 260_000;
+// topics), ~75 000 tokens at the common 4-chars/token heuristic — same order as
+// flow-copilot.js's 200 000. Raised 180 000 → 260 000 in #1879 (epic #1870) and
+// 260 000 → 300 000 in #1889: the per-page topics are a deliberate, growing part
+// of this corpus, and E5 alone added the whole build-a-plugin reference because
+// it DELETED the standalone /plugin-system page that used to carry it. Trimming
+// a topic to fit would degrade the panel too — the topic files are the single
+// source both the panel and this prompt read — so the budget, not the content,
+// is what gives. #1889 is the epic's LAST topic, so this fold stops growing
+// here; the structural fix, when the corpus does grow again, is to fold only the
+// current route's topic plus its `seeAlso` neighbours instead of all of them
+// (route-scoped folding — a separable ticket, since it changes what the assistant
+// can answer about *other* pages, not just the size of the prompt).
+const SYSTEM_PROMPT_CHAR_LIMIT = 300_000;
 
 function measureSystemPrompt() {
   return buildSystemPrompt(null).length;

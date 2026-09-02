@@ -116,12 +116,6 @@ export default function PluginSystemHelp() {
     }}>
       {/* Header */}
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
-          <Puzzle size={26} style={{ color: 'var(--eb-accent-primary)' }} />
-          <h1 style={{ margin: 0, fontSize: 'var(--eb-text-xl)', color: 'var(--eb-text-primary)' }}>
-            Plugin System
-          </h1>
-        </div>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-md)', lineHeight: 1.6 }}>
           Plugins are how agents reach the outside world safely. This page is a complete,
           self-contained guide: what a plugin is (in plain terms and in technical detail), what

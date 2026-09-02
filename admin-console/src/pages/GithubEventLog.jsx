@@ -574,9 +574,6 @@ export default function GithubEventLog() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          GitHub Event Log
-        </h1>
         <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           What the GitHub poller saw and what happened to each event — purely observational.
           <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Processed events</strong> is the history;

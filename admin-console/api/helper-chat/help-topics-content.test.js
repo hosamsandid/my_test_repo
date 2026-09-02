@@ -269,6 +269,38 @@ const TOPIC_CONTENT = [
       'Detach it there first',
     ],
   },
+  {
+    id: 'github-events',
+    routes: ['/github-events'],
+    // #1886 lifted the page's multi-clause intro (observational log; Processed
+    // events = history vs Pending queue = backlog) and the outcome enumeration
+    // out of both tab leads. The topic is now the only place that explains what
+    // each outcome means beyond the chip tooltips, plus the delivery mechanics
+    // no on-page copy ever stated (polling + its lossiness, the seen-id cursor,
+    // the non-poller writers, why a queue backs up, retention, no team scoping).
+    concepts: [
+      'observational',
+      'Processed events',
+      'Pending queue',
+      'delivered',
+      'digested',
+      'dropped',
+      "nobody's listening",
+      'throttle',
+      'horizon',
+      'label-filter',
+      'internal-dedup',
+      'wake label',
+      'no source filtering',
+      'pull_request.synchronize',
+      'seen ids',
+      'Maintenance Mode',
+      'Cancel',
+      '7 days',
+      'best-effort',
+      'not team-scoped',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,

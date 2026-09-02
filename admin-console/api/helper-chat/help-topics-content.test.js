@@ -488,12 +488,58 @@ const TOPIC_CONTENT = [
       'validity window',
     ],
   },
+  {
+    id: 'users',
+    routes: ['/users'],
+    // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
+    // page intro box (records vs memberships, the global System-Admin flag) and
+    // adds what no surface said: the immutable subject, the user-store-then-env
+    // login order, and that Delete is an offboarding which pauses the person's
+    // agents and deletes their personal credentials first.
+    concepts: [
+      'Subject',
+      'immutable',
+      'System Admin',
+      'Team Admin',
+      'membership',
+      'fail-closed',
+      'password',
+      'ADMIN_USERNAME',
+      'offboarding',
+      'paused',
+      'personal SSH keys',
+      'best-effort',
+      'Access',
+    ],
+  },
+  {
+    id: 'about',
+    routes: ['/about'],
+    // #1891 (E16) — a net-new baseline topic for a page that never had help.
+    // What the version string actually is, how the contributor list is derived
+    // (and why a name can be missing), the CC-BY-4.0 attribution obligation,
+    // and where to take a problem report given there is no feedback form.
+    concepts: [
+      'git commit',
+      'not a release number',
+      '-dirty',
+      'unknown',
+      'build time',
+      'agents.local',
+      'commit count',
+      'Parakeet',
+      'CC-BY-4.0',
+      'no in-app feedback form',
+      'GitHub Event Log',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
   // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
   // E11 token-usage, E12 github-events, E13 maintenance-mode, E14 create /
-  // team-setup / role-templates, E15 agent-chat …), never by dropping one.
+  // team-setup / role-templates, E15 agent-chat, E16 baseline (users, about) …),
+  // never by dropping one.
 ];
 
 const registry = loadRegistry();

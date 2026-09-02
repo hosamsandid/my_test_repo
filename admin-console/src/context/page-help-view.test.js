@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 
 import {
+  ALIASES,
+  REDIRECTS,
   canonicalRoute,
   normalizePageHelp,
   overviewTopic,
@@ -196,4 +199,38 @@ test('parseSeenRoutes is fail-soft over the raw localStorage value', () => {
   assert.deepEqual(parseSeenRoutes('[1,"/b",null]'), ['/b']); // drops non-strings
   assert.deepEqual(parseSeenRoutes(''), []);
   assert.deepEqual(parseSeenRoutes(null), []);
+});
+
+// ── the two route-collapse copies must agree (E16 #1891) ──────────────────────
+//
+// This module's ALIASES/REDIRECTS/DYNAMIC maps are a deliberate duplication of
+// admin-console/api/helper-chat/help-routes.js (the api image cannot import from
+// src/, the browser cannot require CommonJS). Both sides were unit-tested, but
+// nothing ever compared them — so an alias added on one side only would make the
+// panel resolve one topic while the chat grounding resolved another, on exactly
+// the routes the coverage guarantee is about. Read the CommonJS module here and
+// diff them.
+
+const serverRoutes = createRequire(import.meta.url)('../../api/helper-chat/help-routes.js');
+
+test('client ALIASES mirror the server help-routes.js copy', () => {
+  assert.deepEqual(ALIASES, serverRoutes.ALIASES);
+});
+
+test('client REDIRECTS mirror the server help-routes.js copy', () => {
+  assert.deepEqual(REDIRECTS, serverRoutes.REDIRECTS);
+});
+
+test('both copies collapse every known route identically', () => {
+  for (const route of [
+    ...serverRoutes.KNOWN_ROUTE_PATHS,
+    '/chats/release-manager',
+    '/plugins/netzplan/view',
+    '/process/team-x',
+  ]) {
+    assert.equal(
+      canonicalRoute(route), serverRoutes.canonicalRoute(route),
+      `client and server disagree on the canonical route for ${route}`,
+    );
+  }
 });

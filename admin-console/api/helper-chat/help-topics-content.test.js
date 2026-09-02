@@ -121,6 +121,76 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'skills',
+    routes: ['/skills'],
+    // #1878 lifted these from the Skills page: the four-paragraph concept intro
+    // (what a skill is, the Global/Team/Agent tiers and their resolution order,
+    // grant vs seeding/activation vs one-off install, the tier-moving verbs, and
+    // Skills vs Knowledge vs Memory) plus the merge dialog's rationale about
+    // provenance, carried-over files and migrated grants.
+    concepts: [
+      'SKILL.md',
+      'Global',
+      'Team',
+      'Agent',
+      'read-only',
+      'then from the global pool',
+      'Grant',
+      'activation',
+      'Install into agent',
+      'workspace reset',
+      'Promote to global',
+      'Move to global',
+      'Adopt',
+      'Move to team',
+      'Distill',
+      'Merge',
+      'Import / Export',
+      'replaces the entire',
+      'provenance',
+      'migrated to the target',
+      'Retire source skills',
+      'Memory',
+      'Knowledge',
+      'distilled from the best knowledge',
+    ],
+  },
+  {
+    id: 'plugins',
+    routes: ['/plugins'],
+    // #1879 lifted these from the Plugins page intro AND from the whole
+    // standalone /plugin-system page, which the same ticket REMOVED outright
+    // (concept §9) — so for the build-a-plugin material this topic is not just
+    // the best home, it is the only one left in the product.
+    concepts: [
+      'broker',
+      'Install',
+      'Grant',
+      'System Admin',
+      'Team Admin',
+      'inherited',
+      'closed enum',
+      'podman-socket',
+      'not available on this stack',
+      'scope granularity',
+      'Per team',
+      'Per agent',
+      'quota',
+      'without respawning',
+      'session log',
+      'embeds it inside the same window',
+      'minRole',
+      'agent plugin',
+      'plugin.json',
+      'requiresApproval',
+      'audit log',
+      'teardown',
+      'broker unreachable',
+      'submit → poll',
+      'Broker SDK',
+    ],
+  },
+  {
     id: 'environments',
     routes: ['/environments'],
     // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe
@@ -144,6 +214,10 @@ const TOPIC_CONTENT = [
       'Sync all agents',
     ],
   },
+  // Append point — every Phase-3 sibling adds its entry here, so two tickets in
+  // flight always conflict on this spot. Resolve by keeping BOTH entries in
+  // ticket order (… #1878 skills, #1879 plugins, #1880 environments …), never by
+  // taking one side.
 ];
 
 const registry = loadRegistry();

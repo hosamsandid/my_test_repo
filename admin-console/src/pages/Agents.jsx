@@ -22,13 +22,13 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import SkillPicker from '../components/SkillPicker';
 import PluginGrantPicker from '../components/PluginGrantPicker';
 import { effectiveGrantFor } from './plugin-grant-view.js';
 import {
   AGENTS_PAGE_COPY,
   EMPTY_STATE_PRIMARY_CTA,
-  AGENT_ROLE_CREATE_LINK,
 } from './agents-view.js';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
@@ -469,83 +469,40 @@ const helpTextStyle = {
   marginTop: 'var(--eb-space-1)', lineHeight: 1.5,
 };
 
-/* ── Role catalogue (single source of truth for labels + descriptions) ─ */
+/* ── Role catalogue (single source of truth for labels + descriptions) ─
+   The long per-role explanation lives in the page's help topic
+   (api/helper-chat/help-topics/agents.md, #1875) — here we keep only the
+   one-line card label and the one-line "when to use", so the form stays lean
+   and the concept text has a single home the "?" affordance opens. */
 const ROLE_INFO = {
   'agent': {
     icon: User,
     title: 'Agent (standalone)',
     short: 'A single chat agent with its own system prompt.',
-    body: (
-      <>
-        Creates a single agent that you can talk to in the <strong>Agent Chat</strong>.
-        The system prompt you write below shapes its persona — for example a COBOL specialist,
-        a code-review buddy, or a release manager. Add cron / GitHub triggers later to make
-        it run autonomously in addition to responding to messages.
-      </>
-    ),
     when: 'Use this for one-of-a-kind agents that act on their own.',
   },
   'team': {
     icon: Users,
     title: 'Agent Team',
     short: 'A reusable template — spawn multiple team members from one prompt.',
-    body: (
-      <>
-        A squad of agents working a repo — <em>not</em> the same thing as a <strong>Team</strong> on the
-        <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}> Access &amp; Users</Link> page (which is a human tenant / access scope).
-        This construct stores a system-prompt template without creating an agent itself. Instead you click
-        <strong> Add Member</strong> on the team card to spawn one or more agents that all
-        share the same prompt and Working Environment, but each gets its own workspace and
-        its own conversation in the Agent Chat.
-      </>
-    ),
     when: 'Use when you need several copies of the same kind of agent — e.g. a pool of three reviewer agents working in parallel.',
   },
   'orchestrator': {
     icon: Workflow,
     title: 'Orchestrator',
     short: 'Watches a folder of mission files and runs one agent per mission.',
-    body: (
-      <>
-        Pointed at a folder of <strong>missions</strong> — task files (<em>BriefingPacks</em>)
-        from an <strong>ACE (Agent Control Environment)</strong> briefings repository. The
-        orchestrator scans the folder and lists one stub agent per mission; when a mission is
-        marked <code>dispatched</code> it offers to turn that stub into a live agent with its
-        own chat, which then works the mission end to end. Open{' '}
-        <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flows</Link> to see
-        active orchestrators.
-      </>
-    ),
     when: 'Use when you have an ACE briefings repository whose missions you want to drive end-to-end through this console.',
   },
   'team-member': {
     icon: User,
     title: 'Team Member',
     short: 'One agent spawned from an Agent Team — most fields inherit from the team.',
-    body: (
-      <>
-        A single agent created with <strong>Add Member</strong> on an <strong>Agent Team</strong> card.
-        It is not created directly here: its system prompt, skills and MCP servers <em>inherit</em> from
-        the parent team unless you flip a field from <strong>Inherit</strong> to <strong>Custom</strong> to
-        override just that one. Its role, Working Environment and parent team are fixed at creation and
-        shown read-only — change the shared parts on the team, the per-member parts here.
-      </>
-    ),
     when: 'You do not pick this role yourself — it is assigned when you add a member to a team.',
   },
   'bp-instance': {
     icon: FileText,
     title: 'Mission Agent (bp-instance)',
     short: 'One agent per mission, managed by an Orchestrator from a BriefingPack.',
-    body: (
-      <>
-        A stub or materialised agent that an <strong>Orchestrator</strong> creates for a single mission it
-        found in an ACE (Agent Control Environment) BriefingPack. You do not create it directly: the
-        orchestrator lists one per mission and materialises it when the mission is dispatched. Its parent
-        orchestrator, mission ID and Mission Directory are inherited and shown read-only here — edit the
-        mission in its BriefingPack, not on this form.
-      </>
-    ),
     when: 'You do not pick this role yourself — the orchestrator assigns it per mission.',
   },
 };
@@ -626,12 +583,12 @@ function RoleDetailBanner({ role }) {
       color: 'var(--eb-text-primary)',
     }}>
       <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-status-info, var(--eb-text-secondary))' }} />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <div>{info.body}</div>
-        <div style={{ color: 'var(--eb-text-muted)' }}>
-          <strong style={{ color: 'var(--eb-text-secondary)' }}>When to use:</strong> {info.when}
-        </div>
+      <div style={{ flex: '1 1 auto', minWidth: 0, color: 'var(--eb-text-muted)' }}>
+        <strong style={{ color: 'var(--eb-text-secondary)' }}>When to use:</strong> {info.when}
       </div>
+      {/* The full role catalogue moved into the page help topic (#1875) — the
+          "?" is how you reach it from inside the form. */}
+      <PageHelpButton label="What the roles mean" size={14} style={{ padding: 0, flexShrink: 0 }} />
     </div>
   );
 }
@@ -924,29 +881,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
                 Agent Team Wizard
               </Link>{' '}
               instead — it sets up the full team structure automatically.
-            </span>
-          </div>
-        )}
-        {form.role === 'orchestrator' && (
-          <div style={{
-            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-            padding: 'var(--eb-space-3)',
-            background: 'var(--eb-bg-elevated)',
-            border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)',
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-secondary)',
-            lineHeight: 1.6,
-          }}>
-            <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-text-muted)' }} />
-            <span>
-              An Orchestrator watches a folder of <strong>missions</strong> — task files from an
-              ACE briefings repository — and runs one agent per mission.
-              Use this only if you have such a repository. See{' '}
-              <Link to="/flows" style={{ color: 'var(--eb-accent-primary)' }}>
-                Flows
-              </Link>{' '}
-              (in the nav) to visualise active orchestrators.
             </span>
           </div>
         )}
@@ -3172,62 +3106,6 @@ export default function Agents() {
           <button onClick={() => setImportError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>✕</button>
         </div>
       )}
-
-      <div style={{
-        padding: 'var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
-        lineHeight: 1.55,
-      }}>
-        <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-          {AGENTS_PAGE_COPY.introLead}
-        </p>
-        <p style={{ margin: 0 }}>
-          An <strong>Agent</strong> is a long-running Claude Code instance with its own workspace and session history.
-          Once created, you talk to it in the <strong>Agent Chat</strong>. This page is where you <strong>manage</strong> the
-          agents and teams you already have — you can also create or import one here for advanced or custom setups, but the
-          guided <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> is
-          the fastest way to start something new:
-        </p>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-xs)' }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)' }}>Role</th>
-              <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--eb-border-default)', color: 'var(--eb-text-primary)' }}>Plain-language description</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent</strong></td>
-              <td style={{ padding: '4px 8px' }}>A standalone chat assistant. Create one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> for the fastest setup.</td>
-            </tr>
-            <tr>
-              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Agent Team / member</strong></td>
-              <td style={{ padding: '4px 8px' }}>A squad of agents working a repo — <em>not</em> the same as a <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (a human tenant / access scope). Start one from the <Link to={AGENT_ROLE_CREATE_LINK.to} style={{ color: 'var(--eb-accent-primary)' }}>Create launcher</Link> — don&apos;t create these manually unless you know what you&apos;re doing.</td>
-            </tr>
-            <tr>
-              <td style={{ padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap' }}><strong>Orchestrator</strong></td>
-              <td style={{ padding: '4px 8px' }}>Runs a folder of mission files from an <strong>ACE (Agent Control Environment)</strong> briefings repository. Only needed for ACE-based workflows.</td>
-            </tr>
-          </tbody>
-        </table>
-        <p style={{ margin: 0 }}>
-          After creation the agent appears below as a card. <em>Active</em> agents are running and ready to chat;
-          <em> paused</em> agents keep their workspace but the process is stopped; <em>not initialised</em> stubs (e.g. orchestrator children) need
-          one click on <strong>Activate</strong> to come to life.
-        </p>
-        <p style={{ margin: '8px 0 0' }}>
-          Three card actions do different things, from reversible to destructive: <strong>Disable</strong> (the toggle) simply
-          pauses the process and <em>keeps</em> the workspace — flip it back on to resume; <strong>Reset to stub</strong> (the
-          red power button) stops the agent and <em>wipes</em> its workspace — session history, cloned repos and any
-          in-workspace state are lost, though the stub config remains so it can be reactivated from scratch;
-          <strong> Delete</strong> removes the agent config entirely. Reach for Disable when you only want to pause.
-        </p>
-      </div>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>

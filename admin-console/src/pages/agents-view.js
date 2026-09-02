@@ -29,13 +29,9 @@ export const AGENTS_PAGE_COPY = Object.freeze({
   subtitle:
     'Manage the agents and teams you already have. To start something new, '
     + 'use the Create launcher.',
-  introLead: 'What is an agent?',
-  introBody:
-    'An Agent is a long-running Claude Code instance with its own workspace and '
-    + 'session history. Once created, you talk to it in the Agent Chat. This page '
-    + 'is where you manage the agents and teams you already have — you can also '
-    + 'create or import one here for advanced or custom setups, but the guided '
-    + 'Create launcher is the fastest way to start something new:',
+  // The former `introLead`/`introBody` ("What is an agent?" + the role table)
+  // moved into the page help topic in #1875 — the page now carries only its
+  // title, this one-line subtitle and the "?" affordance.
   // Empty-state copy (AC1) — leads to the launcher as the primary path while
   // still pointing at the advanced/manual create above (edge case: fresh
   // install / zero agents).
@@ -51,11 +47,6 @@ export const EMPTY_STATE_PRIMARY_CTA = Object.freeze({
   to: CREATE_LAUNCHER_PATH,
 });
 
-// The "What is an agent?" role table used to link each role at its individual
-// creation page (/quickstart, /team-setup). Those are informational "create"
-// CTAs, so per AC3 they now route through the launcher instead.
-export const AGENT_ROLE_CREATE_LINK = Object.freeze({ to: CREATE_LAUNCHER_PATH });
-
 // AC3 predicate — reusable check that a given create-CTA target is the launcher
 // and not one of the individual pages it fronts.
 export function ctaAvoidsLegacyCreatePages(to) {
@@ -70,9 +61,10 @@ export function ctaUsesLauncher(cta = EMPTY_STATE_PRIMARY_CTA) {
 
 // AC1 guard — the page copy frames the page as "manage", not "create": the
 // subtitle leads with "Manage", and manage wording is present across the
-// heading/intro/empty-state copy.
+// subtitle/empty-state copy that remains on the page after #1875 moved the
+// intro box into the help topic.
 export function isManageFramed(copy = AGENTS_PAGE_COPY) {
   const subtitleLeadsWithManage = /^\s*manage\b/i.test(copy.subtitle || '');
-  const hay = `${copy.subtitle} ${copy.introBody} ${copy.emptyLead}`.toLowerCase();
+  const hay = `${copy.subtitle} ${copy.emptyLead}`.toLowerCase();
   return subtitleLeadsWithManage && hay.includes('manage');
 }

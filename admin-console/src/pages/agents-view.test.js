@@ -5,7 +5,6 @@ import {
   LEGACY_CREATE_PATHS,
   AGENTS_PAGE_COPY,
   EMPTY_STATE_PRIMARY_CTA,
-  AGENT_ROLE_CREATE_LINK,
   ctaAvoidsLegacyCreatePages,
   ctaUsesLauncher,
   isManageFramed,
@@ -22,7 +21,6 @@ test('AC1: manage framing is falsified by create-led copy', () => {
   assert.equal(
     isManageFramed({
       subtitle: 'Create agents and teams here.',
-      introBody: 'Create an agent.',
       emptyLead: 'No agents yet.',
     }),
     false,
@@ -36,10 +34,9 @@ test('AC3: empty-state primary CTA targets the Create launcher', () => {
   assert.ok(ctaUsesLauncher(EMPTY_STATE_PRIMARY_CTA));
 });
 
-test('AC3: informational role-create link targets the launcher', () => {
-  assert.equal(AGENT_ROLE_CREATE_LINK.to, CREATE_LAUNCHER_PATH);
-  assert.ok(ctaAvoidsLegacyCreatePages(AGENT_ROLE_CREATE_LINK.to));
-});
+// The informational role table that used to carry its own launcher link was
+// moved into the page help topic (#1875), so AGENT_ROLE_CREATE_LINK is gone —
+// the empty-state CTA above is the page's remaining primary create door.
 
 test('AC3: legacy create pages are rejected as primary create CTAs', () => {
   for (const legacy of LEGACY_CREATE_PATHS) {

@@ -13,6 +13,8 @@
  * dialog host are thin renderers over these.
  */
 
+import { buildAgentMenu, buildTeamMenu } from '../agent-lifecycle/agent-lifecycle-menu.js';
+
 /**
  * Per-user opt-in to seeing disabled agents in the rail (AC6/AC7). Stored under
  * the rail's own `agentChat.` namespace and with the same shape as its sibling
@@ -96,4 +98,75 @@ export function isTeamLocked(agent, agents) {
   if (!agent || agent.role !== 'team-member' || !agent.parentTeamId) return false;
   const team = (agents || []).find(a => a && a.id === agent.parentTeamId);
   return !!team && team.enabled === false;
+}
+
+/**
+ * The rail-header "+" menu (AC3). Both entries reuse an existing surface rather
+ * than growing a second create form in the chat: **New agent** hands over to the
+ * Create launcher, **Import agent** opens the Agents page's own import dialog
+ * inline (it is the shared `ImportAgentForm`, so the chat cannot drift from it).
+ */
+export function buildCreateMenu() {
+  return [
+    { key: 'new-agent', label: 'New agent…', disabled: false },
+    { key: 'import-agent', label: 'Import agent…', disabled: false },
+  ];
+}
+
+/**
+ * Resolve a menu request from the rail into the items to render and the menu's
+ * accessible name — the one place that decides *which* menu a click gets, so
+ * the host component stays a renderer.
+ *
+ * `agents` is whatever list the caller has (the chat's own list, widened with
+ * the scoped `/api/agents` configs when those have arrived): it is read only to
+ * look up the team lock and the team row's `canManage`, both of which the server
+ * re-enforces, so a not-yet-loaded list degrades to "offered, then refused"
+ * rather than to a wrong action.
+ *
+ * @param {{kind:'agent'|'team'|'create', agent?:object, group?:object}} o.target
+ * @param {object[]} o.agents
+ * @param {Set<string>} o.busyIds     ids with a mutation in flight
+ * @param {{id:string,displayName?:string}[]} o.missingRoles  team menu only
+ */
+export function railMenuItems({ target, agents = [], busyIds = new Set(), missingRoles = [] } = {}) {
+  if (!target) return { items: [], label: '' };
+
+  if (target.kind === 'create') {
+    return { items: buildCreateMenu(), label: 'Add an agent' };
+  }
+
+  if (target.kind === 'agent') {
+    const agent = target.agent;
+    if (!agent) return { items: [], label: '' };
+    return {
+      label: `Actions for ${agent.displayName || agent.id}`,
+      items: buildAgentMenu({
+        agent,
+        // Absent (an older payload) means "no reason to think otherwise" — the
+        // route still decides; `false` is only ever an explicit server verdict.
+        canManage: agent.canManage !== false,
+        locked: isTeamLocked(agent, agents),
+        busy: busyIds.has(agent.id),
+      }),
+    };
+  }
+
+  if (target.kind === 'team') {
+    const group = target.group;
+    if (!group?.id) return { items: [], label: '' };
+    const team = group.header || (agents || []).find(a => a && a.id === group.id && a.role === 'team') || null;
+    return {
+      label: `Team actions for ${group.displayName || group.id}`,
+      items: buildTeamMenu({
+        team,
+        teamId: group.id,
+        canManage: team ? team.canManage !== false : true,
+        busy: busyIds.has(group.id),
+        missingRoles,
+      }),
+    };
+  }
+
+  return { items: [], label: '' };
 }

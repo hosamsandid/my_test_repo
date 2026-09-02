@@ -192,7 +192,15 @@ export function buildTeamMenu({ team, teamId, canManage = true, busy = false, mi
 
   // Navigation entries are never gated: they only open a surface that applies
   // its own rules (the edit form / the Flow Editor).
-  items.push({ key: 'edit-team', label: 'Edit team…', disabled: false });
+  items.push({
+    key: 'edit-team',
+    label: 'Edit team…',
+    disabled: false,
+    // Phase 1 answer to open question 3: a navigation to the existing edit
+    // surface, not a second copy of the form in the chat (the in-chat settings
+    // tab is Phase 2). Say where it goes so the jump isn't a surprise.
+    title: 'Opens the Agents page, where the team is edited.',
+  });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });
   items.push({ key: 'delete-team', label: 'Delete team…', danger: true, ...gate(false) });

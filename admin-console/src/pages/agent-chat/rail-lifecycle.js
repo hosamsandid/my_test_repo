@@ -38,6 +38,49 @@ export function saveShowDisabled(value, storage) {
 }
 
 /**
+ * The chat's list endpoint, widened only when the opt-in is on. Kept here rather
+ * than inline in the page so the one place that turns the preference into a URL
+ * is the same place that reads the preference — and so the default really is the
+ * pre-#1928 URL, byte for byte (AC6: with the filter off the chat shows exactly
+ * what it shows today).
+ */
+export function matrixAgentsUrl(showDisabled) {
+  return showDisabled ? '/api/matrix/agents?includeDisabled=1' : '/api/matrix/agents';
+}
+
+/**
+ * Widen the chat's list entries with the full agent configs from the scoped
+ * `GET /api/agents`, which the lifecycle host loads lazily on the first menu it
+ * is asked for.
+ *
+ * The chat payload is deliberately thin (no `labels[]`, no member tree), but two
+ * decisions need the config: which loop-closing roles a team is missing, and how
+ * many members a team-delete confirm has to name. Conversely only the chat
+ * payload carries `canManage`, so the merge is one-directional per field: config
+ * fields win (they are the fuller record), `canManage` is carried over from the
+ * chat entry.
+ *
+ * Either side may be missing — before the fetch lands, and for a config-only
+ * agent that has no chat identity — so both are tolerated and the result is
+ * always a list.
+ */
+export function mergeAgentConfigs(chatAgents, configs) {
+  const chat = (chatAgents || []).filter(Boolean);
+  if (!Array.isArray(configs) || configs.length === 0) return chat;
+
+  const byId = new Map(chat.map(a => [a.id, a]));
+  const out = configs.filter(Boolean).map(cfg => {
+    const seen = byId.get(cfg.id);
+    byId.delete(cfg.id);
+    return seen ? { ...cfg, canManage: seen.canManage } : cfg;
+  });
+  // A chat row with no config (unreadable config.json) still belongs in the list
+  // — dropping it would make a visible row menu-less.
+  for (const left of byId.values()) out.push(left);
+  return out;
+}
+
+/**
  * Place a popup menu near a click point, kept fully inside the viewport.
  *
  * The rail is a scrolling container, so the menu is portaled and positioned in
@@ -111,6 +154,19 @@ export function buildCreateMenu() {
     { key: 'new-agent', label: 'New agent…', disabled: false },
     { key: 'import-agent', label: 'Import agent…', disabled: false },
   ];
+}
+
+/**
+ * Split a chosen menu key into the action and its argument. Only the team menu's
+ * add-role entries carry one (`add-role:<roleId>`), and a role id may itself
+ * contain a colon, so the key is split once from the left rather than by every
+ * separator — the host then switches on `kind` alone.
+ */
+export function parseMenuKey(key) {
+  if (typeof key !== 'string' || !key) return { kind: '', arg: null };
+  const at = key.indexOf(':');
+  if (at < 0) return { kind: key, arg: null };
+  return { kind: key.slice(0, at), arg: key.slice(at + 1) || null };
 }
 
 /**

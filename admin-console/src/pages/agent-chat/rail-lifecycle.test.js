@@ -10,7 +10,11 @@ import {
   existingIds,
   deleteTargetFor,
   isTeamLocked,
+  buildCreateMenu,
+  parseMenuKey,
+  railMenuItems,
 } from './rail-lifecycle.js';
+import { NO_RIGHTS_HINT, TEAM_LOCKED_HINT } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 function fakeStorage(initial = {}) {
   const map = { ...initial };
@@ -121,4 +125,108 @@ test('isTeamLocked is true only for a member of a listed, disabled team', () => 
   assert.equal(isTeamLocked(AGENTS[0], AGENTS), false);       // standalone agent
   // Team absent from the payload (opt-in off): no lock is guessed from absence.
   assert.equal(isTeamLocked(dev, AGENTS.filter(a => a.id !== 'alpha')), false);
+});
+
+test('buildCreateMenu offers exactly the two existing surfaces', () => {
+  assert.deepEqual(buildCreateMenu().map(i => i.key), ['new-agent', 'import-agent']);
+  assert.ok(buildCreateMenu().every(i => i.disabled === false));
+});
+
+test('parseMenuKey splits once from the left so a colon in a role id survives', () => {
+  assert.deepEqual(parseMenuKey('delete'), { kind: 'delete', arg: null });
+  assert.deepEqual(parseMenuKey('add-role:developer'), { kind: 'add-role', arg: 'developer' });
+  // A role id that itself contains a colon must arrive intact.
+  assert.deepEqual(parseMenuKey('add-role:a:b'), { kind: 'add-role', arg: 'a:b' });
+  // Degenerate shapes never throw and never produce a bogus action.
+  assert.deepEqual(parseMenuKey('add-role:'), { kind: 'add-role', arg: null });
+  assert.deepEqual(parseMenuKey(''), { kind: '', arg: null });
+  assert.deepEqual(parseMenuKey(null), { kind: '', arg: null });
+});
+
+test('railMenuItems routes each target kind to its own menu', () => {
+  const create = railMenuItems({ target: { kind: 'create' }, agents: AGENTS });
+  assert.deepEqual(create.items.map(i => i.key), ['new-agent', 'import-agent']);
+  assert.equal(create.label, 'Add an agent');
+
+  const solo = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
+  assert.equal(solo.label, 'Actions for Solo');
+  assert.deepEqual(solo.items.map(i => i.key), [
+    'toggle-enabled', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+  ]);
+
+  const team = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+    agents: AGENTS,
+  });
+  assert.equal(team.label, 'Team actions for Zeta Team');
+  assert.deepEqual(team.items.map(i => i.key), [
+    'toggle-team', 'add-member', 'edit-team', 'export-team', 'open-flow-editor', 'delete-team',
+  ]);
+});
+
+test('railMenuItems degrades to an empty menu rather than guessing a target', () => {
+  assert.deepEqual(railMenuItems(), { items: [], label: '' });
+  assert.deepEqual(railMenuItems({ target: null }), { items: [], label: '' });
+  assert.deepEqual(railMenuItems({ target: { kind: 'agent' } }), { items: [], label: '' });
+  assert.deepEqual(railMenuItems({ target: { kind: 'team', group: {} } }), { items: [], label: '' });
+  assert.deepEqual(railMenuItems({ target: { kind: 'nonsense' } }), { items: [], label: '' });
+});
+
+test('railMenuItems carries the team lock onto a member\'s Enable entry (AC5)', () => {
+  // `alpha` is disabled, so its member may not be enabled on its own.
+  const { items } = railMenuItems({ target: { kind: 'agent', agent: AGENTS[3] }, agents: AGENTS });
+  const toggle = items.find(i => i.key === 'toggle-enabled');
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.title, TEAM_LOCKED_HINT);
+});
+
+test('railMenuItems disables mutating entries for a caller without rights (AC8)', () => {
+  const agent = { ...AGENTS[0], canManage: false };
+  const { items } = railMenuItems({ target: { kind: 'agent', agent }, agents: [agent] });
+  const byKey = Object.fromEntries(items.map(i => [i.key, i]));
+  assert.equal(byKey.delete.disabled, true);
+  assert.equal(byKey.delete.title, NO_RIGHTS_HINT);
+  // Export is a read-only download the server does not gate — leaving it usable
+  // keeps something a Team Member can do today.
+  assert.equal(byKey.export.disabled, false);
+});
+
+test('railMenuItems treats an absent canManage as permitted (older payload)', () => {
+  const { items } = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
+  assert.equal(items.find(i => i.key === 'delete').disabled, false);
+});
+
+test('railMenuItems disables every mutating entry while a mutation is in flight', () => {
+  const { items } = railMenuItems({
+    target: { kind: 'agent', agent: AGENTS[0] },
+    agents: AGENTS,
+    busyIds: new Set(['solo']),
+  });
+  assert.equal(items.find(i => i.key === 'toggle-enabled').disabled, true);
+  assert.equal(items.find(i => i.key === 'delete').disabled, true);
+});
+
+test('railMenuItems omits the fan-out toggle for a header-less team group', () => {
+  // The disabled team is invisible with the opt-in off, so its enabled state is
+  // unknown — the toggle is omitted rather than guessed, the id-only actions stay.
+  const { items } = railMenuItems({
+    target: { kind: 'team', group: { id: 'ghost', displayName: 'Ghost' } },
+    agents: [],
+  });
+  assert.equal(items.some(i => i.key === 'toggle-team'), false);
+  assert.ok(items.some(i => i.key === 'delete-team'));
+});
+
+test('railMenuItems appends one entry per missing role', () => {
+  const { items } = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+    agents: AGENTS,
+    missingRoles: [{ id: 'merger', displayName: 'Merger' }, { id: 'reworker' }],
+  });
+  const keys = items.map(i => i.key);
+  assert.ok(keys.includes('add-role:merger'));
+  assert.ok(keys.includes('add-role:reworker'));
+  assert.equal(items.find(i => i.key === 'add-role:merger').label, 'Add Merger role');
+  // Falls back to the id when the template ships no display name.
+  assert.equal(items.find(i => i.key === 'add-role:reworker').label, 'Add reworker role');
 });

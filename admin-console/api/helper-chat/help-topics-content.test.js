@@ -155,6 +155,41 @@ const TOPIC_CONTENT = [
       'distilled from the best knowledge',
     ],
   },
+  {
+    id: 'plugins',
+    routes: ['/plugins'],
+    // #1879 lifted these from the Plugins page intro AND from the whole
+    // standalone /plugin-system page, which the same ticket REMOVED outright
+    // (concept §9) — so for the build-a-plugin material this topic is not just
+    // the best home, it is the only one left in the product.
+    concepts: [
+      'broker',
+      'Install',
+      'Grant',
+      'System Admin',
+      'Team Admin',
+      'inherited',
+      'closed enum',
+      'podman-socket',
+      'not available on this stack',
+      'scope granularity',
+      'Per team',
+      'Per agent',
+      'quota',
+      'without respawning',
+      'session log',
+      'embeds it inside the same window',
+      'minRole',
+      'agent plugin',
+      'plugin.json',
+      'requiresApproval',
+      'audit log',
+      'teardown',
+      'broker unreachable',
+      'submit → poll',
+      'Broker SDK',
+    ],
+  },
 ];
 
 const registry = loadRegistry();

@@ -1,9 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router';
-import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen } from 'lucide-react';
+import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import PluginTeamAssign from '../components/PluginTeamAssign';
 import { pluginRegistryRow } from './plugin-registry-view.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
@@ -253,20 +253,12 @@ export default function Plugins() {
     <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 600, margin: 0 }}>Plugins</h1>
+        <PageHelpButton />
         <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
-        <Link to="/plugin-system" style={{
-          display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-          marginLeft: 'auto', fontSize: 'var(--eb-text-sm)', fontWeight: 500,
-          color: 'var(--eb-accent-primary)', textDecoration: 'none',
-        }}>
-          <BookOpen size={15} /> Learn about plugins
-        </Link>
       </div>
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, maxWidth: 720 }}>
-        Plugins extend what agents can reach beyond their container — a container runtime, a
-        test-management system — through a privileged broker that runs beside the stack, so the
-        agent itself never holds the credential or the socket. Installing one starts its broker;
-        it grants nothing until you activate it on an agent or team.
+        Governed capability extensions — installing one starts its broker, granting it lets an
+        agent or team use it.
       </p>
 
       {error && (
@@ -327,8 +319,7 @@ export default function Plugins() {
         message={pending ? (
           <div>
             <p style={{ fontSize: 'var(--eb-text-sm)', marginTop: 0 }}>
-              This starts a broker container with the privileges below. It does not grant the
-              plugin to any agent.
+              Starts a broker with the privileges below — it grants the plugin to no agent.
             </p>
             {pending.capabilities.length === 0
               ? <p style={{ fontSize: 'var(--eb-text-sm)' }}>This plugin requests no host privileges.</p>
@@ -349,9 +340,7 @@ export default function Plugins() {
         onConfirm={() => removing && doUninstall(removing)}
         onCancel={() => setRemoving(null)}
         message={
-          'The broker stops and its containers stop being managed. Existing grants on agents are '
-          + 'left in place — they simply seed nothing while the plugin is uninstalled, so '
-          + 'reinstalling restores them.'
+          'The broker stops. Existing grants stay in place and seed nothing until you reinstall.'
         }
       />
     </div>

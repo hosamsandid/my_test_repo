@@ -43,7 +43,6 @@ export const ROUTE_TITLES = {
   '/team-setup': 'Agent Team Wizard',
   '/wizard/team': 'Agent Team Wizard',
   '/orchestrator-wizard': 'Orchestrator Wizard',
-  '/plugin-system': 'Plugin System',
   '/about': 'About',
 };
 

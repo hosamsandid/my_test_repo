@@ -7,6 +7,11 @@ export const BREADCRUMBS = {
   '/create':       'Create',
   '/quickstart':   'One assistant',
   '/team-setup':   'Agent Team Wizard',
+  // The `/wizard/team` alias renders the identical page (App.jsx) — without its
+  // own entry the breadcrumb and the Helper-Chat `currentRouteLabel` fell back to
+  // the raw path there, so the assistant was told the user is on "/wizard/team"
+  // (#1891).
+  '/wizard/team':  'Agent Team Wizard',
   '/agents':       'Agents',
   '/flows':        'Flows',
   '/knowledge':    'Knowledge',
@@ -26,6 +31,7 @@ export const BREADCRUMBS = {
   '/users':        'Users',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',
+  '/about':        'About',
 };
 
 // Resolve a pathname to its breadcrumb label, handling the two dynamic route

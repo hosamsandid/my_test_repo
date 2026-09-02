@@ -3,11 +3,15 @@ import { useNavigate } from 'react-router';
 import {
   Check, PlugZap, RefreshCw, Plus, X, ArrowRight, SkipForward,
   Copy, KeyRound, ClipboardPaste, ExternalLink, LogIn, ShieldAlert,
+  HelpCircle, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import { buildLlmProviderPayload, canSaveLlmProvider } from './setup-wizard-payload';
+import { useHelperChat } from '../context/HelperChatContext.jsx';
+import { resolveHelpContext, OVERLAY_SETUP_WIZARD } from '../context/page-help-view.js';
+import { SafeMarkdown, ensureAgentChatMdCss } from './agent-chat/Message.jsx';
 
 /* ─── Shared button styles ─────────────────────────────────────── */
 
@@ -43,6 +47,89 @@ const inputStyle = {
   borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
 };
+
+
+/* ─── Per-step help (E17 #1892, docs/helper-chat-concept.md §3.2) ─────────────
+ *
+ * The first-run wizard is rendered *instead of* the Shell (App.jsx), so the Help
+ * panel is not mounted and `openHelpFor()` would flip state behind a blank
+ * screen. This renders the resolved topic inline instead — and it resolves the
+ * SAME topic the corresponding console page owns (`wizard:setup#<step>` aliases
+ * `/models` / `/ssh-keys` / `/github-tokens` in CONTEXT_KEYS), so the first
+ * experience is not help-less and there is no second copy of the prose (AC2).
+ * The provider is mounted app-level, so its one page-help fetch has already run;
+ * a step whose aliased topic does not exist yet simply renders nothing.
+ */
+function SetupStepHelp({ stepId }) {
+  const { pageHelp } = useHelperChat();
+  const [open, setOpen] = useState(false);
+  useEffect(() => { ensureAgentChatMdCss(); }, []);
+  const hit = resolveHelpContext(pageHelp, { overlay: OVERLAY_SETUP_WIZARD, step: stepId });
+  const topic = hit && hit.topic;
+  if (!topic) return null;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return (
+    <div style={{
+      marginTop: 'var(--eb-space-4)',
+      border: '1px solid var(--eb-border-default)',
+      borderRadius: 'var(--eb-radius-md)',
+      background: 'var(--eb-bg-surface)',
+    }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          width: '100%', textAlign: 'left',
+          background: 'none', border: 'none', cursor: 'pointer',
+          fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          padding: 'var(--eb-space-3)',
+        }}
+      >
+        <Chevron size={14} />
+        <HelpCircle size={14} />
+        <span>Help for this step — {topic.title}</span>
+      </button>
+      {open ? (
+        <div style={{ padding: '0 var(--eb-space-4) var(--eb-space-4)' }}>
+          {topic.summary ? (
+            <p style={{ margin: '0 0 var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+              {topic.summary}
+            </p>
+          ) : null}
+          <div className="agent-chat-md" style={{ fontSize: 'var(--eb-text-sm)' }}>
+            <SafeMarkdown body={topic.body} />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ─── Shared credential rationale (E10 #1884) ──────────────────────
+   The SSH-key and GitHub-token steps used to restate the "why two
+   credentials" rationale in their own words, on top of the three copies the
+   credential *pages* carried. The long form now lives once in the Credentials
+   help topic (api/helper-chat/help-topics/credentials.md); the wizard reads a
+   single shared summary from here, so there is exactly one wording left in the
+   product. Each step additionally offers the corresponding page's full help
+   topic inline via <SetupStepHelp> (#1892) — the panel itself cannot be used
+   here, since this screen renders instead of the Shell that mounts it. */
+
+function TwoCredentialsNote() {
+  return (
+    <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+      <strong>Two credentials by design.</strong> The SSH key handles repository transport — clone and
+      fetch — and can be narrowed to a per-repo read-only deploy key; the GitHub token handles API
+      actions and writes (push, PR creation, event polling). Keeping them apart means a leak of either
+      costs you only half. Both steps are optional and can be filled in later on the{' '}
+      <strong>SSH Keys</strong> and <strong>GitHub Tokens</strong> pages, whose Help panel explains the
+      split in full.
+    </div>
+  );
+}
 
 /* ─── Progress Stepper ─────────────────────────────────────────── */
 
@@ -563,13 +650,7 @@ function StepSshKey({ onNext, onSkip }) {
         </p>
       </div>
 
-      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-        <strong>Two credentials by design.</strong> The SSH key (this step) handles repo <em>read</em> — clone
-        and fetch — and can be a per-repo read-only deploy key. The GitHub Token (next step) handles API
-        actions and <em>writes</em> — push, PR creation, event polling. Keeping them separate is
-        defense-in-depth: a leaked deploy key can't merge PRs, a leaked PAT didn't already grant the
-        initial clone.
-      </div>
+      <TwoCredentialsNote />
 
       <ErrorBanner msg={error} />
 
@@ -680,13 +761,7 @@ function StepGhToken({ onNext, onSkip, isLast }) {
         </p>
       </div>
 
-      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-        <strong>Companion to the SSH key, not a replacement.</strong> The SSH key (previous step) handles
-        repo <em>read</em>; this token handles API actions and <em>writes</em> — push, PR creation,
-        GitHub Events polling. Both can technically be replaced by a token-only flow, but splitting
-        them keeps the blast radius of a leaked credential narrow and lets you scope the SSH side
-        to a per-repo read-only deploy key.
-      </div>
+      <TwoCredentialsNote />
 
       <ErrorBanner msg={error} />
 
@@ -818,6 +893,8 @@ export default function SetupWizard({ onComplete }) {
           {stepId === 'ssh-key'  && <StepSshKey  onNext={() => advance('ssh-key')}  onSkip={skip} />}
           {stepId === 'gh-token' && <StepGhToken onNext={() => advance('gh-token')} onSkip={skip} isLast />}
         </div>
+
+        <SetupStepHelp stepId={stepId} />
       </div>
     </div>
   );

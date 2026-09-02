@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router';
 import { Github, ArrowRight, AlertCircle, CheckCircle, Info } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import PageHelpButton from '../components/PageHelpButton';
 import {
-  hasRepoUrl,
   quickstartEndpoint,
   quickstartBody,
   showRepoPrerequisites,
@@ -74,7 +74,6 @@ export default function QuickStart() {
 
   // Whether the user has entered a repository URL — the single fork that decides
   // endpoint, body, and which prerequisites apply (no more mode toggle).
-  const repo = hasRepoUrl(url);
   const showRepoPrereqs = showRepoPrerequisites(url);
 
   // Effective provider selection: honour an explicit pick, else the first one.
@@ -124,24 +123,22 @@ export default function QuickStart() {
           margin: 0,
           color: 'var(--eb-text-primary)',
         }}>{QUICKSTART_COPY.heading}</h2>
+        {/* One-line description + "?" (E14, #1888). The second paragraph that
+            re-described the same thing is gone; what each submit path creates
+            lives in the `create` help topic. */}
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
         }}>
-          {QUICKSTART_COPY.intro}
+          <span>{QUICKSTART_COPY.intro}</span>
+          <PageHelpButton label="What gets created here?" size={14} style={{ padding: 0, flexShrink: 0 }} />
         </p>
       </div>
-
-      <p style={{
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        margin: 0,
-        lineHeight: 1.6,
-      }}>
-        {QUICKSTART_COPY.detail}
-      </p>
 
       {!llmEndpointsLoading && !hasLlmEndpoints && (
         <Card accent="var(--eb-status-warning)">
@@ -433,29 +430,11 @@ export default function QuickStart() {
         </form>
       </Card>
 
-      <div style={{
-        fontSize: 'var(--eb-text-xs)',
-        color: 'var(--eb-text-muted)',
-        lineHeight: 1.6,
-      }}>
-        {repo ? (
-          <>
-            <strong>What happens here:</strong> If no Working Environment exists yet for this repository, a new one is created
-            using the repository's default branch (resolved from its remote HEAD), the selected SSH key (for cloning), the current GitHub token (for API actions),
-            and no additional skills. A default agent is then created on top of it. Both can be fine-tuned later under{' '}
-            <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
-            <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
-          </>
-        ) : (
-          <>
-            <strong>What happens here:</strong> A new repo-less Working Environment is created and bound to the model
-            provider you selected, then a single standalone chat agent is created on top of it — no repository is
-            cloned. Both can be fine-tuned later under{' '}
-            <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments</Link> and{' '}
-            <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link>.
-          </>
-        )}
-      </div>
+      {/* The "What happens here" block (both branches) moved to the `create`
+          help topic in E14 (#1888) — including what the box never said: an
+          existing environment AND an existing standalone agent for the same
+          repository are reused, and on the repository path the Name / Model
+          Provider fields above are not used at all. */}
 
       <div style={{
         padding: 'var(--eb-space-3) var(--eb-space-4)',

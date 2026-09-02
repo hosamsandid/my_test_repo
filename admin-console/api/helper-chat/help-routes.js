@@ -9,17 +9,17 @@
 // CI failure, so a future new page cannot ship silently help-less.
 //
 // Two ways a route is "covered":
-//   • PAGE_ROUTES  — a page that shows help. It renders its own authored topic
-//                    when one exists, else the always-present Overview fallback
-//                    (concept §2 — "Overview is the fallback content of the
-//                    This page face"). Both states are legitimate coverage, so a
-//                    page route needs no per-route topic to be considered covered
-//                    at the foundation stage; the extraction tickets (E1–E15)
-//                    author the specific topics later.
+//   • PAGE_ROUTES  — a page that shows help. Since E16 (#1891) every page route
+//                    must resolve to an authored topic; the Overview fallback is
+//                    no longer accepted as permanent coverage, so a route whose
+//                    topic is still owned by an in-flight ticket has to say so
+//                    explicitly in TOPIC_PENDING below. That is the "works for
+//                    all pages" guarantee of concept §3.4 — a page can only be
+//                    help-less on purpose, with an owner named.
 //   • ALLOWLIST    — a structural route that intentionally has NO page help of
-//                    its own: redirect sources, the /wizard/team alias, dynamic
-//                    child routes that inherit their parent's help, and stubs.
-//                    These never auto-open the panel (concept §4, C2).
+//                    its own: redirect sources, dynamic child routes that
+//                    inherit their parent's help, and stubs. These never
+//                    auto-open the panel (concept §4, C2).
 //
 // This module is pure data + three tiny resolvers (aliases / redirects / dynamic
 // collapse) shared by help-registry.js. The parallel client-side copy lives in
@@ -28,6 +28,9 @@
 // duplication is by design, kept small and guarded by tests on both sides).
 
 // Alias routes render the same page as their target and resolve to its topic.
+// `/wizard/team` and `/team-setup` are literally the same element in App.jsx, so
+// the alias is what registers the team-setup topic for both (E16 #1891, AC2) —
+// the topic itself only has to declare the canonical route.
 const ALIASES = {
   '/wizard/team': '/team-setup',
 };
@@ -61,12 +64,17 @@ const DYNAMIC = [
 // this list: `/getting-started` in G1 (#1874) — the page is gone and it is now a
 // redirect source above — and `/plugin-system` in E5 (#1879), removed outright
 // (no redirect, concept §9) with its content folded into the Plugins topic.
+// `/wizard/team` lives here rather than in ALLOWLIST since E16 (#1891): it is not
+// a structural route at all — it renders the whole Agent Team Wizard and shows
+// that page's help through the alias above, so classifying it as "no help of its
+// own" was the one place the topology mis-described what a user sees.
 const PAGE_ROUTES = new Set([
   '/agents',
   '/chats',
   '/create',
   '/quickstart',
   '/team-setup',
+  '/wizard/team',
   '/environments',
   '/ssh-keys',
   '/github-tokens',
@@ -86,8 +94,8 @@ const PAGE_ROUTES = new Set([
   '/about',
 ]);
 
-// Structural routes with no page help of their own (redirects, alias, dynamic
-// children, the orchestrator-wizard stub). Kept explicit so the coverage test
+// Structural routes with no page help of their own (redirects, dynamic children,
+// the orchestrator-wizard stub). Kept explicit so the coverage test
 // forces every new route to be classified as page-or-structural on purpose.
 const ALLOWLIST = new Set([
   '/',
@@ -98,13 +106,167 @@ const ALLOWLIST = new Set([
   '/process/:teamId',
   '/chats/:agentId',
   '/plugins/:id/view',
-  '/wizard/team',
   '/orchestrator-wizard',
 ]);
+
+// ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────
+//
+// A page route with no authored topic yet, mapped to the ticket that owns it.
+// The coverage test requires every OTHER page route to resolve to a real topic,
+// so this list is the only way a page can stay on the Overview fallback — and
+// each entry names who is fixing that. **Delete the entry when the topic lands**
+// (a stale entry does not fail CI, but it silently lowers the bar).
+//
+// Phase-3 extraction tickets in flight at the time of writing; each has an open
+// PR authoring exactly these routes' topic.
+const TOPIC_PENDING = {
+  '/chats': '#1889 (E15 Agent Chat side-panels)',
+  // Discharged as their topics landed: E10 (#1884) covers /ssh-keys,
+  // /github-tokens and /my-credentials (credentials.md), and E14 (#1888) covers
+  // /create + /quickstart (create.md), /team-setup (team-setup.md, with
+  // /wizard/team as its alias) and /role-templates (role-templates.md).
+  // /chats above is the last one owing a topic.
+};
 
 // The full set of routes the help system knows about — every App.jsx path must
 // be in here (as a page or a structural allowlist entry) and nothing else.
 const KNOWN_ROUTE_PATHS = new Set([...PAGE_ROUTES, ...ALLOWLIST]);
+
+// ── non-route help contexts (E17 #1892, docs/helper-chat-concept.md §3.2) ──
+//
+// Three help-worthy surfaces are not routes at all, so a pathname cannot address
+// them: the **Settings dialog** (an overlay on top of whatever page you are on),
+// the **first-run setup wizard** (rendered *instead of* the Shell, before any
+// route exists) and the **individual steps inside a wizard** (sub-states of one
+// route). The help context therefore widens from a bare pathname to
+// `{ route, overlay, step }`, and a topic can claim any of these keys in the same
+// `routes:` front-matter list it claims a pathname in.
+//
+// A context key is namespaced so it can never collide with a pathname (which
+// always starts with `/`):
+//   `<kind>:<name>`   an overlay          — `modal:settings`, `wizard:setup`
+//   `<base>#<state>`  a sub-state of a route or of an overlay — `/team-setup#process`
+//
+// Every key is listed here for the same reason every route is listed above: so a
+// key can only be typo'd or orphaned on purpose. `alias` points a key at the
+// route whose topic already answers it — that is how the first-run wizard gets
+// help "sourced from the same topic content used elsewhere" (#1892 AC2) without
+// a second copy of the prose.
+const OVERLAY_KEYS = {
+  'modal:settings': 'The Settings dialog (account menu → Settings).',
+  'wizard:setup': 'The first-run setup wizard, rendered before the Shell exists.',
+};
+
+const CONTEXT_KEYS = {
+  'modal:settings': { label: 'Settings dialog' },
+  // The dialog's three sections. Optional coverage, exactly like the wizard steps
+  // below: while no topic claims one, the resolver falls back to the dialog's own
+  // topic, so the section keys are an extension point rather than a debt.
+  'modal:settings#behavior': { label: 'Settings · Behavior' },
+  'modal:settings#model': { label: 'Settings · Model' },
+  'modal:settings#display': { label: 'Settings · Display' },
+  'wizard:setup': { label: 'First-run setup' },
+  // The first-run wizard's three steps reuse the topics the corresponding
+  // console pages already own — no duplicate prose (AC2). All three resolve:
+  // `/models` (E8) and the credentials topic E10 (#1884) gave `/ssh-keys` +
+  // `/github-tokens`. A step whose aliased topic is ever missing renders no help
+  // box rather than an empty one.
+  'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
+  'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
+  'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
+  // Agent Team Wizard steps (AC3). A step key is *optional* coverage by design:
+  // while no topic claims it the resolver falls through to the wizard's own
+  // route topic, so the panel is never emptier than it is today. #1888 owns the
+  // wizard's topic content and may claim these keys to make a step's help
+  // step-specific.
+  '/team-setup#process': { label: 'Agent Team Wizard · Process' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#team': { label: 'Agent Team Wizard · Team' },
+  '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
+  '/team-setup#review': { label: 'Agent Team Wizard · Review' },
+};
+
+// `/quickstart` deliberately has NO step keys: it is a single-page form, not a
+// stepped wizard, so its route topic *is* its step help. Recorded here so a
+// later reader does not mistake it for an omission.
+const SINGLE_STEP_PAGES = new Set(['/quickstart']);
+
+// Split a sub-state key into its base and state (`/team-setup#process` →
+// ['/team-setup', 'process']). Returns [key, ''] for a key with no sub-state.
+function splitContextKey(key) {
+  const s = String(key || '');
+  const i = s.indexOf('#');
+  return i === -1 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)];
+}
+
+// True for a key that addresses a non-route help context (an overlay, or any
+// key carrying a `#state` sub-state). A plain pathname is not one.
+function isContextKey(key) {
+  const s = String(key || '');
+  if (!s) return false;
+  return s.includes('#') || !s.startsWith('/');
+}
+
+// Every key the help system knows about: a classified route, or a listed context
+// key. Used by the content guard so a topic cannot claim a key nobody registered.
+function isKnownHelpKey(key) {
+  const s = String(key || '');
+  if (KNOWN_ROUTE_PATHS.has(s)) return true;
+  return Object.prototype.hasOwnProperty.call(CONTEXT_KEYS, s);
+}
+
+// The ordered lookup keys for a help context, most specific first:
+//   overlay#step → overlay → route#step → canonicalRoute#step → route → canonicalRoute
+// The overlay comes first because it is literally on top of the page; the route
+// candidates still follow it, so an overlay with no topic of its own falls back
+// to the page underneath rather than to a bare Overview — and closing the
+// overlay simply drops the first candidates, returning the panel to the page
+// (#1892 AC1). Duplicates are removed, order preserved.
+function helpContextKeys(context) {
+  const ctx = (context && typeof context === 'object') ? context : { route: context };
+  const route = typeof ctx.route === 'string' ? ctx.route : '';
+  const overlay = typeof ctx.overlay === 'string' ? ctx.overlay.trim() : '';
+  const step = typeof ctx.step === 'string' ? ctx.step.trim() : '';
+  const out = [];
+  const push = (k) => { if (k && !out.includes(k)) out.push(k); };
+  if (overlay) {
+    if (step) push(`${overlay}#${step}`);
+    push(overlay);
+  }
+  if (route) {
+    const canon = canonicalRoute(route);
+    if (step) {
+      push(`${route}#${step}`);
+      if (canon) push(`${canon}#${step}`);
+    }
+    push(route);
+    if (canon) push(canon);
+  }
+  return out;
+}
+
+// Follow a context key's `alias` to the route whose topic answers it, or '' when
+// the key has none. One hop only — an alias always points at a route.
+function contextAlias(key) {
+  const entry = CONTEXT_KEYS[String(key || '')];
+  return (entry && typeof entry.alias === 'string') ? entry.alias : '';
+}
+
+// Classify the keys a set of topics claims against this module's topology, so a
+// key that no longer exists (or was mistyped) fails CI exactly like an
+// unclassified route does. Pure, so the guard runs it on the shipped topics and
+// its own regression test runs it on synthetic ones.
+function classifyTopicKeys(topics) {
+  const claimed = [];
+  for (const t of topics || []) {
+    for (const k of (t && t.routes) || []) if (!claimed.includes(k)) claimed.push(k);
+  }
+  return {
+    claimed,
+    unknown: claimed.filter((k) => !isKnownHelpKey(k)),
+    contextKeys: claimed.filter((k) => isContextKey(k)),
+  };
+}
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup:
 // apply the dynamic-route collapse, then the alias, then the redirect. Returns
@@ -130,13 +292,41 @@ function extractAppRoutes(appJsxSource) {
   return [...out];
 }
 
+// Classify an App.jsx source against this module's route topology. Pure, so the
+// CI guard runs it on the real file and its own regression test runs it on a
+// synthetic source that proves the guard actually fires (E16 #1891, AC4 — an
+// assertion nobody has ever seen fail is not a guard).
+//   • unclassified — routes App.jsx renders that are in neither PAGE_ROUTES nor
+//                    ALLOWLIST (a new page shipping help-less).
+//   • stale        — routes this module still lists that App.jsx no longer has.
+function classifyAppRoutes(appJsxSource) {
+  const live = extractAppRoutes(appJsxSource);
+  const liveSet = new Set(live);
+  return {
+    routes: live,
+    unclassified: live.filter((r) => !KNOWN_ROUTE_PATHS.has(r)),
+    stale: [...KNOWN_ROUTE_PATHS].filter((r) => !liveSet.has(r)),
+  };
+}
+
 module.exports = {
   ALIASES,
   REDIRECTS,
   DYNAMIC,
   PAGE_ROUTES,
   ALLOWLIST,
+  TOPIC_PENDING,
   KNOWN_ROUTE_PATHS,
+  OVERLAY_KEYS,
+  CONTEXT_KEYS,
+  SINGLE_STEP_PAGES,
   canonicalRoute,
+  splitContextKey,
+  isContextKey,
+  isKnownHelpKey,
+  helpContextKeys,
+  contextAlias,
+  classifyTopicKeys,
   extractAppRoutes,
+  classifyAppRoutes,
 };

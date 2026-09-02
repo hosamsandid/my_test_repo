@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Wrench, PauseCircle, CheckCircle2, Activity } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
+import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import { countActiveSessions } from './active-sessions';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -102,9 +103,23 @@ export default function MaintenanceMode() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', maxWidth: 560 }}>
-        Signals an upcoming platform restart so in-flight agent sessions can wind down.
-        This does not stop, restart, or lock anything by itself — the actual restart stays a manual, external step.
+      {/* One-line description + the "?" that opens this page's help topic. What
+          the flag actually changes — the cron/once/loop suppression with its
+          single catch-up run, the durable http/github-event queue, the
+          console-wide chat lock, the skipped orchestrator passes and the fact
+          that the grace period is a display countdown no backend reads — now
+          lives in that topic (api/helper-chat/help-topics/maintenance-mode.md,
+          #1887). The live in-context hints on the active card stay put. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', maxWidth: 560,
+      }}>
+        <span>
+          Signals an upcoming platform restart so in-flight agent sessions can wind down — the
+          restart itself stays a manual, external step.
+        </span>
+        <PageHelpButton label="What maintenance mode changes while it is active" size={14} style={{ padding: 0, flexShrink: 0 }} />
       </p>
 
       <div style={{
@@ -164,8 +179,11 @@ export default function MaintenanceMode() {
                 <div style={{ fontSize: 'var(--eb-text-2xl, 28px)', fontWeight: 'var(--eb-font-semibold)', fontFamily: 'var(--eb-font-mono)' }}>
                   {formatDuration(remainingSec)}
                 </div>
+                {/* Stays: this qualifies the live countdown right above it, the
+                    same way copy above a required input stays. What remains
+                    suppressed/queued in the meantime is in the help topic. */}
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-                  Wind-down window for in-flight sessions — it does not end maintenance mode on its own. Scheduled triggers stay suppressed and events keep queuing until you end it below.
+                  Wind-down window for in-flight sessions — it does not end maintenance mode on its own.
                 </div>
                 {remainingSec === 0 && (
                   <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
@@ -219,20 +237,18 @@ export default function MaintenanceMode() {
                 </span>
               </div>
 
+              {/* The bordered "While active" box (the cron catch-up / event
+                  queuing / nothing-force-stopped bullets) moved into the help
+                  topic; a one-line lead plus a contextual "?" keeps the
+                  consequences reachable right where Activate is pressed. */}
               <div style={{
-                background: 'var(--eb-bg-app)',
-                border: '1px solid var(--eb-border-default)',
-                borderRadius: 'var(--eb-radius-md)',
-                padding: 'var(--eb-space-3)',
+                display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+                fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
               }}>
-                <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)', marginBottom: 'var(--eb-space-2)' }}>
-                  While active
-                </div>
-                <ul style={{ margin: 0, paddingLeft: '1.1em', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.5 }}>
-                  <li>Scheduled (cron / once) triggers won't fire — exactly one catch-up run happens after you end it.</li>
-                  <li>HTTP and GitHub events keep queuing and drain once you end it — they aren't dropped.</li>
-                  <li>The grace period is the wind-down window for sessions still in flight; nothing is force-stopped.</li>
-                </ul>
+                <span>
+                  Scheduled triggers pause and events queue while it is active — nothing is force-stopped.
+                </span>
+                <PageHelpButton label="What happens while maintenance mode is active" size={13} style={{ padding: 0, flexShrink: 0 }} />
               </div>
 
               {formError && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</span>}

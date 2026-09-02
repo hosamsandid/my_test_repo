@@ -326,11 +326,12 @@ export default function StepProcess({ form, setForm, templates, error }) {
         <div style={labelStyle}>Pick a process template</div>
         {/* Discoverability pointer (#1703): the describe / blank-canvas entries
             moved to the "+ Create" launcher — keep a lightweight link so a user
-            who lands here can still reach them, without a full entry card. */}
+            who lands here can still reach them, without a full entry card. E14
+            (#1888) trimmed the enumeration of what those entries do: the topic
+            for /create describes all four entry paths. */}
         <div style={hintStyle}>
           Need a custom flow?{' '}
-          <Link to="/create" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>+ Create</Link>{' '}
-          can describe one or start blank in the canvas.
+          <Link to="/create" style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>+ Create</Link>
         </div>
       </div>
       {gallery.length === 0 ? (

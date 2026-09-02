@@ -149,7 +149,7 @@ Autonomy-0 agents and standalone agents without a KB checkout are untouched
 | `agent-entrypoint.py` | Pre-invocation digest rebuild; digest builder port. |
 | Orchestrator | Post-KB-change digest fan-out (hook in `emitKnowledgeHarvest` / KB sync); pure `knowledge-digest.js` builder + unit tests. |
 | Self-curation cron templates (role catalog) | Prune scope shrinks to episodic files; KB curation already belongs to the curator. |
-| `LEARN_PROMPT` (ChatPanel) | §5, then simplified post-unification. |
+| `LEARN_PROMPT` (ChatPanel) | §5, then simplified post-unification. Superseded: the button *and* the prompt were removed entirely in #1922 — the automatic per-invocation memory hint is the single source of the consolidation instruction. |
 | Docs | CLAUDE.md (this repo), `agent-image/CLAUDE.md` memory/knowledge sections. |
 
 ## 8. Phases

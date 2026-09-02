@@ -1,7 +1,14 @@
 import React from 'react';
 import AccentureLogo from '../components/AccentureLogo';
+import PageHelpButton from '../components/PageHelpButton';
 import { formatVersionLabel } from '../components/version-info';
 import { decodeContributors } from '../components/contributors';
+
+// One-line description + the shared "?" (epic #1870, E16 #1891). This page had no
+// help of its own — the `about` topic explains what the version string is, how the
+// contributor list is derived, why the Parakeet attribution is here, and where to
+// take a problem report.
+const PAGE_DESCRIPTION = 'What this build is, who contributed to it, and where to get help.';
 
 const VERSION_LABEL = formatVersionLabel(
   import.meta.env.VITE_GIT_COMMIT,
@@ -32,6 +39,14 @@ export default function About() {
           fontWeight: 'var(--eb-font-medium)',
         }}>
           © 2026 Accenture. All rights reserved.
+        </div>
+        <div style={{
+          marginTop: 'var(--eb-space-2)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+        }}>
+          {PAGE_DESCRIPTION}
+          <PageHelpButton label="About this build" size={14} style={{ padding: 0, flexShrink: 0 }} />
         </div>
       </div>
 

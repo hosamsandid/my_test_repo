@@ -3,6 +3,7 @@ import { Plus, Pencil, Trash2, ShieldCheck, KeyRound } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
+import PageHelpButton from '../components/PageHelpButton';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -11,6 +12,11 @@ import IconButton from '../components/IconButton';
 import {
   usersToRows, isSelf, selfActionWarning, validateUserForm,
 } from './users-view';
+
+// The page's one-liner under the title (epic #1870, E16 #1891). It keeps the
+// Access hand-off, because a user record on its own grants nothing — everything
+// else the old intro box said now lives in the `users` help topic.
+const PAGE_DESCRIPTION = 'Human user records — who can sign in and who is a System Admin; access scopes are granted on the Access page.';
 
 const primaryBtn = {
   display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)',
@@ -301,15 +307,17 @@ export default function Users() {
         </button>
       </div>
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)', background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
+      {/* The intro box moved into the `users` help topic (epic #1870, E16 #1891 —
+          E7 deliberately left this route uncovered). What stays is the one thing a
+          user must not miss on the way *out* of this page: a record alone grants
+          nothing, so the pointer at Access remains on the page. */}
+      <p style={{
+        margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
-        Manage the <strong>human users</strong> of this platform end-to-end: create, edit their details and
-        System-Admin status, set or clear a login password, and delete. <strong>System Admins</strong> have
-        global access. Team membership &amp; access scopes are managed on the <strong>Access</strong> page.
-      </div>
+        {PAGE_DESCRIPTION}
+        <PageHelpButton label="What a user record is" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />
 

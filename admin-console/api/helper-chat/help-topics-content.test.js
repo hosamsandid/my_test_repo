@@ -242,6 +242,39 @@ const TOPIC_CONTENT = [
       'reassign',
     ],
   },
+  {
+    id: 'credentials',
+    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
+    // SetupWizard's two credential steps). The topic additionally records what
+    // no box said: the three ownership tiers, the strict personal privacy
+    // guarantee, the per-operation-class runtime resolution order with
+    // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
+    concepts: [
+      'SSH key',
+      'GitHub token',
+      'deploy key',
+      'defense-in-depth',
+      'blast-radius',
+      'GH_TOKEN',
+      'fingerprint',
+      'Personal',
+      'Team',
+      'System',
+      'only the owner',
+      'break-glass',
+      'attributed writes',
+      'Event polling',
+      'preference among tiers',
+      'refused',
+      'rotate in place',
+      'create-new-and-repoint',
+      'Used by',
+      'read:org',
+      'SAML SSO',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,

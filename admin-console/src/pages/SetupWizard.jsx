@@ -44,6 +44,27 @@ const inputStyle = {
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none',
 };
 
+/* ─── Shared credential rationale (E10 #1884) ──────────────────────
+   The SSH-key and GitHub-token steps used to restate the "why two
+   credentials" rationale in their own words, on top of the three copies the
+   credential *pages* carried. The long form now lives once in the Credentials
+   help topic (api/helper-chat/help-topics/credentials.md); the wizard reads a
+   single shared summary from here, so there is exactly one wording left in the
+   product. Panel-based help for the wizard's own steps is #1892. */
+
+function TwoCredentialsNote() {
+  return (
+    <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
+      <strong>Two credentials by design.</strong> The SSH key handles repository transport — clone and
+      fetch — and can be narrowed to a per-repo read-only deploy key; the GitHub token handles API
+      actions and writes (push, PR creation, event polling). Keeping them apart means a leak of either
+      costs you only half. Both steps are optional and can be filled in later on the{' '}
+      <strong>SSH Keys</strong> and <strong>GitHub Tokens</strong> pages, whose Help panel explains the
+      split in full.
+    </div>
+  );
+}
+
 /* ─── Progress Stepper ─────────────────────────────────────────── */
 
 const STEPS = [
@@ -563,13 +584,7 @@ function StepSshKey({ onNext, onSkip }) {
         </p>
       </div>
 
-      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-        <strong>Two credentials by design.</strong> The SSH key (this step) handles repo <em>read</em> — clone
-        and fetch — and can be a per-repo read-only deploy key. The GitHub Token (next step) handles API
-        actions and <em>writes</em> — push, PR creation, event polling. Keeping them separate is
-        defense-in-depth: a leaked deploy key can't merge PRs, a leaked PAT didn't already grant the
-        initial clone.
-      </div>
+      <TwoCredentialsNote />
 
       <ErrorBanner msg={error} />
 
@@ -680,13 +695,7 @@ function StepGhToken({ onNext, onSkip, isLast }) {
         </p>
       </div>
 
-      <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-        <strong>Companion to the SSH key, not a replacement.</strong> The SSH key (previous step) handles
-        repo <em>read</em>; this token handles API actions and <em>writes</em> — push, PR creation,
-        GitHub Events polling. Both can technically be replaced by a token-only flow, but splitting
-        them keeps the blast radius of a leaked credential narrow and lets you scope the SSH side
-        to a per-repo read-only deploy key.
-      </div>
+      <TwoCredentialsNote />
 
       <ErrorBanner msg={error} />
 

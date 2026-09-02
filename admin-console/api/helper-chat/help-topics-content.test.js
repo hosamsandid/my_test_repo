@@ -440,6 +440,86 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'create',
+    routes: ['/create', '/quickstart'],
+    // #1888 lifted the launcher's tile prose, the one-assistant intro/detail
+    // pair and BOTH "what happens here" branches, and adds what neither said:
+    // an existing environment *and* an existing standalone agent are reused, and
+    // on the repository path the Name / Model Provider fields are not used.
+    concepts: [
+      'equally ranked',
+      'Describe what you need',
+      'Start from a ready-made setup',
+      'Build it yourself',
+      'one assistant',
+      'draft',
+      'team of one',
+      'Grow into a full team',
+      'creates a new team',
+      'default branch',
+      'reuses',
+      'Agent reused',
+      'not used',
+      'Model Provider',
+      'SSH key',
+      'GitHub token',
+    ],
+  },
+  {
+    id: 'team-setup',
+    routes: ['/team-setup'],
+    // #1888 lifted the wizard's header restatement + the Agent-Team-vs-access-
+    // scope line, the Working-Environment step intro, the Knowledge step's
+    // long prose and the go-live notice's follow-up advice.
+    concepts: [
+      'Agent Team',
+      'Access page',
+      'Process',
+      'Working Environment',
+      'Team ID',
+      'Knowledge',
+      'Review',
+      'global-pool',
+      'read-only',
+      'team-member',
+      'per-invocation',
+      'direct-message room',
+      'go live',
+      'Label suffix',
+      'extend',
+      'rolled back',
+      'Retry',
+      'create-only',
+      'Add role',
+    ],
+  },
+  {
+    id: 'role-templates',
+    routes: ['/role-templates'],
+    // #1888 lifted the Agent Templates intro paragraph and the invocation-mode
+    // field help, and adds the role-type / origin-badge / prompt-template
+    // detail the page only ever hinted at.
+    concepts: [
+      'Agent Template',
+      'Built-in',
+      'Edited',
+      'Custom',
+      'Save as template',
+      'future',
+      'independent copy',
+      'chat',
+      'reactive',
+      'pattern',
+      'persistent',
+      'per-invocation',
+      'autonomous',
+      'promptTemplate',
+      'Advanced',
+      'intrinsic',
+      'System Admin',
+    ],
+  },
+  {
     id: 'agent-chat',
     routes: ['/chats'],
     // #1889 lifted the Agent Chat side-panel explainers: the trigger-type concept
@@ -538,8 +618,8 @@ const TOPIC_CONTENT = [
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
   // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
   // E11 token-usage, E12 github-events, E13 maintenance-mode, E14 create /
-  // team-setup / role-templates, E15 agent-chat, E16 baseline (users, about) …),
-  // never by dropping one.
+  // team-setup / role-templates, E15 agent-chat, E16 users / about …), never by
+  // dropping one.
 ];
 
 const registry = loadRegistry();

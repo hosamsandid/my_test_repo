@@ -121,11 +121,9 @@ const ALLOWLIST = new Set([
 // PR authoring exactly these routes' topic.
 const TOPIC_PENDING = {
   '/chats': '#1889 (E15 Agent Chat side-panels)',
-  '/create': '#1888 (E14 Creation & onboarding)',
-  '/quickstart': '#1888 (E14 Creation & onboarding)',
-  '/team-setup': '#1888 (E14 Creation & onboarding)',
-  '/wizard/team': '#1888 (E14 Creation & onboarding) — via the /team-setup alias',
-  '/role-templates': '#1888 (E14 Creation & onboarding)',
+  // E14 (#1888) discharged its five routes: /create + /quickstart (create.md),
+  // /team-setup (team-setup.md, with /wizard/team as its alias) and
+  // /role-templates (role-templates.md).
   '/ssh-keys': '#1884 (E10 Credentials & GitHub access)',
   '/github-tokens': '#1884 (E10 Credentials & GitHub access)',
   '/my-credentials': '#1884 (E10 Credentials & GitHub access)',

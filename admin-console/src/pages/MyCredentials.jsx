@@ -558,8 +558,7 @@ export default function MyCredentials() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
       <div>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>My Credentials</h1>
-        <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.6, maxWidth: 760 }}>
+        <p style={{ margin: '0 0 0', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.6, maxWidth: 760 }}>
           Your <strong>personal</strong> SSH key and GitHub token, so your agents can act under your own GitHub identity.
           These are <strong>private to you</strong> — nobody else, not even a System Admin, can see or manage them here.
           Shared team and platform credentials live on the admin <em>SSH Keys</em> and <em>GitHub Tokens</em> pages.

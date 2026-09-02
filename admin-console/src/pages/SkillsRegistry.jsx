@@ -8,6 +8,7 @@ import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import SkillMarkdown from '../components/SkillMarkdown';
+import { usePageActions } from '../context/PageActionsContext';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -1749,19 +1750,8 @@ export default function SkillsRegistry() {
     return <div role="alert" style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-status-error)' }}>Failed to load skills: {error}</div>;
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-            Skills
-          </h1>
-          <a href="/knowledge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>
-            ← Knowledge (learning, promotion &amp; activation)
-          </a>
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <input
             ref={importFileRef}
             type="file"
@@ -1798,7 +1788,15 @@ export default function SkillsRegistry() {
             {showNewForm ? 'Cancel' : '+ New Skill'}
           </button>
         </div>
-      </div>
+  );
+
+  return (
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <a href="/knowledge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>
+        ← Knowledge (learning, promotion &amp; activation)
+      </a>
 
       {/* Intro / explanation */}
       <div style={{
@@ -1992,5 +1990,6 @@ export default function SkillsRegistry() {
         onCancel={() => { setRowDeleteTarget(null); setRowDeleteError(null); setRowDeleteBlocking(null); }}
       />
     </div>
+    </>
   );
 }

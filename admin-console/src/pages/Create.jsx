@@ -45,12 +45,6 @@ export default function Create() {
     }}>
       {/* Header */}
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
-          <Plus size={26} style={{ color: 'var(--eb-accent-primary)' }} />
-          <h1 style={{ margin: 0, fontSize: 'var(--eb-text-xl)', color: 'var(--eb-text-primary)' }}>
-            Create
-          </h1>
-        </div>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-md)', lineHeight: 1.6 }}>
           How would you like to start? Pick whichever fits — you can always change direction later.
         </p>

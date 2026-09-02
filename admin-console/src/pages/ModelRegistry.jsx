@@ -28,6 +28,7 @@ import {
 import { groupAgentsByTeam } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
+import { usePageActions } from '../context/PageActionsContext';
 import { healthCellModel, healthCellDetail } from './provider-health-view.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
@@ -1286,6 +1287,15 @@ export default function ModelRegistry() {
     refetch();
   }
 
+  const headerAction = usePageActions(
+    <button
+      onClick={() => { setCreating(true); setFormError(null); }}
+      style={{ ...buttonPrimary, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
+    >
+      <Plus size={15} /> New provider
+    </button>
+  );
+
   if (loading) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
@@ -1294,18 +1304,9 @@ export default function ModelRegistry() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Model Providers
-        </h1>
-        <button
-          onClick={() => { setCreating(true); setFormError(null); }}
-          style={{ ...buttonPrimary, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
-        >
-          <Plus size={15} /> New provider
-        </button>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       <div style={{
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -1502,5 +1503,6 @@ export default function ModelRegistry() {
         onCancel={handleRespawnFailureAck}
       />
     </div>
+    </>
   );
 }

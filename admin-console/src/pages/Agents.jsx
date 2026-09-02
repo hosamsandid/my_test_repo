@@ -34,6 +34,7 @@ import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
 import { describeAgentSubmitState } from './agent-create-submit-state.js';
+import { usePageActions } from '../context/PageActionsContext';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -3126,43 +3127,39 @@ export default function Agents() {
   // Orphans count too — otherwise the page shows the empty state while orphans still need cleanup.
   const totalCount = orchestrators.length + teams.length + leaves.length + orphans.length;
 
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+      <input
+        ref={importFileRef}
+        type="file"
+        accept=".zip"
+        style={{ display: 'none' }}
+        onChange={handleImportFileSelected}
+      />
+      <button
+        onClick={() => importFileRef.current?.click()}
+        style={{
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+          borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
+          padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+          display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-secondary)',
+        }}
+      >
+        <Upload size={14} /> Import Agent
+      </button>
+      <SecondaryBtn onClick={() => openPanel('create', null)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}>
+        <Plus size={15} /> New Agent
+      </SecondaryBtn>
+    </div>
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
-        <div>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>{AGENTS_PAGE_COPY.heading}</h1>
-          <p style={{ margin: '4px 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            {AGENTS_PAGE_COPY.subtitle}
-          </p>
-        </div>
-        {/* Creation actions are demoted to secondary/advanced affordances (AC2):
-            the launcher is the primary "create" door, so neither "Import Agent"
-            nor "+ New Agent" is styled as the page's primary action. Both stay
-            fully available for power users (AC5). */}
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexShrink: 0 }}>
-          <input
-            ref={importFileRef}
-            type="file"
-            accept=".zip"
-            style={{ display: 'none' }}
-            onChange={handleImportFileSelected}
-          />
-          <button
-            onClick={() => importFileRef.current?.click()}
-            style={{
-              background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-              borderRadius: 'var(--eb-radius-md)', cursor: 'pointer',
-              padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
-              display: 'flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-secondary)',
-            }}
-          >
-            <Upload size={14} /> Import Agent
-          </button>
-          <SecondaryBtn onClick={() => openPanel('create', null)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}>
-            <Plus size={15} /> New Agent
-          </SecondaryBtn>
-        </div>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <p style={{ margin: '0 0 var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        {AGENTS_PAGE_COPY.subtitle}
+      </p>
       {importSuccess && (
         <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-success-bg, #e6f9f0)', border: '1px solid var(--eb-status-success, #22c55e)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           {importSuccess}
@@ -3542,6 +3539,7 @@ export default function Agents() {
         onCancel={() => setTeamActionResult(null)}
       />
     </div>
+    </>
   );
 }
 

@@ -11,6 +11,7 @@ import IconButton from '../components/IconButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
+import { usePageActions } from '../context/PageActionsContext';
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',
@@ -739,6 +740,15 @@ export default function WorkingEnvironments() {
     }
   }
 
+  const headerAction = usePageActions(
+    <button
+      onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
+      style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+    >
+      <Plus size={15} /> New Environment
+    </button>
+  );
+
   if (loading) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
@@ -747,18 +757,9 @@ export default function WorkingEnvironments() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Working Environments
-        </h1>
-        <button
-          onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
-          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
-        >
-          <Plus size={15} /> New Environment
-        </button>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       <div style={{
         padding: 'var(--eb-space-4)',
@@ -828,6 +829,7 @@ export default function WorkingEnvironments() {
         onCancel={() => setDeleteTarget(null)}
       />
     </div>
+    </>
   );
 }
 

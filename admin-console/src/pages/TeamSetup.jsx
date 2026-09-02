@@ -918,14 +918,14 @@ export default function TeamSetup() {
   return (
     <div style={{ maxWidth: 880, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div>
-        <h1 style={{
+        <h2 style={{
           fontSize: 'var(--eb-text-2xl)',
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
         }}>
           Agent Team Wizard
-        </h1>
+        </h2>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',

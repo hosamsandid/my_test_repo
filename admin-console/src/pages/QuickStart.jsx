@@ -118,12 +118,12 @@ export default function QuickStart() {
   return (
     <div style={{ maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div>
-        <h1 style={{
+        <h2 style={{
           fontSize: 'var(--eb-text-2xl)',
           fontWeight: 'var(--eb-font-semibold)',
           margin: 0,
           color: 'var(--eb-text-primary)',
-        }}>{QUICKSTART_COPY.heading}</h1>
+        }}>{QUICKSTART_COPY.heading}</h2>
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',

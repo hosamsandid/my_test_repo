@@ -84,7 +84,7 @@ GitHub Personal Access Tokens (PATs) authorize the built-in GitHub poller to wat
 
 **Using a token:** Assign a token to a Working Environment. All agents in that environment share the token for polling and for HTTPS GitHub repository access (cloning and the real-time repo-check probe) — they do not each need their own.
 
-**Loop protection:** The GitHub poller stamps agent-originated commits and PR bodies with agent identity markers. This prevents agents from triggering themselves in a feedback loop (see [docs/triggers.md](./triggers.md) for details).
+**Loop protection:** Because every agent shares the environment's one token, an event caused by an agent is indistinguishable from one caused by a human, and a trigger fires on either. `gh-as-agent` stamps commits and PR bodies with agent identity markers for human readers, but nothing suppresses self-caused events — feedback loops are bounded by the poller's rate throttle and burst digest instead (see [docs/triggers.md](./triggers.md) for details).
 
 ### Granting an agent GitHub access
 

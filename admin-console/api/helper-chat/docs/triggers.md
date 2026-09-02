@@ -49,9 +49,9 @@ The webhook secret is generated automatically when the trigger is created. It is
 
 ## GitHub Poller
 
-The built-in GitHub poller queries the GitHub Events API every 30 seconds for all repositories referenced in Working Environments. It uses `If-None-Match` ETags so unchanged repositories cost no rate-limit budget — 304 responses are free. Per-repository state (ETag, last event ID) persists across restarts. The first poll records a baseline so there is no event flood on startup.
+The built-in GitHub poller queries the GitHub Events API every 30 seconds for all repositories referenced in Working Environments. It uses `If-None-Match` ETags so unchanged repositories cost no rate-limit budget — 304 responses are free. Per-repository state (ETag and a sliding set of already-seen event ids) persists across restarts. The first poll records a baseline so there is no event flood on startup.
 
-**Loop protection:** Agents that take GitHub actions via the `gh-as-agent` wrapper stamp commits with `<agentId>@agents.local` and PR/review bodies with `<!-- agent: <id> -->`. The poller reads these markers and drops events that originate from the same agent, preventing feedback loops.
+**Loop protection is frequency-based, not origin-based.** There is deliberately **no** source filtering: a trigger fires on any matching event regardless of who caused it — a human, another agent, or the subscribing agent itself. The backstops are the per-conversation throttle (default 5 events/hour per agent per PR / issue / branch) and the burst digest (more than 3 events on one conversation in a single poll fold into one lossless summary wake). Agents that act via the `gh-as-agent` wrapper do stamp commits with `<agentId>@agents.local` and PR/review bodies with `<!-- agent: <id> -->`, but those markers are attribution for humans reading GitHub — the poller does not read them. See the **GitHub Event Log** page (and its help topic) for what happened to each individual event.
 
 ## Operational note: host clock skew (Podman machine)
 

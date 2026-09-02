@@ -276,13 +276,9 @@ export default function AgentChat() {
     setWorkspaceRefreshKey(k => k + 1);
   }, []);
 
-  // Bumped by ChatPanel after the agent replied to a Full-Learn prompt (which
-  // may have added entries to the team KB), so the right rail's Knowledge tab
-  // refreshes without a manual reload.
-  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
-  const handleKnowledgeChanged = useCallback(() => {
-    setKnowledgeRefreshKey(k => k + 1);
-  }, []);
+  // #1922: the Knowledge-tab refresh signal is gone with the Save & Learn
+  // button — that manual prompt was its only feeder. The tab still reloads
+  // whenever it becomes active, which is the path a user takes to look at it.
 
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
@@ -462,27 +458,25 @@ export default function AgentChat() {
         overflow: 'hidden',
         flexShrink: 0,
       }}>
-        <div style={{
-          padding: 'var(--eb-space-4)',
-          borderBottom: '1px solid var(--eb-border-default)',
-          flexShrink: 0,
-        }}>
-          <h2 style={{
-            fontSize: 'var(--eb-text-md)',
-            fontWeight: 'var(--eb-font-semibold)',
-            margin: 0,
-            color: 'var(--eb-text-primary)',
+        {/*
+          Filter row only — the former "Agents (N)" heading was dropped (#1921):
+          the context is obvious and the count added nothing. The whole row is
+          conditional on there being agents to filter, so an empty/loading list
+          leaves no blank padded strip where the heading used to sit.
+        */}
+        {agents && agents.length > 0 && (
+          <div style={{
+            padding: 'var(--eb-space-3) var(--eb-space-4)',
+            borderBottom: '1px solid var(--eb-border-default)',
+            flexShrink: 0,
           }}>
-            {loading || !agents ? 'Agents' : `Agents (${agents.length})`}
-          </h2>
-          {agents && agents.length > 0 && (
             <FilterSelect
               agents={agents}
               filter={listFilter}
               onChange={setListFilter}
             />
-          )}
-        </div>
+          </div>
+        )}
 
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {loading && !agents && (
@@ -595,7 +589,6 @@ export default function AgentChat() {
             onWorkspaceChanged={handleWorkspaceChanged}
             onTodoBoundary={handleTodoBoundary}
             onOpenKnowledge={handleOpenKnowledge}
-            onKnowledgeChanged={handleKnowledgeChanged}
             resumeRequest={resumeRequest}
             insertRefRequest={composerRefRequest}
           />
@@ -639,7 +632,6 @@ export default function AgentChat() {
           onContextUpdate={handleContextUpdate}
           todoCloseSignal={todoCloseSignal}
           workspaceRefreshKey={workspaceRefreshKey}
-          knowledgeRefreshKey={knowledgeRefreshKey}
           openTabRequest={railTabRequest}
           onResumeSession={handleResumeSession}
           sessionSelectRequest={sessionSelectRequest}
@@ -692,7 +684,8 @@ function FilterSelect({ agents, filter, onChange }) {
       onChange={handleChange}
       title="Filter agent list"
       style={{
-        marginTop: 'var(--eb-space-2)',
+        // No top margin: since #1921 removed the "Agents (N)" heading above it,
+        // the select is the row's only child and its own padding does the work.
         width: '100%',
         padding: '4px 6px',
         fontSize: 'var(--eb-text-xs)',

@@ -55,7 +55,7 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge'];
  */
 export default function RightRail({
   agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
-  todoCloseSignal = 0, workspaceRefreshKey = 0, knowledgeRefreshKey = 0, openTabRequest = null,
+  todoCloseSignal = 0, workspaceRefreshKey = 0, openTabRequest = null,
   onResumeSession, sessionSelectRequest = null, collapsed = false, onReferenceInChat = null,
 }) {
   // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
@@ -365,7 +365,9 @@ export default function RightRail({
           </div>
         )}
         <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} refreshKey={knowledgeRefreshKey} />
+          {/* #1922: no external refresh signal any more (Save & Learn was its
+              only feeder) — the panel reloads when the tab becomes active. */}
+          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
         </div>
       </div>
 

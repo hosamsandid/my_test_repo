@@ -3,12 +3,13 @@ import { useSearchParams, useNavigate } from 'react-router';
 import {
   Brain, RefreshCw, X, ExternalLink, GitBranch, Sparkles, Check, Wand2,
   Archive, Share2, ShieldCheck, Ban, MessageSquare, Search, ArrowRight, Users,
-  HelpCircle, BookOpen, Combine, Trash2, MoreHorizontal, FileText,
+  Combine, Trash2, MoreHorizontal, FileText,
   Inbox, Filter, RotateCcw, CheckCircle2, Circle, Play, SkipForward, Layers,
   Pencil, Loader2,
 } from 'lucide-react';
 import InfoTip from '../components/InfoTip';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import SkillMarkdown from '../components/SkillMarkdown';
@@ -167,14 +168,6 @@ export default function KnowledgeFlow() {
   const [promoting, setPromoting] = useState(null); // { suggestion, teamId }
   const [sharing, setSharing] = useState(null); // { node, teamId }
   const [retiring, setRetiring] = useState(null); // { item, teamId } — retire-learning confirm
-  // "How it works" intro: open on first visit, dismissible, reopenable anytime.
-  const [showIntro, setShowIntro] = useState(() => {
-    try { return localStorage.getItem('kf.introSeen') !== '1'; } catch { return true; }
-  });
-  const dismissIntro = useCallback(() => {
-    setShowIntro(false);
-    try { localStorage.setItem('kf.introSeen', '1'); } catch { /* ignore */ }
-  }, []);
   // Two ways to look at the same team knowledge: the left-to-right flow graph
   // (default) and the human-readable overview table (#635). The choice persists
   // across visits; both honour the same filter bar.
@@ -467,6 +460,7 @@ export default function KnowledgeFlow() {
         <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
           Knowledge Flow
         </h1>
+        <PageHelpButton label="Help for Knowledge" size={15} style={{ padding: 2, flexShrink: 0 }} />
         {selectedTeam && (
           <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
             <span title="Lessons this team's agents have recorded so far">{totals.items} learned</span>
@@ -478,12 +472,6 @@ export default function KnowledgeFlow() {
           </span>
         )}
         <button
-          onClick={() => (showIntro ? dismissIntro() : setShowIntro(true))}
-          title="A short explanation of how the knowledge system works"
-          style={{ ...btn, borderStyle: 'dashed' }}>
-          <HelpCircle size={13} /> How it works
-        </button>
-        <button
           onClick={onRefresh}
           title={selectedTeam ? 'Reload this team’s knowledge' : 'Reload the team list'}
           style={{ ...btn, marginLeft: 'auto' }}>
@@ -493,8 +481,6 @@ export default function KnowledgeFlow() {
       <div style={{ padding: '2px 0 var(--eb-space-2)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
         Your agents write down what they learn while working. Watch those lessons become shared team knowledge — and decide what turns into reusable skills.
       </div>
-
-      {showIntro && <HowItWorks onDismiss={dismissIntro} />}
 
       {/* ── Team selector (mandatory first step — governs the whole page) ────── */}
       {teams && teams.length > 0 && (
@@ -668,117 +654,6 @@ export default function KnowledgeFlow() {
         onConfirm={() => { archiveItem(retiring.item.id, retiring.teamId, true); setRetiring(null); }}
         onCancel={() => setRetiring(null)}
       />
-    </div>
-  );
-}
-
-/* ── "How it works" intro — the page explains itself to a first-time user ──── */
-
-function HowItWorks({ onDismiss }) {
-  const stepStyle = { flex: '1 1 220px', minWidth: 200 };
-  const stepTitle = { display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)', marginBottom: 4 };
-  const stepBody = { fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.55, margin: 0 };
-  const num = (n) => (
-    <span style={{
-      width: 18, height: 18, borderRadius: 'var(--eb-radius-full)', flexShrink: 0,
-      background: 'var(--eb-accent-muted)', color: 'var(--eb-accent-primary)',
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: 11, fontWeight: 700,
-    }}>{n}</span>
-  );
-  const dot = (kind) => (
-    <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 'var(--eb-radius-full)', background: KIND_COLORS[kind], marginRight: 4, verticalAlign: 'baseline' }} />
-  );
-  return (
-    <div style={{
-      margin: '0 0 var(--eb-space-3)', padding: 'var(--eb-space-3) var(--eb-space-4)',
-      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)',
-      background: 'var(--eb-bg-surface)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-2)' }}>
-        <BookOpen size={15} style={{ color: 'var(--eb-accent-primary)' }} />
-        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-          How the knowledge system works
-        </span>
-        <button onClick={onDismiss} style={{ ...btn, marginLeft: 'auto', padding: '2px 10px', fontSize: 'var(--eb-text-xs)' }}>
-          Got it — hide this
-        </button>
-      </div>
-
-      {/* Skills vs Knowledge vs Memory — the three concepts placed side by side (#1142) */}
-      <div style={{
-        display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap',
-        margin: '0 0 var(--eb-space-3)', padding: 'var(--eb-space-3)',
-        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-      }}>
-        <div style={stepStyle}>
-          <div style={stepTitle}><Brain size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Memory</div>
-          <p style={stepBody}>What <em>one agent</em> privately remembers — its own episodic notebook, not shared with anyone.</p>
-        </div>
-        <div style={stepStyle}>
-          <div style={stepTitle}><Share2 size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Knowledge</div>
-          <p style={stepBody}>Lessons <em>shared across the team</em>, so every agent benefits from what any one of them learned (this page).</p>
-        </div>
-        <div style={stepStyle}>
-          <div style={stepTitle}><FileText size={14} style={{ color: 'var(--eb-accent-primary)' }} /> Skills</div>
-          <p style={stepBody}>Polished, reusable instruction files agents load automatically — often distilled from the best knowledge.</p>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-4)', flexWrap: 'wrap' }}>
-        <div style={stepStyle}>
-          <div style={stepTitle}>{num(1)} Agents learn while they work</div>
-          <p style={stepBody}>
-            At the end of a work session, each agent writes down the durable lessons it learned.
-            Every lesson is a {dot('fact')}<strong>fact</strong> (something true about the project),
-            an {dot('entity')}<strong>entity</strong> (a named thing and what’s known about it),
-            or a {dot('convention')}<strong>convention</strong> (how the team does things).
-          </p>
-        </div>
-        <div style={stepStyle}>
-          <div style={stepTitle}>{num(2)} Lessons become team knowledge</div>
-          <p style={stepBody}>
-            Lessons flow into the team’s shared knowledge base, where every agent can use them.
-            When several agents learn the same thing <em>independently</em>, it’s marked
-            {' '}<strong>converged</strong> — a strong signal that it’s both true and important.
-          </p>
-        </div>
-        <div style={stepStyle}>
-          <div style={stepTitle}>{num(3)} The best knowledge becomes skills</div>
-          <p style={stepBody}>
-            Knowledge can be <strong>promoted to a skill</strong>: a reusable instruction file
-            agents load automatically. A skill is often a <em>combination</em> of related lessons —
-            the system suggests such bundles, and you can also tick several lessons yourself and
-            combine them. You review every promotion, unless you let the team curate itself.
-          </p>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
-        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-        <strong style={{ color: 'var(--eb-text-secondary)' }}>Once you have a lot of knowledge, you can shape it.</strong>{' '}
-        Group your lessons into <strong>domains</strong> (the themes they cluster into, e.g. “JCL conversion”),
-        then <strong>consolidate</strong> the many small skills in a domain into a single <strong>playbook</strong>,
-        or <strong>distill</strong> one skill to dedupe and tighten it. These are optional power tools —
-        the panels below explain each in place, and nothing is applied without your review.
-      </div>
-
-      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
-        <Layers size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-        <strong style={{ color: 'var(--eb-text-secondary)' }}>The most important lessons are always in context.</strong>{' '}
-        Each agent gets a per-agent <strong>digest</strong> — the top knowledge, guaranteed to be loaded every session
-        (the green badge on an agent) — while the rest stays reachable on demand via search.
-      </div>
-
-      <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px dashed var(--eb-border-default)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.55 }}>
-        <ShieldCheck size={12} style={{ verticalAlign: -2, marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-        <strong style={{ color: 'var(--eb-text-secondary)' }}>You stay in control.</strong>{' '}
-        Each team has an <strong>Autonomy</strong> dial (how much happens without you), an optional
-        {' '}<strong>Review</strong> mode (you approve every new lesson first), and <strong>promotion
-        gates</strong> (which promotion steps may run automatically). Nothing is deleted silently —
-        retired knowledge is kept in git for audit.
-      </div>
     </div>
   );
 }
@@ -1269,9 +1144,8 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
             marginBottom: 'var(--eb-space-2)',
           }}>
             A <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> is a theme this team’s
-            lessons cluster into — e.g. “JCL conversion” or “DB2 migration”. Domains are the buckets that
-            Consolidation folds the team’s many small skills into, so the routing stays tidy as knowledge grows.
-            Changing them is always a human decision — seed the defaults, or let AI propose a set you review first.
+            lessons cluster into — e.g. “JCL conversion”. Changing them is always a human decision.
+            <PageHelpButton label="What domains are for" size={12} style={{ padding: 0, marginLeft: 4, verticalAlign: '-2px' }} />
           </div>
           {/* Toolbar: LLM bootstrap + merge action */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
@@ -3943,7 +3817,7 @@ function ControlStrip({ teamId, gates, onChanged }) {
 
         {/* Read-only summary of the live saved values */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap', minWidth: 0 }}>
-          <SummaryPill label="Autonomy" value={`${autonomy} · ${current.label}`} title={current.tip} />
+          <SummaryPill label="Autonomy" value={`${autonomy} · ${current.label}`} title={current.desc} />
           <SummaryPill label="Review" value={review ? 'on' : 'off'}
             title={autonomy < 1 ? 'Review needs autonomy 1 or higher — at 0, nothing is shared in the first place.' : (review ? 'New lessons wait for your approval before they are shared.' : 'New lessons are shared immediately.')} />
           {GATE_ORDER.map(tr => (

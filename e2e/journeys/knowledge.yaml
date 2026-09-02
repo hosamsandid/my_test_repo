@@ -33,20 +33,15 @@ steps:
 
       Three ideas sit side by side here. Memory is what one agent privately remembers. Knowledge is what the team shares. Skills are polished, reusable instruction files — often distilled from the best knowledge. This chapter walks that pipeline: agents learn while they work, lessons converge into team knowledge, and the strongest lessons are promoted into skills — with a human in control of how much of that happens automatically.
 
-  # ── The overview + the "how it works" explainer ─────────────────────────────
+  # ── The overview + the page's help topic ────────────────────────────────────
   - id: overview
     voiceover: |
-      This is the Knowledge Flow page. The explainer lays out the whole model: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. Below, the three stages — agents learn while they work, lessons converge into team knowledge, and the best knowledge becomes a skill — and the reminder that you stay in control of how much happens automatically.
+      This is the Knowledge Flow page. The page itself stays lean — title, counts, and the team's knowledge flow. The whole model lives one click away, behind the question mark: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. The help panel walks the three stages, and the control surface that decides how much happens automatically.
     narrative: |
-      This is the Knowledge Flow page. At the top, a short explainer places the three concepts side by side — Memory, Knowledge, Skills — and then walks the three stages of the pipeline: agents learn while they work; lessons flow into the team's shared knowledge and are marked "converged" when several agents learn the same thing independently; and the best knowledge is promoted into a skill. It closes on the control surface: every team has an Autonomy dial, an optional Review mode, and promotion gates — nothing is deleted silently, and nothing is promoted behind your back unless you let the team curate itself.
+      This is the Knowledge Flow page. Rather than opening with a wall of text, it keeps the page for the data and puts the concepts in the Help panel — the "?" next to the title opens the "This page" face. There the three concepts sit side by side — Memory, Knowledge, Skills — followed by the three stages of the pipeline: agents learn while they work; lessons flow into the team's shared knowledge and are marked "converged" when several agents learn the same thing independently; and the best knowledge is promoted into a skill. It closes on the control surface: every team has an Autonomy dial, an optional Review mode, and promotion gates — nothing is deleted silently, and nothing is promoted behind your back unless you let the team curate itself.
     action:
       do: knowledge.openOverview
     screenshot: knowledge-overview
-
-  # Dismiss the explainer for the remaining beats (already captured above) so the
-  # team-flow / activation shots aren't topped by it. Pure plumbing — no capture.
-  - action:
-      do: knowledge.hideIntro
 
   # ── One team's knowledge flow ────────────────────────────────────────────────
   - id: team-flow

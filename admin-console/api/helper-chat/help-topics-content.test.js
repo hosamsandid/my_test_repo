@@ -84,6 +84,42 @@ const TOPIC_CONTENT = [
       'Briefings Path',
     ],
   },
+  {
+    id: 'knowledge',
+    routes: ['/knowledge'],
+    // #1877 lifted these from the Knowledge page: the "How it works" intro box
+    // (Memory vs Knowledge vs Skills, the three-step learning flow, the kinds,
+    // digests, the domains/consolidate/distill power tools) and the long
+    // autonomy / review / promotion-gate copy out of KnowledgeLearningConfig —
+    // which the wizard's Knowledge step renders too, so this is now the only
+    // place that explains what a level or a gate does.
+    concepts: [
+      'Memory',
+      'Knowledge',
+      'Skills',
+      'Fact',
+      'Entity',
+      'Convention',
+      'converged',
+      'digest',
+      'Domains',
+      'Consolidate',
+      'Distill',
+      'playbook',
+      'Autonomy',
+      'Off',
+      'Share',
+      'Suggest',
+      'Auto-curate',
+      'Review',
+      'Promotion gates',
+      'Knowledge → team skill',
+      'Agent skill → team skill',
+      'Team skill → all teams',
+      'Forgetting',
+      'un-retired',
+    ],
+  },
 ];
 
 const registry = loadRegistry();

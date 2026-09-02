@@ -23,7 +23,7 @@ export const BREADCRUMBS = {
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
   '/plugin-system': 'Plugin System',
-  '/teams':        'Access & Users',
+  '/teams':        'Access',
   '/users':        'Users',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',

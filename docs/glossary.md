@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Access & Users** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
+| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Access** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on a Working Environment. |
@@ -223,7 +223,7 @@ The tenant. Every agent, Working Environment and credential belongs to exactly o
 Teams scope who can see and manage what. Roles: **System Admin** (global),
 **Team Admin**, **Team Member**.
 
-*Where you meet it:* the **Access & Users** page.
+*Where you meet it:* the **Access** page.
 *Read more:* [teams-data-model.md](teams-data-model.md) · [multi-user-concept.md](multi-user-concept.md)
 
 ### Model Provider

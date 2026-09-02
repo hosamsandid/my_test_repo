@@ -7,12 +7,12 @@ seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Create something new", to: "/create" }
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Flows", to: "/flows" }
 askPrompts:
   - "Which agent role should I pick — Agent, Agent Team or Orchestrator?"
-  - "What is the difference between an Agent Team and a Team on the Access & Users page?"
+  - "What is the difference between an Agent Team and a Team on the Access page?"
   - "What is the difference between Disable, Reset to stub and Delete?"
   - "Why does one of my agents show as not initialised?"
   - "Where do an agent's skills, prompt and plugins come from?"
@@ -38,8 +38,8 @@ create or import one here for advanced or custom setups, but the guided
 | **Orchestrator** | Points at a folder of **missions** — task files (*BriefingPacks*) from an **ACE (Agent Control Environment)** briefings repository. It lists one stub agent per mission and, when a mission is marked `dispatched`, offers to turn that stub into a live agent that works the mission end to end. | Only when you have an ACE briefings repository. See **Flows** for active orchestrators. |
 | **Mission Agent** (bp-instance) | One agent per mission, created and managed by an Orchestrator. Parent orchestrator, mission id and mission directory are inherited and read-only — edit the mission in its BriefingPack, not here. | You do not pick this role — the orchestrator assigns it per mission. |
 
-> An **Agent Team** is *not* the same thing as a **Team** on the **Access &
-> Users** page. That Team is the human tenant / access scope every agent,
+> An **Agent Team** is *not* the same thing as a **Team** on the **Access**
+> page. That Team is the human tenant / access scope every agent,
 > environment and credential belongs to; an Agent Team is a squad of agents.
 
 ## Lifecycle: what the card states mean

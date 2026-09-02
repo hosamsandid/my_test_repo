@@ -152,7 +152,7 @@ const NAV_GROUPS = [
   ]},
   { key: 'administration', section: 'Administration', items: [
     { path: '/users',            label: 'Users',            Icon: UserCog,   adminOnly: true, subtitle: 'Human user accounts' },
-    { path: '/teams',            label: 'Access & Users',   Icon: Building2, subtitle: 'Human members & access' },
+    { path: '/teams',            label: 'Access',           Icon: Building2, subtitle: 'Teams, roles & assignments' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },

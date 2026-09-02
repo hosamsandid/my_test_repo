@@ -14,6 +14,7 @@ import { ID_FORMAT_HINT } from '../components/id-field-view';
 import GithubTokenHint from '../components/GithubTokenHint';
 import { GITHUB_TOKEN_PREFIX_HINT } from './github-token-view';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
 import {
@@ -557,11 +558,22 @@ export default function MyCredentials() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
+      {/* The tier explanation, the strict-privacy guarantee and the SSH-vs-PAT
+          "why both" rationale moved into the shared Credentials help topic in
+          E10 (#1884) — api/helper-chat/help-topics/credentials.md, claimed by
+          /ssh-keys, /github-tokens and this route. The create/rotate panels keep
+          their one-time-secret warnings and SAML-SSO steps inline. */}
       <div>
-        <p style={{ margin: '0 0 0', color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.6, maxWidth: 760 }}>
-          Your <strong>personal</strong> SSH key and GitHub token, so your agents can act under your own GitHub identity.
-          These are <strong>private to you</strong> — nobody else, not even a System Admin, can see or manage them here.
-          Shared team and platform credentials live on the admin <em>SSH Keys</em> and <em>GitHub Tokens</em> pages.
+        <p style={{
+          margin: 0,
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+          color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', lineHeight: 1.6, maxWidth: 760,
+        }}>
+          <span>
+            Your <strong>personal</strong> SSH key and GitHub token, private to you, so your agents can act
+            under your own GitHub identity.
+          </span>
+          <PageHelpButton label="Why both an SSH key and a GitHub token, and who can see mine?" size={14} style={{ padding: 0, flexShrink: 0 }} />
         </p>
       </div>
 
@@ -599,7 +611,7 @@ export default function MyCredentials() {
             rows={sshRows}
             refetch={refetchSsh}
             emptyText="No personal SSH key yet. Add one to clone/push under your own identity."
-            blurb={<>An SSH key authenticates git transport (clone / fetch / push) over SSH. Personal keys are <strong>account-wide</strong> — one key covers all your repositories. Register the private key here; add the matching public key to your GitHub account.</>}
+            blurb={<>Authenticates git transport over SSH; personal keys are <strong>account-wide</strong>. Register the private key here, add the matching public key to your GitHub account.</>}
           />
           <CredentialSection
             kind="github"
@@ -610,7 +622,7 @@ export default function MyCredentials() {
             rows={ghRows}
             refetch={refetchGh}
             emptyText="No personal GitHub token yet. Add one so your agents open PRs and push under your name."
-            blurb={<>A GitHub Personal Access Token drives attributed writes — commits, pushes, pull requests and the <code>gh</code> CLI — under your identity. It is stored securely and never shown again after creation.</>}
+            blurb={<>Drives attributed writes — commits, pushes, pull requests and the <code>gh</code> CLI — under your identity.</>}
           />
         </>
       )}

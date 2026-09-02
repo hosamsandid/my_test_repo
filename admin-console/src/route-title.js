@@ -46,18 +46,19 @@ export const ROUTE_TITLES = {
 };
 
 // Resolve a pathname to a human page name, handling the dynamic child routes the
-// same way the breadcrumb does: `/chats/:agentId` and `/plugins/:id/view` carry
-// their id so two chat tabs (or two plugin tabs) stay distinguishable. Returns
-// null for a route we don't recognise, so the caller can fall back cleanly.
+// same way the breadcrumb does: `/plugins/:id/view` carries its id so two plugin
+// tabs stay distinguishable, while `/chats/:agentId` deliberately does not (#1921
+// — the selected agent is already highlighted in that page's own left rail).
+// Returns null for a route we don't recognise, so the caller can fall back cleanly.
 export function pageNameForPath(pathname) {
   if (!pathname || typeof pathname !== 'string') return null;
   if (ROUTE_TITLES[pathname]) return ROUTE_TITLES[pathname];
   // "/" redirects to /chats — label the tab for the destination, not the raw slash.
   if (pathname === '/') return ROUTE_TITLES['/chats'];
-  if (pathname.startsWith('/chats/')) {
-    const id = pathname.slice('/chats/'.length);
-    return id ? `Agent Chat / ${id}` : 'Agent Chat';
-  }
+  // `/chats/:agentId` reads plainly "Agent Chat" (#1921) — same as the
+  // breadcrumb/header, which dropped the agent id because the selected agent is
+  // already highlighted in the page's left-rail list.
+  if (pathname.startsWith('/chats/')) return ROUTE_TITLES['/chats'];
   const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
   if (pluginView) return `Plugins / ${pluginView[1]}`;
   return null;

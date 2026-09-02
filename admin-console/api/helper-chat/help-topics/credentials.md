@@ -120,5 +120,7 @@ Tokens** and **My Credentials** walk you through it at the moment you add the
 secret, together with the reminder that GitHub shows a token value only once.
 
 Commits and PR bodies written by agents are stamped with an agent-identity
-marker, which is what stops the Events poller from waking an agent on its own
-output.
+marker, but that stamp is attribution for humans reading GitHub — the Events
+poller does not read it, and a trigger fires on any matching event regardless of
+who caused it. Feedback loops are bounded by frequency instead: a per-conversation
+rate throttle and a burst digest.

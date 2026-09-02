@@ -29,7 +29,7 @@ title: Agents
 summary: One line under the title.
 seeAlso:
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
 askPrompts:
   - "What is the difference between an Agent and an Agent Team?"
   - "When should I disable vs delete an agent?"
@@ -47,7 +47,7 @@ test('parseTopic reads front-matter fields and body', () => {
   assert.equal(t.summary, 'One line under the title.');
   assert.deepEqual(t.seeAlso, [
     { label: 'Working Environments', to: '/environments' },
-    { label: 'Access & Users', to: '/teams' },
+    { label: 'Access', to: '/teams' },
   ]);
   assert.equal(t.askPrompts.length, 2);
   assert.match(t.askPrompts[0], /difference between an Agent/);
@@ -213,8 +213,8 @@ test('the real help-topics dir loads and includes the Overview pilot', () => {
 test('the Overview topic carries the former Getting Started concepts and CTAs', () => {
   const reg = loadRegistry(path.join(__dirname, 'help-topics'));
   const body = reg.overview.body;
-  for (const concept of ['Agents', 'Access & Users', 'Flows', 'Working Environments', 'Knowledge', 'Model Providers']) {
-    assert.match(body, new RegExp(`\\*\\*${concept.replace('&', '&')}\\*\\*`), `Overview body must explain ${concept}`);
+  for (const concept of ['Agents', 'Access', 'Flows', 'Working Environments', 'Knowledge', 'Model Providers']) {
+    assert.match(body, new RegExp(`\\*\\*${concept}\\*\\*`), `Overview body must explain ${concept}`);
   }
   const linked = reg.overview.seeAlso.map((s) => s.to);
   for (const to of ['/agents', '/teams', '/flows', '/environments', '/knowledge', '/models']) {

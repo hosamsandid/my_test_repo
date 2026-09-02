@@ -85,7 +85,7 @@ title: Agents
 summary: One line shown under the page title and at the top of the panel.
 seeAlso:
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
 askPrompts:
   - "What is the difference between an Agent, an Agent Team and an Orchestrator?"
   - "When should I disable vs reset-to-stub vs delete an agent?"
@@ -260,7 +260,7 @@ Every Phase-3 ticket follows the same shape:
 | **E4** | Skills | 4-paragraph concept intro + "See how the knowledge system works →" jump-off + overwrite/merge dialog prose |
 | **E5** | Plugins (+ Plugin System) | Plugins page intro + **fold `/plugin-system` in as a deep-dive**; **remove the route outright** (no redirect) + the `PluginSystemHelp` page + the "Learn about plugins" link; install/uninstall modal explainers |
 | **E6** | Working Environments | Top intro box ("a reusable workspace recipe") |
-| **E7** | Access & Users | Top intro box incl. the **Team vs Agent Team** distinction; roles (System/Team Admin/Member) |
+| **E7** | Access | Top intro box incl. the **Team vs Agent Team** distinction; roles (System/Team Admin/Member) |
 | **E8** | Model Providers | Top intro + the two auth-type descriptions + OAuth/probe dialog prose |
 | **E9** | MCP Servers | Top intro (servers + credentials + env pairing) + the "where does 'required' come from" InfoTip |
 | **E10** | Credentials & GitHub access | SSH Keys + GitHub Tokens + My Credentials intros + the duplicated **"why both / defense-in-depth"** prose + SetupWizard credential steps + success-dialog SSO instructions (author once, reuse) |

@@ -22,7 +22,7 @@ export const BREADCRUMBS = {
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
-  '/teams':        'Access & Users',
+  '/teams':        'Access',
   '/users':        'Users',
   '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',
@@ -32,10 +32,11 @@ export const BREADCRUMBS = {
 // shapes (Agent-Chat room, plugin viewer). Falls back to the raw pathname.
 export function breadcrumbFor(pathname) {
   if (BREADCRUMBS[pathname]) return BREADCRUMBS[pathname];
-  if (pathname.startsWith('/chats/')) {
-    const id = pathname.slice('/chats/'.length);
-    return `Agent Chat / ${id}`;
-  }
+  // `/chats/:agentId` reads plainly "Agent Chat" (#1921): which agent is
+  // selected is already shown — highlighted — in the page's own left-rail list,
+  // so repeating the id in the header only added noise. Reuse the static label
+  // so the two forms of the route can never drift apart.
+  if (pathname.startsWith('/chats/')) return BREADCRUMBS['/chats'];
   const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
   if (pluginView) return `Plugins / ${pluginView[1]}`;
   return pathname;

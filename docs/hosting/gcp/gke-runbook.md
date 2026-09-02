@@ -276,7 +276,7 @@ CI's tag-pinned apply cannot do for Secret-only changes).
 
 **Wire IAP single login (`IAP_AUDIENCE`)** — after the environment's ingress
 exists. Silent login is issued only for IAP identities registered as Agent
-Studio users (Access & Users page) or matching `ADMIN_USERNAME` (#1415); everyone else
+Studio users (Users page) or matching `ADMIN_USERNAME` (#1415); everyone else
 gets the console login form. The audience embeds the environment's **own**
 backend-service id, so test and preprod each need their own (never copy it):
 

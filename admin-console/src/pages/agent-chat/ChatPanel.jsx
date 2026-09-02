@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, GraduationCap, Gauge, Trash2, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2, ArrowRight } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -38,32 +38,14 @@ import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
 
-// Default prompt sent when the user clicks "Save & Learn". The agent
-// continues in its current Claude session (so it has full conversational
-// context), is asked to consolidate that context into the memory files
-// AND to share durable, team-useful lessons via the knowledge CLI, then
-// replies with a short summary. The knowledge paragraph's wording is kept
-// aligned with build_harvest_hint() in agent-image/scripts/agent-entrypoint.py
-// so the two instructions can't drift apart; "skip if the team knowledge
-// base is not available" covers autonomy-0 agents without a KB checkout.
-const LEARN_PROMPT =
-  'Before we end this conversation: please summarize the key insights, ' +
-  'decisions and open points from our discussion so far ' +
-  'and update your memory/ files accordingly, routing each piece to the right file:\n' +
-  '- memory/context.md — current session state (keep slim)\n' +
-  '- memory/log.md — one summary entry for this conversation\n' +
-  '- memory/users.md — per-user interaction profiles\n' +
-  '- memory/facts.md / memory/entities.md — only if your Memory System instructions still use ' +
-  'these files (legacy model); on the unified model semantic knowledge goes to the team ' +
-  'knowledge base instead, never to these files\n' +
-  'In addition to your memory files, share durable lessons with your teammates ' +
-  'through the team knowledge base: for each insight that would help ANY teammate ' +
-  'on this repo (a project convention, an environment fact, a key entity) run: ' +
-  'knowledge add fact|entity|convention "<one-line statement>". ' +
-  'First run knowledge search "<topic>" to avoid restating something already recorded; ' +
-  'record only lessons that hold beyond this one conversation. ' +
-  'Skip this step if the team knowledge base is not available.\n' +
-  'Then briefly reply with what you have saved and what you shared with the team.';
+// #1922: the manual "Save & Learn" button and its canned LEARN_PROMPT were
+// removed. The instruction they sent is one the runtime already gives the agent
+// on *every* invocation — the memory hint (`_build_memory_hint()` in
+// agent-image/scripts/agent-entrypoint.py, byte-identical to `buildMemoryHint()`
+// in orchestrator/prompt-assembly.js), plus `build_harvest_hint()` and the #602
+// structured harvest block on the legacy memory model. That automatic hint is
+// now the single source of the memory/knowledge consolidation instruction, so a
+// user never has to ask for it. Reset Session took over the primary slot.
 
 /**
  * The middle column: header + scrollable message list + input.
@@ -96,10 +78,6 @@ const LEARN_PROMPT =
  *        pinned To-Do panel from a previous session gets dismissed (#273).
  * @param {()=>void} [onOpenKnowledge] Open the right rail on its Knowledge tab
  *        (wired to the "N learned" badge in the header).
- * @param {()=>void} [onKnowledgeChanged] Notify parent after the agent replied
- *        to the Full-Learn prompt (which may have added KB entries), so the
- *        right rail's Knowledge tab refreshes and the user sees the button
- *        feeding the pipeline.
  * @param {?{ref:string, ts:number}} [insertRefRequest] Cross-panel request to
  *        splice a `@<ref>` file reference into the composer draft, forwarded
  *        straight to MessageInput (#1699 — the workspace browser's "Reference in
@@ -107,7 +85,7 @@ const LEARN_PROMPT =
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
-  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, onKnowledgeChanged, resumeRequest,
+  onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, resumeRequest,
   insertRefRequest,
 }) {
   const [messages, setMessages]      = useState([]);
@@ -132,13 +110,12 @@ export default function ChatPanel({
 
   // Active Claude `--resume <sessionId>` pointer for this (agent, room).
   // The pointer file is written by the runner after every successful
-  // invocation and read back here so the UI can gate the reset/learn
-  // controls on whether a resumable session exists.
+  // invocation and read back here so the UI can gate the reset
+  // control on whether a resumable session exists.
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
   const [resuming, setResuming]       = useState(false);
-  const [learnPending, setLearnPending] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
@@ -215,12 +192,6 @@ export default function ChatPanel({
     const maxOutput = typeof entry?.maxOutputTokens === 'number' && entry.maxOutputTokens > 0 ? entry.maxOutputTokens : null;
     return { windowTokens, maxOutput };
   }, [modelOptions]);
-  // Wall-clock at the moment the user clicked "Save & Learn". The
-  // post-message effect uses it to decide which agent reply to treat as
-  // "the response to the learn prompt" — namely, the next agent message
-  // whose timestamp is at or after this value.
-  const learnTriggeredAtRef = useRef(0);
-
   // Git repos info for the agent workspace (branch + dirty status).
   const [gitInfo, setGitInfo] = useState(null);
 
@@ -759,33 +730,6 @@ export default function ChatPanel({
     else if (act.kind === 'model') await handleModelChange(null);
   }
 
-  async function handleFullLearn() {
-    if (!sessionApiBase || learnPending) return;
-    setError(null);
-    setLearnPending(true);
-    learnTriggeredAtRef.current = Date.now();
-    try {
-      await handleSend(LEARN_PROMPT);
-    } catch (err) {
-      setLearnPending(false);
-      setError(`Full learn failed: ${err.message}`);
-    }
-  }
-
-  // Clear learnPending once the agent has replied to the learn prompt, and
-  // let the parent refresh the Knowledge tab — the learn run may have added
-  // entries to the team KB.
-  useEffect(() => {
-    if (!learnPending) return;
-    if (!messages.length || !agent?.userId) return;
-    const last = messages[messages.length - 1];
-    if (last?.sender !== agent.userId) return;
-    if (last?.isOptimistic) return;
-    if ((last?.ts || 0) < learnTriggeredAtRef.current) return;
-    setLearnPending(false);
-    onKnowledgeChanged?.();
-  }, [messages, learnPending, agent?.userId, onKnowledgeChanged]);
-
   /* ─── 5. Send ────────────────────────────────────────────────────── */
   /* ─── Loop launch (#1020) ────────────────────────────────────────────
    * A loop is launched from the composer, runs as a launched run visible
@@ -1167,34 +1111,31 @@ export default function ChatPanel({
         color: 'var(--eb-text-muted)',
         minWidth: 0,
       }}>
+        {/* #1922: Reset Session is the primary, always-visible session action
+            (it took over the slot the removed Save & Learn held). Its action,
+            guards, busy spinner and tooltip are the ones it carried inside the
+            `…` menu — only its location changed. Deliberately still no
+            confirmation: it drops the session pointer, it does not delete
+            anything (unlike Clear History, which keeps its confirm dialog). */}
         <button
           type="button"
-          onClick={handleFullLearn}
-          disabled={!sessionId || learnPending || disabled || maintenance.active}
-          title="Save & Learn: the agent summarizes this conversation, persists session state to its memory files and pushes durable lessons to the team knowledge base — a deliberate, consequential action. The session stays open afterwards."
-          style={sessionBtnStyle(!sessionId || learnPending || disabled || maintenance.active)}
+          onClick={handleResetSession}
+          disabled={!sessionId || resetting || disabled}
+          title="This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one."
+          style={sessionBtnStyle(!sessionId || resetting || disabled)}
         >
-          {learnPending
+          {resetting
             ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
-            : <GraduationCap size={11} />}
-          Save &amp; Learn
+            : <RotateCcw size={11} />}
+          Reset Session
         </button>
-        {/* #1810: the rare, destructive session actions (Reset Session /
-            Clear History) live behind a `…` overflow menu so they sit apart
-            from the primary Save & Learn action. Each keeps its own guard
-            state, busy spinner, and confirmation (Clear History's dialog). */}
+        {/* #1810 (re-pointed in #1922): the `…` overflow menu still groups the
+            rare, destructive session actions away from the primary button — it
+            now holds Clear History (with its confirmation dialog) and stays in
+            place as the home for further actions. */}
         <HeaderOverflowMenu
           buttonStyle={sessionBtnStyle}
           items={[
-            {
-              key: 'reset',
-              label: 'Reset Session',
-              icon: <RotateCcw size={13} />,
-              onClick: handleResetSession,
-              disabled: !sessionId || resetting || learnPending || disabled,
-              busy: resetting,
-              title: 'This room keeps one running Claude session; your next message resumes it. Reset Session clears it — the next message starts a new conversation with no memory of this one.',
-            },
             {
               key: 'clear',
               label: 'Clear History',

@@ -331,6 +331,21 @@ export default function AgentChat() {
     setRailTabRequest({ tab: 'knowledge', ts: Date.now() });
   }, []);
 
+  // Which agent the rail's Settings tab (#1929) is for, when it is NOT the open
+  // chat's. A rail menu sets it — "Team settings…" on a group header (AC5), or
+  // "Settings…" on a row whose agent has no chat to open, e.g. a disabled one
+  // (AC10). Cleared whenever the chat moves on, so the tab silently follows the
+  // conversation again rather than stranding the user on a stale subject.
+  const [settingsAgentId, setSettingsAgentId] = useState(null);
+  const handleOpenSettings = useCallback((id) => {
+    if (!id) return;
+    setLogOpen(true);
+    setSettingsAgentId(id);
+    setRailTabRequest({ tab: 'settings', ts: Date.now() });
+  }, []);
+  const clearSettingsAgent = useCallback(() => setSettingsAgentId(null), []);
+  useEffect(() => { setSettingsAgentId(null); }, [agentId]);
+
   // "Reference in chat" (#1699): the workspace browser (RightRail) asks to splice
   // a `@<workspace-relative-path>` token into the composer (ChatPanel). The two are
   // siblings, so lift the request here and hand it down — the same request-object
@@ -682,6 +697,14 @@ export default function AgentChat() {
           onResumeSession={handleResumeSession}
           sessionSelectRequest={sessionSelectRequest}
           onReferenceInChat={handleReferenceInChat}
+          // Settings (#1929). `canManage` rides on the list payload (#1928) —
+          // the same boundary the PUT enforces — so the tab is hidden rather
+          // than offered and refused.
+          agentCanManage={selectedAgent ? selectedAgent.canManage !== false : true}
+          settingsAgentId={settingsAgentId}
+          chatAgentName={selectedAgent?.displayName || ''}
+          onClearSettingsAgent={clearSettingsAgent}
+          onAgentConfigChanged={refetch}
         />
       </div>
 
@@ -696,6 +719,7 @@ export default function AgentChat() {
         onClose={closeMenu}
         chatAgents={agents || []}
         onChanged={refetch}
+        onOpenSettings={handleOpenSettings}
       />
     </div>
   );

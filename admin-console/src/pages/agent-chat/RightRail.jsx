@@ -1,14 +1,16 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target, Settings } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
 import OutcomesPanel from './OutcomesPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
+import AgentSettingsPanel from './AgentSettingsPanel';
 import { fitTabCount } from './rail-layout';
 import { useSessionsActive } from './SessionsActiveContext';
 import { activeSessionCount } from './sessions-active';
+import { settingsSubject } from './agent-settings-view';
 
 const TAB_KEY = 'agentChat.rightRailTab';
 
@@ -19,7 +21,7 @@ const IS_MAC = typeof navigator !== 'undefined'
   && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge', 'settings'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -33,6 +35,10 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge'];
  *     outputs counterpart of Triggers, so it sits next to it. Team members only
  *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
  *   - "Knowledge" — the agent's knowledge base
+ *   - "Settings"  — the agent's configuration (#1929), rendering the Agents
+ *     page's own edit form. Normally for the open chat's agent; the rail can
+ *     point it at another one (a team, a disabled agent). Hidden for a caller
+ *     who may not manage the agent, hence `agentCanManage` gating the tab.
  *
  * The active tab is persisted in localStorage so it survives reloads; an old
  * stored 'log' value silently falls back to the default 'sessions' tab (it is
@@ -57,10 +63,22 @@ export default function RightRail({
   agentId, agentTeamId = null, roomId, hoveredCorrelationId, onHoverCorrelation, onClose, onOpen, onCostUpdate, onContextUpdate,
   todoCloseSignal = 0, workspaceRefreshKey = 0, openTabRequest = null,
   onResumeSession, sessionSelectRequest = null, collapsed = false, onReferenceInChat = null,
+  agentCanManage = true, settingsAgentId = null, chatAgentName = '',
+  onClearSettingsAgent = null, onAgentConfigChanged = null,
 }) {
   // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
   // standalone agent (#963 AC1).
   const showOutcomes = !!agentTeamId;
+  // Settings (#1929) is normally the open chat's agent, but the rail can point
+  // it at another one — a team (whose settings have no chat, AC5) or a disabled
+  // agent (which has no chat at all, AC10). Hidden outright for a caller the
+  // server would refuse (AC8), rather than offered and then 403'd.
+  const settings = settingsSubject({
+    chatAgentId: agentId,
+    chatCanManage: agentCanManage,
+    overrideId: settingsAgentId,
+  });
+  const showSettings = settings.visible;
   const [tab, setTab] = useState(() => {
     try {
       const v = localStorage.getItem(TAB_KEY);
@@ -87,7 +105,8 @@ export default function RightRail({
   useEffect(() => {
     if (!agentId) return;
     if (!showOutcomes && tab === 'outcomes') setTab('sessions');
-  }, [agentId, showOutcomes, tab]);
+    if (!showSettings && tab === 'settings') setTab('sessions');
+  }, [agentId, showOutcomes, showSettings, tab]);
 
   // Session COUNT for the "Sessions" tab badge — regardless of which tab is
   // visible, and even while the rail is collapsed (the icon dot). Derived from
@@ -106,7 +125,8 @@ export default function RightRail({
     { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
     ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
     { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
-  ], [sessionCount, showOutcomes]);
+    ...(showSettings ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This agent\'s configuration — prompt, skills, plugins, context folders, repositories' }] : []),
+  ], [sessionCount, showOutcomes, showSettings]);
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
@@ -369,6 +389,18 @@ export default function RightRail({
               only feeder) — the panel reloads when the tab becomes active. */}
           <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
         </div>
+        {showSettings && (
+          <div style={{ display: tab === 'settings' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <AgentSettingsPanel
+              agentId={settings.agentId}
+              active={tab === 'settings'}
+              chatAgentId={agentId}
+              chatAgentName={chatAgentName}
+              onBackToChatAgent={settings.override ? onClearSettingsAgent : null}
+              onSaved={onAgentConfigChanged}
+            />
+          </div>
+        )}
       </div>
 
     </div>

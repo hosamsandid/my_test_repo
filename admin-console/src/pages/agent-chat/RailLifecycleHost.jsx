@@ -49,8 +49,11 @@ import {
  * @param {() => void} props.onClose        close the menu
  * @param {object[]}   props.chatAgents     the chat's own list (`/api/matrix/agents`)
  * @param {() => void} props.onChanged      re-read that list after a mutation
+ * @param {(id:string) => void} props.onOpenSettings
+ *        point the rail's Settings tab (#1929) at an agent — the Phase-2
+ *        replacement for Phase 1's jump to the Agents page
  */
-export default function RailLifecycleHost({ request, onClose, chatAgents, onChanged }) {
+export default function RailLifecycleHost({ request, onClose, chatAgents, onChanged, onOpenSettings }) {
   const navigate = useNavigate();
 
   // The scoped `GET /api/agents` configs, loaded lazily on the first menu and
@@ -402,6 +405,9 @@ export default function RailLifecycleHost({ request, onClose, chatAgents, onChan
       const agent = agents.find(a => a && a.id === target.agent.id) || target.agent;
       switch (kind) {
         case 'toggle-enabled':    toggleEnabled(agent); break;
+        // Configuration stays in the chat (#1929): the rail's Settings tab
+        // renders this very agent's edit form, so there is nowhere to navigate.
+        case 'settings':          if (onOpenSettings) onOpenSettings(agent.id); break;
         case 'clone':             setPanelAgent(agent); setPanelMode('clone'); break;
         case 'export':            window.open(`/api/agents/${encodeURIComponent(agent.id)}/export`, '_blank'); break;
         case 'extract-template':  openExtractPanel(agent); break;
@@ -419,9 +425,10 @@ export default function RailLifecycleHost({ request, onClose, chatAgents, onChan
         case 'toggle-team':      if (team) toggleTeam(team); break;
         case 'add-member':       addMember(teamId); break;
         case 'add-role':         if (arg) addRole(teamId, arg); break;
-        // Phase 1 answer to open question 3: navigate to the existing edit
-        // surface rather than grow a second copy of the form in the chat.
-        case 'edit-team':        navigate('/agents'); break;
+        // Phase 2 (#1929) answers open question 3 the other way round: the
+        // team's own edit form now renders in the rail's Settings tab, so this
+        // opens it there instead of leaving the chat for the Agents page.
+        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
         case 'open-flow-editor': navigate(`/flows?proc=${encodeURIComponent(teamId)}`); break;
         case 'delete-team':      if (team) setDeleteTarget(deleteTargetFor(team, agents)); break;

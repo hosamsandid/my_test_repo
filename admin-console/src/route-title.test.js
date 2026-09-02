@@ -22,11 +22,15 @@ test('root path is labelled for its redirect destination (/chats)', () => {
   assert.equal(documentTitleForPath('/'), 'Agent Chat · Agent Studio');
 });
 
-test('a specific agent chat keeps the agent id so two chat tabs differ', () => {
-  assert.equal(pageNameForPath('/chats/release-manager'), 'Agent Chat / release-manager');
-  assert.equal(documentTitleForPath('/chats/release-manager'), 'Agent Chat / release-manager · Agent Studio');
-  // trailing slash / empty id degrades gracefully to the base name
+test('a specific agent chat drops the agent id — just "Agent Chat" (#1921)', () => {
+  // The selected agent is already highlighted in the page's left-rail list, so
+  // the id is noise in the tab title; it must read the same as the header.
+  assert.equal(pageNameForPath('/chats/release-manager'), 'Agent Chat');
+  assert.equal(documentTitleForPath('/chats/release-manager'), 'Agent Chat · Agent Studio');
+  // trailing slash / empty id resolves to the same base name
   assert.equal(pageNameForPath('/chats/'), 'Agent Chat');
+  // and matches the no-agent-selected route exactly
+  assert.equal(pageNameForPath('/chats/release-manager'), pageNameForPath('/chats'));
 });
 
 test('a plugin viewer keeps the plugin id', () => {

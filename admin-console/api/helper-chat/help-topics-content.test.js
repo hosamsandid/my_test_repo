@@ -190,9 +190,58 @@ const TOPIC_CONTENT = [
       'Broker SDK',
     ],
   },
-  // APPEND POINT — every Phase-3 extraction ticket adds its entry at this tail,
-  // so a still-open sibling WILL conflict here. Resolve by keeping BOTH sides in
-  // ticket order (E-number), never by dropping one.
+  {
+    id: 'environments',
+    routes: ['/environments'],
+    // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe
+    // definition, what an agent inherits (repos / token / MCP refs / provider /
+    // additional instructions), the shared-recipe-but-own-workspace point, the
+    // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
+    // Sync-all-agents caveat.
+    concepts: [
+      'reusable workspace recipe',
+      'own isolated workspace',
+      'Git repositories',
+      'GitHub token',
+      'MCP servers',
+      'Model provider',
+      'Additional instructions',
+      'no repository at all',
+      'SSH key',
+      'HTTPS',
+      'Read-only',
+      'newly created agents',
+      'Sync all agents',
+    ],
+  },
+  {
+    id: 'access-users',
+    routes: ['/teams'],
+    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
+    // definition, the explicit *this is not an Agent Team* distinction and the
+    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
+    // records what a scope actually gates (list filtering, private agents, the
+    // 403 on management calls) and the default-team / still-owns-resources
+    // delete rules, which the page never spelled out.
+    concepts: [
+      'access scope',
+      'Agent Team',
+      'Agent Team Wizard',
+      'exactly one',
+      'System Admin',
+      'Team Admin',
+      'Team Member',
+      'default',
+      'fail-closed',
+      'updates their role in place',
+      'Lists are filtered',
+      'Private agents',
+      '403',
+      'Manage Users',
+      'Resource ownership',
+      'reassign',
+    ],
+  },
   {
     id: 'models',
     routes: ['/models'],
@@ -225,6 +274,10 @@ const TOPIC_CONTENT = [
       'detach it there first',
     ],
   },
+  // Append point — every Phase-3 extraction ticket adds its entry at this tail,
+  // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
+  // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
+  // E6 environments, E7 access-users, E8 models …), never by dropping one.
 ];
 
 const registry = loadRegistry();

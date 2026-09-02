@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, User } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
 import { slugifyHumanId } from './humans-registry-ops';
 
 // Human-role registry editor (#987) — named, purely-declarative human flow
@@ -108,10 +109,12 @@ export default function HumanRegistryPanel({ humans = [], stages = [], ops, onCl
 
   return (
     <SidePanel open onClose={onClose} title="Human roles" width="520px">
+      {/* The "how human roles act in a flow" prose moved into the `flows` help
+          topic (#1876) — the "?" is how you reach it from inside the panel. */}
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
         Named people who act in the flow — an <strong>Issue Reviewer</strong>, a <strong>Tech Lead</strong>.
-        A human role never runs anything; people keep acting through GitHub labels. Labels a person
-        <em> applies</em> become gates; artifacts and brakes wired to them show under each role.
+        A human role never runs anything; people act through GitHub labels.
+        <PageHelpButton label="How human roles act in a flow" size={13} style={{ padding: 0, verticalAlign: '-2px' }} />
       </p>
       {error && (
         <div style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>{error}</div>

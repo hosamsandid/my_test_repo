@@ -49,6 +49,41 @@ const TOPIC_CONTENT = [
       'Host context folders',
     ],
   },
+  {
+    id: 'flows',
+    routes: ['/flows'],
+    // #1876 lifted these from the Flows page: the "Welcome to Flows" banner and
+    // the page's own help drawer, plus the long concept prose out of the
+    // hand-off chooser, the label registry and the human-role registry.
+    concepts: [
+      'flow graphs',
+      'Drafts',
+      'Outcome',
+      'Label',
+      'Consumer',
+      'Materialize',
+      'Flow Copilot',
+      'Import / Export',
+      'Label hand-off',
+      'Issue channel',
+      'Pull-request channel',
+      'File artifact',
+      'GitHub trigger',
+      'Webhook',
+      'Dependency',
+      'Parent / child',
+      'Human gate',
+      'Brake',
+      'Human roles',
+      'exactly one',
+      'any of',
+      'Inputs',
+      'Stages',
+      'Anomalies',
+      'BriefingPack',
+      'Briefings Path',
+    ],
+  },
 ];
 
 const registry = loadRegistry();

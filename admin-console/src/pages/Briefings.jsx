@@ -1,17 +1,17 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useSearchParams, Link } from 'react-router';
-import { GitBranch, Server, ChevronLeft, ChevronRight, HelpCircle, X, Users, FileText, Plus, Trash2, Upload, Sparkles } from 'lucide-react';
+import { GitBranch, Server, ChevronLeft, ChevronRight, Users, FileText, Plus, Trash2, Upload, Sparkles } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { FlowGraph } from './process/FlowGraph';
 import ConfirmDialog from '../components/ConfirmDialog';
+import PageHelpButton from '../components/PageHelpButton';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
 const ProcessGraphPanel = lazy(() =>
   import('./ProcessCanvas').then(m => ({ default: m.ProcessGraphPanel })));
 
-const BANNER_KEY = 'aee.flows.infoBanner.dismissed';
 const LAST_SELECTED_KEY_PREFIX = 'flows.lastSelected';
 const SIDEBAR_WIDTH_KEY = 'flowsPaneWidth';
 const SIDEBAR_MIN = 160;
@@ -54,182 +54,6 @@ function ResizeDivider({ onMouseDown, disabled = false }) {
         transition: 'background 0.15s, width 0.15s',
         pointerEvents: 'none',
       }} />
-    </div>
-  );
-}
-
-function HelpPanel({ onClose }) {
-  useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') onClose(); }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return (
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 200,
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
-        background: 'rgba(0,0,0,0.35)',
-      }}
-    >
-      <div style={{
-        width: 480, maxWidth: '90vw', height: '100%',
-        background: 'var(--eb-bg-surface)', borderLeft: '1px solid var(--eb-border-default)',
-        display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: 'var(--eb-space-4)', borderBottom: '1px solid var(--eb-border-default)', flexShrink: 0,
-        }}>
-          <span style={{ fontWeight: 'var(--eb-font-semibold)', fontSize: 'var(--eb-text-md)', color: 'var(--eb-text-primary)' }}>
-            Flows — Help
-          </span>
-          <button
-            onClick={onClose}
-            aria-label="Close help panel"
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-secondary)', display: 'flex', alignItems: 'center' }}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-4)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              What can I do here?
-            </h3>
-            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-              Flows is where you design and run <strong>flow graphs</strong>: teams of agents wired
-              together so work hands off from one to the next automatically. Pick an item in the left list:
-            </p>
-            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Teams</strong> — a live flow graph you can inspect and edit in place.</li>
-              <li><strong>Drafts</strong> — editable flows you're still designing; click <strong>New flow</strong>
-                to start one from scratch.</li>
-            </ul>
-          </section>
-
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              How agents are wired
-            </h3>
-            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-              Agents don't call each other directly. Instead:
-            </p>
-            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: '0 0 var(--eb-space-2)' }}>
-              <li>An agent finishes with an <strong>Outcome</strong>, which sets a <strong>Label</strong>.</li>
-              <li>A <strong>Consumer</strong> agent is waiting on that label and wakes up when it appears.</li>
-            </ul>
-            <p style={{ margin: 0 }}>
-              Every arrow you see on the canvas is one of these <em>Outcome → Label → Consumer</em> hand-offs.
-              Wiring the flow means deciding who sets which label and who reacts to it.
-            </p>
-          </section>
-
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Building a flow
-            </h3>
-            <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-              You always edit a <strong>Draft</strong> first — a live <strong>Team</strong> keeps running while
-              you design. Add agents, draw the hand-offs between them, then <strong>Materialize</strong> the
-              draft to turn it into a real, running team.
-            </p>
-            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Flow Copilot</strong> — describe the process in plain language and it drafts the whole
-                flow for you to review before applying.</li>
-              <li><strong>Import / Export</strong> — save a flow to a portable JSON bundle, or bring one in to
-                reuse or share.</li>
-            </ul>
-          </section>
-
-          <section style={{ marginBottom: 'var(--eb-space-5)' }}>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Concepts you'll meet in the editor
-            </h3>
-            <ul style={{ paddingLeft: 'var(--eb-space-4)', margin: 0 }}>
-              <li><strong>Labels</strong> — the small tokens agents set and wait on; they are what the arrows
-                carry.</li>
-              <li><strong>Stages</strong> — optional columns that group the flow into phases (e.g. build → review
-                → release) so a big graph stays readable.</li>
-              <li><strong>Human-approval gates</strong> — a point where the flow pauses until a person approves,
-                drawn as a red gate on the edge. No agent can set a gate's label.</li>
-              <li><strong>Named human roles</strong> — real people placed on the canvas (a reviewer, an approver)
-                that gates and hand-offs can be wired to, instead of an anonymous "human".</li>
-              <li><strong>GitHub PR / Issue channels</strong> — wire a consumer to react when an upstream agent
-                opens a pull request or issue, so the flow follows your GitHub workflow.</li>
-              <li><strong>Data-flow / artifact hand-offs</strong> — pass a named output (an artifact) from one
-                agent to another, matched by logical name rather than file path.</li>
-              <li><strong>Anomalies</strong> — on a live team, a check that surfaces stalls (a wake that was never
-                picked up, a gate sitting idle) so you can spot a stuck flow.</li>
-            </ul>
-          </section>
-
-          <section>
-            <h3 style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-2)', fontSize: 'var(--eb-text-md)' }}>
-              Special solution: BriefingPack flows
-            </h3>
-            <p style={{ margin: 0 }}>
-              An advanced, niche mode also lives here: a <strong>BriefingPack flow</strong> is an
-              <strong> Orchestrator</strong> agent that monitors a directory of BriefingPacks (discrete units of
-              work) and renders their dependency graph. Most teams don't need it. To set one up, create an
-              Orchestrator agent on the <strong>Agents</strong> page and point its <strong>Briefings Path</strong>
-              at the directory — the flow then appears under <strong>BriefingPack flows</strong> in the left list.
-            </p>
-          </section>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function InfoBanner({ onDismiss }) {
-  return (
-    <div style={{
-      margin: 'var(--eb-space-4)',
-      padding: 'var(--eb-space-4)',
-      background: 'color-mix(in srgb, var(--eb-accent-primary) 8%, var(--eb-bg-surface))',
-      border: '1px solid var(--eb-accent-primary)',
-      borderRadius: 6,
-      fontSize: 'var(--eb-text-sm)',
-      color: 'var(--eb-text-secondary)',
-      lineHeight: 1.6,
-      position: 'relative',
-    }}>
-      <button
-        onClick={onDismiss}
-        aria-label="Dismiss banner"
-        style={{
-          position: 'absolute', top: 'var(--eb-space-3)', right: 'var(--eb-space-3)',
-          background: 'none', border: 'none', cursor: 'pointer',
-          color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center', padding: 2,
-        }}
-      >
-        <X size={16} />
-      </button>
-
-      <p style={{ margin: '0 0 var(--eb-space-2)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-        Welcome to Flows
-      </p>
-      <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        Flows is where you design and run <strong>flow graphs</strong>: teams of agents wired together so work
-        hands off from one to the next automatically. Pick a <strong>Team</strong> on the left to see its live
-        graph, or click <strong>New flow</strong> to author a <strong>Draft</strong> from scratch and
-        <strong> materialize</strong> it into a team.
-      </p>
-      <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        Agents don't call each other directly: an agent's <strong>Outcome</strong> sets a <strong>Label</strong>,
-        a <strong>Consumer</strong> waits on that label, and that wiring is the graph.
-      </p>
-      <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-        A niche <strong>BriefingPack flow</strong> mode also lives here (an Orchestrator agent watching a directory
-        of BriefingPacks) — see the help for details.
-      </p>
-      <p style={{ margin: 0 }}>
-        Open the <HelpCircle size={12} style={{ verticalAlign: 'middle' }} /> help for details.
-      </p>
     </div>
   );
 }
@@ -384,10 +208,6 @@ export default function Briefings() {
   const lastSelectedKey = user ? `${LAST_SELECTED_KEY_PREFIX}.${user.username}` : null;
   const [searchParams, setSearchParams] = useSearchParams();
   const [navCollapsed, setNavCollapsed] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [bannerDismissed, setBannerDismissed] = useState(
-    () => localStorage.getItem(BANNER_KEY) === 'true'
-  );
 
   // Resizable left sidebar — width persisted in localStorage.
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
@@ -662,14 +482,6 @@ export default function Briefings() {
     }
   }
 
-  const dismissBanner = useCallback(() => {
-    localStorage.setItem(BANNER_KEY, 'true');
-    setBannerDismissed(true);
-  }, []);
-
-  const closeHelp = useCallback(() => setHelpOpen(false), []);
-
-
   const selectedAgent = orchestrators.find(a => a.id === selectedFlow);
 
   return (
@@ -740,21 +552,10 @@ export default function Briefings() {
                     Flows
                   </div>
                 </div>
-                {/* AC 2: persistent help icon, always visible */}
-                <button
-                  onClick={() => setHelpOpen(true)}
-                  title="Help"
-                  aria-label="Open Flows help"
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
-                    padding: 2, flexShrink: 0,
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-accent-primary)'; }}
-                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-                >
-                  <HelpCircle size={15} />
-                </button>
+                {/* The Welcome banner and this page's own help drawer moved into
+                    the `flows` help topic (#1876) — the "?" opens the Help panel
+                    on its "This page" face. */}
+                <PageHelpButton label="Help for Flows" size={15} style={{ padding: 2, flexShrink: 0 }} />
               </div>
               <button
                 onClick={() => setNavCollapsed(true)}
@@ -899,11 +700,8 @@ export default function Briefings() {
 
       <ResizeDivider onMouseDown={startDrag} disabled={navCollapsed} />
 
-      {/* Right pane: banner + graph */}
+      {/* Right pane: the graph */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
-        {/* AC 1: dismissible info banner — only in the BriefingPack-flow context */}
-        {!bannerDismissed && !proc && <InfoBanner onDismiss={dismissBanner} />}
-
         <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
           {proc ? (
             <Suspense fallback={
@@ -960,9 +758,6 @@ export default function Briefings() {
             </div>
           )}
         </div>
-
-        {/* AC 2: help panel slide-in overlay */}
-        {helpOpen && <HelpPanel onClose={closeHelp} />}
       </div>
 
       <ConfirmDialog

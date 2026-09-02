@@ -21,6 +21,7 @@ import {
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
+import { usePageActions } from '../context/PageActionsContext';
 
 const inputStyle = {
   width: '100%',
@@ -404,6 +405,15 @@ export default function GithubTokens() {
     }
   }
 
+  const headerAction = usePageActions(
+    <button
+      onClick={() => { setCreating(true); setFormError(null); }}
+      style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+    >
+      <Plus size={15} /> New Token
+    </button>
+  );
+
   if (loading) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
@@ -412,18 +422,9 @@ export default function GithubTokens() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          GitHub Tokens
-        </h1>
-        <button
-          onClick={() => { setCreating(true); setFormError(null); }}
-          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
-        >
-          <Plus size={15} /> New Token
-        </button>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       <div style={{
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -544,5 +545,6 @@ export default function GithubTokens() {
         onCancel={() => setDeleteTarget(null)}
       />
     </div>
+    </>
   );
 }

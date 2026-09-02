@@ -598,10 +598,7 @@ export default function TokenUsage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Token Usage
-        </h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
         <TeamFilter teams={teams} value={team} onChange={setTeam} />
       </div>
 

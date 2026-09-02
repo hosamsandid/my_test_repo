@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Plus, Trash2, RotateCcw, AlertTriangle } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
+import { usePageActions } from '../context/PageActionsContext';
 
 // Keys the structured form owns directly; everything else on a template
 // (triggers, ports, patternRole, stageAffinity, github, skills, …) is edited
@@ -264,22 +265,22 @@ export default function RoleTemplates() {
     }
   };
 
+  const headerAction = usePageActions(
+    <button style={btn('primary')} onClick={() => { setActionError(null); setEditing({ origin: 'new' }); }}>
+      <Plus size={16} /> New template
+    </button>
+  );
+
   const cell = { padding: 'var(--eb-space-2) var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', borderBottom: '1px solid var(--eb-border-default)', textAlign: 'left' };
   const th = { ...cell, color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em' };
 
   return (
-    <div style={{ maxWidth: 1100 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 'var(--eb-space-4)' }}>
-        <div>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Agent Templates</h1>
-          <p style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-1)', maxWidth: 720 }}>
-            Predefined agents used by the Team-Setup wizard and Flow editor. Edits create a stored override that shadows the built-in default and survives a redeploy or re-seed. Changing a template only affects <strong>future</strong> team members — already-created agents are independent.
-          </p>
-        </div>
-        <button style={btn('primary')} onClick={() => { setActionError(null); setEditing({ origin: 'new' }); }}>
-          <Plus size={16} /> New template
-        </button>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ maxWidth: 1100 }}>
+      <p style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', marginTop: 0, marginBottom: 'var(--eb-space-4)', maxWidth: 720 }}>
+        Predefined agents used by the Team-Setup wizard and Flow editor. Edits create a stored override that shadows the built-in default and survives a redeploy or re-seed. Changing a template only affects <strong>future</strong> team members — already-created agents are independent.
+      </p>
 
       {actionError && (
         <div role="alert" style={{
@@ -378,5 +379,6 @@ export default function RoleTemplates() {
         </div>
       )}
     </div>
+    </>
   );
 }

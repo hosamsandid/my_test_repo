@@ -467,14 +467,14 @@ export default function AgentChat() {
           borderBottom: '1px solid var(--eb-border-default)',
           flexShrink: 0,
         }}>
-          <h1 style={{
+          <h2 style={{
             fontSize: 'var(--eb-text-md)',
             fontWeight: 'var(--eb-font-semibold)',
             margin: 0,
             color: 'var(--eb-text-primary)',
           }}>
             {loading || !agents ? 'Agents' : `Agents (${agents.length})`}
-          </h1>
+          </h2>
           {agents && agents.length > 0 && (
             <FilterSelect
               agents={agents}

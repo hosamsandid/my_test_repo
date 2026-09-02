@@ -86,12 +86,6 @@ export default function GettingStarted() {
     }}>
       {/* Header */}
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
-          <Compass size={26} style={{ color: 'var(--eb-accent-primary)' }} />
-          <h1 style={{ margin: 0, fontSize: 'var(--eb-text-xl)', color: 'var(--eb-text-primary)' }}>
-            Getting Started
-          </h1>
-        </div>
         <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-md)', lineHeight: 1.6 }}>
           A quick tour of the core concepts. Come back here any time you need a refresher —
           the pages you can act on are one click away from each card.

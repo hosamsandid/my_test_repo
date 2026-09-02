@@ -243,6 +243,38 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'models',
+    routes: ['/models'],
+    // #1882 lifted these from the Model Providers page: the intro paragraph, the
+    // long `AUTH_TYPE_OPTIONS` rationale and the OAuth box's consequences (the
+    // Consumer-Terms rule itself stays on the page — it guards a required tick).
+    concepts: [
+      'Anthropic Messages API',
+      'LiteLLM',
+      'catalog',
+      'Working Environment',
+      'Agent override',
+      'api-key',
+      'Bearer header',
+      '0600',
+      'oauth-token',
+      'claude setup-token',
+      'no Base URL',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'bypasses any proxy',
+      'server-side',
+      'Consumer Terms',
+      'single-user',
+      'per-seat Enterprise tokens',
+      'Rate limits are shared',
+      'assist calls skip subscription providers',
+      'Discover models',
+      'Health',
+      'when it starts',
+      'detach it there first',
+    ],
+  },
+  {
     id: 'mcp',
     routes: ['/mcp'],
     // #1883 lifted the MCP Servers intro box (the three-part servers /
@@ -272,7 +304,7 @@ const TOPIC_CONTENT = [
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users, E9 mcp …), never by dropping one.
+  // E6 environments, E7 access-users, E8 models, E9 mcp …), never by dropping one.
 ];
 
 const registry = loadRegistry();

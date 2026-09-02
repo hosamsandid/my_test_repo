@@ -214,9 +214,36 @@ const TOPIC_CONTENT = [
       'Sync all agents',
     ],
   },
+  {
+    id: 'mcp',
+    routes: ['/mcp'],
+    // #1883 lifted the MCP Servers intro box (the three-part servers /
+    // credentials / Working-Environment-pairing model) and the "where does
+    // 'required' come from" InfoTip, and adds what neither said: the seed-time
+    // merge into the agent's own settings.json, the dropped-key behaviour when
+    // nothing is bound, the per-transport field split, and where the pairing is
+    // actually visible today.
+    concepts: [
+      'three-part model',
+      '${credential}',
+      'requiresCredential',
+      'rotated',
+      'seed time',
+      '.claude/settings.json',
+      'merged, not replaced',
+      'dropped',
+      'stdio',
+      'sse',
+      'mutually exclusive',
+      'Default server',
+      'fingerprint',
+      'next invocation',
+      'Detach it there first',
+    ],
+  },
   // Append point — every Phase-3 sibling adds its entry here, so two tickets in
   // flight always conflict on this spot. Resolve by keeping BOTH entries in
-  // ticket order (… #1878 skills, #1879 plugins, #1880 environments …), never by
+  // ticket order (… #1879 plugins, #1880 environments, #1883 mcp …), never by
   // taking one side.
 ];
 

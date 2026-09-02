@@ -8,7 +8,7 @@ seeAlso:
   - { label: "GitHub Tokens", to: "/github-tokens" }
   - { label: "My Credentials", to: "/my-credentials" }
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "Why do I need both an SSH key and a GitHub token?"

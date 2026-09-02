@@ -243,6 +243,33 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'mcp',
+    routes: ['/mcp'],
+    // #1883 lifted the MCP Servers intro box (the three-part servers /
+    // credentials / Working-Environment-pairing model) and the "where does
+    // 'required' come from" InfoTip, and adds what neither said: the seed-time
+    // merge into the agent's own settings.json, the dropped-key behaviour when
+    // nothing is bound, the per-transport field split, and where the pairing is
+    // actually visible today.
+    concepts: [
+      'three-part model',
+      '${credential}',
+      'requiresCredential',
+      'rotated',
+      'seed time',
+      '.claude/settings.json',
+      'merged, not replaced',
+      'dropped',
+      'stdio',
+      'sse',
+      'mutually exclusive',
+      'Default server',
+      'fingerprint',
+      'next invocation',
+      'Detach it there first',
+    ],
+  },
+  {
     id: 'credentials',
     routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
     // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
@@ -278,7 +305,7 @@ const TOPIC_CONTENT = [
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users …), never by dropping one.
+  // E6 environments, E7 access-users, E9 mcp, E10 credentials …), never by dropping one.
 ];
 
 const registry = loadRegistry();

@@ -11,6 +11,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import InfoTip from '../components/InfoTip';
+import PageHelpButton from '../components/PageHelpButton';
 import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
 
 const inputStyle = {
@@ -353,12 +354,12 @@ export default function McpServers() {
         <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
           <InfoTip
             title="Where does “required” come from?"
-            text={<>Shows <strong>required</strong> automatically when this server's template references <code>{'${credential}'}</code> in its env/headers. At seed time the orchestrator fills that placeholder with the secret from the credential the Working Environment binds to this server.</>}
+            text={<>Derived from the template: <strong>required</strong> when it references <code>{'${credential}'}</code>.</>}
           />
         </span>
       </span>
     ), render: v => v
-      ? <span title="Required because this server's template references ${credential} — bind a credential in the Working Environment.">required</span>
+      ? <span title="This server's template references ${credential} — bind a credential in the Working Environment.">required</span>
       : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteServer(row)} /></div>
@@ -386,17 +387,23 @@ export default function McpServers() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
-      <div>
-        <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, marginBottom: 0, lineHeight: 1.6 }}>
-          Configure runtime knowledge sources (wiki, vector store, graph DB, …) that agents can query through the
-          Model Context Protocol. It's a three-part model: <strong>servers</strong> describe <em>how</em> to launch a
-          backend and mark where a secret goes with the <code style={monoStyle}>${'${credential}'}</code> placeholder;
-          <strong> credentials</strong> carry the secrets; a <strong>Working Environment</strong> pairs a server with a
-          credential. A server whose template uses that placeholder shows <em>required</em> in the Credential column
-          below until an environment binds one. The orchestrator then substitutes the secret and materializes the merged
-          config into each agent's own <code style={monoStyle}>.claude/settings.json</code> at workspace seed time.
-        </p>
-      </div>
+      {/* One-line description + the "?" that opens this page's help topic. The
+          three-part model (servers / credentials / the Working-Environment
+          pairing), the ${credential} placeholder, where the *required* status
+          comes from and what the orchestrator does at seed time now live in that
+          topic (api/helper-chat/help-topics/mcp.md, #1883). Per-field help
+          inside the create forms stays where the decision is made. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+      }}>
+        <span>
+          Runtime knowledge sources and tools agents can query through the Model Context Protocol — a
+          catalog of servers, a separate store for their secrets, and a Working Environment that pairs the two.
+        </span>
+        <PageHelpButton label="How MCP servers and credentials fit together" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>

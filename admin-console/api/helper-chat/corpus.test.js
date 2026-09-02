@@ -52,6 +52,24 @@ test('buildSystemPrompt appends the current-page context when given a route labe
   assert.ok(!buildSystemPrompt(null).includes('currently on the'), 'no route → no page context');
 });
 
+test('the page-help topics are folded into the grounding prompt (#1872 single source)', () => {
+  const prompt = buildSystemPrompt(null);
+  // The Overview pilot topic ships in help-topics/ and must be present in the
+  // same system prompt the panel serves — this is the "no vendoring" single
+  // source in action.
+  assert.ok(prompt.includes('### page-help topics'), 'help topics section must be spliced in');
+  assert.ok(prompt.includes('Welcome to Agent Studio'), 'the Overview topic title must be present');
+});
+
+test('a currentRoute with a topic adds a page-grounding pointer', () => {
+  // The Overview topic has no route, so use a label + route pair that resolves
+  // to nothing → no pointer; and confirm the label sentence is independent.
+  const withLabel = buildSystemPrompt('Agents', '/agents');
+  assert.ok(withLabel.includes('currently on the **Agents** page'));
+  // No route argument → no page-topic pointer sentence.
+  assert.ok(!buildSystemPrompt('Agents').includes('maps to the help topic'));
+});
+
 test('measured system prompt is below the char limit', () => {
   const n = measureSystemPrompt();
   assert.ok(

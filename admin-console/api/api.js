@@ -330,6 +330,22 @@ app.get('/api/helper/tour-manifest', (req, res) => {
   res.json(_tourManifestCache);
 });
 
+// ─── Context-help topics (#1872, spec docs/context-help-system-concept.md §3) ──
+// GET /api/helper/page-help returns the whole curated topic set once (a few KB;
+// the client resolves the current route → topic locally so face-switching is
+// instant/offline). The SAME help-topics/ files ground the chat corpus above, so
+// there is no vendoring/parity drift. Behind the global /api auth gate like every
+// other /api route. Topics are small + static; load once and memoize.
+const _helpRegistryModule = require('./helper-chat/help-registry');
+let _pageHelpCache = null;
+app.get('/api/helper/page-help', (req, res) => {
+  if (!_pageHelpCache) {
+    const topics = _helpRegistryModule.loadTopics();
+    _pageHelpCache = { topics, overviewId: _helpRegistryModule.OVERVIEW_ID };
+  }
+  res.json(_pageHelpCache);
+});
+
 // Speech-to-text transcription: proxies audio to the STT service and returns { text }.
 const _transcribeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/transcribe', _transcribeUpload.single('audio_file'), createTranscribeRoute());

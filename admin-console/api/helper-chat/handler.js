@@ -67,10 +67,10 @@ function trimMessages(messages, max = MAX_TURNS) {
  * grounding corpus + optional route context goes in the system prompt; the
  * client-held conversation passes through as the message turns.
  */
-function buildHelperChatPayload({ messages, currentRouteLabel, buildSystemPrompt = corpus.buildSystemPrompt }) {
+function buildHelperChatPayload({ messages, currentRouteLabel, currentRoute, buildSystemPrompt = corpus.buildSystemPrompt }) {
   return {
     max_tokens: MAX_TOKENS,
-    system: buildSystemPrompt(currentRouteLabel),
+    system: buildSystemPrompt(currentRouteLabel, currentRoute),
     messages: trimMessages(messages).map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: String(m.content ?? ''),
@@ -113,6 +113,7 @@ function createHelperChatHandler({
       ...buildHelperChatPayload({
         messages: parsed.messages,
         currentRouteLabel: parsed.currentRouteLabel,
+        currentRoute: parsed.currentRoute,
         buildSystemPrompt,
       }),
     };

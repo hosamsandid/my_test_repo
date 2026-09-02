@@ -15,8 +15,9 @@ import {
   railMenuItems,
   matrixAgentsUrl,
   mergeAgentConfigs,
+  canMarkUnread,
 } from './rail-lifecycle.js';
-import { NO_RIGHTS_HINT, TEAM_LOCKED_HINT } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { NO_RIGHTS_HINT, TEAM_LOCKED_HINT, buildAgentMenu } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 function fakeStorage(initial = {}) {
   const map = { ...initial };
@@ -192,8 +193,12 @@ test('railMenuItems routes each target kind to its own menu', () => {
   const solo = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
   assert.equal(solo.label, 'Actions for Solo');
   assert.deepEqual(solo.items.map(i => i.key), [
+    // The chat-only view action leads (#1938 D1), then the lifecycle group.
+    'mark-unread',
     'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
   ]);
+  // The lifecycle group is fenced off from the view action, and only there.
+  assert.deepEqual(solo.items.filter(i => i.separated).map(i => i.key), ['toggle-enabled']);
 
   const team = railMenuItems({
     target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
@@ -245,6 +250,67 @@ test('railMenuItems disables every mutating entry while a mutation is in flight'
   });
   assert.equal(items.find(i => i.key === 'toggle-enabled').disabled, true);
   assert.equal(items.find(i => i.key === 'delete').disabled, true);
+});
+
+test('mark-unread is offered for a readable chat and inert everywhere else (#1938)', () => {
+  const agent = AGENTS[0];
+  assert.equal(canMarkUnread(agent, 'idle'), true);
+  assert.equal(canMarkUnread(agent, 'busy'), true);
+  // Nothing to do: the row already reads as unread.
+  assert.equal(canMarkUnread(agent, 'unread'), false);
+  // Not a readable chat — by state…
+  for (const state of ['disabled', 'offline', 'problem']) {
+    assert.equal(canMarkUnread(agent, state), false, state);
+  }
+  // …or because the agent itself is disabled / a stub, whatever the poll says.
+  assert.equal(canMarkUnread({ ...agent, enabled: false }, 'idle'), false);
+  assert.equal(canMarkUnread(null, 'idle'), false);
+  // An absent state is the ordinary case, not a reason to withhold the action.
+  assert.equal(canMarkUnread(agent), true);
+});
+
+test('mark-unread stays in the list when it does not apply, greyed out and hint-less (D2)', () => {
+  const unread = railMenuItems({
+    target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS, activityState: 'unread',
+  }).items.find(i => i.key === 'mark-unread');
+  assert.equal(unread.disabled, true);
+  // D2 is explicit: greyed out with *no* explanation. A title would render as a
+  // tooltip on the menu item.
+  assert.equal(unread.title, undefined);
+  assert.equal(unread.label, 'Mark as unread');
+
+  const idle = railMenuItems({
+    target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS, activityState: 'idle',
+  }).items.find(i => i.key === 'mark-unread');
+  assert.equal(idle.disabled, false);
+});
+
+test('mark-unread never depends on canManage — it mutates nothing (#1938 AC6)', () => {
+  const agent = { ...AGENTS[0], canManage: false };
+  const { items } = railMenuItems({
+    target: { kind: 'agent', agent }, agents: [agent], activityState: 'idle',
+  });
+  const markUnread = items.find(i => i.key === 'mark-unread');
+  assert.equal(markUnread.disabled, false);
+  // …and a mutation in flight is equally none of its business.
+  const busy = railMenuItems({
+    target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS, busyIds: new Set(['solo']),
+  }).items.find(i => i.key === 'mark-unread');
+  assert.equal(busy.disabled, false);
+});
+
+test('the shared team menu never grows the chat-only view action', () => {
+  // `buildAgentMenu` is rendered by the Agents page too, which has no unread
+  // concept — the entry must live in this rail-only layer, not in that
+  // descriptor, and a team group's menu has no row to mark.
+  const { items } = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+    agents: AGENTS,
+  });
+  assert.equal(items.some(i => i.key === 'mark-unread'), false);
+  assert.deepEqual(
+    buildAgentMenu({ agent: AGENTS[0] }).filter(i => i.key === 'mark-unread'), [],
+  );
 });
 
 test('railMenuItems omits the fan-out toggle for a header-less team group', () => {

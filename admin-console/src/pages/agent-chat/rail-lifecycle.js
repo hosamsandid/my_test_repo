@@ -13,7 +13,7 @@
  * dialog host are thin renderers over these.
  */
 
-import { buildAgentMenu, buildTeamMenu } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { buildAgentMenu, buildTeamMenu, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 /**
  * Per-user opt-in to seeing disabled agents in the rail (AC6/AC7). Stored under
@@ -157,6 +157,45 @@ export function buildCreateMenu() {
 }
 
 /**
+ * The activity states in which "mark as unread" has nothing to do: the row is
+ * already unread, or it is not a readable chat at all. Kept as data so the one
+ * rule survives a reword — it is the same set the hover icon used before #1938
+ * moved the action into the menu.
+ */
+const NOT_MARKABLE_STATES = new Set(['unread', 'disabled', 'offline', 'problem']);
+
+/**
+ * May this row be marked unread? A **local view action**, so the answer depends
+ * only on the row's unread + chat-openable state and never on `canManage`
+ * (#1938 AC6) — nothing is mutated on the server.
+ */
+export function canMarkUnread(agent, activityState = 'idle') {
+  if (!isChatOpenable(agent)) return false;
+  return !NOT_MARKABLE_STATES.has(activityState);
+}
+
+/**
+ * The chat-rail-only "Mark as unread" entry (#1938).
+ *
+ * It lives here rather than in the shared `buildAgentMenu` because the Agents
+ * management page renders that same descriptor and has no unread concept at
+ * all. This layer already knows it is the Agent-Chat rail, so the chat-only
+ * action is prepended here and the shared descriptor stays free of it.
+ *
+ * The entry is **always present** and merely disabled when it does not apply
+ * (D2) — a stable list beats a menu whose first row moves depending on whether
+ * the agent happens to be unread — and it carries **no** hint: unlike a refused
+ * mutation there is nothing to explain, the row's own indicator already says it.
+ */
+export function markUnreadItem(agent, activityState) {
+  return {
+    key: 'mark-unread',
+    label: 'Mark as unread',
+    disabled: !canMarkUnread(agent, activityState),
+  };
+}
+
+/**
  * Split a chosen menu key into the action and its argument. Only the team menu's
  * add-role entries carry one (`add-role:<roleId>`), and a role id may itself
  * contain a colon, so the key is split once from the left rather than by every
@@ -184,8 +223,13 @@ export function parseMenuKey(key) {
  * @param {object[]} o.agents
  * @param {Set<string>} o.busyIds     ids with a mutation in flight
  * @param {{id:string,displayName?:string}[]} o.missingRoles  team menu only
+ * @param {string} o.activityState    the row's activity state (agent menu only,
+ *                                    from the chat's status poll) — decides
+ *                                    whether "Mark as unread" applies (#1938)
  */
-export function railMenuItems({ target, agents = [], busyIds = new Set(), missingRoles = [] } = {}) {
+export function railMenuItems({
+  target, agents = [], busyIds = new Set(), missingRoles = [], activityState = 'idle',
+} = {}) {
   if (!target) return { items: [], label: '' };
 
   if (target.kind === 'create') {
@@ -195,16 +239,23 @@ export function railMenuItems({ target, agents = [], busyIds = new Set(), missin
   if (target.kind === 'agent') {
     const agent = target.agent;
     if (!agent) return { items: [], label: '' };
+    const lifecycle = buildAgentMenu({
+      agent,
+      // Absent (an older payload) means "no reason to think otherwise" — the
+      // route still decides; `false` is only ever an explicit server verdict.
+      canManage: agent.canManage !== false,
+      locked: isTeamLocked(agent, agents),
+      busy: busyIds.has(agent.id),
+    });
+    // The view action leads (#1938 D1) and the lifecycle group is fenced off
+    // from it: `separated` is a hint to the renderer, not a pseudo-item, so the
+    // menu's keyboard traversal still walks a flat list of real entries.
     return {
       label: `Actions for ${agent.displayName || agent.id}`,
-      items: buildAgentMenu({
-        agent,
-        // Absent (an older payload) means "no reason to think otherwise" — the
-        // route still decides; `false` is only ever an explicit server verdict.
-        canManage: agent.canManage !== false,
-        locked: isTeamLocked(agent, agents),
-        busy: busyIds.has(agent.id),
-      }),
+      items: [
+        markUnreadItem(agent, activityState),
+        ...lifecycle.map((item, i) => (i === 0 ? { ...item, separated: true } : item)),
+      ],
     };
   }
 

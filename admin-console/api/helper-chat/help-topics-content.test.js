@@ -121,6 +121,45 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'skills',
+    routes: ['/skills'],
+    // #1878 lifted these from the Skills page: the four-paragraph concept intro
+    // (what a skill is, the Global/Team/Agent tiers and their resolution order,
+    // grant vs seeding/activation vs one-off install, the tier-moving verbs, and
+    // Skills vs Knowledge vs Memory) plus the merge dialog's rationale about
+    // provenance, carried-over files and migrated grants.
+    concepts: [
+      'SKILL.md',
+      'Global',
+      'Team',
+      'Agent',
+      'read-only',
+      'then from the global pool',
+      'Grant',
+      'activation',
+      'Install into agent',
+      'workspace reset',
+      'Promote to global',
+      'Move to global',
+      'Adopt',
+      'Move to team',
+      'Distill',
+      'Merge',
+      'Import / Export',
+      'replaces the entire',
+      'provenance',
+      'migrated to the target',
+      'Retire source skills',
+      'Memory',
+      'Knowledge',
+      'distilled from the best knowledge',
+    ],
+  },
+  // Entries stay in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills,
+  // E7 access-users …). This tail is the append point every Phase-3 extraction
+  // ticket touches, so a sibling landing first always conflicts here — resolve
+  // by keeping BOTH sides, never by dropping one.
+  {
     id: 'access-users',
     routes: ['/teams'],
     // #1881 lifted the Access & Users intro box: the access-scope ("Team")

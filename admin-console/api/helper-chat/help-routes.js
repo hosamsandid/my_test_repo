@@ -57,9 +57,10 @@ const DYNAMIC = [
 ];
 
 // Every content route that shows page help (own topic or Overview fallback).
-// Mirrors the non-structural routes in App.jsx. `/plugin-system` is still a page
-// route here — E5 (#1879) removes it and this list drops it in the same commit
-// (`/getting-started` left in G1, #1874: it is now a redirect source below).
+// Mirrors the non-structural routes in App.jsx. Two routes have already left
+// this list: `/getting-started` in G1 (#1874) — the page is gone and it is now a
+// redirect source above — and `/plugin-system` in E5 (#1879), removed outright
+// (no redirect, concept §9) with its content folded into the Plugins topic.
 const PAGE_ROUTES = new Set([
   '/agents',
   '/chats',
@@ -82,7 +83,6 @@ const PAGE_ROUTES = new Set([
   '/users',
   '/flows',
   '/knowledge',
-  '/plugin-system',
   '/about',
 ]);
 

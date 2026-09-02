@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-01T13:27:33.126Z",
+  "generated": "2026-09-02T08:26:15.963Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -127,7 +127,7 @@
       "steps": [
         {
           "id": "overview",
-          "voiceover": "This is the Knowledge Flow page. The explainer lays out the whole model: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. Below, the three stages — agents learn while they work, lessons converge into team knowledge, and the best knowledge becomes a skill — and the reminder that you stay in control of how much happens automatically.",
+          "voiceover": "This is the Knowledge Flow page. The page itself stays lean — title, counts, and the team's knowledge flow. The whole model lives one click away, behind the question mark: Memory is what one agent privately remembers, Knowledge is what the team shares, and Skills are the reusable instruction files distilled from the best of it. The help panel walks the three stages, and the control surface that decides how much happens automatically.",
           "screenshotPath": "knowledge/knowledge-overview.png"
         },
         {

@@ -23,7 +23,7 @@ import {
 //   onReset()                              — clear the per-agent override(s)
 //   onOpen()                               — refetch options when the popover opens
 //
-// #1845: the trigger is aligned to the session toolbar buttons (Save & Learn, the
+// #1845: the trigger is aligned to the session toolbar buttons (Reset Session, the
 // `…` overflow) — same `--eb-text-xs` font size (they use `--eb-text-xs` in
 // ChatPanel's sessionBtnStyle) — and widened so a typical `<model> · <provider>`
 // label fits without truncation. Applied only here, so the shared assist selector

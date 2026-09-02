@@ -9,12 +9,13 @@ import {
 /**
  * HeaderOverflowMenu — the agent-header `…` overflow menu (#1810).
  *
- * Groups the rare, higher-risk session actions (Reset Session / Clear History)
- * behind a single `…` button so they sit apart from the frequent, primary
- * Save & Learn action, which stays directly visible on the toolbar. Each action
- * keeps its own disabled/guard state and busy spinner; the menu only relocates
- * the trigger — clicking an item runs the exact same handler as before (so the
- * Clear History confirmation dialog and the Reset guards are unchanged).
+ * Groups the rare, higher-risk session actions behind a single `…` button so
+ * they sit apart from the primary session action that stays directly visible on
+ * the toolbar — Reset Session since #1922, which promoted it out of this menu
+ * and left Clear History as the current sole item (the menu stays as the home
+ * for further actions). Each action keeps its own disabled/guard state and busy
+ * spinner; the menu only relocates the trigger — clicking an item runs the exact
+ * same handler as before (so the Clear History confirmation dialog is unchanged).
  *
  * Keyboard-accessible (AC4): the trigger is a real button (Enter/Space toggles),
  * opening moves focus to the first enabled item, ↑/↓ traverse enabled items

@@ -276,13 +276,9 @@ export default function AgentChat() {
     setWorkspaceRefreshKey(k => k + 1);
   }, []);
 
-  // Bumped by ChatPanel after the agent replied to a Full-Learn prompt (which
-  // may have added entries to the team KB), so the right rail's Knowledge tab
-  // refreshes without a manual reload.
-  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0);
-  const handleKnowledgeChanged = useCallback(() => {
-    setKnowledgeRefreshKey(k => k + 1);
-  }, []);
+  // #1922: the Knowledge-tab refresh signal is gone with the Save & Learn
+  // button — that manual prompt was its only feeder. The tab still reloads
+  // whenever it becomes active, which is the path a user takes to look at it.
 
   // Aggregated cost for the current agent+room, fed by SessionLogPanel via onCostUpdate.
   const [sessionCost, setSessionCost] = useState(null); // null = no data yet
@@ -595,7 +591,6 @@ export default function AgentChat() {
             onWorkspaceChanged={handleWorkspaceChanged}
             onTodoBoundary={handleTodoBoundary}
             onOpenKnowledge={handleOpenKnowledge}
-            onKnowledgeChanged={handleKnowledgeChanged}
             resumeRequest={resumeRequest}
             insertRefRequest={composerRefRequest}
           />
@@ -639,7 +634,6 @@ export default function AgentChat() {
           onContextUpdate={handleContextUpdate}
           todoCloseSignal={todoCloseSignal}
           workspaceRefreshKey={workspaceRefreshKey}
-          knowledgeRefreshKey={knowledgeRefreshKey}
           openTabRequest={railTabRequest}
           onResumeSession={handleResumeSession}
           sessionSelectRequest={sessionSelectRequest}

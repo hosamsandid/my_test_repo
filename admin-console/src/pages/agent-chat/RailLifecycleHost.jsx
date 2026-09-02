@@ -52,8 +52,18 @@ import {
  * @param {(id:string) => void} props.onOpenSettings
  *        point the rail's Settings tab (#1929) at an agent — the Phase-2
  *        replacement for Phase 1's jump to the Agents page
+ * @param {(id:string) => void} props.onMarkAsUnread
+ *        flip a row back to unread (#1938). A purely local view action owned by
+ *        the chat page (it edits the persisted `lastViewed` map), so the host
+ *        only dispatches to it — this is the one menu entry behind which there
+ *        is no request at all.
+ * @param {Record<string,string>} props.statuses
+ *        agentId → activity state, the same map the rail renders its dots
+ *        from. Read only to decide whether "Mark as unread" applies.
  */
-export default function RailLifecycleHost({ request, onClose, chatAgents, onChanged, onOpenSettings }) {
+export default function RailLifecycleHost({
+  request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread, statuses = {},
+}) {
   const navigate = useNavigate();
 
   // The scoped `GET /api/agents` configs, loaded lazily on the first menu and
@@ -146,9 +156,17 @@ export default function RailLifecycleHost({ request, onClose, chatAgents, onChan
     return inferred ? inferred.missing : [];
   }, [request, agents, templates]);
 
+  // The row's activity state, from the same poll the rail's dots read (#1938).
+  // Taken from the *request's* agent rather than the merged config list: only
+  // the chat's own status map knows a row is unread, and only the row the menu
+  // was opened for matters.
+  const activityState = request?.target?.kind === 'agent'
+    ? (statuses[request.target.agent?.id] || 'idle')
+    : 'idle';
+
   const menu = useMemo(
-    () => railMenuItems({ target: request?.target, agents, busyIds, missingRoles }),
-    [request, agents, busyIds, missingRoles],
+    () => railMenuItems({ target: request?.target, agents, busyIds, missingRoles, activityState }),
+    [request, agents, busyIds, missingRoles, activityState],
   );
 
   // --------------------------------------------------------------- per-agent
@@ -404,6 +422,10 @@ export default function RailLifecycleHost({ request, onClose, chatAgents, onChan
       // `children` a team/orchestrator delete has to name.
       const agent = agents.find(a => a && a.id === target.agent.id) || target.agent;
       switch (kind) {
+        // A local view action, not a mutation (#1938): it flips the row's
+        // indicator and drops the id from the persisted `lastViewed` map, which
+        // is the chat page's state — hence the callback rather than a request.
+        case 'mark-unread':       if (onMarkAsUnread) onMarkAsUnread(agent.id); break;
         case 'toggle-enabled':    toggleEnabled(agent); break;
         // Configuration stays in the chat (#1929): the rail's Settings tab
         // renders this very agent's edit form, so there is nowhere to navigate.

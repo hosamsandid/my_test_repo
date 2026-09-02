@@ -167,6 +167,13 @@ function itemStyle(item) {
     textAlign: 'left',
     background: 'none',
     border: 'none',
+    // A group boundary is drawn on the *following* item (#1938 D1) rather than
+    // pushed into `items` as a separator entry — a pseudo-item would be an
+    // unfocusable hole in the flat list the keyboard helpers walk by index.
+    ...(item.separated ? {
+      borderTop: '1px solid var(--eb-border-default)',
+      marginTop: 'var(--eb-space-1)',
+    } : null),
     borderRadius: 'var(--eb-radius-sm)',
     color,
     cursor: item.disabled ? 'not-allowed' : 'pointer',

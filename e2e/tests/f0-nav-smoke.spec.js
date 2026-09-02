@@ -27,7 +27,7 @@ const NAV_PAGES = [
   { label: 'GitHub Tokens',        breadcrumb: 'GitHub Tokens' },
   { label: 'Working Environments', breadcrumb: 'Working Environments' },
   { label: 'Users',                breadcrumb: 'Users' },
-  { label: 'Access & Users',       breadcrumb: 'Access & Users' },
+  { label: 'Access',               breadcrumb: 'Access' },
   { label: 'Skills',               breadcrumb: 'Skills Registry' },
   { label: 'Agent Templates',      breadcrumb: 'Agent Templates' },
   { label: 'Triggers',             breadcrumb: 'Triggers' },

@@ -47,9 +47,10 @@ import {
   ImportAgentForm, CloneAgentForm, ExtractTemplateForm,
 } from './agent-lifecycle/AgentLifecycleForms.jsx';
 import {
-  DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog, renderDeleteMessage,
+  DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
+  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
 } from './agent-lifecycle/AgentLifecycleDialogs.jsx';
-import { agentState } from './agent-lifecycle/agent-lifecycle-menu.js';
+import { agentState, deleteDialogCopy } from './agent-lifecycle/agent-lifecycle-menu.js';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -2868,46 +2869,23 @@ export default function Agents() {
         )}
       </SidePanel>
 
+      {/* Title / confirm label / width come from the shared `deleteDialogCopy`
+          so the chat rail's delete confirm (#1928) reads identically. */}
       <ConfirmDialog
         open={!!deleteTarget}
-        title={
-          deleteTarget?.role === 'team'
-            ? `Delete team "${deleteTarget.displayName}"?`
-            : deleteTarget?.role === 'orchestrator'
-            ? `Delete orchestrator "${deleteTarget.displayName}"?`
-            : 'Delete agent?'
-        }
+        title={deleteDialogCopy(deleteTarget).title}
         message={renderDeleteMessage(deleteTarget)}
         variant="danger"
-        confirmLabel={
-          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
-          (deleteTarget?.children?.length ?? 0) > 0
-            ? `Delete ${deleteTarget.role === 'team' ? 'team' : 'orchestrator'} and ${deleteTarget.children.length} ${deleteTarget.role === 'team' ? 'member' : 'mission'}${deleteTarget.children.length !== 1 ? 's' : ''}`
-            : 'Delete'
-        }
-        maxWidth={
-          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
-          (deleteTarget?.children?.length ?? 0) > 0
-            ? 560
-            : 440
-        }
+        confirmLabel={deleteDialogCopy(deleteTarget).confirmLabel}
+        maxWidth={deleteDialogCopy(deleteTarget).maxWidth}
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
         busy={deleteBusy}
       />
 
-      <ConfirmDialog
+      <ResetToStubDialog
         open={!!deactivateTarget}
-        title="Reset agent to stub?"
-        message={
-          `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
-          `This stops the agent process and wipes the workspace. ` +
-          `The stub config is kept so the agent can be reactivated later — but session history, ` +
-          `cloned repositories, and any in-workspace state will be lost. ` +
-          `To pause without losing anything, cancel and use the Disable toggle instead.`
-        }
-        variant="danger"
-        confirmLabel="Reset to stub"
+        agent={deactivateTarget}
         onConfirm={handleDeactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
       />
@@ -2932,26 +2910,11 @@ export default function Agents() {
         onCancel={() => setDeactivateWarning(null)}
       />
 
-      <ConfirmDialog
+      <TeamEnableDialog
         open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
-        title={`Enable team "${teamActionPrompt?.team?.displayName ?? ''}"?`}
-        message={teamActionPrompt && (
-          <div>
-            <p style={{ marginTop: 0 }}>
-              This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
-            </p>
-            <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
-                <li key={m.id}>{m.displayName}</li>
-              ))}
-            </ul>
-            {teamActionError && (
-              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{teamActionError}</p>
-            )}
-          </div>
-        )}
-        variant="info"
-        confirmLabel="Enable team"
+        team={teamActionPrompt?.team}
+        members={teamActionPrompt?.members}
+        error={teamActionError}
         busy={teamActionBusy}
         onConfirm={handleTeamEnableConfirmed}
         onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
@@ -2968,25 +2931,9 @@ export default function Agents() {
         onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
       />
 
-      <ConfirmDialog
-        open={!!teamActionResult}
-        variant="danger"
-        alertOnly
-        title={teamActionResult?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
-        message={teamActionResult && (
-          <div>
-            <p style={{ marginTop: 0 }}>
-              {teamActionResult.failedMembers.length} member(s) could not be {teamActionResult.action === 'disable' ? 'disabled' : 'enabled'}:
-            </p>
-            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-              {teamActionResult.failedMembers.map(m => (
-                <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        onConfirm={() => setTeamActionResult(null)}
-        onCancel={() => setTeamActionResult(null)}
+      <TeamActionResultDialog
+        result={teamActionResult}
+        onClose={() => setTeamActionResult(null)}
       />
     </div>
     </>

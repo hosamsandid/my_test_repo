@@ -216,3 +216,35 @@ export function buildTeamMenu({ team, teamId, canManage = true, busy = false, mi
 export function isChatOpenable(agent) {
   return !!agent && agent.enabled !== false;
 }
+
+/**
+ * Title / confirm label / width for the delete confirm, given the target that
+ * `renderDeleteMessage` renders (the agent plus its `children`).
+ *
+ * These three strings used to be three inline ternaries at the Agents page's
+ * `<ConfirmDialog>`. The chat needs the identical confirm — a delete that names
+ * "and 6 members" in one surface and just "Delete" in the other would be the
+ * same irreversible action wearing two different warnings — so the decision
+ * moves next to the message it belongs to.
+ */
+export function deleteDialogCopy(target) {
+  const role = target?.role;
+  const parent = role === 'team' ? 'team' : role === 'orchestrator' ? 'orchestrator' : null;
+  const count = parent ? (target?.children?.length ?? 0) : 0;
+
+  if (!parent) {
+    return { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 };
+  }
+
+  const title = `Delete ${parent} "${target.displayName ?? target.id}"?`;
+  if (count === 0) {
+    return { title, confirmLabel: 'Delete', maxWidth: 440 };
+  }
+
+  const noun = parent === 'team' ? 'member' : 'mission';
+  return {
+    title,
+    confirmLabel: `Delete ${parent} and ${count} ${noun}${count !== 1 ? 's' : ''}`,
+    maxWidth: 560,
+  };
+}

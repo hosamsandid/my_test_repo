@@ -10,15 +10,21 @@
  * knowledge-purge note in the team-delete message cannot drift between the two
  * surfaces.
  *
- * These three are hand-rolled fixed-overlay modals rather than the shared
- * `ConfirmDialog` because each needs *three* actions (Cancel / drain / hard
- * stop), which `ConfirmDialog`'s two-button contract cannot express.
- * `renderDeleteMessage` is the ReactNode body the callers pass as
- * `ConfirmDialog`'s `message`.
+ * The three drain-vs-hard-stop dialogs are hand-rolled fixed-overlay modals
+ * rather than the shared `ConfirmDialog` because each needs *three* actions
+ * (Cancel / drain / hard stop), which `ConfirmDialog`'s two-button contract
+ * cannot express. The remaining three (`ResetToStubDialog`, `TeamEnableDialog`,
+ * `TeamActionResultDialog`) are thin wrappers *over* `ConfirmDialog` — they were
+ * inline JSX at the Agents page's call site, which is exactly the shape that
+ * drifts once a second surface renders "the same" confirm, so the body and the
+ * button copy live here now. `renderDeleteMessage` is the ReactNode body the
+ * callers pass as `ConfirmDialog`'s `message`.
  *
  * Nothing about them changed in the move.
  */
 import React from 'react';
+
+import ConfirmDialog from '../../components/ConfirmDialog';
 
 export function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAbort, onCancel }) {
   if (!open) return null;
@@ -210,6 +216,97 @@ export function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onD
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The reset-to-stub confirm (AC4). Reset is not a pause — it wipes the
+ * workspace — so the copy has to name what is lost and point at Disable, and it
+ * may never be reachable in one click from either surface.
+ */
+export function ResetToStubDialog({ open, agent, onConfirm, onCancel }) {
+  return (
+    <ConfirmDialog
+      open={open}
+      title="Reset agent to stub?"
+      message={
+        `Reset "${agent?.displayName ?? agent?.id}" to its stub state? ` +
+        `This stops the agent process and wipes the workspace. ` +
+        `The stub config is kept so the agent can be reactivated later — but session history, ` +
+        `cloned repositories, and any in-workspace state will be lost. ` +
+        `To pause without losing anything, cancel and use the Disable toggle instead.`
+      }
+      variant="danger"
+      confirmLabel="Reset to stub"
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
+  );
+}
+
+/**
+ * The team *enable* fan-out confirm. It names the members the team disabled
+ * automatically, because those are exactly the ones coming back — a member that
+ * was already off on its own stays off, and the operator has to be able to see
+ * that before confirming.
+ */
+export function TeamEnableDialog({ open, team, members, error, busy, onConfirm, onCancel }) {
+  return (
+    <ConfirmDialog
+      open={open}
+      title={`Enable team "${team?.displayName ?? ''}"?`}
+      message={(
+        <div>
+          <p style={{ marginTop: 0 }}>
+            This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
+          </p>
+          <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+            {(members || []).filter(m => m.disabledByTeam).map(m => (
+              <li key={m.id}>{m.displayName}</li>
+            ))}
+          </ul>
+          {error && (
+            <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</p>
+          )}
+        </div>
+      )}
+      variant="info"
+      confirmLabel="Enable team"
+      busy={busy}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
+  );
+}
+
+/**
+ * The partial-failure report for a team fan-out (AC2): the members the
+ * enable/disable could not reach, each with the server's reason. Alert-only —
+ * there is nothing to confirm, and silently swallowing a half-applied fan-out is
+ * the failure mode this dialog exists to prevent.
+ */
+export function TeamActionResultDialog({ result, onClose }) {
+  return (
+    <ConfirmDialog
+      open={!!result}
+      variant="danger"
+      alertOnly
+      title={result?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
+      message={result && (
+        <div>
+          <p style={{ marginTop: 0 }}>
+            {result.failedMembers.length} member(s) could not be {result.action === 'disable' ? 'disabled' : 'enabled'}:
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
+            {result.failedMembers.map(m => (
+              <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      onConfirm={onClose}
+      onCancel={onClose}
+    />
   );
 }
 

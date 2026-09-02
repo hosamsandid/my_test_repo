@@ -18,6 +18,7 @@ import { buildReviewFields } from './team-setup/review-fields';
 // progress/collision/error feedback; the wizard collects the team identity on
 // its earlier steps and shows only the extend / materialize-now toggles here.
 import LaunchStep from './process/LaunchStep';
+import { useHelpSubject } from '../context/HelperChatContext.jsx';
 
 const inputStyle = {
   width: '100%',
@@ -99,6 +100,14 @@ function ErrorBox({ message }) {
 // the template/draft gallery (#1703); describe/blank-canvas authoring lives in
 // the "+ Create" launcher.
 const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
+
+// The help-context key per step (E17 #1892). A wizard step is a sub-state of one
+// route, so it has no pathname of its own: the page publishes `<step>` and the
+// panel resolves `/team-setup#<step>` before falling back to the wizard's own
+// topic — which is how step-specific help can be authored later without touching
+// this wiring again. Index-aligned with STEPS; the labels are display copy and
+// change, these keys are the contract (registered in help-routes.js CONTEXT_KEYS).
+const STEP_HELP_IDS = ['process', 'environment', 'team', 'knowledge', 'review'];
 
 function StepIndicator({ current, onStepClick }) {
   return (
@@ -735,6 +744,10 @@ export default function TeamSetup() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [stepError, setStepError] = useState(null);
+
+  // Tell the help panel which step is showing (E17 #1892) — the step is a
+  // sub-state of one route, so nothing else can know it.
+  useHelpSubject({ step: STEP_HELP_IDS[step] || '' });
   // The shared LaunchStep owns the submit/progress state now; the wizard only
   // needs to know when a launch is in flight (to lock the Back button).
   const [launchBusy, setLaunchBusy] = useState(false);
@@ -937,7 +950,10 @@ export default function TeamSetup() {
           Agent Team Wizard
         </h2>
         {/* One-line description + "?" (E14, #1888). The Agent-Team-vs-access-scope
-            distinction and what each step decides live in the team-setup topic. */}
+            distinction and what each step decides live in the team-setup topic.
+            The "?" follows the current step, not just the route (E17, #1892):
+            useHelpSubject() above publishes the step, so this one button resolves
+            to the step's help — no second affordance next to the title. */}
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',

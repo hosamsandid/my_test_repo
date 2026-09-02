@@ -5,7 +5,7 @@ import { useHelperChat } from '../context/HelperChatContext';
 import { SafeMarkdown, ensureAgentChatMdCss, ThinkingDots } from '../pages/agent-chat/Message.jsx';
 import useVoiceRecorder from '../hooks/useVoiceRecorder.js';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
-import { pageHelpState, seeAlsoLinks, askPromptChips, topicActions, askHandoff } from '../context/page-help-view.js';
+import { pageHelpState, seeAlsoLinks, askPromptChips, topicActions, askHandoff, panelZIndex, contextLabel } from '../context/page-help-view.js';
 import HelperChatTour from './HelperChatTour.jsx';
 
 // Helper Chat panel (#1735, Phase 1.3). A non-blocking slide-in help assistant,
@@ -175,11 +175,15 @@ function TabBar({ mode, setMode }) {
 // that hand off to Ask. When the route has no dedicated topic (or the user
 // clicks the Home affordance) it renders the Overview topic instead, and the
 // "← Overview" link is hidden (it would be a no-op there).
-function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt, onTour }) {
-  const resolved = pageHelpState(pageHelp, route);
+function PageFace({ pageHelp, context, atOverview, onHome, onNavigate, onAskPrompt, onTour }) {
+  const resolved = pageHelpState(pageHelp, context);
   // atOverview forces the Overview home regardless of the current route.
   const showingOverview = atOverview || resolved.isOverview;
   const topic = atOverview ? (resolved.overview || resolved.topic) : resolved.topic;
+  // When help resolved through a non-route context (an open dialog, a wizard
+  // step — E17 #1892), name it: the topic title alone would look like help for
+  // the page behind the dialog.
+  const forContext = atOverview ? '' : contextLabel(resolved.contextKey);
 
   if (!topic) {
     return (
@@ -219,6 +223,18 @@ function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt
       )}
 
       <div>
+        {forContext ? (
+          <div style={{
+            fontSize: 'var(--eb-text-xs)',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+            color: 'var(--eb-text-muted)',
+            marginBottom: 'var(--eb-space-1)',
+          }}>
+            {forContext}
+          </div>
+        ) : null}
         <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', fontWeight: 700, color: 'var(--eb-text-primary)' }}>
           {topic.title}
         </h2>
@@ -324,7 +340,7 @@ function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt
 }
 
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, registerHelpPanel } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
   const navigate = useNavigate();
@@ -339,9 +355,13 @@ export default function HelperChatPanel() {
 
   useEffect(() => { ensureAgentChatMdCss(); }, []);
 
+  // Tell the provider a panel is on screen, so the first-run auto-open nudge is
+  // never spent on a screen that has no panel (E17 #1892 — the setup wizard).
+  useEffect(() => registerHelpPanel(), [registerHelpPanel]);
+
   // Page-scoped Ask chips: when the current route has a topic, its askPrompts
   // seed the Ask empty state instead of the generic SUGGESTED_PROMPTS (#1873).
-  const pageTopic = pageHelpState(pageHelp, currentRoute).topic;
+  const pageTopic = pageHelpState(pageHelp, helpContext).topic;
   const askPrompts = askPromptChips(pageTopic);
 
   // A "This page" chip hands off to Ask pre-seeded (concept §4): switch to the
@@ -401,7 +421,10 @@ export default function HelperChatPanel() {
         bottom: 0,
         width: 'var(--eb-side-panel-width)',
         maxWidth: '100vw',
-        zIndex: 50,
+        // Normally below modals/side panels; lifted above the Modal layer while an
+        // overlay help context is active, so help *for* an open dialog is visible
+        // next to it (E17 #1892).
+        zIndex: panelZIndex(helpContext),
         display: 'flex',
         flexDirection: 'column',
         background: 'var(--eb-bg-elevated)',
@@ -456,7 +479,7 @@ export default function HelperChatPanel() {
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           <PageFace
             pageHelp={pageHelp}
-            route={currentRoute}
+            context={helpContext}
             atOverview={atOverview}
             onHome={() => setAtOverview(true)}
             onNavigate={(to) => navigate(to)}

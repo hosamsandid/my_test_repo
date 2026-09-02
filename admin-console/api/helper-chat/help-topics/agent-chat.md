@@ -56,10 +56,10 @@ time it passes and every `cron` whose time it crosses.
 A GitHub-event or data-flow wake does **not** know whether the change is relevant
 to this agent, and it fires for **the agent's own pushes** too. So the wake
 instruction should tell the agent to `git pull` first, decide whether the change
-concerns it, and answer `[PASS]` when there is nothing to do. (Actions taken
-through `gh-as-agent` are stamped with the agent id, and the poller drops events
-it can attribute to the same agent — that is loop *protection*, not a relevance
-filter.)
+concerns it, and answer `[PASS]` when there is nothing to do. There is
+deliberately **no source filtering** anywhere in the delivery path — loop
+protection is frequency-based (a per-conversation throttle and a burst digest),
+so relevance is the agent's job, not the trigger's.
 
 A label listener can additionally **claim** its wake label on fire (`ready` →
 `ready:wip`), which makes work-in-progress visible on GitHub and is rolled back

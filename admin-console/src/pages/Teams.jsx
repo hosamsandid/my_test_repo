@@ -13,6 +13,7 @@ import IconButton from '../components/IconButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
 import { groupAgentsForOwnership } from './teams-ownership';
+import { usePageActions } from '../context/PageActionsContext';
 
 const DEFAULT_TEAM_ID = 'default';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
@@ -440,26 +441,23 @@ export default function Teams() {
   // Keep the manage panel's team in sync with refetched data.
   const liveManageTeam = manageTeam ? (teamList.find(t => t.id === manageTeam.id) || manageTeam) : null;
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>Access &amp; Users</h1>
-        {/* Creating teams and managing global user records are System-Admin
-            actions (#584); a Team Admin manages memberships within their own
-            team via the per-team Manage panel, not here. */}
-        {isAdmin && (
-          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            {/* User records now live on their own full-page Users screen (#1844).
-                This is a pointer to it — the single place to manage users. */}
-            <button onClick={() => navigate('/users')} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
-              <Users2 size={15} /> Manage Users
-            </button>
-            <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
-              <Plus size={15} /> New Team
-            </button>
-          </div>
-        )}
+  const headerAction = usePageActions(
+    isAdmin ? (
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+        <button onClick={() => navigate('/users')} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
+          <Users2 size={15} /> Manage Users
+        </button>
+        <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
+          <Plus size={15} /> New Team
+        </button>
       </div>
+    ) : null
+  );
+
+  return (
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
 
       <div style={{
         padding: 'var(--eb-space-3) var(--eb-space-4)', background: 'var(--eb-bg-surface)',
@@ -515,5 +513,6 @@ export default function Teams() {
         onConfirm={handleDelete} onCancel={() => setDeleteTarget(null)}
       />
     </div>
+    </>
   );
 }

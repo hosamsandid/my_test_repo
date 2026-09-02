@@ -457,10 +457,6 @@ export default function KnowledgeFlow() {
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) 0 0', flexWrap: 'wrap' }}>
         <Brain size={20} style={{ color: 'var(--eb-accent-primary)' }} />
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Knowledge Flow
-        </h1>
-        <PageHelpButton label="Help for Knowledge" size={15} style={{ padding: 2, flexShrink: 0 }} />
         {selectedTeam && (
           <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
             <span title="Lessons this team's agents have recorded so far">{totals.items} learned</span>

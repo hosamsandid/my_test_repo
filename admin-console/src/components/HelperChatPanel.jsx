@@ -5,7 +5,7 @@ import { useHelperChat } from '../context/HelperChatContext';
 import { SafeMarkdown, ensureAgentChatMdCss, ThinkingDots } from '../pages/agent-chat/Message.jsx';
 import useVoiceRecorder from '../hooks/useVoiceRecorder.js';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
-import { pageHelpState, seeAlsoLinks, askPromptChips, askHandoff } from '../context/page-help-view.js';
+import { pageHelpState, seeAlsoLinks, askPromptChips, topicActions, askHandoff } from '../context/page-help-view.js';
 import HelperChatTour from './HelperChatTour.jsx';
 
 // Helper Chat panel (#1735, Phase 1.3). A non-blocking slide-in help assistant,
@@ -175,7 +175,7 @@ function TabBar({ mode, setMode }) {
 // that hand off to Ask. When the route has no dedicated topic (or the user
 // clicks the Home affordance) it renders the Overview topic instead, and the
 // "← Overview" link is hidden (it would be a no-op there).
-function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt }) {
+function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt, onTour }) {
   const resolved = pageHelpState(pageHelp, route);
   // atOverview forces the Overview home regardless of the current route.
   const showingOverview = atOverview || resolved.isOverview;
@@ -191,6 +191,9 @@ function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt
 
   const links = seeAlsoLinks(topic);
   const chips = askPromptChips(topic);
+  // "Where to go next" CTAs (#1874) — a topic may carry action buttons; the
+  // Overview's are the ones the retired Getting Started page used to render.
+  const ctas = topicActions(topic);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4)' }}>
@@ -231,6 +234,33 @@ function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt
           <SafeMarkdown body={topic.body} />
         </div>
       ) : null}
+
+      {ctas.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+          {ctas.map(c => (
+            <button
+              key={c.label}
+              onClick={() => (c.to ? onNavigate(c.to) : onTour())}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 'var(--eb-space-2)',
+                background: c.primary ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+                border: c.primary ? 'none' : '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+                color: c.primary ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)',
+                fontWeight: 'var(--eb-font-semibold)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+              }}
+            >
+              {c.to ? <ArrowUpRight size={14} /> : <Compass size={14} />} {c.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {links.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -294,7 +324,7 @@ function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt
 }
 
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, pageHelp, currentRoute } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
   const navigate = useNavigate();
@@ -431,6 +461,7 @@ export default function HelperChatPanel() {
             onHome={() => setAtOverview(true)}
             onNavigate={(to) => navigate(to)}
             onAskPrompt={seedAsk}
+            onTour={openTour}
           />
         </div>
       ) : (

@@ -7,8 +7,8 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
-import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
+import { usePageActions } from '../context/PageActionsContext';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -1751,27 +1751,8 @@ export default function SkillsRegistry() {
     return <div role="alert" style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-status-error)' }}>Failed to load skills: {error}</div>;
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)' }}>
-        {/* Title + one-line description + the "?" that opens this page's help
-            topic — the four-paragraph concept intro (tiers, grant vs activation
-            vs install, Skills vs Knowledge vs Memory) and its inline Knowledge
-            jump-off now live in that topic, whose seeAlso carries the link
-            (#1878). */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
-            <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-              Skills
-            </h1>
-            <PageHelpButton />
-          </div>
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Reusable instruction packages agents load — in the global pool, the team pools, and inside individual agents.
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <input
             ref={importFileRef}
             type="file"
@@ -1808,7 +1789,12 @@ export default function SkillsRegistry() {
             {showNewForm ? 'Cancel' : '+ New Skill'}
           </button>
         </div>
-      </div>
+  );
+
+  return (
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       {/* Import feedback */}
       {importError && (
@@ -1960,5 +1946,6 @@ export default function SkillsRegistry() {
         onCancel={() => { setRowDeleteTarget(null); setRowDeleteError(null); setRowDeleteBlocking(null); }}
       />
     </div>
+    </>
   );
 }

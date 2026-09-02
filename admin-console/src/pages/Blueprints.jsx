@@ -8,6 +8,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import { missingFieldsHint } from './submit-hint.js';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { usePageActions } from '../context/PageActionsContext';
 import StatusBadge from '../components/StatusBadge';
 
 const hasRepos = (env) =>
@@ -425,22 +426,19 @@ export default function Blueprints() {
 
   const list = blueprints ?? [];
 
+  const headerAction = usePageActions(
+    <PrimaryBtn onClick={() => { setSaveError(null); setPanelMode('create'); }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Blueprint</span>
+    </PrimaryBtn>
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {/* Title bar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-            Agent Blueprints
-          </h1>
-          <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: 'var(--eb-space-1) 0 0' }}>
-            Define a blueprint once. Spin up multiple instances — each with its own workspace, all sharing memory.
-          </p>
-        </div>
-        <PrimaryBtn onClick={() => { setSaveError(null); setPanelMode('create'); }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Plus size={15} /> New Blueprint</span>
-        </PrimaryBtn>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', margin: '0 0 var(--eb-space-2)' }}>
+        Define a blueprint once. Spin up multiple instances — each with its own workspace, all sharing memory.
+      </p>
 
       {/* Blueprint cards */}
       {list.length === 0 ? (
@@ -525,5 +523,6 @@ export default function Blueprints() {
         onCancel={() => setDeleteTarget(null)}
       />
     </div>
+    </>
   );
 }

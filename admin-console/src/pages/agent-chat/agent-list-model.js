@@ -150,19 +150,36 @@ export function matchesFilter(agent, filter) {
 }
 
 /**
+ * Disabled agents are hidden from the chat list unless the caller opted in
+ * (#1928 / epic decision D2). The chat's list source only returns disabled
+ * agents when asked, so with the opt-in off this predicate is a no-op — it is
+ * the guard that keeps a *stale* disabled row (an agent disabled in another tab,
+ * still in the last fetched payload) from lingering as a chat-openable row.
+ */
+export function passesDisabledFilter(agent, showDisabled) {
+  if (showDisabled) return true;
+  return !agent || agent.enabled !== false;
+}
+
+/**
  * Layer 3 — apply the current filter to the ordered groups/singles. Groups with
  * neither a matching header nor any matching child drop out entirely.
+ *
+ * `showDisabled` (default off, matching the pre-#1928 behaviour) additionally
+ * admits `enabled: false` rows.
  */
-export function filterModel(orderedGroups, orderedSingles, filter) {
+export function filterModel(orderedGroups, orderedSingles, filter, showDisabled = false) {
+  const keep = a => matchesFilter(a, filter) && passesDisabledFilter(a, showDisabled);
+
   const visibleGroups = orderedGroups
     .map(group => {
-      const header   = group.header   && matchesFilter(group.header,   filter) ? group.header   : null;
-      const children = group.children.filter(c => matchesFilter(c, filter));
+      const header   = group.header && keep(group.header) ? group.header : null;
+      const children = group.children.filter(keep);
       return { ...group, header, children };
     })
     .filter(group => group.header || group.children.length > 0);
 
-  const visibleSingles = orderedSingles.filter(a => matchesFilter(a, filter));
+  const visibleSingles = orderedSingles.filter(keep);
 
   return {
     visibleGroups,
@@ -177,8 +194,8 @@ export function filterModel(orderedGroups, orderedSingles, filter) {
  * change to only one input re-runs only the layers downstream of it; this
  * helper is the single-shot equivalent used by tests.
  */
-export function buildAgentListModel(agents, sidebarOrder, filter) {
+export function buildAgentListModel(agents, sidebarOrder, filter, showDisabled = false) {
   const { groups, singles } = buildGroups(agents);
   const { orderedGroups, orderedSingles } = orderModel(groups, singles, sidebarOrder);
-  return filterModel(orderedGroups, orderedSingles, filter);
+  return filterModel(orderedGroups, orderedSingles, filter, showDisabled);
 }

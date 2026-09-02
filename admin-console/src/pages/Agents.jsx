@@ -35,22 +35,22 @@ import useAutoDerivedId, { sanitizeId } from '../hooks/useAutoDerivedId';
 import { summarizeTeamAction } from './team-action-summary.js';
 import { describeAgentSubmitState } from './agent-create-submit-state.js';
 import { usePageActions } from '../context/PageActionsContext';
-
-// Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
-// feedback before the server round-trip; the server remains the source of
-// truth for validity.
-const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
-
-// Suggests a unique clone id derived from the source id, avoiding any id
-// already present in the agents list (server-side uniqueness is still
-// enforced — this is just a friendlier starting point).
-function suggestCloneId(sourceId, existingIds) {
-  const base = `${sourceId}-copy`;
-  if (!existingIds.has(base)) return base;
-  let n = 2;
-  while (existingIds.has(`${base}-${n}`)) n++;
-  return `${base}-${n}`;
-}
+// Lifecycle presentation shared with Agent Chat's left rail (#1928). These
+// styles, dialog bodies and forms used to be defined here; they moved into
+// `agent-lifecycle/` unchanged so the chat renders the *same* components rather
+// than a second copy that could drift. Only the definitions moved — every call
+// site below is untouched.
+import {
+  labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
+} from './agent-lifecycle/form-kit.jsx';
+import {
+  ImportAgentForm, CloneAgentForm, ExtractTemplateForm,
+} from './agent-lifecycle/AgentLifecycleForms.jsx';
+import {
+  DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
+  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
+} from './agent-lifecycle/AgentLifecycleDialogs.jsx';
+import { agentState, deleteDialogCopy } from './agent-lifecycle/agent-lifecycle-menu.js';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -453,22 +453,6 @@ function TreeConnector({ ancestorMore, isLast }) {
   );
 }
 
-/* ── Shared style helpers ───────────────────────────────────────────── */
-const labelStyle = {
-  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
-  fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-0-5)',
-};
-const inputStyle = {
-  width: '100%', padding: 'var(--eb-space-2) var(--eb-space-3)',
-  background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
-  fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
-};
-const helpTextStyle = {
-  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
-  marginTop: 'var(--eb-space-1)', lineHeight: 1.5,
-};
-
 /* ── Role catalogue (single source of truth for labels + descriptions) ─
    The long per-role explanation lives in the page's help topic
    (api/helper-chat/help-topics/agents.md, #1875) — here we keep only the
@@ -593,37 +577,6 @@ function RoleDetailBanner({ role }) {
   );
 }
 
-function PrimaryBtn({ children, onClick, disabled, saving, style = {} }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled || saving}
-      style={{
-        padding: 'var(--eb-space-2) var(--eb-space-4)',
-        background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
-        border: 'none', borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-        cursor: (disabled || saving) ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-        opacity: (disabled || saving) ? 0.6 : 1, ...style,
-      }}
-    >{children}</button>
-  );
-}
-
-function SecondaryBtn({ children, onClick, style = {} }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: 'var(--eb-space-2) var(--eb-space-4)',
-        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
-        cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', ...style,
-      }}
-    >{children}</button>
-  );
-}
-
 /* ── Enable/Disable toggle ──────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange, label, disabled }) {
   return (
@@ -656,14 +609,6 @@ function ToggleSwitch({ checked, onChange, label, disabled }) {
 }
 
 /* ── Agent state derivation ────────────────────────────────────────── */
-// Three states: stub (no token, never activated), active (token + enabled),
-// paused (token + disabled). Drive UI off this single function.
-function agentState(agent) {
-  if (!agent.token && agent.enabled === false) return 'stub';
-  if (agent.enabled === false) return 'paused';
-  return 'active';
-}
-
 function StateBadge({ state }) {
   const cfg = {
     stub:    { bg: 'var(--eb-bg-app)',            color: 'var(--eb-text-muted)',     label: 'Not initialised' },
@@ -957,378 +902,6 @@ function AgentCreateForm({ onSave, onCancel, saving, error }) {
           </PrimaryBtn>
           <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
         </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Import Agent Form ──────────────────────────────────────────────── */
-// Import dialog: pick an optional new id (e.g. when the exported id collides)
-// and optionally graft the agent into an existing team. The imported workspace
-// (memory, skills, repo, prompt) is preserved 1:1; only a fresh Matrix identity
-// is provisioned on the server side.
-function ImportAgentForm({ file, teams, onSubmit, onCancel }) {
-  const [newId, setNewId] = useState('');
-  const [parentTeamId, setParentTeamId] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [conflict, setConflict] = useState(false);
-
-  async function submit() {
-    setBusy(true);
-    setError(null);
-    try {
-      const { ok, data } = await onSubmit({
-        newId: newId.trim() || undefined,
-        parentTeamId: parentTeamId || undefined,
-      });
-      if (!ok) {
-        if (data?.code === 'id-conflict') {
-          setConflict(true);
-          // Seed a non-colliding suggestion so the operator can just confirm.
-          if (!newId.trim() && data.agentId) setNewId(`${data.agentId}-2`);
-          setError(data.error || 'That id is already in use — choose a different one.');
-        } else {
-          setError(data?.error || 'Import failed.');
-        }
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
-        Importing <strong style={{ color: 'var(--eb-text-primary)' }}>{file?.name}</strong>.
-        The agent's memory, skills and repo clone are kept as-is; a fresh chat identity
-        is provisioned on import. Activate it from its card afterwards.
-      </div>
-
-      <div>
-        <FormInput
-          label={conflict ? 'New Agent ID *' : 'New Agent ID'}
-          value={newId}
-          onChange={setNewId}
-          placeholder="leave blank to keep the exported id"
-        />
-        <div style={helpTextStyle}>
-          {conflict
-            ? 'The exported id already exists — pick an unused id to import under.'
-            : 'Optional. Provide an id only to rename the agent or avoid a collision.'}
-        </div>
-      </div>
-
-      <div>
-        <div style={labelStyle}>
-          Assign to Team
-          <span style={{ marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>(optional)</span>
-        </div>
-        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
-          Graft the imported agent into an existing team as a member. It inherits the
-          team's working environment but keeps its own imported system prompt as an override.
-          Leave as <em>Standalone</em> to import it as an independent agent.
-        </div>
-        <select
-          value={parentTeamId}
-          onChange={e => setParentTeamId(e.target.value)}
-          style={inputStyle}
-        >
-          <option value="">Standalone agent (no team)</option>
-          {(teams || []).map(t => (
-            <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || (conflict && !newId.trim())}>
-          {busy ? 'Importing…' : 'Import Agent'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
-      </div>
-    </div>
-  );
-}
-
-/* ── Clone Agent Form ───────────────────────────────────────────────── */
-// Direct "duplicate this agent" dialog — a one-step alternative to the
-// Export → Import round trip. Only offered for `agent` and `team-member`
-// source cards (see LeafAgentCard / AgentRow); the backend clone endpoint
-// also rejects any other role defensively.
-function CloneAgentForm({ agent, teams, existingIds, onSubmit, onCancel }) {
-  const [newId, setNewId] = useState(() => suggestCloneId(agent.id, existingIds));
-  const [newDisplayName, setNewDisplayName] = useState(`${agent.displayName || agent.id} (Copy)`);
-  const [parentTeamId, setParentTeamId] = useState(agent.parentTeamId || '');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-
-  const trimmedId = newId.trim();
-  const idError = trimmedId && !AGENT_ID_RE.test(trimmedId)
-    ? 'Only letters, digits, underscores, hyphens and dots are allowed.'
-    : null;
-  const canSubmit = trimmedId && !idError && newDisplayName.trim();
-
-  async function submit() {
-    setBusy(true);
-    setError(null);
-    try {
-      const { ok, data } = await onSubmit({
-        newId: trimmedId,
-        newDisplayName: newDisplayName.trim(),
-        parentTeamId: parentTeamId || undefined,
-      });
-      if (!ok) {
-        if (data?.code === 'id-conflict') {
-          setNewId(suggestCloneId(trimmedId, existingIds));
-        }
-        setError(data?.error || 'Clone failed.');
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
-        Cloning <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id}).
-        The clone gets its own workspace, prompt and chat identity — a fully independent
-        copy, not a reference. Deleting one later never affects the other.
-      </div>
-
-      <FormInput
-        label="New Agent ID"
-        required
-        value={newId}
-        onChange={v => setNewId(sanitizeId(v))}
-        error={idError}
-        placeholder="e.g. cobol-agent-copy"
-      />
-
-      <FormInput
-        label="New Display Name"
-        required
-        value={newDisplayName}
-        onChange={setNewDisplayName}
-        placeholder="COBOL Agent (Copy)"
-      />
-
-      <div>
-        <div style={labelStyle}>Target Team</div>
-        <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
-          Defaults to the source's own team (if any). Choose a different team or
-          <em> Standalone</em> to place the clone elsewhere.
-        </div>
-        <select
-          value={parentTeamId}
-          onChange={e => setParentTeamId(e.target.value)}
-          style={inputStyle}
-        >
-          <option value="">Standalone agent (no team)</option>
-          {(teams || []).map(t => (
-            <option key={t.id} value={t.id}>{t.displayName || t.id}</option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
-          {busy ? 'Cloning…' : 'Clone Agent'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
-      </div>
-    </div>
-  );
-}
-
-/* ── Extract Template Form (#1509) ──────────────────────────────────── */
-// "Save as template" — snapshot a live agent (standalone or team member) into
-// a reusable, team-neutral user-tier Agent Template. Mirrors CloneAgentForm:
-// a suggested unique id, a review/confirm dialog, and 409 id-conflict handling.
-// The server is the source of truth for the mapping (effective prompt / skills /
-// sessionPolicy / triggers) and for id uniqueness across both template tiers.
-
-// Derive a slug-valid template id (lowercase letters/digits/hyphens) from an
-// agent id, unique across the supplied existing-id set. Server still enforces.
-function suggestTemplateId(sourceId, existingIds) {
-  const base = String(sourceId || '')
-    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-{2,}/g, '-')
-    .replace(/^-+/, '').replace(/-+$/, '') || 'agent-template';
-  if (!existingIds.has(base)) return base;
-  let n = 2;
-  while (existingIds.has(`${base}-${n}`)) n++;
-  return `${base}-${n}`;
-}
-
-const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
-
-function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCancel }) {
-  // Client-side pre-fill of the editable category/patternRole (AC-2); the
-  // server re-infers if either is omitted. A team member or a per-invocation
-  // agent reads as event-driven ("reactive"); otherwise a "chat" companion.
-  const reactive = agent.role === 'team-member' || agent.sessionPolicy === 'per-invocation';
-  const [templateId, setTemplateId] = useState(() => suggestTemplateId(agent.id, existingTemplateIds));
-  const [displayName, setDisplayName] = useState(agent.displayName || agent.id);
-  const [description, setDescription] = useState('');
-  const [category, setCategory] = useState(reactive ? 'reactive' : 'chat');
-  const [patternRole, setPatternRole] = useState(reactive ? 'author' : 'companion');
-  const [includeTriggers, setIncludeTriggers] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [done, setDone] = useState(null); // created template id
-
-  const trimmedId = templateId.trim();
-  const idError = trimmedId && !TEMPLATE_ID_RE.test(trimmedId)
-    ? 'Lowercase letters, digits and hyphens only; must not start with a hyphen.'
-    : null;
-  const canSubmit = trimmedId && !idError && displayName.trim();
-
-  async function submit() {
-    setBusy(true);
-    setError(null);
-    try {
-      const { ok, data } = await onSubmit({
-        id: trimmedId,
-        displayName: displayName.trim(),
-        description: description.trim() || undefined,
-        category,
-        patternRole,
-        includeTriggers,
-      });
-      if (ok) {
-        setDone(data?.id || trimmedId);
-      } else {
-        if (data?.code === 'id-conflict') {
-          setTemplateId(suggestTemplateId(trimmedId, existingTemplateIds));
-        }
-        setError(data?.error || 'Could not save template.');
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (done) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
-          Saved <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> as the
-          Agent Template <strong style={{ color: 'var(--eb-text-primary)' }}>{done}</strong>. It now appears on the
-          Agent Templates page with a <em>Custom</em> badge, ready to create new agents from.
-        </div>
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-          <Link
-            to="/role-templates"
-            style={{
-              display: 'inline-flex', alignItems: 'center', padding: '8px 16px',
-              borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-accent-primary)',
-              color: 'var(--eb-text-inverted)', fontWeight: 600, textDecoration: 'none',
-              fontSize: 'var(--eb-text-sm)',
-            }}
-          >
-            Open Agent Templates
-          </Link>
-          <SecondaryBtn onClick={onCancel}>Close</SecondaryBtn>
-        </div>
-      </div>
-    );
-  }
-
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      {error && (
-        <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.55 }}>
-        Captures <strong style={{ color: 'var(--eb-text-primary)' }}>{agent.displayName}</strong> ({agent.id})
-        — its effective prompt, skills and configuration — as a reusable, team-neutral Agent
-        Template. This is a one-shot snapshot: the agent is left unchanged and stays independent
-        of the template. The template appears on the <em>Agent Templates</em> page.
-      </div>
-
-      <FormInput
-        label="Template ID"
-        required
-        value={templateId}
-        onChange={v => setTemplateId(v)}
-        error={idError}
-        placeholder="e.g. tuned-developer"
-      />
-
-      <FormInput
-        label="Display Name"
-        required
-        value={displayName}
-        onChange={setDisplayName}
-        placeholder="e.g. Tuned Developer"
-      />
-
-      <FormInput
-        label="Description"
-        value={description}
-        onChange={setDescription}
-        placeholder="What this template is for (optional)"
-      />
-
-      <div>
-        <div style={labelStyle}>Role type</div>
-        <select value={category} onChange={e => setCategory(e.target.value)} style={inputStyle}>
-          <option value="chat">chat — always-on companion; responds to direct messages</option>
-          <option value="reactive">reactive — event-driven; wakes on GitHub / label triggers</option>
-          <option value="pattern">pattern — scaffold role</option>
-        </select>
-      </div>
-
-      <div>
-        <div style={labelStyle}>Pattern role</div>
-        <select value={patternRole} onChange={e => setPatternRole(e.target.value)} style={inputStyle}>
-          {['scout', 'author', 'companion', 'intake', 'standalone'].map(r => (
-            <option key={r} value={r}>{r}</option>
-          ))}
-        </select>
-      </div>
-
-      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
-        <input
-          type="checkbox"
-          checked={includeTriggers}
-          onChange={e => setIncludeTriggers(e.target.checked)}
-          style={{ marginTop: 3 }}
-        />
-        <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-          <strong style={{ color: 'var(--eb-text-primary)' }}>Include triggers</strong> — carry the agent's
-          triggers into the template. Off by default; leave off for a prompt-and-skills-only template.
-        </span>
-      </label>
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
-          {busy ? 'Saving…' : 'Save as template'}
-        </PrimaryBtn>
-        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
       </div>
     </div>
   );
@@ -3296,46 +2869,23 @@ export default function Agents() {
         )}
       </SidePanel>
 
+      {/* Title / confirm label / width come from the shared `deleteDialogCopy`
+          so the chat rail's delete confirm (#1928) reads identically. */}
       <ConfirmDialog
         open={!!deleteTarget}
-        title={
-          deleteTarget?.role === 'team'
-            ? `Delete team "${deleteTarget.displayName}"?`
-            : deleteTarget?.role === 'orchestrator'
-            ? `Delete orchestrator "${deleteTarget.displayName}"?`
-            : 'Delete agent?'
-        }
+        title={deleteDialogCopy(deleteTarget).title}
         message={renderDeleteMessage(deleteTarget)}
         variant="danger"
-        confirmLabel={
-          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
-          (deleteTarget?.children?.length ?? 0) > 0
-            ? `Delete ${deleteTarget.role === 'team' ? 'team' : 'orchestrator'} and ${deleteTarget.children.length} ${deleteTarget.role === 'team' ? 'member' : 'mission'}${deleteTarget.children.length !== 1 ? 's' : ''}`
-            : 'Delete'
-        }
-        maxWidth={
-          (deleteTarget?.role === 'team' || deleteTarget?.role === 'orchestrator') &&
-          (deleteTarget?.children?.length ?? 0) > 0
-            ? 560
-            : 440
-        }
+        confirmLabel={deleteDialogCopy(deleteTarget).confirmLabel}
+        maxWidth={deleteDialogCopy(deleteTarget).maxWidth}
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
         busy={deleteBusy}
       />
 
-      <ConfirmDialog
+      <ResetToStubDialog
         open={!!deactivateTarget}
-        title="Reset agent to stub?"
-        message={
-          `Reset "${deactivateTarget?.displayName ?? deactivateTarget?.id}" to its stub state? ` +
-          `This stops the agent process and wipes the workspace. ` +
-          `The stub config is kept so the agent can be reactivated later — but session history, ` +
-          `cloned repositories, and any in-workspace state will be lost. ` +
-          `To pause without losing anything, cancel and use the Disable toggle instead.`
-        }
-        variant="danger"
-        confirmLabel="Reset to stub"
+        agent={deactivateTarget}
         onConfirm={handleDeactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
       />
@@ -3360,26 +2910,11 @@ export default function Agents() {
         onCancel={() => setDeactivateWarning(null)}
       />
 
-      <ConfirmDialog
+      <TeamEnableDialog
         open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
-        title={`Enable team "${teamActionPrompt?.team?.displayName ?? ''}"?`}
-        message={teamActionPrompt && (
-          <div>
-            <p style={{ marginTop: 0 }}>
-              This brings back every member this team disabled automatically. Members that were disabled on their own before the team was disabled stay off.
-            </p>
-            <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-              {(teamActionPrompt.members || []).filter(m => m.disabledByTeam).map(m => (
-                <li key={m.id}>{m.displayName}</li>
-              ))}
-            </ul>
-            {teamActionError && (
-              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{teamActionError}</p>
-            )}
-          </div>
-        )}
-        variant="info"
-        confirmLabel="Enable team"
+        team={teamActionPrompt?.team}
+        members={teamActionPrompt?.members}
+        error={teamActionError}
         busy={teamActionBusy}
         onConfirm={handleTeamEnableConfirmed}
         onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
@@ -3396,317 +2931,11 @@ export default function Agents() {
         onCancel={() => { setTeamActionPrompt(null); setTeamActionError(null); }}
       />
 
-      <ConfirmDialog
-        open={!!teamActionResult}
-        variant="danger"
-        alertOnly
-        title={teamActionResult?.action === 'disable' ? 'Some members failed to disable' : 'Some members failed to enable'}
-        message={teamActionResult && (
-          <div>
-            <p style={{ marginTop: 0 }}>
-              {teamActionResult.failedMembers.length} member(s) could not be {teamActionResult.action === 'disable' ? 'disabled' : 'enabled'}:
-            </p>
-            <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-              {teamActionResult.failedMembers.map(m => (
-                <li key={m.id}><strong>{m.displayName}</strong> — {m.error}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        onConfirm={() => setTeamActionResult(null)}
-        onCancel={() => setTeamActionResult(null)}
+      <TeamActionResultDialog
+        result={teamActionResult}
+        onClose={() => setTeamActionResult(null)}
       />
     </div>
     </>
   );
-}
-
-function DisableWarningDialog({ open, agent, busy, activeTriggers, onDrain, onAbort, onCancel }) {
-  if (!open) return null;
-  const name = agent?.displayName ?? agent?.id ?? 'this agent';
-  const triggerCount = Array.isArray(activeTriggers) ? activeTriggers.length : 0;
-
-  const parts = [];
-  if (busy) parts.push('a session is currently running');
-  if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Disable agent" style={{
-      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
-    }}>
-      <div style={{
-        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 480,
-        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
-          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Disable "{name}"
-            </h3>
-            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-              {parts.length > 0
-                ? `This agent has ${parts.join(' and ')}. Choose how to proceed:`
-                : 'This agent has active state. Choose how to proceed:'}
-            </p>
-            <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-              <li><strong>Let run</strong> — disable immediately; the current execution finishes naturally. No new triggers will start.</li>
-              <li><strong>Hard stop</strong> — kill the process now. Any in-progress work is aborted.</li>
-            </ul>
-          </div>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
-          <button onClick={onCancel} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
-            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Cancel</button>
-          <button onClick={onDrain} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Let run</button>
-          <button onClick={onAbort} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Hard stop</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TeamDisableDialog({ open, team, members, error, busy, onDrain, onAbort, onCancel }) {
-  if (!open) return null;
-  const name = team?.displayName ?? team?.id ?? 'this team';
-  const toDisable = members.filter(m => m.enabled);
-  const busyCount = toDisable.filter(m => m.busy || (m.activeTriggers?.length ?? 0) > 0).length;
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Disable team" style={{
-      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
-    }}>
-      <div style={{
-        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 520,
-        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
-          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Disable team "{name}"
-            </h3>
-            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-              {toDisable.length === 0
-                ? 'Every member is already disabled — this only marks the team itself as disabled.'
-                : `${toDisable.length} member${toDisable.length !== 1 ? 's' : ''} will be disabled${busyCount > 0 ? ` (${busyCount} currently busy or with active triggers)` : ''}. Choose how to proceed:`}
-            </p>
-            {toDisable.length > 0 && (
-              <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxHeight: 200, overflowY: 'auto' }}>
-                {toDisable.map(m => (
-                  <li key={m.id}>
-                    {m.displayName}
-                    {(m.busy || (m.activeTriggers?.length ?? 0) > 0) && (
-                      <span style={{ color: 'var(--eb-status-warning)' }}> — {m.busy ? 'busy' : `${m.activeTriggers.length} active trigger(s)`}</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {members.some(m => !m.enabled) && (
-              <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                {members.filter(m => !m.enabled).length} member(s) already disabled are left untouched.
-              </p>
-            )}
-            {error && (
-              <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginTop: 'var(--eb-space-2)' }}>{error}</p>
-            )}
-          </div>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
-          <button onClick={onCancel} disabled={busy} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
-            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-          }}>Cancel</button>
-          <button onClick={onDrain} disabled={busy} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-          }}>Let running work finish</button>
-          <button onClick={onAbort} disabled={busy} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-          }}>Hard stop</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeactivateWarningDialog({ open, agent, busy, activeTriggers, onDrain, onHardStop, onCancel }) {
-  if (!open) return null;
-  const name = agent?.displayName ?? agent?.id ?? 'this agent';
-  const triggerCount = Array.isArray(activeTriggers) ? activeTriggers.length : 0;
-
-  const parts = [];
-  if (busy) parts.push('a session is currently running');
-  if (triggerCount > 0) parts.push(`${triggerCount} active trigger${triggerCount !== 1 ? 's' : ''}`);
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Reset agent to stub" style={{
-      position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
-    }}>
-      <div style={{
-        background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5)', maxWidth: 500,
-        width: '90%', boxShadow: 'var(--eb-shadow-xl)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)' }}>
-          <span style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2, fontSize: 20 }}>⚠</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
-              Reset "{name}" to stub
-            </h3>
-            <p style={{ margin: 'var(--eb-space-2) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-              {parts.length > 0
-                ? `This agent has ${parts.join(' and ')}. Choose how to proceed:`
-                : 'This agent has active state. Choose how to proceed:'}
-            </p>
-            <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-              <li><strong>Let run</strong> — disable triggers now so no new executions start; the current execution finishes naturally. Come back to reset once the agent is idle.</li>
-              <li><strong>Hard stop</strong> — kill the process immediately, then wipe the workspace.</li>
-            </ul>
-          </div>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-4)' }}>
-          <button onClick={onCancel} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
-            color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Cancel</button>
-          <button onClick={onDrain} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Let run</button>
-          <button onClick={onHardStop} style={{
-            padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-status-error)',
-            color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit',
-          }}>Hard stop + reset</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function renderDeleteMessage(target) {
-  if (!target) return '';
-
-  if (target.role === 'team' || target.role === 'orchestrator') {
-    const children = Array.isArray(target.children) ? target.children : [];
-    const childNoun = target.role === 'team' ? 'member' : 'mission';
-    const childNounPlural = target.role === 'team' ? 'members' : 'missions';
-    const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
-
-    // Deleting a team purges its locally cached / curated knowledge on this
-    // stack (#532) — the honest counterpart to actually purging the data on the
-    // backend. Knowledge shared via the team's repository is NOT touched (that
-    // is the sanctioned sharing channel), so the note must say so explicitly.
-    const knowledgeNote = target.role === 'team' ? (
-      <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-primary)' }}>
-        <strong>This team's locally cached and curated knowledge will be permanently removed</strong> —
-        its local Knowledge Base copy, promotion suggestions, archive, review decisions and team skill pool.
-        Knowledge shared via the team's repository is <strong>not affected</strong>.
-      </p>
-    ) : null;
-
-    if (children.length === 0) {
-      return (
-        <>
-          <p style={{ margin: 0 }}>
-            Delete this {parentNoun}? It currently has no {childNounPlural} attached.
-            The workspace, configuration and chat account will be removed permanently.
-          </p>
-          {knowledgeNote}
-        </>
-      );
-    }
-
-    return (
-      <>
-        <div style={{
-          padding: 'var(--eb-space-3)',
-          background: 'var(--eb-status-error-bg)',
-          border: '1px solid var(--eb-status-error)',
-          borderRadius: 'var(--eb-radius-md)',
-          color: 'var(--eb-text-primary)',
-          fontWeight: 'var(--eb-font-semibold)',
-          fontSize: 'var(--eb-text-sm)',
-        }}>
-          ⚠ This will permanently delete the {parentNoun} <strong>and all {children.length} {children.length === 1 ? childNoun : childNounPlural}</strong> below.
-          Workspaces, session histories and chat accounts for every listed agent will be removed. This cannot be undone.
-        </div>
-        <p style={{ margin: 'var(--eb-space-3) 0 var(--eb-space-1)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-          {childNounPlural[0].toUpperCase() + childNounPlural.slice(1)} that will be deleted:
-        </p>
-        <ul style={{
-          margin: 0,
-          padding: 'var(--eb-space-2) var(--eb-space-3)',
-          maxHeight: 220,
-          overflowY: 'auto',
-          background: 'var(--eb-bg-app)',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-md)',
-          listStyle: 'none',
-          fontFamily: 'var(--eb-font-mono)',
-          fontSize: 'var(--eb-text-xs)',
-        }}>
-          {children.map((c) => (
-            // Stacked layout: id on top, displayName underneath. Side-by-side
-            // didn't survive long ids + long titles — the row blew the dialog
-            // open even with min-width:0 on the parent because both spans
-            // wanted full width. Stacking is robust regardless of length and
-            // keeps the visual hierarchy (mono id, muted title).
-            <li key={c.id} style={{
-              padding: '4px 0',
-              display: 'flex', flexDirection: 'column', gap: 1,
-              borderBottom: '1px solid var(--eb-border-subtle, transparent)',
-            }}>
-              <span style={{ color: 'var(--eb-text-primary)', wordBreak: 'break-all' }}>
-                {c.id}
-              </span>
-              {c.displayName && c.displayName !== c.id && (
-                <span style={{
-                  color: 'var(--eb-text-muted)',
-                  fontFamily: 'var(--eb-font-sans, inherit)',
-                  fontSize: '11px',
-                  wordBreak: 'break-word',
-                }}>
-                  {c.displayName}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-        {knowledgeNote}
-      </>
-    );
-  }
-
-  return `Delete agent "${target.displayName ?? target.id}"? This removes the workspace and all associated data.`;
 }

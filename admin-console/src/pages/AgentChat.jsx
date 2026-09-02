@@ -1,10 +1,13 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router';
-import { MessageCircle, Loader2 } from 'lucide-react';
+import { MessageCircle, Loader2, Plus, Eye, EyeOff } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
+import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
+import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-chat/rail-lifecycle.js';
+import { isChatOpenable } from './agent-lifecycle/agent-lifecycle-menu.js';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
@@ -106,7 +109,24 @@ export default function AgentChat() {
   const { agentId } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { data: agents, loading, error, refetch } = useApi('/api/matrix/agents');
+  // Per-user opt-in to also listing disabled agents (#1928 AC6/AC7). It widens
+  // the list URL, so it is read before the fetch — with the opt-in off the URL
+  // is byte-for-byte the pre-#1928 one and the chat shows exactly what it always
+  // showed.
+  const [showDisabled, setShowDisabled] = useState(loadShowDisabled);
+  useEffect(() => { saveShowDisabled(showDisabled); }, [showDisabled]);
+  const { data: agents, loading, error, refetch } = useApi(matrixAgentsUrl(showDisabled));
+
+  // The open lifecycle context menu: `{ target, anchor }` or null. The rail only
+  // reports *that* a menu was asked for and for which row (#1928); which items
+  // it holds, and every dialog and API call behind them, live in
+  // `RailLifecycleHost` so the memoized rows stay free of lifecycle state.
+  const [menuRequest, setMenuRequest] = useState(null);
+  const handleRequestMenu = useCallback(
+    (target, anchor) => setMenuRequest({ target, anchor }),
+    [],
+  );
+  const closeMenu = useCallback(() => setMenuRequest(null), []);
 
   // Local map agentId -> roomId, for rooms we created during this session
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
@@ -356,7 +376,12 @@ export default function AgentChat() {
     setSearchParams(next, { replace: true });
   }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
-  const selectedAgent = (agents ?? []).find(a => a.id === agentId) || null;
+  // A disabled agent is only ever in this list because the opt-in is on (#1928
+  // AC6), and it has no chat to open — the DM route rejects it with a 409. Treat
+  // it as no selection so the panel shows the empty state rather than a
+  // dead-end error, matching what the rail does when its row is clicked.
+  const selectedAgent =
+    (agents ?? []).find(a => a.id === agentId && isChatOpenable(a)) || null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
     selectedAgent?.dmRoomId ||
@@ -459,22 +484,41 @@ export default function AgentChat() {
         flexShrink: 0,
       }}>
         {/*
-          Filter row only — the former "Agents (N)" heading was dropped (#1921):
-          the context is obvious and the count added nothing. The whole row is
-          conditional on there being agents to filter, so an empty/loading list
-          leaves no blank padded strip where the heading used to sit.
+          Rail header. The former "Agents (N)" heading was dropped (#1921): the
+          context is obvious and the count added nothing. The row still never
+          renders while the list is loading, but it now survives an *empty* list
+          — since #1928 it carries the "+" create control, which is precisely
+          what someone with no agents needs; the filter alone stays conditional
+          on there being something to filter.
         */}
-        {agents && agents.length > 0 && (
+        {agents && (
           <div style={{
             padding: 'var(--eb-space-3) var(--eb-space-4)',
             borderBottom: '1px solid var(--eb-border-default)',
             flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--eb-space-2)',
           }}>
-            <FilterSelect
-              agents={agents}
-              filter={listFilter}
-              onChange={setListFilter}
+            {agents.length > 0 && (
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <FilterSelect
+                  agents={agents}
+                  filter={listFilter}
+                  onChange={setListFilter}
+                />
+              </div>
+            )}
+            <RailHeaderToggle
+              on={showDisabled}
+              onToggle={() => setShowDisabled(v => !v)}
             />
+            <RailHeaderButton
+              label="New or import an agent"
+              onOpen={anchor => handleRequestMenu({ kind: 'create' }, anchor)}
+            >
+              <Plus size={14} />
+            </RailHeaderButton>
           </div>
         )}
 
@@ -552,6 +596,8 @@ export default function AgentChat() {
               onMarkAsUnread={handleMarkAsUnread}
               statuses={agentStatuses}
               filter={listFilter}
+              showDisabled={showDisabled}
+              onRequestMenu={handleRequestMenu}
             />
           )}
         </div>
@@ -640,7 +686,93 @@ export default function AgentChat() {
       </div>
 
       </SessionsActiveProvider>
+
+      {/* Lifecycle quick actions (#1928): the menu the rail asked for, plus
+          every dialog and request behind it. Mounted outside the rail column so
+          its portaled menu and side panels are never clipped by the column's
+          overflow, and so a mutation can refresh the list the rail renders. */}
+      <RailLifecycleHost
+        request={menuRequest}
+        onClose={closeMenu}
+        chatAgents={agents || []}
+        onChanged={refetch}
+      />
     </div>
+  );
+}
+
+/**
+ * The rail header's disabled-agents opt-in (#1928 AC6/AC7).
+ *
+ * A two-state icon toggle rather than a checkbox: the header is a single tight
+ * row next to the filter, and the state is legible at a glance from the icon
+ * alone. `aria-pressed` carries the state for assistive tech, since the eye is
+ * decorative.
+ */
+function RailHeaderToggle({ on, onToggle }) {
+  const label = on ? 'Hide disabled agents' : 'Show disabled agents';
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={label}
+      aria-label={label}
+      aria-pressed={on}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 26,
+        height: 26,
+        flexShrink: 0,
+        background: on ? 'var(--eb-bg-elevated)' : 'none',
+        border: `1px solid ${on ? 'var(--eb-border-default)' : 'transparent'}`,
+        borderRadius: 'var(--eb-radius-sm)',
+        color: on ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+        cursor: 'pointer',
+        transition: 'color var(--eb-transition-fast), background var(--eb-transition-fast)',
+      }}
+    >
+      {on ? <Eye size={14} /> : <EyeOff size={14} />}
+    </button>
+  );
+}
+
+/**
+ * The rail header's "+" control. Opens a menu anchored at the button's own
+ * bottom-left corner, so the same `RowContextMenu` that serves the row kebabs
+ * and right-clicks — all of which are anchored at a *point* — serves this too.
+ */
+function RailHeaderButton({ label, onOpen, children }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-haspopup="menu"
+      onClick={e => {
+        const r = e.currentTarget.getBoundingClientRect();
+        onOpen({ x: r.left, y: r.bottom + 4 });
+      }}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 26,
+        height: 26,
+        flexShrink: 0,
+        background: 'none',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-sm)',
+        color: 'var(--eb-text-secondary)',
+        cursor: 'pointer',
+        transition: 'color var(--eb-transition-fast), background var(--eb-transition-fast)',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+    >
+      {children}
+    </button>
   );
 }
 

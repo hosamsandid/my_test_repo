@@ -7,6 +7,7 @@ import {
   matchesFilter,
   orderModel,
   filterModel,
+  passesDisabledFilter,
   buildAgentListModel,
   groupKey,
 } from './agent-list-model.js';
@@ -189,4 +190,82 @@ test('buildAgentListModel composes the three layers end-to-end', () => {
 test('groupKey namespaces team and orchestrator ids so they cannot collide', () => {
   assert.equal(groupKey({ kind: 'team', id: 'x' }), 'team:x');
   assert.equal(groupKey({ kind: 'orchestrator', id: 'x' }), 'orchestrator:x');
+});
+
+// ── disabled-agents filter (#1928, epic decision D2) ─────────────────────────
+
+const off = (agent) => ({ ...agent, enabled: false });
+
+test('passesDisabledFilter hides disabled rows only while the opt-in is off', () => {
+  assert.equal(passesDisabledFilter({ enabled: false }, false), false);
+  assert.equal(passesDisabledFilter({ enabled: false }, true), true);
+  assert.equal(passesDisabledFilter({ enabled: true }, false), true);
+  // An absent flag means enabled — the pre-#1928 payload shape.
+  assert.equal(passesDisabledFilter({}, false), true);
+});
+
+test('AC6 — with the filter off the list is exactly what it was before', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    off(member('t1-qa', 't1', 'QA')),
+    standalone('solo', 'Solo'),
+    off(standalone('paused', 'Paused')),
+  ];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ALL);
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-dev']);
+  assert.deepEqual(model.visibleSingles.map(s => s.id), ['solo']);
+});
+
+test('AC6 — with the filter on the disabled rows appear alongside the rest', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    off(member('t1-qa', 't1', 'QA')),
+    standalone('solo', 'Solo'),
+    off(standalone('paused', 'Paused')),
+  ];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ALL, true);
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-dev', 't1-qa']);
+  assert.deepEqual(model.visibleSingles.map(s => s.id), ['paused', 'solo']);
+});
+
+test('a disabled team header is hidden while its enabled members still group', () => {
+  const { groups, singles } = buildGroups([
+    off(team('t1', 'Alpha')),
+    member('t1-dev', 't1', 'Dev'),
+  ]);
+  const { orderedGroups, orderedSingles } = orderModel(groups, singles, EMPTY_ORDER);
+
+  const hidden = filterModel(orderedGroups, orderedSingles, ALL, false);
+  assert.equal(hidden.visibleGroups.length, 1);
+  assert.equal(hidden.visibleGroups[0].header, null);
+  assert.deepEqual(hidden.visibleGroups[0].children.map(c => c.id), ['t1-dev']);
+
+  const shown = filterModel(orderedGroups, orderedSingles, ALL, true);
+  assert.equal(shown.visibleGroups[0].header.id, 't1');
+});
+
+test('a group whose every row is disabled drops out entirely with the filter off', () => {
+  const { groups, singles } = buildGroups([
+    off(team('t1', 'Alpha')),
+    off(member('t1-dev', 't1', 'Dev')),
+  ]);
+  const { orderedGroups, orderedSingles } = orderModel(groups, singles, EMPTY_ORDER);
+  const model = filterModel(orderedGroups, orderedSingles, ALL, false);
+  assert.deepEqual(model.visibleGroups, []);
+  assert.equal(model.empty, true);
+});
+
+test('the disabled filter composes with the text/entity filter rather than overriding it', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    off(member('t1-qa', 't1', 'QA')),
+    off(standalone('paused', 'Paused')),
+  ];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' }, true);
+  // Filter says "team t1 only", so the disabled standalone stays out even
+  // though the disabled opt-in is on.
+  assert.deepEqual(model.visibleSingles, []);
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-qa']);
 });

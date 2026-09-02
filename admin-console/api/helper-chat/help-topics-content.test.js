@@ -302,6 +302,79 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'credentials',
+    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
+    // SetupWizard's two credential steps). The topic additionally records what
+    // no box said: the three ownership tiers, the strict personal privacy
+    // guarantee, the per-operation-class runtime resolution order with
+    // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
+    concepts: [
+      'SSH key',
+      'GitHub token',
+      'deploy key',
+      'defense-in-depth',
+      'blast-radius',
+      'GH_TOKEN',
+      'fingerprint',
+      'Personal',
+      'Team',
+      'System',
+      'only the owner',
+      'break-glass',
+      'attributed writes',
+      'Event polling',
+      'preference among tiers',
+      'refused',
+      'rotate in place',
+      'create-new-and-repoint',
+      'Used by',
+      'read:org',
+      'SAML SSO',
+    ],
+  },
+  {
+    id: 'token-usage',
+    routes: ['/token-usage'],
+    // #1885 lifted the Token Usage intro banner (what the page shows + how the
+    // two tabs differ), the reasoning behind the tokens-not-costs caveat, and
+    // the full attribution-tier explainer out of the `TIER_SIGNAL_HELP` InfoTip
+    // — which now carries only the four signal names. The topic additionally
+    // records what the banner never said: that only agent runs are recorded,
+    // the strongest-signal-wins rule, the shared / flow-mismatch flags, why the
+    // unattributed remainder is always reported, and that records are filed
+    // under the day the run happened.
+    concepts: [
+      'System Admin',
+      'Team filter',
+      'agent runs',
+      'Statistics',
+      'Work items',
+      'Group by',
+      'unknown',
+      'raw token count',
+      'never reads it',
+      'CSV',
+      'Input',
+      'Output',
+      'Cache write',
+      'Cache read',
+      'closes #N',
+      'flow',
+      'created',
+      'event',
+      'branch',
+      'strongest signal',
+      'shared',
+      'flow-mismatch',
+      'always',
+      'attributed',
+      'Invocations',
+      'Open session',
+    ],
+  },
+  {
     id: 'github-events',
     routes: ['/github-events'],
     // #1886 lifted the page's multi-clause intro (observational log; Processed
@@ -331,6 +404,39 @@ const TOPIC_CONTENT = [
       '7 days',
       'best-effort',
       'not team-scoped',
+    ],
+  },
+  {
+    id: 'maintenance-mode',
+    routes: ['/maintenance-mode'],
+    // #1887 lifted the page intro and the bordered "While active" box (the
+    // cron catch-up, the durable http/github-event queue, nothing-force-stopped)
+    // and adds what neither said: the console-wide chat lock, the skipped
+    // orchestrator passes, the advisory-only session counter, and the fact that
+    // the grace period is a display countdown no backend component enforces.
+    concepts: [
+      'signal, not an action',
+      'manual, external step',
+      'Nothing auto-deactivates',
+      'across every team and user',
+      'advisory',
+      'Trigger possibly lost',
+      'enforcement timer',
+      'stays active',
+      '24 hours',
+      'cron',
+      'exactly one',
+      'once',
+      'loop',
+      'github-event',
+      'nothing is dropped',
+      'not auto-retried',
+      'read-only',
+      'refuses to send',
+      'hill-climb metrics',
+      'flow-anomaly history',
+      'natural end',
+      'End Maintenance Mode',
     ],
   },
   {

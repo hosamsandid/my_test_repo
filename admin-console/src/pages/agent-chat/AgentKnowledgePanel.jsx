@@ -27,7 +27,7 @@ function fmtWhen(iso) {
   return sameDay ? `today ${hm}` : `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}. ${hm}`;
 }
 
-export default function AgentKnowledgePanel({ agentId, active = false, refreshKey = 0 }) {
+export default function AgentKnowledgePanel({ agentId, active = false }) {
   const navigate = useNavigate();
   const [items, setItems] = useState(null); // null = loading
   const [teamId, setTeamId] = useState(null);
@@ -58,9 +58,6 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
   // Refetch when the tab becomes visible again — cheaper and more predictable
   // than keeping an SSE feed open for events that land a few times a day.
   useEffect(() => { if (active) load(); }, [active, load]);
-  // Refetch when the parent signals a probable KB change (e.g. the agent just
-  // replied to a Full-Learn prompt), so new entries appear without a reload.
-  useEffect(() => { if (refreshKey) load(); }, [refreshKey, load]);
 
   const nominate = useCallback((item) => {
     setAction(a => ({ ...a, [item.id]: { state: 'busy' } }));

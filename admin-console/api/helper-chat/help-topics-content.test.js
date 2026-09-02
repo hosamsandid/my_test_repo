@@ -274,10 +274,37 @@ const TOPIC_CONTENT = [
       'detach it there first',
     ],
   },
+  {
+    id: 'mcp',
+    routes: ['/mcp'],
+    // #1883 lifted the MCP Servers intro box (the three-part servers /
+    // credentials / Working-Environment-pairing model) and the "where does
+    // 'required' come from" InfoTip, and adds what neither said: the seed-time
+    // merge into the agent's own settings.json, the dropped-key behaviour when
+    // nothing is bound, the per-transport field split, and where the pairing is
+    // actually visible today.
+    concepts: [
+      'three-part model',
+      '${credential}',
+      'requiresCredential',
+      'rotated',
+      'seed time',
+      '.claude/settings.json',
+      'merged, not replaced',
+      'dropped',
+      'stdio',
+      'sse',
+      'mutually exclusive',
+      'Default server',
+      'fingerprint',
+      'next invocation',
+      'Detach it there first',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users, E8 models …), never by dropping one.
+  // E6 environments, E7 access-users, E8 models, E9 mcp …), never by dropping one.
 ];
 
 const registry = loadRegistry();

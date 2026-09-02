@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useState, useRef, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useRef, useCallback, useMemo, useEffect } from 'react';
+import { useLocation } from 'react-router';
 import { assistHeaders, notifyAssistError } from './assist-transport.js';
-import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
+import { UNAUTHORIZED_EVENT, useAuth } from '../auth/AuthContext';
 import { BREADCRUMBS } from '../components/breadcrumbs';
 import {
   appendUserMessage,
@@ -11,6 +12,17 @@ import {
   buildRequestBody,
   splitNdjson,
 } from './helper-chat-model.js';
+import {
+  autoOpenPlan,
+  markSeen,
+  seenRoutesKey,
+  parseSeenRoutes,
+} from './page-help-view.js';
+
+// The empty topic set the provider starts with (and falls back to if the
+// GET /api/helper/page-help fetch fails) — the panel then always renders the
+// Overview fallback rather than crashing on an absent payload.
+const EMPTY_PAGE_HELP = { topics: [], overviewId: 'overview' };
 
 // Helper Chat context (#1735, Phase 1.3). Mounted app-level (in index.jsx,
 // alongside TranscriptionSessionProvider) so the chat panel + its history
@@ -28,7 +40,8 @@ export function useHelperChat() {
   return useContext(HelperChatContext) || {
     isOpen: false, toggle: () => {}, messages: [],
     sendMessage: () => {}, isStreaming: false, clearHistory: () => {},
-    mode: 'chat', setMode: () => {}, openTour: () => {},
+    mode: 'chat', setMode: () => {}, openTour: () => {}, openHelpFor: () => {},
+    pageHelp: EMPTY_PAGE_HELP, currentRoute: '/',
   };
 }
 
@@ -43,11 +56,37 @@ export function HelperChatProvider({ children }) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  // Which face of the panel is showing: 'chat' (default, #1735) or 'tour'
-  // (#1737). Lifted to the provider so an external entry point (the Getting
-  // Started page's "Take the Tour" button) can open the panel straight into
-  // tour mode.
+  // Which face of the panel is showing: 'page' (the page-aware "This page" face,
+  // #1873 — the default the header Help button now opens on), 'chat' (the "Ask"
+  // face, #1735) or 'tour' (#1737). Lifted to the provider so an external entry
+  // point (a page's PageHelpButton, the Getting Started "Take the Tour" button)
+  // can open the panel straight into a given face.
   const [mode, setMode] = useState('chat');
+
+  // The curated per-page help topic set, fetched once (concept §4: the client
+  // resolves route→topic locally so face-switching is instant/offline). Starts
+  // empty and stays empty on a fetch failure — the panel then just renders the
+  // Overview fallback. The provider sits inside BrowserRouter + AuthProvider
+  // (index.jsx), so useLocation/useAuth are safe here.
+  const [pageHelp, setPageHelp] = useState(EMPTY_PAGE_HELP);
+  const location = useLocation();
+  const currentRoute = location.pathname;
+  const { authenticated, user } = useAuth();
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/helper/page-help', { headers: { ...assistHeaders() } });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (alive && data) setPageHelp(data);
+      } catch {
+        // Keep the empty set — Overview fallback still renders.
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   // A synchronous mirror of the list so sendMessage builds the request from the
   // just-appended user turn without waiting for a state flush.
@@ -66,6 +105,43 @@ export function HelperChatProvider({ children }) {
     setMode('tour');
     setIsOpen(true);
   }, []);
+
+  // Open the panel on the page-aware "This page" face (#1873) — used by the
+  // header Help button and every page's PageHelpButton. The face resolves the
+  // topic from the live route, so the optional `route` argument is accepted for
+  // call-site clarity but the panel always shows help for wherever the user is.
+  const openHelpFor = useCallback(() => {
+    setMode('page');
+    setIsOpen(true);
+  }, []);
+
+  // First-run auto-open (#1873, concept §4/§9): the first time an authenticated
+  // user lands on a route that has a dedicated topic, nudge the panel open on
+  // the "This page" face — once. The seen key is persisted BEFORE opening, so a
+  // user who immediately closes it is never nudged for that route again. Routes
+  // with only the Overview fallback never auto-open.
+  useEffect(() => {
+    if (!authenticated) return;
+    if (!pageHelp || !Array.isArray(pageHelp.topics) || pageHelp.topics.length === 0) return;
+    let seen = [];
+    let storageKey = null;
+    try {
+      storageKey = seenRoutesKey(user && user.username);
+      seen = parseSeenRoutes(window.localStorage.getItem(storageKey));
+    } catch {
+      return; // localStorage unavailable — skip the nudge rather than guess.
+    }
+    const plan = autoOpenPlan(pageHelp, currentRoute, seen);
+    if (!plan.open) return;
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(markSeen(seen, plan.routeKey)));
+    } catch {
+      // Can't persist "seen" → don't auto-open, or it would re-fire every visit.
+      return;
+    }
+    setMode('page');
+    setIsOpen(true);
+  }, [authenticated, user, pageHelp, currentRoute]);
 
   const sendMessage = useCallback(async (text) => {
     const trimmed = (text || '').trim();
@@ -148,8 +224,8 @@ export function HelperChatProvider({ children }) {
 
   const value = useMemo(() => ({
     isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
-    mode, setMode, openTour,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour]);
+    mode, setMode, openTour, openHelpFor, pageHelp, currentRoute,
+  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute]);
 
   return (
     <HelperChatContext.Provider value={value}>

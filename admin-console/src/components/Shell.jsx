@@ -185,7 +185,9 @@ export default function Shell({ children }) {
   const location = useLocation();
   const { user, logout } = useAuth();
   // Helper Chat (#1735): the header Help button toggles the app-level panel.
-  const { isOpen: helpOpen, toggle: toggleHelp } = useHelperChat();
+  // Opening now lands on the page-aware "This page" face (#1873, concept §4).
+  const { isOpen: helpOpen, toggle: toggleHelp, openHelpFor } = useHelperChat();
+  const onHelpClick = () => { if (helpOpen) toggleHelp(); else openHelpFor(); };
   // Nav badge counts, derived from the shared agent-status poll (#1677) instead
   // of a Shell-owned interval — one /api/agents/statuses request now feeds every
   // subscribing surface.
@@ -609,8 +611,8 @@ export default function Shell({ children }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
             <button
-              onClick={toggleHelp}
-              title="Help — ask anything about Agent Studio"
+              onClick={onHelpClick}
+              title="Help — this page, ask a question, or take the tour"
               aria-label="Help"
               aria-pressed={helpOpen}
               style={{

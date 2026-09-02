@@ -11,6 +11,11 @@ import {
   askHandoff,
   seeAlsoLinks,
   askPromptChips,
+  seenRoutesKey,
+  autoOpenRouteKey,
+  autoOpenPlan,
+  markSeen,
+  parseSeenRoutes,
 } from './page-help-view.js';
 
 const PAYLOAD = {
@@ -92,4 +97,65 @@ test('seeAlsoLinks drops entries without a destination', () => {
 
 test('askPromptChips de-duplicates and drops blanks', () => {
   assert.deepEqual(askPromptChips(PAYLOAD.topics[0]), ['hi']);
+});
+
+// ── first-run auto-open (#1873) ─────────────────────────────────────────────────
+
+test('seenRoutesKey is per-user and collapses blank usernames to anon', () => {
+  assert.equal(seenRoutesKey('alice'), 'help.seenRoutes.alice');
+  assert.equal(seenRoutesKey('  bob  '), 'help.seenRoutes.bob');
+  assert.equal(seenRoutesKey(''), 'help.seenRoutes.anon');
+  assert.equal(seenRoutesKey(null), 'help.seenRoutes.anon');
+  assert.equal(seenRoutesKey(undefined), 'help.seenRoutes.anon');
+});
+
+test('autoOpenRouteKey returns the canonical key for a topic route, null otherwise', () => {
+  assert.equal(autoOpenRouteKey(PAYLOAD, '/agents'), '/agents');
+  // dynamic child collapses to its canonical parent (which has a topic here? no —
+  // /chats has no topic in PAYLOAD), so a route with no dedicated topic is null.
+  assert.equal(autoOpenRouteKey(PAYLOAD, '/skills'), null);
+  assert.equal(autoOpenRouteKey(PAYLOAD, '/chats/agent-1'), null);
+});
+
+test('autoOpenRouteKey collapses a dynamic child to its topic-bearing parent', () => {
+  const payload = {
+    overviewId: 'overview',
+    topics: [
+      { id: 'overview', routes: [], title: 'O', askPrompts: ['x'] },
+      { id: 'flows', routes: ['/flows'], title: 'F', askPrompts: ['x'] },
+    ],
+  };
+  // /process/:id collapses to /flows (a redirect/dynamic target with a topic).
+  assert.equal(autoOpenRouteKey(payload, '/process/team-7'), '/flows');
+});
+
+test('autoOpenPlan opens once for an unseen topic route, then never again', () => {
+  const first = autoOpenPlan(PAYLOAD, '/agents', []);
+  assert.deepEqual(first, { open: true, routeKey: '/agents' });
+  // Once seen, the same route no longer opens but still reports its key.
+  const seen = markSeen([], first.routeKey);
+  assert.deepEqual(autoOpenPlan(PAYLOAD, '/agents', seen), { open: false, routeKey: '/agents' });
+});
+
+test('autoOpenPlan never opens a route with no dedicated topic', () => {
+  assert.deepEqual(autoOpenPlan(PAYLOAD, '/skills', []), { open: false, routeKey: null });
+});
+
+test('markSeen appends without mutating and de-duplicates', () => {
+  const base = ['/agents'];
+  const next = markSeen(base, '/flows');
+  assert.deepEqual(next, ['/agents', '/flows']);
+  assert.deepEqual(base, ['/agents']); // input untouched
+  assert.deepEqual(markSeen(next, '/flows'), ['/agents', '/flows']); // idempotent
+  assert.deepEqual(markSeen(['/x'], ''), ['/x']); // blank key is a no-op
+  assert.deepEqual(markSeen(null, '/a'), ['/a']); // tolerates a non-array input
+});
+
+test('parseSeenRoutes is fail-soft over the raw localStorage value', () => {
+  assert.deepEqual(parseSeenRoutes('["/a","/b"]'), ['/a', '/b']);
+  assert.deepEqual(parseSeenRoutes('not json'), []);
+  assert.deepEqual(parseSeenRoutes('{"a":1}'), []); // not an array
+  assert.deepEqual(parseSeenRoutes('[1,"/b",null]'), ['/b']); // drops non-strings
+  assert.deepEqual(parseSeenRoutes(''), []);
+  assert.deepEqual(parseSeenRoutes(null), []);
 });

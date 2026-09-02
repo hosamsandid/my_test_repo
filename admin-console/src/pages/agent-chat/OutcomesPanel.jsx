@@ -146,12 +146,14 @@ export default function OutcomesPanel({ agentId, active }) {
               </div>
             )}
 
-            {/* AC3 — a legacy flat `emits[]` agent has labels but no structure. */}
+            {/* AC3 — a legacy flat `emits[]` agent has labels but no structure.
+                What a structured outcome *is* (condition + title, and the
+                exactly-one / any-of modes) moved to the Agent Chat help topic in
+                E15 (#1889); the actionable "where to fix it" pointer stays. */}
             {view.kind === 'legacy' && (
               <div style={hintBox}>
-                This agent still declares plain flat labels. Structured outcomes —
-                with a condition and a title per outcome — can be authored in the
-                Flow Editor.
+                This agent still declares plain flat labels. Structured outcomes can
+                be authored in the Flow Editor.
               </div>
             )}
 

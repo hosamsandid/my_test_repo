@@ -26,6 +26,7 @@ import {
   indexAskAnswers, questionState,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
+import PageHelpButton from '../../components/PageHelpButton';
 import VirtualList from '../../components/VirtualList.jsx';
 import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
 import { headerContextIndicator } from './session-info.js';
@@ -1147,6 +1148,11 @@ export default function ChatPanel({
               onClick={onOpenKnowledge}
               title="Show what this agent has learned (Knowledge tab)"
             />
+            {/* E15 (#1889, epic #1870): the page's "?" affordance. The chat header
+                is bespoke (it carries the agent name, not a page title — the #1847
+                exception), so the control joins this cluster rather than a shared
+                page header. */}
+            <PageHelpButton label="Help for Agent Chat" size={14} style={{ flexShrink: 0 }} />
           </div>
         </div>
       </div>
@@ -1575,8 +1581,11 @@ export default function ChatPanel({
       >
         {/* Loop-launcher explainer (#1120): a loop is one of the most
             consequential actions in the UI (repeated autonomous runs, token
-            spend), so state plainly what it does and how it stops before the
-            form. */}
+            spend), so what it does and how it stops stays here at the point of
+            decision. E15 (#1889) moved the wider concept material — why each try
+            starts fresh, the four terminal states, what a verifier is for, and
+            that everything else waits while a loop holds the workspace — into the
+            Agent Chat help topic, reachable from the "?" beside it. */}
         <p style={{
           margin: '0 0 var(--eb-space-4)',
           fontSize: 'var(--eb-text-sm)',
@@ -1584,11 +1593,14 @@ export default function ChatPanel({
           lineHeight: 1.5,
         }}>
           A loop re-runs this agent on the instruction below — each run starts
-          fresh — until a goal is reached, working on its own between runs. It
-          stops when the <strong>max iterations</strong> cap is hit, when the{' '}
-          <strong>stop condition</strong> passes, or when you press Stop; if a{' '}
-          <strong>verifier</strong> is set, each run only counts once that check
-          passes.
+          fresh — working on its own between runs. It stops when the{' '}
+          <strong>max iterations</strong> cap is hit, when the{' '}
+          <strong>stop condition</strong> passes, or when you press Stop.
+          <PageHelpButton
+            label="How loops work"
+            size={13}
+            style={{ padding: 0, marginLeft: 4, verticalAlign: 'middle' }}
+          />
         </p>
         <TriggerForm
           // Remount on each open so the form re-seeds from the current

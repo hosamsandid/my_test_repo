@@ -208,8 +208,12 @@ export default function AgentKnowledgePanel({ agentId, active = false, refreshKe
                 “{retireTarget.text}”
               </p>
             )}
+            {/* The reversibility stays here — it is what makes the confirm safe to
+                press. Why retiring is an archive rather than a delete (the git
+                audit trail, the digest re-projection, the promoted-skill refusal)
+                is in the Agent Chat help topic since E15 (#1889). */}
             <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-              It stays in git for audit and can be un-retired on the Knowledge page.
+              You can un-retire it on the Knowledge page.
             </p>
           </>
         }

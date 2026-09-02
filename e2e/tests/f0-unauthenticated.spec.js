@@ -18,6 +18,7 @@ test('F0: unauthenticated visit shows the login screen, not the app', async ({ p
   await expect(page.locator('#login-password')).toBeVisible();
   await expect(page.getByText('Sign in to continue', { exact: true })).toBeVisible();
 
-  // The authenticated shell must NOT be present.
-  await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+  // The authenticated shell must NOT be present (#1802 — the account-menu
+  // control only renders inside the authenticated shell header).
+  await expect(page.getByRole('button', { name: 'Account menu' })).toHaveCount(0);
 });

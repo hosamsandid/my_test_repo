@@ -92,10 +92,15 @@ test.describe('Speech-to-Text', () => {
     const agentOption = page.locator('[role="option"]').first();
     await agentOption.click({ timeout: 10_000 });
 
-    const textarea = page.locator('textarea');
+    // Scope to the chat composer: the app-level Helper Chat panel (#1735) is
+    // always mounted (off-screen when closed), so a bare `textarea` / a
+    // "Record voice message" mic now also match its composer. The chat
+    // composer's textarea is the only one whose placeholder ends in "to send",
+    // and its dictation mic is labelled "Dictate message".
+    const textarea = page.getByPlaceholder(/Message .*to send/);
     await textarea.waitFor({ state: 'visible', timeout: 10_000 });
 
-    const micButton = page.locator('button[aria-label="Record voice message"]');
+    const micButton = page.locator('button[aria-label="Dictate message"]');
     await micButton.waitFor({ state: 'visible', timeout: 5_000 });
 
     // Headless Chromium on macOS does not support getUserMedia even with

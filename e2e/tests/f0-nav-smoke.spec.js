@@ -43,9 +43,10 @@ test('F0: authenticated shell renders and every nav page mounts', async ({ page 
   await page.goto('/');
 
   // The shell chrome must be present (proves the session is valid and the SPA
-  // built): the sidebar brand and the sign-out control.
+  // built): the sidebar brand and the account-menu control (#1802 — the former
+  // bare "Sign out" control is now the account menu; Logout lives inside it).
   await expect(page.getByText('Agent Studio', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Account menu' })).toBeVisible();
 
   const main = page.locator('main');
   const loadingFallback = page.getByText('Loading...', { exact: true });

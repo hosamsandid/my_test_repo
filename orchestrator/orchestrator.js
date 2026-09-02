@@ -1287,6 +1287,30 @@ function _flowGithubGetJson(apiPath, token) {
   });
 }
 
+// #1897 AC8: best-effort resolution of an issue/PR title for a synthetic
+// internal-delivery event. The trigger notice shows `[#N](url): <title>` when
+// the title is known; internal-transport (flow-emit) and plugin-fast-path
+// deliveries synthesize a minimal `{number, html_url}` subject with NO title
+// (only poller-delivered PRs are enriched today), so we fetch it here with the
+// repo's team token — exactly as the poller does for PRs. Never throws and
+// never blocks the hand-off: any missing-token/failure/timeout degrades to a
+// null title, and the notice then shows `[#N](url)` with no title (AC5).
+async function fetchWorkItemTitle(repoFullName, kind, number) {
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const apiPath = kind === "pr"
+      ? `/repos/${repoFullName}/pulls/${number}`
+      : `/repos/${repoFullName}/issues/${number}`;
+    const detail = await _flowGithubGetJson(apiPath, token);
+    return detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+  } catch (err) {
+    console.error(`[Orchestrator] title fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return null;
+  }
+}
+
 function _flowLiftEmits(cfgEmits, triggers) {
   const base = Array.isArray(cfgEmits) ? cfgEmits.filter((e) => typeof e === "string" && e) : [];
   const lifted = [];
@@ -11719,8 +11743,10 @@ async function main() {
           }));
           const listeners = flowEmit.matchInternalListeners(
             { repo, label, kind: target.kind }, agents);
+          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+          const title = await fetchWorkItemTitle(repo, target.kind, target.number);
           const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number,
+            repo, label, kind: target.kind, number: target.number, title,
             producerId: agentId,
             eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
             now: new Date().toISOString(),
@@ -11803,8 +11829,10 @@ async function main() {
           }));
           const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
           const now = new Date().toISOString();
+          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+          const title = await fetchWorkItemTitle(repo, kind, number);
           const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, actor,
+            repo, label, kind, number, title, actor,
             eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
             now,
           });

@@ -17,7 +17,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { loadRegistry, baselineProblems } = require('./help-registry');
-const { KNOWN_ROUTE_PATHS } = require('./help-routes');
+const { KNOWN_ROUTE_PATHS, isKnownHelpKey } = require('./help-routes');
 
 // Concepts each topic must still carry, as case-insensitive substrings of the
 // rendered topic text (front-matter summary + body). Deliberately phrased as
@@ -452,10 +452,35 @@ const TOPIC_CONTENT = [
     ],
   },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
+  {
+    id: 'settings',
+    routes: ['modal:settings'],
+    // #1892 authored this from the dialog itself (the first topic keyed on a
+    // non-route context). The load-bearing facts: assist model != agent model,
+    // and which preferences are browser-local vs on the user record.
+    concepts: [
+      'Behavior',
+      'Model',
+      'Display',
+      'send keybinding',
+      'IDE style',
+      'Chat style',
+      'Assist model',
+      'not the model your agents run on',
+      'Flow Copilot',
+      'oauth-token',
+      'single-user',
+      'Theme',
+      'Chat font size',
+      'in this browser only',
+      'user record',
+    ],
+  },
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
   // E6 environments, E7 access-users, E8 models, E9 mcp, E11 token-usage,
-  // E12 github-events, E13 maintenance-mode …), never by dropping one.
+  // E12 github-events, E13 maintenance-mode, E16 about/users, E17 settings …),
+  // never by dropping one.
 ];
 
 const registry = loadRegistry();
@@ -472,7 +497,10 @@ for (const spec of TOPIC_CONTENT) {
   test(`topic ${spec.id}: claims exactly its declared routes, and they resolve`, () => {
     assert.deepEqual(topic.routes, spec.routes);
     for (const route of spec.routes) {
-      assert.ok(KNOWN_ROUTE_PATHS.has(route), `${route} must be classified in help-routes.js`);
+      // Since E17 (#1892) a topic may also claim a non-route help context key
+      // (`modal:settings`, `/team-setup#process`), so the check is "a key the
+      // help system knows" rather than "a pathname".
+      assert.ok(isKnownHelpKey(route), `${route} must be classified in help-routes.js`);
       assert.equal(registry.topicForRoute(route)?.id, spec.id);
     }
   });

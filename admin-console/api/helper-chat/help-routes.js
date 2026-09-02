@@ -135,6 +135,141 @@ const TOPIC_PENDING = {
 // be in here (as a page or a structural allowlist entry) and nothing else.
 const KNOWN_ROUTE_PATHS = new Set([...PAGE_ROUTES, ...ALLOWLIST]);
 
+// ── non-route help contexts (E17 #1892, docs/helper-chat-concept.md §3.2) ──
+//
+// Three help-worthy surfaces are not routes at all, so a pathname cannot address
+// them: the **Settings dialog** (an overlay on top of whatever page you are on),
+// the **first-run setup wizard** (rendered *instead of* the Shell, before any
+// route exists) and the **individual steps inside a wizard** (sub-states of one
+// route). The help context therefore widens from a bare pathname to
+// `{ route, overlay, step }`, and a topic can claim any of these keys in the same
+// `routes:` front-matter list it claims a pathname in.
+//
+// A context key is namespaced so it can never collide with a pathname (which
+// always starts with `/`):
+//   `<kind>:<name>`   an overlay          — `modal:settings`, `wizard:setup`
+//   `<base>#<state>`  a sub-state of a route or of an overlay — `/team-setup#process`
+//
+// Every key is listed here for the same reason every route is listed above: so a
+// key can only be typo'd or orphaned on purpose. `alias` points a key at the
+// route whose topic already answers it — that is how the first-run wizard gets
+// help "sourced from the same topic content used elsewhere" (#1892 AC2) without
+// a second copy of the prose.
+const OVERLAY_KEYS = {
+  'modal:settings': 'The Settings dialog (account menu → Settings).',
+  'wizard:setup': 'The first-run setup wizard, rendered before the Shell exists.',
+};
+
+const CONTEXT_KEYS = {
+  'modal:settings': { label: 'Settings dialog' },
+  // The dialog's three sections. Optional coverage, exactly like the wizard steps
+  // below: while no topic claims one, the resolver falls back to the dialog's own
+  // topic, so the section keys are an extension point rather than a debt.
+  'modal:settings#behavior': { label: 'Settings · Behavior' },
+  'modal:settings#model': { label: 'Settings · Model' },
+  'modal:settings#display': { label: 'Settings · Display' },
+  'wizard:setup': { label: 'First-run setup' },
+  // The first-run wizard's three steps reuse the topics the corresponding
+  // console pages already own — no duplicate prose (AC2). `/ssh-keys` and
+  // `/github-tokens` are still TOPIC_PENDING to #1884, so those two steps show
+  // nothing until that topic lands; the alias needs no change when it does.
+  'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
+  'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
+  'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
+  // Agent Team Wizard steps (AC3). A step key is *optional* coverage by design:
+  // while no topic claims it the resolver falls through to the wizard's own
+  // route topic, so the panel is never emptier than it is today. #1888 owns the
+  // wizard's topic content and may claim these keys to make a step's help
+  // step-specific.
+  '/team-setup#process': { label: 'Agent Team Wizard · Process' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#team': { label: 'Agent Team Wizard · Team' },
+  '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
+  '/team-setup#review': { label: 'Agent Team Wizard · Review' },
+};
+
+// `/quickstart` deliberately has NO step keys: it is a single-page form, not a
+// stepped wizard, so its route topic *is* its step help. Recorded here so a
+// later reader does not mistake it for an omission.
+const SINGLE_STEP_PAGES = new Set(['/quickstart']);
+
+// Split a sub-state key into its base and state (`/team-setup#process` →
+// ['/team-setup', 'process']). Returns [key, ''] for a key with no sub-state.
+function splitContextKey(key) {
+  const s = String(key || '');
+  const i = s.indexOf('#');
+  return i === -1 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)];
+}
+
+// True for a key that addresses a non-route help context (an overlay, or any
+// key carrying a `#state` sub-state). A plain pathname is not one.
+function isContextKey(key) {
+  const s = String(key || '');
+  if (!s) return false;
+  return s.includes('#') || !s.startsWith('/');
+}
+
+// Every key the help system knows about: a classified route, or a listed context
+// key. Used by the content guard so a topic cannot claim a key nobody registered.
+function isKnownHelpKey(key) {
+  const s = String(key || '');
+  if (KNOWN_ROUTE_PATHS.has(s)) return true;
+  return Object.prototype.hasOwnProperty.call(CONTEXT_KEYS, s);
+}
+
+// The ordered lookup keys for a help context, most specific first:
+//   overlay#step → overlay → route#step → canonicalRoute#step → route → canonicalRoute
+// The overlay comes first because it is literally on top of the page; the route
+// candidates still follow it, so an overlay with no topic of its own falls back
+// to the page underneath rather than to a bare Overview — and closing the
+// overlay simply drops the first candidates, returning the panel to the page
+// (#1892 AC1). Duplicates are removed, order preserved.
+function helpContextKeys(context) {
+  const ctx = (context && typeof context === 'object') ? context : { route: context };
+  const route = typeof ctx.route === 'string' ? ctx.route : '';
+  const overlay = typeof ctx.overlay === 'string' ? ctx.overlay.trim() : '';
+  const step = typeof ctx.step === 'string' ? ctx.step.trim() : '';
+  const out = [];
+  const push = (k) => { if (k && !out.includes(k)) out.push(k); };
+  if (overlay) {
+    if (step) push(`${overlay}#${step}`);
+    push(overlay);
+  }
+  if (route) {
+    const canon = canonicalRoute(route);
+    if (step) {
+      push(`${route}#${step}`);
+      if (canon) push(`${canon}#${step}`);
+    }
+    push(route);
+    if (canon) push(canon);
+  }
+  return out;
+}
+
+// Follow a context key's `alias` to the route whose topic answers it, or '' when
+// the key has none. One hop only — an alias always points at a route.
+function contextAlias(key) {
+  const entry = CONTEXT_KEYS[String(key || '')];
+  return (entry && typeof entry.alias === 'string') ? entry.alias : '';
+}
+
+// Classify the keys a set of topics claims against this module's topology, so a
+// key that no longer exists (or was mistyped) fails CI exactly like an
+// unclassified route does. Pure, so the guard runs it on the shipped topics and
+// its own regression test runs it on synthetic ones.
+function classifyTopicKeys(topics) {
+  const claimed = [];
+  for (const t of topics || []) {
+    for (const k of (t && t.routes) || []) if (!claimed.includes(k)) claimed.push(k);
+  }
+  return {
+    claimed,
+    unknown: claimed.filter((k) => !isKnownHelpKey(k)),
+    contextKeys: claimed.filter((k) => isContextKey(k)),
+  };
+}
+
 // Collapse a concrete pathname to the canonical route key used for topic lookup:
 // apply the dynamic-route collapse, then the alias, then the redirect. Returns
 // null when a dynamic route explicitly has no topic (the plugin viewer).
@@ -184,7 +319,16 @@ module.exports = {
   ALLOWLIST,
   TOPIC_PENDING,
   KNOWN_ROUTE_PATHS,
+  OVERLAY_KEYS,
+  CONTEXT_KEYS,
+  SINGLE_STEP_PAGES,
   canonicalRoute,
+  splitContextKey,
+  isContextKey,
+  isKnownHelpKey,
+  helpContextKeys,
+  contextAlias,
+  classifyTopicKeys,
   extractAppRoutes,
   classifyAppRoutes,
 };

@@ -33,12 +33,20 @@ const PRELOAD_LANGS = [
   'markdown', 'md', 'html', 'css', 'scss', 'less',
   'sql', 'java', 'go', 'rust', 'ruby', 'rb', 'php',
   'c', 'cpp', 'csharp', 'cs', 'xml', 'diff',
-  'cobol', 'jcl',
+  // 'jcl' is NOT a bundled Shiki language (v1.29.2 only ships 'cobol'), so
+  // listing it here rejected createHighlighter — which left _hl null (ALL code
+  // blocks silently un-highlighted) AND fired an unhandled rejection surfacing
+  // as a page error. A ```jcl block still degrades to plaintext at render time
+  // (see resolvedLang below), so nothing is lost by omitting it.
+  'cobol',
 ];
 
 let _hl = null;
 createHighlighter({ themes: Object.values(THEMES), langs: PRELOAD_LANGS })
-  .then(h => { _hl = h; });
+  .then(h => { _hl = h; })
+  // Defense-in-depth: if any preload language is unavailable in a future Shiki
+  // bump, degrade to plain <pre><code> instead of an unhandled rejection.
+  .catch(() => { _hl = null; });
 
 // Adds data-theme to <pre> and <code> so tokens.css dual-theme selectors match.
 const DATA_THEME_TRANSFORMER = {

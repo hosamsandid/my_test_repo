@@ -6,9 +6,10 @@ name: E2E (Playwright)
 # + manual dispatch, non-blocking" first; promote the smoke lane to a required
 # PR check only after a clean streak). When that promotion happens, the PR gate
 # scope STAYS F0+F1 — run `make e2e-gate` there, never the full suite, so the
-# blocking check excludes the slower F3/F4 flows and F2 (which is expected red
-# until #253, the SSE stream-miss bug it exists to catch, is fixed — a red F2 in
-# the nightly full suite is the test doing its job, not a regression).
+# blocking check excludes the slower F3/F4 flows. (F2 was also kept out while it
+# was expected-red on #253, the SSE stream-miss bug it exists to catch; #253 is
+# now fixed and F2 passes, so a red F2 in the nightly full suite is now a real
+# regression. Whether to promote F2 into the gate is a separate call.)
 # Runs on podman — Docker is NOT a drop-in for the libpod spawn path (§4.3).
 on:
   schedule:

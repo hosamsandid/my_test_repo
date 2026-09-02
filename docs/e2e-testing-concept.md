@@ -225,11 +225,11 @@ runs them.
 
 - **No sleeps, ever.** All waits are Playwright auto-waiting assertions on user-visible
   state (wizard step chips, chat bubbles, badges) — the same signal a human uses.
-- **SSE surfaces** (chat stream, session log) are asserted through the UI they feed; the
-  known #253 stream-miss bug means F2 may legitimately fail until #253 is fixed — that
-  is the test doing its job. F2's assertion gets a generous-but-bounded timeout
-  (fake-claude replies in milliseconds; 30 s ceiling flags a real delivery bug, not
-  slowness).
+- **SSE surfaces** (chat stream, session log) are asserted through the UI they feed. F2
+  was written to catch the #253 stream-miss bug; #253 is now fixed, so F2 is expected
+  green and a red reply-bubble step is a real regression, not an accepted red. F2's
+  assertion gets a generous-but-bounded timeout (fake-claude replies in milliseconds;
+  30 s ceiling flags a real delivery bug, not slowness).
 - **Agent async:** DM message → runtime poll → fake claude → Matrix post is seconds, not
   minutes, once the model call is canned — "long-running agent flows" cease to exist in
   the stubbed lane. Trigger-driven flows (cron 60 s sync loops) are avoided in specs;

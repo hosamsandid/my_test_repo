@@ -89,7 +89,11 @@ async function send(ctx, { text }) {
   const { page } = ctx;
   const input = page.getByPlaceholder(/Message .*to send/);
   await input.fill(text);
-  const sendBtn = page.getByRole('button', { name: 'Send message' });
+  // The primary action's accessible name encodes the send keybinding hint
+  // (#1427/#1704 — "Send — ⌘+↵" / "Send — Ctrl+↵" / "Send — ↵"), and flips to a
+  // "Stop the running turn/loop" label while busy. Match the Send state by
+  // prefix so the locator survives the OS/keybinding variants.
+  const sendBtn = page.getByRole('button', { name: /^Send\b/ });
   await expect(sendBtn).toBeEnabled();
   await sendBtn.click();
   await expect(input).toHaveValue('');

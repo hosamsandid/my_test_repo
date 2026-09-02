@@ -13,6 +13,8 @@ import {
   buildCreateMenu,
   parseMenuKey,
   railMenuItems,
+  matrixAgentsUrl,
+  mergeAgentConfigs,
 } from './rail-lifecycle.js';
 import { NO_RIGHTS_HINT, TEAM_LOCKED_HINT } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
@@ -49,6 +51,45 @@ test('showDisabled survives a throwing storage (privacy mode)', () => {
   };
   assert.equal(loadShowDisabled(boom), false);
   assert.doesNotThrow(() => saveShowDisabled(true, boom));
+});
+
+// AC6: with the opt-in off the chat must show exactly what it shows today, so
+// the default URL has to be the pre-#1928 one byte for byte — not merely an
+// equivalent one carrying `includeDisabled=0`.
+test('matrixAgentsUrl widens the list only when the opt-in is on', () => {
+  assert.equal(matrixAgentsUrl(false), '/api/matrix/agents');
+  assert.equal(matrixAgentsUrl(undefined), '/api/matrix/agents');
+  assert.equal(matrixAgentsUrl(true), '/api/matrix/agents?includeDisabled=1');
+});
+
+test('mergeAgentConfigs prefers the fuller config but keeps the chat verdict', () => {
+  const chat = [{ id: 'a', displayName: 'A', canManage: false, enabled: true }];
+  const configs = [{ id: 'a', displayName: 'A', role: 'team', labels: [{ name: 'ready' }] }];
+  const merged = mergeAgentConfigs(chat, configs);
+
+  assert.equal(merged.length, 1);
+  // The config side carries the record the menus need...
+  assert.equal(merged[0].role, 'team');
+  assert.deepEqual(merged[0].labels, [{ name: 'ready' }]);
+  // ...but only the chat payload knows whether this caller may manage it.
+  assert.equal(merged[0].canManage, false);
+});
+
+test('mergeAgentConfigs keeps rows either side is missing', () => {
+  const chat = [{ id: 'only-chat', canManage: true }];
+  const configs = [{ id: 'only-config', role: 'agent' }];
+  const ids = mergeAgentConfigs(chat, configs).map(a => a.id).sort();
+
+  // A visible chat row with no readable config must not vanish — dropping it
+  // would leave a row on screen with no menu behind it.
+  assert.deepEqual(ids, ['only-chat', 'only-config']);
+});
+
+test('mergeAgentConfigs degrades to the chat list before the configs land', () => {
+  const chat = [{ id: 'a' }, { id: 'b' }];
+  assert.deepEqual(mergeAgentConfigs(chat, null), chat);
+  assert.deepEqual(mergeAgentConfigs(chat, []), chat);
+  assert.deepEqual(mergeAgentConfigs(null, null), []);
 });
 
 test('clampMenuPosition prefers below-right of the pointer', () => {

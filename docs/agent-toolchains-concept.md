@@ -66,7 +66,10 @@ project team.
 
 ## 3. Mechanism — image selectable per Working Environment
 
-*(Child #1940.)*
+*(Child #1940 — **shipped**. The registry store, the environment field, the
+seam change, label-based eviction and respawn-on-change are live; the pure
+decision core is `orchestrator/toolchain-registry.js` ⇄ its byte-identical
+admin-console twin. No toolchain image ships with it — see §4/#1941.)*
 
 A Working Environment names a **toolchain**; agents bound to it are spawned
 from that toolchain's image. Everything else keeps using `AGENT_IMAGE` /

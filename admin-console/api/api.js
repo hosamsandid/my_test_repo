@@ -82,6 +82,16 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
+// Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
+// to orchestrator/toolchain-registry.js. The console owns the WRITE side (a
+// System Admin registering an image reference); the orchestrator reads the same
+// file at spawn time.
+const {
+  validateToolchain,
+  normalizeRegistry: normalizeToolchainRegistry,
+  normalizeRuntime: normalizeToolchainRuntime,
+  DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
+} = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
@@ -11724,6 +11734,120 @@ app.delete('/api/admin/memberships', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `memberships${adminQuery(req)}`);
 });
 
+/* ─── Agent toolchain registry (#1940, concept docs/agent-toolchains-concept.md §3)
+ *
+ * The operator-curated list of agent container images a Working Environment may
+ * select from. It exists because the alternative — a free-text image field on
+ * the environment — is a privilege-escalation path, not a convenience:
+ * `startAgentProcess` injects the environment's SSH identity, its GitHub PAT and
+ * the model credential into every agent container, so whoever types the image
+ * reference runs arbitrary code with those secrets.
+ *
+ * The authorisation split therefore copies the plugin registry rather than
+ * inventing a second model (`POST /api/plugins/:id/install`, System-Admin-only):
+ *   - a SYSTEM ADMIN registers/removes a toolchain — the only place in the whole
+ *     product where an image reference is accepted from a client;
+ *   - a TEAM ADMIN selects a registered one by ID on their environment, and can
+ *     do nothing else. `PUT /api/environments/:id` validates the id against this
+ *     registry and stores the id; the orchestrator resolves it to an image at
+ *     spawn time (orchestrator/toolchain-registry.js).
+ * Both gates are SERVER-SIDE 403s (AC6), not hidden buttons.
+ *
+ * This ticket ships the mechanism and no toolchain: the `toolchains/<id>/`
+ * source tree, `make toolchain-images` and the first JVM variant are #1941,
+ * which fills this registry rather than replacing it.
+ */
+const TOOLCHAINS_DIR = path.join(WORKSPACE, 'toolchains');
+const TOOLCHAINS_INDEX = path.join(TOOLCHAINS_DIR, 'index.json');
+
+// Re-validated on every read (the plugin-registry.js discipline) — this file is
+// the boundary that keeps a Team Admin from introducing an image reference, so a
+// hand-edited entry is rejected here too, not only at the route that wrote it.
+function listToolchains() {
+  const { toolchains } = normalizeToolchainRegistry(readJsonFile(TOOLCHAINS_INDEX, []));
+  return toolchains;
+}
+
+function saveToolchains(list) {
+  fs.mkdirSync(TOOLCHAINS_DIR, { recursive: true });
+  writeJsonAtomic(TOOLCHAINS_INDEX, list);
+}
+
+// Which environments currently select a toolchain — used to refuse a removal
+// that would leave an environment pointing at nothing (its agents would then
+// refuse to spawn with `toolchain-not-registered`, which is correct but a
+// terrible way to find out).
+function environmentsUsingToolchain(toolchainId) {
+  return listEnvironmentIds().map(loadEnvironment).filter(Boolean)
+    .filter((e) => (e.toolchainId || null) === toolchainId)
+    .map((e) => ({ id: e.id, name: e.name }));
+}
+
+// Readable by any authenticated user: a Team Admin has to see the options to
+// pick one, and an entry carries no secret (a name, a description and an image
+// reference the operator chose to publish).
+app.get('/api/toolchains', (req, res) => {
+  const toolchains = listToolchains().map((t) => ({
+    ...t,
+    environments: environmentsUsingToolchain(t.id),
+  }));
+  res.json({
+    toolchains,
+    // The installation-wide default every environment without a toolchain uses
+    // (AC1/AC9) — shown so an operator can see what "no toolchain" resolves to.
+    defaultImage: process.env.AGENT_IMAGE || BUILTIN_AGENT_IMAGE,
+    runtime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
+    canManage: !!getScope(req).all,
+  });
+});
+
+app.post('/api/toolchains', heavyLimiter, (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const v = validateToolchain(req.body || {});
+  if (!v.ok) return res.status(400).json({ error: v.errors[0], errors: v.errors });
+  const list = listToolchains();
+  if (list.some((t) => t.id === v.toolchain.id)) {
+    return res.status(409).json({ error: `Toolchain '${v.toolchain.id}' already exists` });
+  }
+  saveToolchains([...list, v.toolchain]);
+  res.status(201).json(v.toolchain);
+});
+
+app.delete('/api/toolchains/:id', heavyLimiter, (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = String(req.params.id || '');
+  const list = listToolchains();
+  if (!list.some((t) => t.id === id)) {
+    return res.status(404).json({ error: `Toolchain '${id}' not found` });
+  }
+  const usedBy = environmentsUsingToolchain(id);
+  if (usedBy.length) {
+    return res.status(409).json({
+      error: `Toolchain '${id}' is selected by ${usedBy.length} Working Environment(s): `
+        + `${usedBy.map((e) => e.name || e.id).join(', ')}. Clear it there first.`,
+      environments: usedBy,
+    });
+  }
+  saveToolchains(list.filter((t) => t.id !== id));
+  res.status(204).end();
+});
+
+// Resolve a client-supplied toolchain SELECTION (an id, never an image) against
+// the registry. A Team Admin may only name something a System Admin registered —
+// this is the enforcement point for that half of AC6, and the reason no
+// environment route ever reads an `image` field from a request body.
+function resolveToolchainSelection(toolchainId) {
+  if (toolchainId === undefined || toolchainId === null || toolchainId === '') {
+    return { toolchainId: null };
+  }
+  if (typeof toolchainId !== 'string') return { error: 'toolchainId must be a string' };
+  const found = listToolchains().find((t) => t.id === toolchainId.trim());
+  if (!found) {
+    return { error: `Toolchain '${toolchainId}' is not registered. A System Admin must add it first.` };
+  }
+  return { toolchainId: found.id };
+}
+
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
@@ -11770,7 +11894,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // (orchestrator/skill-grants.js) and lives on the agent constructs — the
   // Working Environment is a pure infrastructure template. Old clients may
   // still send the field; it is ignored so it can't silently grant anything.
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId, toolchainId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -11811,6 +11935,11 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
   if (llm.error) return res.status(400).json({ error: llm.error });
 
+  // Agent toolchain (#1940): an ID from the operator registry, resolved to an
+  // image server-side at spawn time. Never an image string from the client.
+  const toolchain = resolveToolchainSelection(toolchainId);
+  if (toolchain.error) return res.status(400).json({ error: toolchain.error });
+
   const env = {
     id,
     name,
@@ -11824,6 +11953,10 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     additionalContext: additionalContext || '',
     createdAt: new Date().toISOString(),
   };
+  // Written only when a toolchain was actually selected, so an environment
+  // without one is byte-identical to a pre-#1940 environment on disk (AC1) —
+  // the same discipline as contextMountRw (#1289).
+  if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
   saveEnvironment(id, env);
   res.status(201).json(env);
 });
@@ -11840,10 +11973,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const prevGithubTokenId = env.githubTokenId || null;
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
+  const prevToolchainId = env.toolchainId || null;
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId, toolchainId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -11893,15 +12027,32 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
   }
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
+  if (toolchainId !== undefined) {
+    const toolchain = resolveToolchainSelection(toolchainId);
+    if (toolchain.error) return res.status(400).json({ error: toolchain.error });
+    // Clearing it DELETES the key rather than storing null, so an environment
+    // that never had a toolchain — or had one and gave it up — is byte-identical
+    // to a pre-#1940 environment on disk (AC1).
+    if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
+    else delete env.toolchainId;
+  }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
-  // Spawn-time bindings (GitHub PAT, LLM provider/model) are baked into each
-  // agent container at start, so a change only takes effect on respawn. Respawn
-  // the env's running agents whenever any of them changed — otherwise a provider
-  // switch at the environment level would silently not apply until a manual
-  // disable→enable. (A per-agent override is handled by PATCH /agents/:id/provider.)
+  // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
+  // baked into each agent container at start, so a change only takes effect on
+  // respawn. Respawn the env's running agents whenever any of them changed —
+  // otherwise a provider switch at the environment level would silently not apply
+  // until a manual disable→enable. (A per-agent override is handled by
+  // PATCH /agents/:id/provider.)
+  //
+  // The toolchain (#1940 AC5) rides this exact path, and it must: a container's
+  // image is immutable for its whole lifetime, so a toolchain change reaches a
+  // RUNNING agent only by recreating it. The console warns about the interruption
+  // before the save, as the personal-credential rotate panel does.
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  } else if ((env.toolchainId || null) !== prevToolchainId) {
+    notifyEnvCredentialChange(env.id, 'toolchain-changed');
   } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');

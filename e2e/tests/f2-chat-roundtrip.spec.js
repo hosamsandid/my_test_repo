@@ -11,11 +11,11 @@
 // fixture (steps/team.js) — F1 already covers the wizard UI — and all chat
 // selectors / SSE plumbing live in steps/chat.js.
 //
-// KNOWN-RED until #253 (SSE stream miss) is fixed: the room-SSE reply-bubble
-// step may fail because the chat stream drops the message. Per §7 that is the
-// test doing its job, not a regression — do NOT quiet it, and do NOT promote
-// F2 into the F0+F1 PR gate until #253 lands. The session-log surface uses a
-// different stream and is expected green.
+// #253 (the SSE stream miss this spec was written to catch) is now FIXED, so
+// BOTH surfaces are expected green: the session-log `result` event AND the
+// room-SSE reply bubble. A red reply-bubble step is therefore a real #253-class
+// regression, not an accepted red — do NOT quiet it. (Whether to promote F2
+// into the F0+F1 PR gate is a separate call; it is no longer blocked by #253.)
 const { test, expect } = require('@playwright/test');
 const env = require('../steps/env');
 const team = require('../steps/team');
@@ -40,11 +40,6 @@ test.describe('F2: agent DM chat round-trip', () => {
   });
 
   test('reply arrives through both SSE surfaces (chat bubble + session log)', async ({ page, request }) => {
-    test.info().annotations.push({
-      type: 'issue',
-      description: 'Reply-bubble (room SSE) step is expected red until #253 is fixed — see file header.',
-    });
-
     const ctx = { page, request };
     teamId = makeRunId();
     envId = `${teamId}-fixture`;
@@ -82,7 +77,7 @@ test.describe('F2: agent DM chat round-trip', () => {
       await chat.expectSessionLogResult(ctx, { agentId, roomId, token });
     });
 
-    await test.step('room surface: the reply bubble is delivered (room SSE) [known-red until #253]', async () => {
+    await test.step('room surface: the reply bubble is delivered (room SSE)', async () => {
       await chat.expectReplyBubble(ctx, { token });
     });
   });

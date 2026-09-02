@@ -30,12 +30,12 @@ const NAV_PAGES = [
   { label: 'Access',               breadcrumb: 'Access' },
   { label: 'Skills',               breadcrumb: 'Skills Registry' },
   { label: 'Agent Templates',      breadcrumb: 'Agent Templates' },
-  { label: 'Triggers',             breadcrumb: 'Triggers' },
+  { label: 'My Credentials',       breadcrumb: 'My Credentials' },
   { label: 'GitHub Event Log',     breadcrumb: 'GitHub Event Log' },
   { label: 'Token Usage',          breadcrumb: 'Token Usage' },
   { label: 'Model Providers',      breadcrumb: 'Model Providers' },
   { label: 'MCP Servers',          breadcrumb: 'MCP Servers' },
-  { label: 'Patterns Catalog',     breadcrumb: 'Patterns Catalog' },
+  { label: 'Plugins',              breadcrumb: 'Plugins' },
   { label: 'Maintenance Mode',     breadcrumb: 'Maintenance Mode' },
 ];
 
@@ -43,9 +43,27 @@ test('F0: authenticated shell renders and every nav page mounts', async ({ page 
   await page.goto('/');
 
   // The shell chrome must be present (proves the session is valid and the SPA
-  // built): the sidebar brand and the sign-out control.
+  // built): the sidebar brand and the account-menu control (#1802 — the former
+  // bare "Sign out" control is now the account menu; Logout lives inside it).
   await expect(page.getByText('Agent Studio', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Account menu' })).toBeVisible();
+
+  // #1595: the sidebar nav is now a set of collapsible accordion groups; only
+  // the group holding the active route starts expanded, and a collapsed group
+  // unmounts its item buttons (so a click below would time out). Expand every
+  // group up front. The group headers are the only buttons carrying
+  // aria-expanded — the header-cluster "Help" button uses aria-pressed — so we
+  // toggle a header only when it reports aria-expanded="false" (already-open and
+  // non-header "Help" are skipped).
+  for (const section of ['Agent Setup', 'Connections', 'Administration', 'Help']) {
+    const headers = page.getByRole('button', { name: section, exact: true });
+    for (let i = 0; i < (await headers.count()); i++) {
+      const header = headers.nth(i);
+      if ((await header.getAttribute('aria-expanded')) === 'false') {
+        await header.click();
+      }
+    }
+  }
 
   const main = page.locator('main');
   const loadingFallback = page.getByText('Loading...', { exact: true });

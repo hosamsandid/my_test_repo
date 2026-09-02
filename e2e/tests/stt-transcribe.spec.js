@@ -15,8 +15,12 @@
 const { test, expect } = require('@playwright/test');
 const path = require('path');
 const fs = require('fs');
+const env = require('../steps/env');
+const team = require('../steps/team');
+const teardown = require('../steps/teardown');
 
 const FIXTURE_PATH = path.resolve(__dirname, '../fixtures/audio/stt-test.wav');
+const FIXTURE_REPO_URL = process.env.E2E_FIXTURE_REPO_URL || 'http://git-remote/e2e/fixture.git';
 const EXPECTED_WORDS = ['ask', 'country'];
 
 function normalize(text) {
@@ -28,6 +32,19 @@ function normalize(text) {
 }
 
 test.describe('Speech-to-Text', () => {
+  // Set by the UI test when it materialises its fixture team; the API test
+  // leaves them undefined so the afterEach teardown is a no-op after it.
+  let teamId;
+  let envId;
+
+  test.afterEach(async ({ page, request }) => {
+    if (teamId && envId) {
+      await teardown.teardownTeam({ page, request }, { teamId, envId });
+      teamId = undefined;
+      envId = undefined;
+    }
+  });
+
   test.beforeAll(async ({ request }) => {
     // Skip suite if ASR is unreachable or unhealthy.
     // Send the real fixture so a working ASR returns 200; a network error
@@ -79,23 +96,43 @@ test.describe('Speech-to-Text', () => {
     }
   });
 
-  test('UI: records via fake mic and populates textarea', async ({ page, context }) => {
-    test.setTimeout(45_000);
+  test('UI: records via fake mic and populates textarea', async ({ page, context, request }) => {
+    test.setTimeout(60_000);
 
     const errors = [];
     page.on('pageerror', (err) => errors.push(err.message));
 
     await context.grantPermissions(['microphone']);
 
-    await page.goto('/chats');
+    // The mic lives on an agent's chat composer, so this test needs an agent to
+    // open. Every other phase-1 spec tears its team down in afterEach, so the
+    // chat list is NOT guaranteed to hold one (a prior race here made the test
+    // flaky). Materialise a dedicated single-member fixture team and open ITS
+    // chat directly by id — no dependency on whichever agents happen to linger.
+    const ctx = { page, request };
+    teamId = `e2e-stt-${Date.now().toString(36)}`.slice(0, 24);
+    envId = `${teamId}-fixture`;
+    const agentId = `${teamId}-business-analyst`;
 
-    const agentOption = page.locator('[role="option"]').first();
-    await agentOption.click({ timeout: 10_000 });
+    await env.createFixtureEnv(ctx, {
+      id: envId,
+      name: `${teamId} fixture env`,
+      repoUrl: FIXTURE_REPO_URL,
+      branch: 'main',
+    });
+    await team.materializeTeam(ctx, { teamId, envId, roles: ['business-analyst'] });
 
-    const textarea = page.locator('textarea');
-    await textarea.waitFor({ state: 'visible', timeout: 10_000 });
+    await page.goto(`/chats/${agentId}`);
 
-    const micButton = page.locator('button[aria-label="Record voice message"]');
+    // Scope to the chat composer: the app-level Helper Chat panel (#1735) is
+    // always mounted (off-screen when closed), so a bare `textarea` / a
+    // "Record voice message" mic now also match its composer. The chat
+    // composer's textarea is the only one whose placeholder ends in "to send",
+    // and its dictation mic is labelled "Dictate message".
+    const textarea = page.getByPlaceholder(/Message .*to send/);
+    await textarea.waitFor({ state: 'visible', timeout: 15_000 });
+
+    const micButton = page.locator('button[aria-label="Dictate message"]');
     await micButton.waitFor({ state: 'visible', timeout: 5_000 });
 
     // Headless Chromium on macOS does not support getUserMedia even with
@@ -111,12 +148,12 @@ test.describe('Speech-to-Text', () => {
       const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
       navigator.mediaDevices.getUserMedia = async (constraints) => {
         if (constraints?.audio) {
-          const ctx = new AudioContext();
-          const audioBuffer = await ctx.decodeAudioData(wavBuffer.slice(0));
-          const source = ctx.createBufferSource();
+          const audioCtx = new AudioContext();
+          const audioBuffer = await audioCtx.decodeAudioData(wavBuffer.slice(0));
+          const source = audioCtx.createBufferSource();
           source.buffer = audioBuffer;
           source.loop = true;
-          const dest = ctx.createMediaStreamDestination();
+          const dest = audioCtx.createMediaStreamDestination();
           source.connect(dest);
           source.start();
           return dest.stream;

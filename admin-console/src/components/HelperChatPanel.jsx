@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Send, HelpCircle, MessageCircle, Compass, Mic, Square, Loader2 } from 'lucide-react';
+import { X, Send, HelpCircle, MessageCircle, Compass, Mic, Square, Loader2, FileText, ArrowLeft, ArrowUpRight } from 'lucide-react';
+import { useNavigate } from 'react-router';
 import { useHelperChat } from '../context/HelperChatContext';
 import { SafeMarkdown, ensureAgentChatMdCss, ThinkingDots } from '../pages/agent-chat/Message.jsx';
 import useVoiceRecorder from '../hooks/useVoiceRecorder.js';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
+import { pageHelpState, seeAlsoLinks, askPromptChips, askHandoff } from '../context/page-help-view.js';
 import HelperChatTour from './HelperChatTour.jsx';
 
 // Helper Chat panel (#1735, Phase 1.3). A non-blocking slide-in help assistant,
@@ -86,7 +88,10 @@ function TourCta({ onTakeTour }) {
   );
 }
 
-function SuggestedPrompts({ onPick, onTakeTour }) {
+function SuggestedPrompts({ onPick, onTakeTour, prompts }) {
+  // Page-scoped askPrompts replace the generic Overview chips when a topic is
+  // active (#1873); otherwise the static SUGGESTED_PROMPTS are the fallback.
+  const chips = (prompts && prompts.length) ? prompts : SUGGESTED_PROMPTS;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4)' }}>
       <TourCta onTakeTour={onTakeTour} />
@@ -98,7 +103,7 @@ function SuggestedPrompts({ onPick, onTakeTour }) {
         Ask anything about Agent Studio, or start with one of these:
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-        {SUGGESTED_PROMPTS.map(p => (
+        {chips.map(p => (
           <button
             key={p}
             onClick={() => onPick(p)}
@@ -158,19 +163,165 @@ function TabBar({ mode, setMode }) {
       borderBottom: '1px solid var(--eb-border-default)',
       flexShrink: 0,
     }}>
-      {tab('chat', 'Chat', MessageCircle)}
+      {tab('page', 'This page', FileText)}
+      {tab('chat', 'Ask', MessageCircle)}
       {tab('tour', 'Tour', Compass)}
     </div>
   );
 }
 
+// The "This page" face (#1873): curated per-route help — the topic's title +
+// sanitised-markdown body, its "related" links, and page-scoped question chips
+// that hand off to Ask. When the route has no dedicated topic (or the user
+// clicks the Home affordance) it renders the Overview topic instead, and the
+// "← Overview" link is hidden (it would be a no-op there).
+function PageFace({ pageHelp, route, atOverview, onHome, onNavigate, onAskPrompt }) {
+  const resolved = pageHelpState(pageHelp, route);
+  // atOverview forces the Overview home regardless of the current route.
+  const showingOverview = atOverview || resolved.isOverview;
+  const topic = atOverview ? (resolved.overview || resolved.topic) : resolved.topic;
+
+  if (!topic) {
+    return (
+      <div style={{ padding: 'var(--eb-space-4)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+        No help is available for this page yet. Try the <strong>Ask</strong> tab.
+      </div>
+    );
+  }
+
+  const links = seeAlsoLinks(topic);
+  const chips = askPromptChips(topic);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4)' }}>
+      {!showingOverview && (
+        <button
+          onClick={onHome}
+          style={{
+            alignSelf: 'flex-start',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 'var(--eb-space-1)',
+            background: 'none',
+            border: 'none',
+            color: 'var(--eb-text-secondary)',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            fontSize: 'var(--eb-text-sm)',
+            padding: 0,
+          }}
+        >
+          <ArrowLeft size={14} /> Overview
+        </button>
+      )}
+
+      <div>
+        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-lg)', fontWeight: 700, color: 'var(--eb-text-primary)' }}>
+          {topic.title}
+        </h2>
+        {topic.summary ? (
+          <p style={{ margin: 'var(--eb-space-1) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+            {topic.summary}
+          </p>
+        ) : null}
+      </div>
+
+      {topic.body ? (
+        <div className="agent-chat-md">
+          <SafeMarkdown body={topic.body} />
+        </div>
+      ) : null}
+
+      {links.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-secondary)' }}>Related</span>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
+            {links.map(l => (
+              <button
+                key={l.to}
+                onClick={() => onNavigate(l.to)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'var(--eb-bg-elevated)',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-md)',
+                  color: 'var(--eb-accent-primary)',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  fontSize: 'var(--eb-text-sm)',
+                  padding: 'var(--eb-space-1) var(--eb-space-2)',
+                }}
+              >
+                {l.label} <ArrowUpRight size={13} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {chips.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-secondary)' }}>Ask about this page</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+            {chips.map(q => (
+              <button
+                key={q}
+                onClick={() => onAskPrompt(q)}
+                style={{
+                  textAlign: 'left',
+                  background: 'var(--eb-bg-elevated)',
+                  border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-md)',
+                  color: 'var(--eb-text-primary)',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  fontSize: 'var(--eb-text-sm)',
+                  padding: 'var(--eb-space-2) var(--eb-space-3)',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'var(--eb-bg-elevated)'; }}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, pageHelp, currentRoute } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
+  const navigate = useNavigate();
   const isTour = mode === 'tour';
+  const isPage = mode === 'page';
+
+  // The "This page" face can be pinned to the Overview home via its "← Overview"
+  // link; navigating to a different route clears that pin so the face tracks the
+  // page again.
+  const [atOverview, setAtOverview] = useState(false);
+  useEffect(() => { setAtOverview(false); }, [currentRoute]);
 
   useEffect(() => { ensureAgentChatMdCss(); }, []);
+
+  // Page-scoped Ask chips: when the current route has a topic, its askPrompts
+  // seed the Ask empty state instead of the generic SUGGESTED_PROMPTS (#1873).
+  const pageTopic = pageHelpState(pageHelp, currentRoute).topic;
+  const askPrompts = askPromptChips(pageTopic);
+
+  // A "This page" chip hands off to Ask pre-seeded (concept §4): switch to the
+  // Ask face and drop the question into the composer for the user to send/edit.
+  const seedAsk = (prompt) => {
+    const { question } = askHandoff(prompt);
+    if (!question) return;
+    setComposer(question);
+    setMode('chat');
+  };
 
   // Quick voice dictation (#1779), reusing Agent Chat's shared useVoiceRecorder
   // hook (mic → record → POST /api/transcribe → text). The transcription is
@@ -262,13 +413,25 @@ export default function HelperChatPanel() {
         </button>
       </div>
 
-      {/* Tab bar: Chat / Tour */}
+      {/* Tab bar: This page / Ask / Tour */}
       <TabBar mode={mode} setMode={setMode} />
 
       {isTour ? (
         /* Tour mode */
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           <HelperChatTour />
+        </div>
+      ) : isPage ? (
+        /* "This page" face (#1873) */
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          <PageFace
+            pageHelp={pageHelp}
+            route={currentRoute}
+            atOverview={atOverview}
+            onHome={() => setAtOverview(true)}
+            onNavigate={(to) => navigate(to)}
+            onAskPrompt={seedAsk}
+          />
         </div>
       ) : (
       <>
@@ -282,6 +445,7 @@ export default function HelperChatPanel() {
             <SuggestedPrompts
               onPick={(p) => { if (!isStreaming) sendMessage(p); }}
               onTakeTour={() => setMode('tour')}
+              prompts={askPrompts}
             />
           )
           : (

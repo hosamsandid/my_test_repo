@@ -215,6 +215,34 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'access-users',
+    routes: ['/teams'],
+    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
+    // definition, the explicit *this is not an Agent Team* distinction and the
+    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
+    // records what a scope actually gates (list filtering, private agents, the
+    // 403 on management calls) and the default-team / still-owns-resources
+    // delete rules, which the page never spelled out.
+    concepts: [
+      'access scope',
+      'Agent Team',
+      'Agent Team Wizard',
+      'exactly one',
+      'System Admin',
+      'Team Admin',
+      'Team Member',
+      'default',
+      'fail-closed',
+      'updates their role in place',
+      'Lists are filtered',
+      'Private agents',
+      '403',
+      'Manage Users',
+      'Resource ownership',
+      'reassign',
+    ],
+  },
+  {
     id: 'mcp',
     routes: ['/mcp'],
     // #1883 lifted the MCP Servers intro box (the three-part servers /
@@ -241,10 +269,10 @@ const TOPIC_CONTENT = [
       'Detach it there first',
     ],
   },
-  // Append point — every Phase-3 sibling adds its entry here, so two tickets in
-  // flight always conflict on this spot. Resolve by keeping BOTH entries in
-  // ticket order (… #1879 plugins, #1880 environments, #1883 mcp …), never by
-  // taking one side.
+  // Append point — every Phase-3 extraction ticket adds its entry at this tail,
+  // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
+  // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
+  // E6 environments, E7 access-users, E9 mcp …), never by dropping one.
 ];
 
 const registry = loadRegistry();

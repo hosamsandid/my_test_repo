@@ -302,6 +302,39 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'credentials',
+    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
+    // SetupWizard's two credential steps). The topic additionally records what
+    // no box said: the three ownership tiers, the strict personal privacy
+    // guarantee, the per-operation-class runtime resolution order with
+    // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
+    concepts: [
+      'SSH key',
+      'GitHub token',
+      'deploy key',
+      'defense-in-depth',
+      'blast-radius',
+      'GH_TOKEN',
+      'fingerprint',
+      'Personal',
+      'Team',
+      'System',
+      'only the owner',
+      'break-glass',
+      'attributed writes',
+      'Event polling',
+      'preference among tiers',
+      'refused',
+      'rotate in place',
+      'create-new-and-repoint',
+      'Used by',
+      'read:org',
+      'SAML SSO',
+    ],
+  },
+  {
     id: 'token-usage',
     routes: ['/token-usage'],
     // #1885 lifted the Token Usage intro banner (what the page shows + how the
@@ -486,12 +519,57 @@ const TOPIC_CONTENT = [
       'System Admin',
     ],
   },
+  {
+    id: 'users',
+    routes: ['/users'],
+    // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
+    // page intro box (records vs memberships, the global System-Admin flag) and
+    // adds what no surface said: the immutable subject, the user-store-then-env
+    // login order, and that Delete is an offboarding which pauses the person's
+    // agents and deletes their personal credentials first.
+    concepts: [
+      'Subject',
+      'immutable',
+      'System Admin',
+      'Team Admin',
+      'membership',
+      'fail-closed',
+      'password',
+      'ADMIN_USERNAME',
+      'offboarding',
+      'paused',
+      'personal SSH keys',
+      'best-effort',
+      'Access',
+    ],
+  },
+  {
+    id: 'about',
+    routes: ['/about'],
+    // #1891 (E16) — a net-new baseline topic for a page that never had help.
+    // What the version string actually is, how the contributor list is derived
+    // (and why a name can be missing), the CC-BY-4.0 attribution obligation,
+    // and where to take a problem report given there is no feedback form.
+    concepts: [
+      'git commit',
+      'not a release number',
+      '-dirty',
+      'unknown',
+      'build time',
+      'agents.local',
+      'commit count',
+      'Parakeet',
+      'CC-BY-4.0',
+      'no in-app feedback form',
+      'GitHub Event Log',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users, E8 models, E9 mcp, E11 token-usage,
-  // E12 github-events, E13 maintenance-mode, E14 create / team-setup /
-  // role-templates …), never by dropping one.
+  // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
+  // E11 token-usage, E12 github-events, E13 maintenance-mode, E14 create /
+  // team-setup / role-templates, E16 users / about …), never by dropping one.
 ];
 
 const registry = loadRegistry();

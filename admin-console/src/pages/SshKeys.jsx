@@ -9,6 +9,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
@@ -581,27 +582,24 @@ export default function SshKeys() {
       {headerAction}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        lineHeight: '1.6',
+      {/* The intro box + the repeated "Why both an SSH key and a GitHub Token?"
+          note moved into the shared Credentials help topic in E10 (#1884):
+          api/helper-chat/help-topics/credentials.md, claimed by all three
+          credential routes. It carries the SSH-vs-PAT blast-radius rationale,
+          the ownership tiers, the runtime resolution order and the rotation /
+          deletion rules. The create dialogs keep their one-time-secret warning
+          and SAML-SSO steps at the point of decision. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
-        <strong>SSH keys</strong> allow agents to authenticate to Git repositories via SSH — for example to clone a private GitHub Enterprise repository.
-        You register the <em>private</em> key here; the corresponding <em>public</em> key must be added to the Git host (e.g. GitHub → Settings → SSH and GPG keys).
-        Each Working Environment can be linked to one key per repository.
-        The private key is stored securely in the workspace volume and is <strong>never</strong> returned by the API — only its fingerprint is shown afterwards.
-        <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)', color: 'var(--eb-text-muted)' }}>
-          <strong>Why both an SSH key and a GitHub Token?</strong> Defense-in-depth: the SSH key handles repo
-          read (clone / fetch) and can be a per-repo read-only deploy key; the GitHub Token handles API
-          actions and writes (push, PR creation, event polling). Splitting them keeps the blast radius of
-          a leaked credential narrow — a stolen deploy key can't merge PRs, a stolen PAT didn't already
-          grant the initial clone.
-        </div>
-      </div>
+        <span>
+          Shared team and platform SSH keys — the private keys that authenticate git transport
+          for the repositories your Working Environments clone.
+        </span>
+        <PageHelpButton label="Why both an SSH key and a GitHub token?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>

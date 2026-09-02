@@ -11,6 +11,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import GithubTokenHint from '../components/GithubTokenHint';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
@@ -426,26 +427,22 @@ export default function GithubTokens() {
       {headerAction}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        lineHeight: '1.6',
+      {/* Intro box + the mirrored "Why both a GitHub Token and an SSH key?"
+          note extracted in E10 (#1884) into the shared Credentials help topic
+          (api/helper-chat/help-topics/credentials.md), which all three
+          credential routes claim. The create dialog keeps GitHub's
+          shown-only-once warning, the scope checklist and the SAML-SSO step. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
-        <strong>GitHub Personal Access Tokens (PAT)</strong> allow agents to interact with GitHub — for example to push commits, open pull requests, or use the <code>gh</code> CLI.
-        Once a token is linked to a Working Environment it is injected as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code> into every agent process in that environment.
-        The raw token value is stored securely and is <strong>never</strong> returned by the API after creation — only a preview (prefix + last 4 characters) and a fingerprint are displayed.
-        <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)', color: 'var(--eb-text-muted)' }}>
-          <strong>Why both a GitHub Token and an SSH key?</strong> Defense-in-depth: the SSH key handles repo
-          read (clone / fetch) and can be a per-repo read-only deploy key; the PAT handles API actions and
-          writes (push, PR creation, event polling) — broader scope, higher blast radius. Keeping the two
-          separate means a leaked PAT didn't already grant the initial clone, and a leaked deploy key
-          can't merge PRs.
-        </div>
-      </div>
+        <span>
+          Shared team and platform GitHub Personal Access Tokens — injected as <code>GH_TOKEN</code> /{' '}
+          <code>GITHUB_TOKEN</code> into every agent of the Working Environment they are linked to.
+        </span>
+        <PageHelpButton label="Why both a GitHub token and an SSH key?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>

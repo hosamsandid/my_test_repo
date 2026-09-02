@@ -43,7 +43,7 @@ test('agentState distinguishes stub / paused / active', () => {
 test('a standalone agent offers the full AC1 action set', () => {
   const items = buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true } });
   assert.deepEqual(keys(items), [
-    'toggle-enabled', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
   ]);
   assert.ok(items.every(i => !i.disabled));
 });
@@ -73,12 +73,12 @@ test('reset-to-stub carries the wipe warning, not a bare label', () => {
 
 test('a bp-instance gets no clone / save-as-template entry (edge case)', () => {
   const items = buildAgentMenu({ agent: { role: 'bp-instance', hasToken: true, enabled: true } });
-  assert.deepEqual(keys(items), ['toggle-enabled', 'reset-to-stub', 'delete']);
+  assert.deepEqual(keys(items), ['toggle-enabled', 'settings', 'reset-to-stub', 'delete']);
 });
 
 test('an orchestrator may be exported but not cloned or templated', () => {
   const items = buildAgentMenu({ agent: { role: 'orchestrator', hasToken: true, enabled: true } });
-  assert.deepEqual(keys(items), ['toggle-enabled', 'export', 'reset-to-stub', 'delete']);
+  assert.deepEqual(keys(items), ['toggle-enabled', 'settings', 'export', 'reset-to-stub', 'delete']);
 });
 
 test('a stub is not exportable and its clone/template/reset entries are inert', () => {
@@ -108,7 +108,7 @@ test('AC8 — without management rights every mutating entry is inert with a hin
     agent: { role: 'agent', hasToken: true, enabled: true },
     canManage: false,
   });
-  for (const key of ['toggle-enabled', 'clone', 'extract-template', 'reset-to-stub', 'delete']) {
+  for (const key of ['toggle-enabled', 'settings', 'clone', 'extract-template', 'reset-to-stub', 'delete']) {
     assert.equal(byKey(items, key).disabled, true, `${key} should be inert`);
     assert.equal(byKey(items, key).title, NO_RIGHTS_HINT, `${key} should explain why`);
   }
@@ -178,7 +178,12 @@ test('AC8 — team mutations are inert without rights; navigation stays live', (
     assert.equal(byKey(items, key).disabled, true, `${key} should be inert`);
     assert.equal(byKey(items, key).title, NO_RIGHTS_HINT);
   }
-  for (const key of ['edit-team', 'export-team', 'open-flow-editor']) {
+  // `edit-team` joined the gated set in #1929: it no longer navigates to a
+  // page that re-applies its own rules, it opens the chat's Settings tab —
+  // which is hidden for exactly this caller, so a live entry would open nothing.
+  assert.equal(byKey(items, 'edit-team').disabled, true, 'edit-team should be inert');
+  assert.equal(byKey(items, 'edit-team').title, NO_RIGHTS_HINT);
+  for (const key of ['export-team', 'open-flow-editor']) {
     assert.equal(byKey(items, key).disabled, false, `${key} should stay live`);
   }
 });

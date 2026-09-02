@@ -192,7 +192,7 @@ test('railMenuItems routes each target kind to its own menu', () => {
   const solo = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
   assert.equal(solo.label, 'Actions for Solo');
   assert.deepEqual(solo.items.map(i => i.key), [
-    'toggle-enabled', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
   ]);
 
   const team = railMenuItems({

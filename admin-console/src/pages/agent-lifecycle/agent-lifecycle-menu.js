@@ -99,6 +99,15 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     ...gate(locked, locked ? TEAM_LOCKED_HINT : undefined),
   });
 
+  // Configuration (#1929). Gated like a mutating entry even though choosing it
+  // only opens a surface: the Settings tab is hidden for a caller who may not
+  // manage the agent, so an ungated entry would open nothing at all.
+  items.push({
+    key: 'settings',
+    label: 'Settings…',
+    ...gate(false, 'Opens this agent\'s configuration in the right rail.'),
+  });
+
   if (CLONEABLE_ROLES.has(role)) {
     items.push({
       key: 'clone',
@@ -190,16 +199,14 @@ export function buildTeamMenu({ team, teamId, canManage = true, busy = false, mi
     });
   }
 
-  // Navigation entries are never gated: they only open a surface that applies
-  // its own rules (the edit form / the Flow Editor).
+  // Phase 2 (#1929) replaced Phase 1's jump to the Agents page: the team's own
+  // edit form now opens in the chat's Settings tab, which is where AC5 wants
+  // team settings reachable from. Gated like the mutating entries because that
+  // tab is hidden for a caller who may not manage the team.
   items.push({
     key: 'edit-team',
-    label: 'Edit team…',
-    disabled: false,
-    // Phase 1 answer to open question 3: a navigation to the existing edit
-    // surface, not a second copy of the form in the chat (the in-chat settings
-    // tab is Phase 2). Say where it goes so the jump isn't a surprise.
-    title: 'Opens the Agents page, where the team is edited.',
+    label: 'Team settings…',
+    ...gate(false, 'Opens the team\'s configuration in the right rail.'),
   });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });

@@ -121,11 +121,11 @@ const ALLOWLIST = new Set([
 // PR authoring exactly these routes' topic.
 const TOPIC_PENDING = {
   '/chats': '#1889 (E15 Agent Chat side-panels)',
-  '/create': '#1888 (E14 Creation & onboarding)',
-  '/quickstart': '#1888 (E14 Creation & onboarding)',
-  '/team-setup': '#1888 (E14 Creation & onboarding)',
-  '/wizard/team': '#1888 (E14 Creation & onboarding) — via the /team-setup alias',
-  '/role-templates': '#1888 (E14 Creation & onboarding)',
+  // Discharged as their topics landed: E10 (#1884) covers /ssh-keys,
+  // /github-tokens and /my-credentials (credentials.md), and E14 (#1888) covers
+  // /create + /quickstart (create.md), /team-setup (team-setup.md, with
+  // /wizard/team as its alias) and /role-templates (role-templates.md).
+  // /chats above is the last one owing a topic.
 };
 
 // The full set of routes the help system knows about — every App.jsx path must

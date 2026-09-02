@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Plus, Trash2, RotateCcw, AlertTriangle } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
+import PageHelpButton from '../components/PageHelpButton';
 import { usePageActions } from '../context/PageActionsContext';
 
 // Keys the structured form owns directly; everything else on a template
@@ -192,10 +193,10 @@ function Editor({ initial, origin, onSaved, onClose }) {
           <option value="persistent">persistent — triggered runs resume the last conversation</option>
           <option value="per-invocation">per-invocation — each triggered run starts fresh (no --resume)</option>
         </select>
-        <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-          <strong>per-invocation</strong> agents are marked autonomous: they receive trigger-management documentation in their system prompt and the entrypoint invokes Claude fresh on every trigger.
-          <strong> persistent</strong> agents resume their last session on each trigger.
-        </div>
+        {/* E14 (#1888): the consequence of per-invocation (marked autonomous →
+            trigger-management docs in the prompt, fresh invocation, lessons must
+            go to memory) is in the role-templates topic. The option labels stay —
+            they are the live choice. */}
       </Field>
 
       <Field label="Prompt">
@@ -278,8 +279,18 @@ export default function RoleTemplates() {
     <>
       {headerAction}
       <div style={{ maxWidth: 1100 }}>
-      <p style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', marginTop: 0, marginBottom: 'var(--eb-space-4)', maxWidth: 720 }}>
-        Predefined agents used by the Team-Setup wizard and Flow editor. Edits create a stored override that shadows the built-in default and survives a redeploy or re-seed. Changing a template only affects <strong>future</strong> team members — already-created agents are independent.
+      {/* The page has no <h1> of its own (the Shell header supplies it), so the
+          one-line description + "?" is the body's first child — same header
+          pattern as Token Usage / GitHub Event Log. The override-vs-built-in
+          mechanics and the future-agents-only rule are the role-templates help
+          topic (E14, #1888). */}
+      <p style={{
+        color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)',
+        marginTop: 0, marginBottom: 'var(--eb-space-4)', maxWidth: 720,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+      }}>
+        <span>Reusable agent definitions the Team-Setup wizard and the Flow editor build agents from.</span>
+        <PageHelpButton label="What is an Agent Template?" size={14} style={{ padding: 0, flexShrink: 0 }} />
       </p>
 
       {actionError && (

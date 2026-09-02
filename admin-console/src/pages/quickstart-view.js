@@ -142,22 +142,20 @@ export function quickstartSubmitReasons({
 // team") — never as an either/or the user must classify up front. Held here as
 // data so the reframing is unit-testable and QuickStart.jsx stays a thin
 // renderer (#651 convention).
+// E14 of epic #1870 (#1888) removed the second, near-duplicate paragraph
+// (`detail`) and shortened the team-of-one note: what the two submit paths
+// actually create — which fields each one uses, the environment/agent reuse, the
+// prerequisites — is the `create` help topic, reachable from the page's "?".
 export const QUICKSTART_COPY = {
   heading: 'Chat with one assistant',
   intro:
     'Name your assistant, pick a model provider, and start chatting. Point it at a '
     + 'GitHub repository if you want it to read code — that part is optional.',
-  // Factual description of what the fast lane does — no wrong-mode nudge.
-  detail:
-    'Creates a single chat assistant you can talk to right away. Add a repository and '
-    + 'it clones the code and can answer questions about it (SSH key + GitHub token '
-    + 'required); leave it empty for a repo-less assistant.',
   // A single agent is simply a team of one — growing into a full team is an
   // optional next step, never a mode you should have chosen instead (AC1/AC3).
-  teamOfOneNote:
-    'A single agent is simply a team of one. When you want reviewers, a developer, '
-    + 'or a full development workflow, you can grow into a complete team — nothing to '
-    + 'decide up front.',
+  // The framing stays on the page (it is what keeps the fast lane from reading as
+  // a separate mode); the "what growing means" detail lives in the topic.
+  teamOfOneNote: 'A single agent is simply a team of one.',
   growCtaLabel: 'Grow into a full team',
 };
 

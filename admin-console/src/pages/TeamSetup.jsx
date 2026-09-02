@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import SkillPicker from '../components/SkillPicker';
+import PageHelpButton from '../components/PageHelpButton';
 import KnowledgeLearningSections, {
   KNOWLEDGE_LEARNING_DEFAULTS, AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS,
 } from '../components/KnowledgeLearningConfig';
@@ -17,7 +18,6 @@ import { buildReviewFields } from './team-setup/review-fields';
 // progress/collision/error feedback; the wizard collects the team identity on
 // its earlier steps and shows only the extend / materialize-now toggles here.
 import LaunchStep from './process/LaunchStep';
-import PageHelpButton from '../components/PageHelpButton';
 import { useHelpSubject } from '../context/HelperChatContext.jsx';
 
 const inputStyle = {
@@ -417,12 +417,11 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
           lineHeight: 1.6,
           display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
         }}>
+          {/* E14 (#1888): the step's own restatement of what the wizard builds is
+              gone — that belongs to the team-setup topic. What remains is the one
+              line that names the immediate input. */}
           <p style={{ margin: 0 }}>
-            Sets up a coordinated team of agents — Business Analyst, Developer, Code Reviewer, and more — all
-            wired to one GitHub repository and ready to react to issues and pull requests automatically.
-          </p>
-          <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-            Pick the <strong style={{ color: 'var(--eb-text-secondary)' }}>Working Environment</strong> the team
+            Pick the <strong style={{ color: 'var(--eb-text-primary)' }}>Working Environment</strong> the team
             works in — it already bundles the repository, credentials and knowledge sources.
           </p>
         </div>
@@ -499,11 +498,10 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
         <div>
           <div style={labelStyle}>Initial team skills ({(form.skills || []).length})</div>
+          {/* E14 (#1888): why only global skills are offered here (the team-tier
+              pool does not exist yet) is in the team-setup topic. */}
           <div style={{ ...hintStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-            Skills from the global pool the whole team starts with — placed on the team agent, so every member
-            inherits them unless it overrides. Only global skills are offered here because the team's own
-            skill pool does not exist yet; a team-tier pool appears once the team is created, and you can then
-            grant from it on the team's card on the Agents page.
+            Skills from the global pool the whole team starts with — every member inherits them.
           </div>
           <SkillPicker
             skills={poolSkills || []}
@@ -511,13 +509,15 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
             onChange={v => setForm(f => ({ ...f, skills: v }))}
           />
         </div>
+        {/* E14 (#1888): what an MCP knowledge source is, why the set is read-only
+            here and where per-member overrides happen moved to the topic. The
+            live pointer (which environment it comes from, how to change it, and
+            that the step is optional) stays — it guides this step's decision. */}
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
-          Knowledge sources are MCP servers the team can query at runtime — wiki, vector store, graph DB, etc.
-          They are inherited from the working environment{env ? <> <strong style={{ color: 'var(--eb-text-primary)' }}>{env.name}</strong></> : null}.
-          To change them, edit the environment at{' '}
-          <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
-          {' '}— per-member overrides come later via the agent edit form.
-          {' '}<strong style={{ color: 'var(--eb-text-primary)' }}>This step is optional</strong> — if the inherited set looks right (or the team needs none), just continue.
+          Knowledge sources are inherited read-only from the working environment{env ? <> <strong style={{ color: 'var(--eb-text-primary)' }}>{env.name}</strong></> : null};
+          change them at{' '}
+          <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>.
+          {' '}<strong style={{ color: 'var(--eb-text-primary)' }}>This step is optional</strong> — just continue if the inherited set looks right.
         </div>
         <div>
           <div style={labelStyle}>Knowledge sources ({knowledge.length})</div>
@@ -672,6 +672,12 @@ function StepReview({ form, environments, sshKeys, githubTokens, mcpServers, mcp
 // spins up autonomous agents that go live at once. Uses the repo convention for
 // warning text-on-bg (color:--eb-status-warning on --eb-status-warning-bg; no
 // -text token exists — see Agents.jsx truncation banner).
+//
+// E14 (#1888) KEPT this notice: it states the consequence of a consequential
+// click, the same reason the Model-Provider single-user rule and the Token-Usage
+// cost note stayed on their pages. Only the follow-up advice (staging the
+// rollout by disabling members on the Agents page) moved into the team-setup
+// topic, reachable from the "?" next to the heading.
 function GoLiveNotice({ agentCount, repoLabel }) {
   const agents = agentCount > 0 ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : 'the team’s agents';
   return (
@@ -687,14 +693,17 @@ function GoLiveNotice({ agentCount, repoLabel }) {
     }}>
       <AlertTriangle size={18} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
       <div>
-        <div style={{ fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', marginBottom: 'var(--eb-space-1)' }}>
+        <div style={{
+          fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)',
+          marginBottom: 'var(--eb-space-1)', display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        }}>
           What happens next
+          <PageHelpButton label="What does Create team provision?" size={13} style={{ padding: 0, flexShrink: 0, color: 'var(--eb-status-warning)' }} />
         </div>
         <p style={{ margin: 0 }}>
           Creating the team provisions {agents} that go live immediately and begin watching{' '}
           {repoLabel ? <code>{repoLabel}</code> : 'the bound repository'} for issues and pull requests,
-          acting autonomously from that moment. You can disable individual agents afterwards on the{' '}
-          <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> page.
+          acting autonomously from that moment.
         </p>
       </div>
     </div>
@@ -932,34 +941,32 @@ export default function TeamSetup() {
   return (
     <div style={{ maxWidth: 880, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <h2 style={{
-            fontSize: 'var(--eb-text-2xl)',
-            fontWeight: 'var(--eb-font-semibold)',
-            margin: 0,
-            color: 'var(--eb-text-primary)',
-          }}>
-            Agent Team Wizard
-          </h2>
-          {/* Help follows the current step, not just the route (#1892). */}
-          <PageHelpButton label="Help for this wizard step" size={15} style={{ padding: 0 }} />
-        </div>
+        <h2 style={{
+          fontSize: 'var(--eb-text-2xl)',
+          fontWeight: 'var(--eb-font-semibold)',
+          margin: 0,
+          color: 'var(--eb-text-primary)',
+        }}>
+          Agent Team Wizard
+        </h2>
+        {/* One-line description + "?" (E14, #1888). The Agent-Team-vs-access-scope
+            distinction and what each step decides live in the team-setup topic.
+            The "?" follows the current step, not just the route (E17, #1892):
+            useHelpSubject() above publishes the step, so this one button resolves
+            to the step's help — no second affordance next to the title. */}
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
           marginTop: 'var(--eb-space-2)',
           marginBottom: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
         }}>
-          Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.
-        </p>
-        <p style={{
-          fontSize: 'var(--eb-text-sm)',
-          color: 'var(--eb-text-muted)',
-          marginTop: 'var(--eb-space-2)',
-          marginBottom: 0,
-        }}>
-          This builds an <strong>Agent Team</strong> (a squad of agents) — not the same as a human{' '}
-          <Link to="/teams" style={{ color: 'var(--eb-accent-primary)' }}>Team</Link> (members &amp; access scope).
+          <span>
+            Spin up a complete agent team — Business Analyst, Developer, Reviewers, and more — bound to one repository, in one shot.
+          </span>
+          <PageHelpButton label="What do these steps do, and what gets created?" size={14} style={{ padding: 0, flexShrink: 0 }} />
         </p>
       </div>
 

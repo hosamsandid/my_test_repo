@@ -4,7 +4,7 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -25,6 +25,7 @@ import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { useModelSelection } from '../context/ModelSelectionContext';
 import { breadcrumbFor } from './breadcrumbs';
+import { PageActionsContext } from '../context/PageActionsContext';
 import { formatVersionLabel } from './version-info';
 import { formatCommitTimestamp } from './version-info';
 
@@ -112,8 +113,9 @@ function GroupHeader({ label, expanded, onToggle }) {
 // Sidebar information architecture, re-cut by user task (#1595). Two tiers:
 //   • NAV_TOP     — ungrouped, primary/daily (Agent Chat, with its badges).
 //   • NAV_GROUPS  — collapsible accordions in workflow order (key = accordion +
-//                   persistence id; `section` = header label). Help is the final
-//                   group; the dynamic Plugins group is inserted just before it.
+//                   persistence id; `section` = header label). The dynamic
+//                   Plugins group is appended after them at runtime. There is no
+//                   Help group: help lives in the header Help panel (#1874).
 // Role gating (`adminOnly` / `credAdmin`) is unchanged from the old flat NAV.
 // Dynamically-appended UI-plugin entries (incl. the Patterns Catalog, now a
 // plugin) are added at runtime below — see `pluginSection`.
@@ -155,12 +157,6 @@ const NAV_GROUPS = [
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
   ]},
-  // Help is a normal collapsible section at the tail of the nav — part of the
-  // scrolling accordion, not a pinned bottom cluster. The dynamic Plugins group
-  // is inserted just before it at runtime so Help stays the final section.
-  { key: 'help', section: 'Help', items: [
-    { path: '/getting-started', label: 'Getting Started', Icon: Compass },
-  ]},
 ];
 
 const NAV_GROUP_KEYS = NAV_GROUPS.map(g => g.key);
@@ -174,6 +170,8 @@ const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
+  // DOM node of the page-actions slot in the header; pages portal into it.
+  const [pageActionsSlot, setPageActionsSlot] = useState(null);
   // User Settings modal (#1802) — opened from the header account menu.
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Optional deep-link section for the Settings modal: the assist-error nudge
@@ -276,15 +274,10 @@ export default function Shell({ children }) {
       }
     : null;
 
-  // The full accordion list = static groups + the dynamic plugins group (when
-  // any UI plugins resolve), inserted just before the trailing Help group so Help
-  // stays the final nav section. Drives both active-group auto-expand and rendering.
-  const allGroups = (() => {
-    if (!pluginSection) return groups;
-    const helpIdx = groups.findIndex(g => g.key === 'help');
-    if (helpIdx === -1) return [...groups, pluginSection];
-    return [...groups.slice(0, helpIdx), pluginSection, ...groups.slice(helpIdx)];
-  })();
+  // The full accordion list = static groups + the dynamic plugins group (when any
+  // UI plugins resolve) appended last, so a long plugin list folds away at the tail
+  // of the nav. Drives both active-group auto-expand and rendering.
+  const allGroups = pluginSection ? [...groups, pluginSection] : groups;
 
   // ── Collapsible group state (#1595) ──────────────────────────────────
   // Which group holds the active route (auto-expanded on load / deep-link /
@@ -413,6 +406,7 @@ export default function Shell({ children }) {
   };
 
   return (
+    <PageActionsContext.Provider value={pageActionsSlot}>
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
 
       {/* ── Sidebar ──────────────────────────────────────────────────── */}
@@ -600,16 +594,37 @@ export default function Shell({ children }) {
           height: 'var(--eb-header-height)',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
+          gap: 'var(--eb-space-3)',
           padding: '0 var(--eb-space-6)',
           borderBottom: '1px solid var(--eb-border-default)',
           background: 'var(--eb-bg-surface)',
           flexShrink: 0,
+          minWidth: 0,
         }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {/* Page title — bold, primary colour; acts as the accessible h1 for
+              the current route. Truncates on narrow viewports so actions/controls
+              on the right never get pushed off-screen. */}
+          <h1 style={{
+            margin: 0,
+            flex: '1 1 0',
+            minWidth: 0,
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-semibold)',
+            color: 'var(--eb-text-primary)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
             {breadcrumbFor(location.pathname)}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexShrink: 0 }}>
+            {/* Page-actions slot: pages portal their primary action button(s)
+                here via usePageActions(); the ref callback captures the DOM node
+                once and stores it in pageActionsSlot so portals can mount. */}
+            <div
+              ref={el => { if (el && el !== pageActionsSlot) setPageActionsSlot(el); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
+            />
             <button
               onClick={onHelpClick}
               title="Help — this page, ask a question, or take the tour"
@@ -673,5 +688,6 @@ export default function Shell({ children }) {
         onClose={() => { setSettingsOpen(false); setSettingsSection(null); }}
       />
     </div>
+    </PageActionsContext.Provider>
   );
 }

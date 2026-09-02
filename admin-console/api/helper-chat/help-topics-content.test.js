@@ -155,6 +155,97 @@ const TOPIC_CONTENT = [
       'distilled from the best knowledge',
     ],
   },
+  {
+    id: 'plugins',
+    routes: ['/plugins'],
+    // #1879 lifted these from the Plugins page intro AND from the whole
+    // standalone /plugin-system page, which the same ticket REMOVED outright
+    // (concept §9) — so for the build-a-plugin material this topic is not just
+    // the best home, it is the only one left in the product.
+    concepts: [
+      'broker',
+      'Install',
+      'Grant',
+      'System Admin',
+      'Team Admin',
+      'inherited',
+      'closed enum',
+      'podman-socket',
+      'not available on this stack',
+      'scope granularity',
+      'Per team',
+      'Per agent',
+      'quota',
+      'without respawning',
+      'session log',
+      'embeds it inside the same window',
+      'minRole',
+      'agent plugin',
+      'plugin.json',
+      'requiresApproval',
+      'audit log',
+      'teardown',
+      'broker unreachable',
+      'submit → poll',
+      'Broker SDK',
+    ],
+  },
+  {
+    id: 'environments',
+    routes: ['/environments'],
+    // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe
+    // definition, what an agent inherits (repos / token / MCP refs / provider /
+    // additional instructions), the shared-recipe-but-own-workspace point, the
+    // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
+    // Sync-all-agents caveat.
+    concepts: [
+      'reusable workspace recipe',
+      'own isolated workspace',
+      'Git repositories',
+      'GitHub token',
+      'MCP servers',
+      'Model provider',
+      'Additional instructions',
+      'no repository at all',
+      'SSH key',
+      'HTTPS',
+      'Read-only',
+      'newly created agents',
+      'Sync all agents',
+    ],
+  },
+  {
+    id: 'access-users',
+    routes: ['/teams'],
+    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
+    // definition, the explicit *this is not an Agent Team* distinction and the
+    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
+    // records what a scope actually gates (list filtering, private agents, the
+    // 403 on management calls) and the default-team / still-owns-resources
+    // delete rules, which the page never spelled out.
+    concepts: [
+      'access scope',
+      'Agent Team',
+      'Agent Team Wizard',
+      'exactly one',
+      'System Admin',
+      'Team Admin',
+      'Team Member',
+      'default',
+      'fail-closed',
+      'updates their role in place',
+      'Lists are filtered',
+      'Private agents',
+      '403',
+      'Manage Users',
+      'Resource ownership',
+      'reassign',
+    ],
+  },
+  // Append point — every Phase-3 extraction ticket adds its entry at this tail,
+  // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
+  // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
+  // E6 environments, E7 access-users …), never by dropping one.
 ];
 
 const registry = loadRegistry();

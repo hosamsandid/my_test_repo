@@ -10,6 +10,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
 import { groupAgentsForOwnership } from './teams-ownership';
@@ -459,17 +460,23 @@ export default function Teams() {
       {headerAction}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)', background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
+      {/* One-line description + the "?" that opens this page's help topic. The
+          intro box that used to sit here — the access-scope definition, the
+          Team-vs-Agent-Team distinction and the role list — now lives in that
+          topic (api/helper-chat/help-topics/access-users.md, #1881), together
+          with what a scope actually gates and the delete/ownership rules. The
+          role hints inside the Manage panel stay at the point of decision. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
-        This section manages <strong>access scopes</strong> and the <strong>human users</strong> in them. A scope — internally a
-        <strong> Team</strong> — is a <em>human</em> collaboration &amp; visibility tenant: every agent, Agent Team, orchestrator and
-        Working Environment is owned by exactly one. Add human users as <strong>Team Admins</strong> or <strong>Team Members</strong>;
-        <strong> System Admins</strong> have global access. This is <em>not</em> the <em>Agent Team</em> construct (a squad of agents)
-        created via the Agent Team Wizard.
-      </div>
+        <span>
+          Access scopes — internally <strong>Teams</strong> — are the human tenants that own your
+          agents, environments and credentials, plus the people who may see and manage them.
+        </span>
+        <PageHelpButton label="What is an access scope, and how does it differ from an Agent Team?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />
 

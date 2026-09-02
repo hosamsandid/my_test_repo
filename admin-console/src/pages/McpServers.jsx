@@ -387,8 +387,7 @@ export default function McpServers() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-6)' }}>
       <div>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>MCP Servers</h1>
-        <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 'var(--eb-space-2)', marginBottom: 0, lineHeight: 1.6 }}>
+        <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, marginBottom: 0, lineHeight: 1.6 }}>
           Configure runtime knowledge sources (wiki, vector store, graph DB, …) that agents can query through the
           Model Context Protocol. It's a three-part model: <strong>servers</strong> describe <em>how</em> to launch a
           backend and mark where a secret goes with the <code style={monoStyle}>${'${credential}'}</code> placeholder;

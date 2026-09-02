@@ -61,7 +61,14 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
     fontWeight: 'var(--eb-font-medium)',
     background: bg, color,
     border: `1px solid ${color}`,
-    whiteSpace: 'nowrap',
+    // Wrap within the bounded Outcomes column (#1898): the label wraps at its
+    // spaces, and a long unbroken token (e.g. a long agent id) breaks rather
+    // than overflowing and forcing a horizontal scrollbar (AC5/AC6). Capped at
+    // the cell width so no single chip can widen the table.
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+    maxWidth: '100%',
   };
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
@@ -147,8 +154,11 @@ function WorkItemCell({ workItem, repo }) {
   const text = `#${workItem.number}`;
   const kindLabel = workItem.kind === 'pr' ? 'PR' : 'issue';
   const closes = <ClosesRefs closesIssues={workItem.closesIssues} repo={repo} />;
+  // No forced nowrap here (#1898): the column wraps, so the `#<n>` and its
+  // trailing `→ closes #<issue>` reference may flow onto a second line rather
+  // than widening the table.
   return (
-    <span style={{ whiteSpace: 'nowrap' }}>
+    <span>
       {workItem.url ? (
         <a
           href={workItem.url}
@@ -177,24 +187,14 @@ function TypeCell({ workItem }) {
   return <span>{label}</span>;
 }
 
-/* ── Title cell (#1827) — the work-item title, truncated with the full
-   text on hover so a long title never wraps and stretches the row. */
+/* ── Title cell (#1827; wraps as of #1898) — the work-item title. Its column
+   opts into DataTable `wrap`, so instead of truncating to a fixed width the
+   title now wraps onto multiple lines within the column (AC4), keeping the
+   table at 100% width with no horizontal scrollbar. The full text is still
+   offered on hover. */
 function TitleCell({ title }) {
   if (!title) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
-  return (
-    <span
-      title={title}
-      style={{
-        display: 'block',
-        maxWidth: 340,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {title}
-    </span>
-  );
+  return <span title={title}>{title}</span>;
 }
 
 /* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
@@ -341,8 +341,13 @@ function ProcessedEventsView() {
     // inferred from the Event wording. Driven by workItem.kind (its own flat
     // 'workItemType' key so it sorts/filters); work-item-less rows show `—`.
     { key: 'workItemType', label: 'Type', render: (_v, row) => <TypeCell workItem={row.workItem} /> },
-    { key: 'workItemNumber', label: 'Work item', render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
-    { key: 'workItemTitle', label: 'Title', render: v => <TitleCell title={v} /> },
+    // Work item / Title / Outcomes opt into per-column wrap (#1898, same
+    // DataTable flag as Triggers #1643) so their long content wraps within the
+    // column instead of widening the table past 100% and spawning a horizontal
+    // scrollbar. Enabling wrap here changes only this page — the other ~11
+    // DataTable pages stay single-line + ellipsis (AC9).
+    { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
     { key: 'event', label: 'Event', render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who
@@ -361,7 +366,7 @@ function ProcessedEventsView() {
       return <span>{friendly || '—'}{suffix}</span>;
     } },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
-    { key: 'outcomes', label: 'Outcomes', sortable: false, render: (v, row) => {
+    { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
       if (row.noMatchingTrigger) return <NoMatchBadge />;
       const list = Array.isArray(v) ? v : [];
       return (
@@ -574,9 +579,6 @@ export default function GithubEventLog() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          GitHub Event Log
-        </h1>
         <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           What the GitHub poller saw and what happened to each event — purely observational.
           <strong style={{ fontWeight: 'var(--eb-font-medium)' }}> Processed events</strong> is the history;

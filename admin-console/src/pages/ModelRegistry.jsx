@@ -28,6 +28,8 @@ import {
 import { groupAgentsByTeam } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
+import { usePageActions } from '../context/PageActionsContext';
+import { healthCellModel, healthCellDetail } from './provider-health-view.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
 
@@ -1127,6 +1129,36 @@ export default function ModelRegistry() {
         );
       },
     },
+    {
+      // Per-provider reachability (#1843), from the background health poller +
+      // probe-on-save. Current on page load from the persisted status — no click
+      // (AC3). Honest 'Unknown' when never probed (AC6).
+      key: 'health',
+      label: 'Health',
+      sortable: false,
+      render: (v, row) => {
+        if (row.readOnly) return '—'; // the .env fallback row is not a probed endpoint
+        const { label, tone } = healthCellModel(v);
+        const color = tone === 'ok' ? 'var(--eb-status-success)'
+                    : tone === 'error' ? 'var(--eb-status-error)'
+                    : 'var(--eb-text-secondary)';
+        const detail = healthCellDetail(v);
+        return (
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
+            <span title={detail} style={{ color, fontWeight: 600 }}>{label}</span>
+            {v && v.status === 'error' && (
+              <span title={detail} style={{
+                color: 'var(--eb-text-secondary)', maxWidth: 220,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{detail}</span>
+            )}
+            {v && v.checkedAt && (
+              <span style={{ color: 'var(--eb-text-muted)' }}><WhenCell iso={v.checkedAt} /></span>
+            )}
+          </span>
+        );
+      },
+    },
     { key: 'createdAt', label: 'Added', render: (v, row) => row.readOnly ? '—' : <WhenCell iso={v} /> },
     {
       key: '_actions',
@@ -1255,6 +1287,15 @@ export default function ModelRegistry() {
     refetch();
   }
 
+  const headerAction = usePageActions(
+    <button
+      onClick={() => { setCreating(true); setFormError(null); }}
+      style={{ ...buttonPrimary, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
+    >
+      <Plus size={15} /> New provider
+    </button>
+  );
+
   if (loading) {
     return <div aria-busy="true" style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />;
   }
@@ -1263,18 +1304,9 @@ export default function ModelRegistry() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-          Model Providers
-        </h1>
-        <button
-          onClick={() => { setCreating(true); setFormError(null); }}
-          style={{ ...buttonPrimary, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
-        >
-          <Plus size={15} /> New provider
-        </button>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       <div style={{
         padding: 'var(--eb-space-3) var(--eb-space-4)',
@@ -1471,5 +1503,6 @@ export default function ModelRegistry() {
         onCancel={handleRespawnFailureAck}
       />
     </div>
+    </>
   );
 }

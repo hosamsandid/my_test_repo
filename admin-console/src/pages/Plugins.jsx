@@ -8,6 +8,7 @@ import PluginTeamAssign from '../components/PluginTeamAssign';
 import { pluginRegistryRow } from './plugin-registry-view.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
+import { usePageActions } from '../context/PageActionsContext';
 
 // Plugin registry (#1547) — the operator-facing install surface for the plugin
 // system (docs/plugin-system-concept.md §4.1/§4.3).
@@ -249,19 +250,23 @@ export default function Plugins() {
     } finally { setBusy(false); }
   }
 
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+      <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
+      <Link to="/plugin-system" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', fontWeight: 500,
+        color: 'var(--eb-accent-primary)', textDecoration: 'none',
+      }}>
+        <BookOpen size={15} /> Learn about plugins
+      </Link>
+    </div>
+  );
+
   return (
-    <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 600, margin: 0 }}>Plugins</h1>
-        <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
-        <Link to="/plugin-system" style={{
-          display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-          marginLeft: 'auto', fontSize: 'var(--eb-text-sm)', fontWeight: 500,
-          color: 'var(--eb-accent-primary)', textDecoration: 'none',
-        }}>
-          <BookOpen size={15} /> Learn about plugins
-        </Link>
-      </div>
+    <>
+      {headerAction}
+      <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, maxWidth: 720 }}>
         Plugins extend what agents can reach beyond their container — a container runtime, a
         test-management system — through a privileged broker that runs beside the stack, so the
@@ -355,5 +360,6 @@ export default function Plugins() {
         }
       />
     </div>
+    </>
   );
 }

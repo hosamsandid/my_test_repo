@@ -25,6 +25,7 @@ import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { useModelSelection } from '../context/ModelSelectionContext';
 import { breadcrumbFor } from './breadcrumbs';
+import { PageActionsContext } from '../context/PageActionsContext';
 import { formatVersionLabel } from './version-info';
 import { formatCommitTimestamp } from './version-info';
 
@@ -169,6 +170,8 @@ const ALL_GROUP_KEYS = [...NAV_GROUP_KEYS, PLUGINS_GROUP_KEY];
 
 export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
+  // DOM node of the page-actions slot in the header; pages portal into it.
+  const [pageActionsSlot, setPageActionsSlot] = useState(null);
   // User Settings modal (#1802) — opened from the header account menu.
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Optional deep-link section for the Settings modal: the assist-error nudge
@@ -403,6 +406,7 @@ export default function Shell({ children }) {
   };
 
   return (
+    <PageActionsContext.Provider value={pageActionsSlot}>
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh' }}>
 
       {/* ── Sidebar ──────────────────────────────────────────────────── */}
@@ -590,16 +594,37 @@ export default function Shell({ children }) {
           height: 'var(--eb-header-height)',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
+          gap: 'var(--eb-space-3)',
           padding: '0 var(--eb-space-6)',
           borderBottom: '1px solid var(--eb-border-default)',
           background: 'var(--eb-bg-surface)',
           flexShrink: 0,
+          minWidth: 0,
         }}>
-          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          {/* Page title — bold, primary colour; acts as the accessible h1 for
+              the current route. Truncates on narrow viewports so actions/controls
+              on the right never get pushed off-screen. */}
+          <h1 style={{
+            margin: 0,
+            flex: '1 1 0',
+            minWidth: 0,
+            fontSize: 'var(--eb-text-sm)',
+            fontWeight: 'var(--eb-font-semibold)',
+            color: 'var(--eb-text-primary)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
             {breadcrumbFor(location.pathname)}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexShrink: 0 }}>
+            {/* Page-actions slot: pages portal their primary action button(s)
+                here via usePageActions(); the ref callback captures the DOM node
+                once and stores it in pageActionsSlot so portals can mount. */}
+            <div
+              ref={el => { if (el && el !== pageActionsSlot) setPageActionsSlot(el); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}
+            />
             <button
               onClick={onHelpClick}
               title="Help — this page, ask a question, or take the tour"
@@ -663,5 +688,6 @@ export default function Shell({ children }) {
         onClose={() => { setSettingsOpen(false); setSettingsSection(null); }}
       />
     </div>
+    </PageActionsContext.Provider>
   );
 }

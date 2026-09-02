@@ -14694,7 +14694,7 @@ jobs:
  * from MATRIX_ACCESS_TOKEN; per-agent tokens come from /workspace/agents/<id>/config.json.
  *
  * Routes:
- *   GET    /api/matrix/agents                          List enabled agents with Matrix identities
+ *   GET    /api/matrix/agents[?includeDisabled=1]     List agents with Matrix identities (enabled-only by default)
  *   POST   /api/matrix/agents/:agentId/dm              Idempotent create/get DM room
  *   GET    /api/matrix/rooms/:roomId/messages          Paginated history (proxy)
  *   POST   /api/matrix/rooms/:roomId/messages          Send m.text as admin
@@ -14702,15 +14702,23 @@ jobs:
  *   GET    /api/matrix/rooms/:roomId/stream            SSE long-poll on /sync filtered to room
  */
 
-// 1. List enabled agents that have Matrix identities
+// 1. List agents that have Matrix identities.
+//
+// Enabled-only by default — that is what the chat has always shown. `?includeDisabled=1`
+// additionally lists disabled (paused) agents so the chat's opt-in "show disabled
+// agents" filter can offer Enable on them without a trip to the Agents page
+// (#1928, epic #1925 decision D2). Stubs stay out either way: an agent with no
+// token has no chat identity to list. Visibility scoping (#302) is unchanged, so
+// the opt-in can only ever widen the list within what this caller may already see.
 app.get('/api/matrix/agents', (req, res) => {
   const scope = getScope(req);
+  const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
   const ids = listAgentDirs();
   const out = [];
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg) continue;
-    if (cfg.enabled === false) continue;
+    if (cfg.enabled === false && !includeDisabled) continue;
     if (!cfg.token) continue;
     if (!visibleAgent(scope, cfg)) continue; // team + visibility scoping (#302)
     const dm = matrix.getAgentDmRoom(id);
@@ -14721,6 +14729,15 @@ app.get('/api/matrix/agents', (req, res) => {
       role: cfg.role || 'agent',
       userId: cfg.userId || `@${id}:local`,
       enabled: cfg.enabled !== false,
+      // Whether the agent has ever been provisioned — never the token itself.
+      // Always true here (a tokenless agent is skipped above); shipped so the
+      // shared `agentState()` can tell "paused" from "stub" on this payload too.
+      hasToken: !!cfg.token,
+      // Whether THIS caller may run management actions on the agent — the same
+      // boundary the mutating routes enforce (#989), so the chat's lifecycle
+      // menu can disable what the server would reject (mirrors `canSwitch` on
+      // GET /api/agents/:id/model).
+      canManage: canManageAgent(scope, agentMetaForScope(cfg)),
       dmRoomId: dm?.roomId || null,
       environmentId: cfg.environmentId || null,
       environmentName: env?.name || cfg.environmentId || null,

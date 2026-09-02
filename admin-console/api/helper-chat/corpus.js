@@ -77,7 +77,15 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
   return promptTemplate.replace('[corpus is appended here at runtime]', corpus) + routeContext + routePointer;
 }
 
-const SYSTEM_PROMPT_CHAR_LIMIT = 180_000; // same limit as flow-copilot.js
+// Guard on the assembled grounding prompt (docs corpus + the folded page-help
+// topics), ~65 000 tokens at the common 4-chars/token heuristic — same order as
+// flow-copilot.js's 200 000. Raised from 180 000 in #1879 (epic #1870): the
+// per-page topics are a deliberate, growing part of this corpus, and E5 alone
+// added the whole build-a-plugin reference because it DELETED the standalone
+// /plugin-system page that used to carry it. Trimming a topic to fit would
+// degrade the panel too — the topic files are the single source both the panel
+// and this prompt read — so the budget, not the content, is what gives.
+const SYSTEM_PROMPT_CHAR_LIMIT = 260_000;
 
 function measureSystemPrompt() {
   return buildSystemPrompt(null).length;

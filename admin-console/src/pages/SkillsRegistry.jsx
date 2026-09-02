@@ -7,6 +7,7 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
@@ -1296,9 +1297,10 @@ function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
           <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
             Merge {sources.length} skills
           </h2>
+          {/* One line here; what merging does to provenance, extra files and
+              grants is explained in the Skills help topic (#1878). */}
           <p style={{ margin: 'var(--eb-space-1) 0 0', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-            Fold the selected skills into one. The target's provenance unions every source's, extra files are carried over,
-            and grants pointing at retired sources are migrated to the target.
+            Fold the selected skills into one.
           </p>
         </div>
 
@@ -1753,13 +1755,21 @@ export default function SkillsRegistry() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-3)' }}>
+        {/* Title + one-line description + the "?" that opens this page's help
+            topic — the four-paragraph concept intro (tiers, grant vs activation
+            vs install, Skills vs Knowledge vs Memory) and its inline Knowledge
+            jump-off now live in that topic, whose seeAlso carries the link
+            (#1878). */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
-            Skills
-          </h1>
-          <a href="/knowledge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)', textDecoration: 'none' }}>
-            ← Knowledge (learning, promotion &amp; activation)
-          </a>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+            <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+              Skills
+            </h1>
+            <PageHelpButton />
+          </div>
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            Reusable instruction packages agents load — in the global pool, the team pools, and inside individual agents.
+          </span>
         </div>
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
           <input
@@ -1798,48 +1808,6 @@ export default function SkillsRegistry() {
             {showNewForm ? 'Cancel' : '+ New Skill'}
           </button>
         </div>
-      </div>
-
-      {/* Intro / explanation */}
-      <div style={{
-        padding: 'var(--eb-space-4)',
-        background: 'var(--eb-bg-elevated)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        lineHeight: 1.5,
-      }}>
-        <p style={{ margin: '0 0 var(--eb-space-2)' }}>
-          Skills are reusable instruction packages (a <code style={{ fontFamily: 'var(--eb-font-mono)' }}>SKILL.md</code> plus
-          any helper scripts or assets) that agents load to perform domain-specific tasks. This page shows every skill in
-          the shared <strong>pool</strong> as well as the copies living inside individual <strong>agents</strong>.
-        </p>
-        <p style={{ margin: 0 }}>
-          Skills live in two tiers: <strong>Global</strong> skills are available to every team, while{' '}
-          <strong>Team</strong> skills belong to a single team. You put a skill to work by <strong>granting it to a team
-          or an agent</strong> — on the Agents page, in the Team-Setup wizard, or on the Knowledge page. (Working
-          Environments don't carry skills.) When an agent is set up, each granted skill is resolved from its own team's
-          pool first, then from the global pool. A team skill can be copied to the global pool with <em>Promote to global</em>{' '}
-          or relocated with <em>Move to global</em>. <strong>Agent</strong> skills are read-only — lift one into a team
-          pool first, then promote that team skill to global; use <em>Install into agent</em> to push a global skill into
-          a running agent. Click a skill to browse its files.
-        </p>
-        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
-          <strong>How skills reach an agent.</strong> Three distinct things sit behind the verbs on this page:{' '}
-          a <strong>grant</strong> is the <em>list of names</em> an agent (or its team) is entitled to;{' '}
-          <strong>seeding / activation</strong> is the moment those files are actually <em>copied</em> into the agent's
-          workspace (it reads them on its next message); and <em>Install into agent</em> is a <strong>one-off push</strong> of
-          a single skill — handy for a quick trial, but a later workspace reset re-seeds only the granted skills, so an
-          install that isn't also granted won't survive. Everything else (<em>Promote</em>, <em>Move</em>, <em>Adopt</em>,{' '}
-          <em>Distill</em>, <em>Merge</em>) just moves a skill between the Global and Team tiers above.
-        </p>
-        <p style={{ margin: 'var(--eb-space-2) 0 0' }}>
-          <strong>Skills vs Knowledge vs Memory.</strong> <strong>Memory</strong> is what one agent privately remembers;{' '}
-          <strong>Knowledge</strong> is lessons shared across the team; <strong>Skills</strong> (this page) are the polished,
-          reusable instruction files agents load automatically — often distilled from the best knowledge.{' '}
-          <Link to="/knowledge" style={{ color: 'var(--eb-accent-primary)' }}>See how the knowledge system works →</Link>
-        </p>
       </div>
 
       {/* Import feedback */}

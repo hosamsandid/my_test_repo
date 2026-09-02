@@ -8,6 +8,7 @@ import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
@@ -761,32 +762,25 @@ export default function WorkingEnvironments() {
       {headerAction}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
-      <div style={{
-        padding: 'var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 'var(--eb-space-2)',
+      {/* One-line description + the "?" that opens this page's help topic. The
+          "What is a Working Environment?" box that used to sit here — the
+          repositories / token / additional-instructions list and the
+          shared-recipe-but-own-workspace point — now lives in that topic
+          (api/helper-chat/help-topics/environments.md, #1880), together with the
+          SSH-vs-token rule, read-only repositories and the
+          repositories-are-cloned-once / Sync-all-agents caveat. Per-field help
+          inside the form stays where the decision is made. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
-        <p style={{ margin: 0, fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-          What is a Working Environment?
-        </p>
-        <p style={{ margin: 0 }}>
-          A <strong>Working Environment</strong> is a reusable workspace recipe that defines what every agent created from it receives:
-        </p>
-        <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-          <li><strong>Git repositories</strong> — one or more repos that are automatically cloned into the agent's workspace when it is created. Private repos use SSH keys you manage on the SSH Keys page.</li>
-          <li><strong>GitHub token</strong> — optional access token for the <code>gh</code> CLI and HTTPS pushes.</li>
-          <li><strong>Additional instructions</strong> — custom text appended to the agent's CLAUDE.md, giving it project-specific context or constraints.</li>
-        </ul>
-        <p style={{ margin: 0 }}>
-          When you create an agent, you pick one Working Environment. All agents sharing the same environment get the same tools and repositories — but each agent has its own isolated workspace.
-        </p>
-      </div>
+        <span>
+          A reusable workspace recipe — the repositories, credentials, model provider and extra
+          context every agent created from it inherits.
+        </span>
+        <PageHelpButton label="What is a Working Environment?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
 
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>

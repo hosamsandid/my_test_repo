@@ -16,14 +16,17 @@
 // carries a `default`/`primary`/`recommended` flag, so none is a forced default
 // (AC1). Labels deliberately avoid the words agent / team / flow / template /
 // orchestrator so a first-time user can choose by intent, not artifact (AC7).
+//
+// Each description is ONE line: the tile is a chooser, so it states the intent
+// and nothing else. What the path actually produces (draft vs wizard vs fast
+// lane, what gets created, what "a team of one" implies) is the `create` help
+// topic — E14 of epic #1870 (#1888).
 const CREATE_ENTRIES = [
   {
     key: 'describe',
     icon: 'MessageSquare',
     title: 'Describe what you need',
-    description:
-      'Tell us in plain language what you want to get done. We draft it for you and '
-      + 'show a live preview before anything is created.',
+    description: 'Tell us in plain language what you want to get done.',
     // The conversational creator: a new draft opened with the Flow Copilot
     // (POST /api/process/copilot) — live graph preview + confirm-to-create (AC3).
     to: '/flows?new=describe',
@@ -32,9 +35,7 @@ const CREATE_ENTRIES = [
     key: 'template',
     icon: 'LayoutTemplate',
     title: 'Start from a ready-made setup',
-    description:
-      'Pick a proven starting point and adjust it. Fastest way to a working setup '
-      + 'when one already fits.',
+    description: 'Pick a proven starting point and adjust it.',
     // The curated registry + saved drafts, picked and materialised through the
     // Team Wizard's first step (AC4).
     to: '/team-setup',
@@ -43,9 +44,7 @@ const CREATE_ENTRIES = [
     key: 'build',
     icon: 'PenTool',
     title: 'Build it yourself',
-    description:
-      'Lay it out visually on a canvas and connect the pieces yourself. Full control '
-      + 'from a blank slate.',
+    description: 'Lay it out visually on a canvas and connect the pieces yourself.',
     // A fresh draft opened in the Flows canvas (POST /api/process/drafts → /flows, AC5).
     to: '/flows?new=blank',
   },
@@ -53,10 +52,9 @@ const CREATE_ENTRIES = [
     key: 'chat',
     icon: 'Rocket',
     title: 'Just give me one assistant to chat with',
-    description:
-      'Spin up a single assistant you can start talking to right away. No wiring, '
-      + 'no setup — the quickest path in. It is simply a team of one; grow it into a '
-      + 'full team whenever you need more.',
+    // Keeps the "team of one" framing (#1667 AC3, asserted in the test): it is
+    // what stops this tile reading as a separate mode. The rationale moved.
+    description: 'Start talking right away — simply a team of one you can grow later.',
     // The merged single-agent form from Phase A (#1664) — the "Fast lane" (AC6).
     // Kept as an explicit shortcut so users who just want one assistant are not
     // forced through the right-sizing flow (#1667 Phase D, AC4).

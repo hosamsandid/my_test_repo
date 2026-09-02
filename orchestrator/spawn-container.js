@@ -10,9 +10,22 @@ const http = require('http');
 const os = require('os');
 const { EventEmitter, PassThrough } = require('stream');
 const { buildContextMountSpecs } = require('./context-mount');
+const {
+  DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
+  missingImageMessage,
+  isMissingImageFailure,
+} = require('./toolchain-registry');
 
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
-const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
+// Installation-wide default agent image (#1940 AC9). Since #1940 this is only
+// the DEFAULT — the image an agent container is actually spawned from arrives
+// through the seam as `spawnContainer({ image })`, resolved per Working
+// Environment by orchestrator/toolchain-registry.js. This constant is exported
+// so the resolver has one place to read the default from, and is deliberately
+// NOT consulted when building the agent's create body: a toolchain that
+// silently degraded to `as-agent:latest` would start a build agent without its
+// toolchain (#1940 AC2/AC7).
+const DEFAULT_AGENT_IMAGE = process.env.AGENT_IMAGE || BUILTIN_AGENT_IMAGE;
 const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const WORKSPACE_VOLUME = process.env.AGENT_WORKSPACE_VOLUME ||
   `${COMPOSE_PROJECT}_agent-pool-workspace`;
@@ -291,6 +304,26 @@ async function ensurePerAgentVolume(id) {
 // container. Fatal on failure — we must not spawn an agent against an empty
 // volume. `security_opt: label=disable` matches the compose services so an
 // SELinux host doesn't deny the bind (no-op on macOS).
+//
+// IMAGE (#1940 AC3) — this helper runs on the installation-wide DEFAULT image,
+// NOT the environment's toolchain image, and that is a decision rather than an
+// oversight. Three reasons:
+//   1. It uses nothing from a toolchain. The script is `ls`/`cp -a`/`test`
+//      against two mounts; every toolchain variant derives `FROM as-agent:…`
+//      (concept §4 "derive, never fork"), so the toolchain adds capability the
+//      copy does not use.
+//   2. One code path for every agent. Volume seeding is platform plumbing whose
+//      behaviour must not depend on which team's toolchain the agent happens to
+//      carry — a copy that worked on the default image and failed on a variant
+//      would read as a seeding bug.
+//   3. Failure attribution. If a toolchain image is missing or unpullable the
+//      AGENT container is where that must surface, with the named AC7 error
+//      (see resolveAgentImage / missingImageMessage) — not here, where it would
+//      look like a broken volume. Using the default image keeps the toolchain's
+//      one failure mode in one place.
+// The cost is stated openly: on a stack that only ever runs variant images the
+// default image must still be present locally. It always is — it is the base
+// every variant is built FROM.
 async function seedPerAgentVolume(id) {
   const volName = perAgentVolumeName(id);
   // Fail-closed sentinel (#185 item 7): after seeding, the dedicated volume MUST
@@ -304,7 +337,7 @@ async function seedPerAgentVolume(id) {
     'else echo "[seed] /dst already populated — skipping"; fi; ' +
     'if [ ! -f /dst/config.json ]; then echo "[seed] FATAL: /dst missing config.json after seed" >&2; exit 3; fi';
   const createBody = {
-    image: AGENT_IMAGE,
+    image: DEFAULT_AGENT_IMAGE, // #1940 AC3 — see the rationale above.
     entrypoint: ['/bin/sh', '-c'],
     command: [seedScript],
     volumes: [
@@ -497,7 +530,10 @@ async function reseedPerAgentVolume(id, paths) {
     'else cp -a "/src/$p" "/dst/$p.tmp.$$" && mv -f "/dst/$p.tmp.$$" "/dst/$p" && echo "[reseed] file $p"; fi; ' +
     'done';
   const createBody = {
-    image: AGENT_IMAGE,
+    // #1940 AC3 — the DEFAULT image, for the same three reasons as
+    // seedPerAgentVolume above (the reseed script is the same kind of `cp -a`
+    // plumbing and uses nothing a toolchain adds).
+    image: DEFAULT_AGENT_IMAGE,
     entrypoint: ['/bin/sh', '-c'],
     command: [reseedScript, 'reseed', ...valid],
     volumes: [
@@ -526,7 +562,13 @@ async function reseedPerAgentVolume(id, paths) {
   return { reseeded: valid };
 }
 
-function spawnContainer({ id, env, contextMounts }) {
+// `image` (#1940) is the container image for THIS agent, resolved per Working
+// Environment by the caller (orchestrator.js → resolveAgentImage). It is a
+// required part of the seam: this file must not decide the image, or a
+// per-environment toolchain could never take effect (AC2).
+// `toolchain` is the {toolchainId, environmentId, environmentName} context of a
+// NON-default image, used only to word the AC7 refusal; null for the default.
+function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
@@ -601,8 +643,18 @@ function spawnContainer({ id, env, contextMounts }) {
       })
     : Promise.resolve(AGENT_NETWORK);
 
-  networkPromise
-    .then(async (networkName) => {
+  // The seam requires a resolved image (#1940 AC2) — a missing one is a contract
+  // violation, not a podman error, so refuse before touching the socket rather
+  // than sending `image: undefined` and reading a confusing libpod reply.
+  const imagePromise = image
+    ? Promise.resolve(image)
+    : Promise.reject(new Error(
+        `refusing to spawn ${id}: no container image was resolved. The container-runtime ` +
+        'seam requires spawnContainer({ image }) (#1940) — see resolveAgentImage.',
+      ));
+
+  Promise.all([imagePromise, networkPromise])
+    .then(async ([, networkName]) => {
       const isolated = PER_AGENT_NETWORK_ENABLED && networkName !== AGENT_NETWORK;
       console.log(
         `[spawn-container] ${id} -> network ${networkName} ` +
@@ -637,7 +689,9 @@ function spawnContainer({ id, env, contextMounts }) {
       if (AGENT_MEM_LIMIT_BYTES) resourceLimits.memory = { limit: AGENT_MEM_LIMIT_BYTES };
       if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
       const createBody = {
-        image: AGENT_IMAGE,
+        // #1940 AC2: the RESOLVED image, never the module-level default — the
+        // caller decided which toolchain (if any) this agent runs on.
+        image,
         env: envMap,
         netns: { nsmode: 'bridge' },
         volumes,
@@ -670,6 +724,15 @@ function spawnContainer({ id, env, contextMounts }) {
     })
     .then((r) => {
       if (r.status >= 300 || !r.body || !r.body.Id) {
+        // #1940 AC7: when the image that could not be found is a TOOLCHAIN
+        // image, a bare libpod "no such image" names neither the environment
+        // nor the toolchain — the two things an operator needs to fix it. Add
+        // the sentence that does. (Note what does NOT happen here: we do not
+        // retry on the default image. A build agent that came up without its
+        // toolchain would look healthy and fail much later, at the first `mvn`.)
+        if (toolchain && isMissingImageFailure(r.status, r.body)) {
+          throw new Error(missingImageMessage({ ...toolchain, image, runtime: 'podman' }));
+        }
         throw new Error(`create failed: status=${r.status} body=${JSON.stringify(r.body)}`);
       }
       containerId = r.body.Id;
@@ -710,6 +773,10 @@ module.exports = {
   perAgentNetworkName,
   PER_AGENT_NETWORK_ENABLED,
   AGENT_NETWORK,
+  // Installation-wide default image (#1940 AC9). The orchestrator reads it from
+  // the seam so the fallback link of the resolution chain is the runtime's own
+  // default, whichever runtime is selected.
+  DEFAULT_AGENT_IMAGE,
   // Plugin broker sidecars are implemented on this runtime only (#1547) — see
   // the Deliberate differences block in spawn-kubernetes-pod.js.
   PLUGIN_SIDECARS_SUPPORTED: true,

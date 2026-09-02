@@ -15,6 +15,8 @@ askPrompts:
   - "I added a repository to an existing environment — why does the agent not see it?"
   - "Do I need an SSH key or a GitHub token for a private repository?"
   - "What does the Read-only checkbox on a repository do?"
+  - "My agent cannot run Maven — how do I give it a JDK?"
+  - "Why can I only pick a toolchain from a list instead of typing an image name?"
 ---
 
 ## What is a Working Environment?
@@ -37,6 +39,7 @@ infrastructure.
 | **GitHub token** | Optional personal access token, injected as `GH_TOKEN` / `GITHUB_TOKEN`. Needed for the `gh` CLI, HTTPS pushes and the GitHub poller behind event-driven triggers. |
 | **MCP servers** | Optional server + credential references from the MCP registry, materialised into the agent's `.claude/settings.json` at creation. The MCP Servers page refuses to delete a server an environment still references. |
 | **Model provider** | Optional override — agents start on this provider and its default model instead of the global `ANTHROPIC_BASE_URL` from `.env`. |
+| **Agent toolchain** | Optional — which container image the agents are spawned from, picked from the operator registry. Absent means the default image. See *Agent toolchains* below. |
 | **Additional instructions** | Markdown appended to the agent's `CLAUDE.md`: project context, coding conventions, domain terminology, constraints every agent here should follow. |
 
 An environment may have **no repository at all**. Nothing is cloned and the
@@ -64,6 +67,42 @@ Tick **Read-only** on a repository to clone it for reference only. The repositor
 is still cloned into the workspace, but the agent is told it is reference-only
 and must not commit or push to it. Use it for an upstream codebase, a shared
 library, or a docs repo the agent should only read.
+
+## Agent toolchains: giving agents a language stack
+
+The default agent image carries Python, Node, git/ssh/`gh`, the Claude Code CLI
+and the platform CLIs — and **no other language runtime**. There is no JDK, no
+Maven, no .NET, no Go. An agent on a Java repository can read and edit the code
+but cannot compile or test it.
+
+A Working Environment can therefore name a **toolchain**: an image derived from
+the default one that adds a stack. Its agents are spawned from that image; every
+other environment keeps the default, byte-identically.
+
+**Why it is a list and not a text field.** An agent container receives its
+environment's SSH identity, its GitHub token and the model credential. Whoever
+chooses the image chooses what executes with those secrets — so a free-text image
+field would be a privilege-escalation path, not a convenience. The split is the
+same as for plugins: a **System Admin** registers a toolchain (the **Toolchains**
+button on this page) and a **Team Admin** only selects one that is already
+registered. Both halves are enforced by the server, not by hiding a button.
+
+**Changing it interrupts running agents.** A container's image is fixed for its
+whole lifetime, so a new toolchain reaches a running agent only by recreating it
+— exactly like repointing the environment at a different GitHub token. The form
+tells you how many agents will restart; do it at a quiet moment.
+
+**A broken selection refuses rather than degrades.** If the toolchain is not
+registered, is not built for the runtime this stack runs on, or its image cannot
+be found, the agent does not start and the log names the environment and the
+toolchain. Falling back to the default image would instead bring the agent up
+*without* its toolchain and fail much later, at the first build command, looking
+like a broken repository rather than a misconfigured environment.
+
+One list, two runtimes: a toolchain declares where its image is actually
+pullable. An image built locally on a developer machine is podman-only and is
+shown greyed out on a Kubernetes stack, where it would have to live in the
+registry the cluster's nodes pull from.
 
 ## Editing an environment: repositories are cloned once
 

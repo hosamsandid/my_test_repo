@@ -190,6 +190,34 @@ const TOPIC_CONTENT = [
       'Broker SDK',
     ],
   },
+  {
+    id: 'environments',
+    routes: ['/environments'],
+    // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe
+    // definition, what an agent inherits (repos / token / MCP refs / provider /
+    // additional instructions), the shared-recipe-but-own-workspace point, the
+    // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
+    // Sync-all-agents caveat.
+    concepts: [
+      'reusable workspace recipe',
+      'own isolated workspace',
+      'Git repositories',
+      'GitHub token',
+      'MCP servers',
+      'Model provider',
+      'Additional instructions',
+      'no repository at all',
+      'SSH key',
+      'HTTPS',
+      'Read-only',
+      'newly created agents',
+      'Sync all agents',
+    ],
+  },
+  // Append point — every Phase-3 sibling adds its entry here, so two tickets in
+  // flight always conflict on this spot. Resolve by keeping BOTH entries in
+  // ticket order (… #1878 skills, #1879 plugins, #1880 environments …), never by
+  // taking one side.
 ];
 
 const registry = loadRegistry();

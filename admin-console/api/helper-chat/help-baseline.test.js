@@ -21,7 +21,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { loadRegistry, baselineProblems, OVERVIEW_ID } = require('./help-registry');
-const { KNOWN_ROUTE_PATHS, PAGE_ROUTES } = require('./help-routes');
+const { KNOWN_ROUTE_PATHS, PAGE_ROUTES, CONTEXT_KEYS, isContextKey } = require('./help-routes');
 
 const registry = loadRegistry();
 
@@ -90,7 +90,15 @@ for (const topic of registry.all) {
     }
     assert.ok(topic.routes.length > 0, 'a page topic must declare at least one route');
     for (const route of topic.routes) {
-      assert.ok(PAGE_ROUTES.has(route), `${route} must be a PAGE_ROUTES entry in help-routes.js`);
+      // A topic keys on a page route, or — since E17 (#1892) — on a registered
+      // non-route help context (an overlay/wizard-step key). Either way the key
+      // must be classified in help-routes.js, never invented at the topic.
+      assert.ok(
+        isContextKey(route)
+          ? Object.prototype.hasOwnProperty.call(CONTEXT_KEYS, route)
+          : PAGE_ROUTES.has(route),
+        `${route} must be a PAGE_ROUTES or CONTEXT_KEYS entry in help-routes.js`,
+      );
       assert.equal(
         registry.topicForRoute(route)?.id, topic.id,
         `${route} resolves to another topic — two topics are claiming the same route`,

@@ -30,6 +30,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { buildAssistModelOptions } = require('./assist-model-options');
+const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
@@ -164,6 +165,10 @@ const GH_TOKENS_INDEX = path.join(GH_TOKENS_DIR, 'index.json');
 const LLM_ENDPOINTS_DIR = path.join(WORKSPACE, 'llm-endpoints');
 const LLM_ENDPOINTS_INDEX = path.join(LLM_ENDPOINTS_DIR, 'index.json');
 const LLM_KEYS_DIR = path.join(LLM_ENDPOINTS_DIR, '_keys');
+// Model Provider health status (#1843) — persisted SEPARATELY from index.json so
+// the background poller's frequent rewrites never race the CRUD read-modify-write
+// of the endpoint list. Keyed by endpoint id → health record (see llm-health.js).
+const LLM_HEALTH_INDEX = path.join(LLM_ENDPOINTS_DIR, 'health.json');
 const MCP_SERVERS_DIR = path.join(WORKSPACE, 'mcp-servers');
 const MCP_CREDENTIALS_DIR = path.join(WORKSPACE, 'mcp-credentials');
 const MCP_CREDENTIALS_KEYS_DIR = path.join(MCP_CREDENTIALS_DIR, '_keys');
@@ -328,6 +333,22 @@ app.get('/api/helper/tour-manifest', (req, res) => {
     return res.json(m);
   }
   res.json(_tourManifestCache);
+});
+
+// ─── Context-help topics (#1872, spec docs/context-help-system-concept.md §3) ──
+// GET /api/helper/page-help returns the whole curated topic set once (a few KB;
+// the client resolves the current route → topic locally so face-switching is
+// instant/offline). The SAME help-topics/ files ground the chat corpus above, so
+// there is no vendoring/parity drift. Behind the global /api auth gate like every
+// other /api route. Topics are small + static; load once and memoize.
+const _helpRegistryModule = require('./helper-chat/help-registry');
+let _pageHelpCache = null;
+app.get('/api/helper/page-help', (req, res) => {
+  if (!_pageHelpCache) {
+    const topics = _helpRegistryModule.loadTopics();
+    _pageHelpCache = { topics, overviewId: _helpRegistryModule.OVERVIEW_ID };
+  }
+  res.json(_pageHelpCache);
 });
 
 // Speech-to-text transcription: proxies audio to the STT service and returns { text }.
@@ -1080,6 +1101,112 @@ function listLlmEndpoints() {
 
 function saveLlmEndpointsIndex(list) {
   writeJsonAtomic(LLM_ENDPOINTS_INDEX, list);
+}
+
+// ─── Model Provider health (#1843) ──────────────────────────────────────────
+// A background poller (startLlmHealthPoller, kicked off in app.listen) probes
+// every configured provider on an interval and persists the last-known status
+// per endpoint in health.json. probeLlmEndpointTest / readLlmEndpointToken are
+// hoisted function declarations defined later in this file — safe to call here.
+
+function loadLlmHealthMap() {
+  const map = readJsonFile(LLM_HEALTH_INDEX, {});
+  return map && typeof map === 'object' && !Array.isArray(map) ? map : {};
+}
+
+function saveLlmHealthMap(map) {
+  writeJsonAtomic(LLM_HEALTH_INDEX, map);
+}
+
+// Cadence + stale thresholds, all env-configurable (AC1 "~5 min default,
+// configurable"; AC5 stale window).
+function llmHealthConfig() {
+  return {
+    intervalMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_INTERVAL_MS, llmHealth.DEFAULT_INTERVAL_MS),
+    baseMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_BASE_MS, llmHealth.DEFAULT_BACKOFF_BASE_MS),
+    maxMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_BACKOFF_MAX_MS, llmHealth.DEFAULT_BACKOFF_MAX_MS),
+    staleMs: llmHealth.coerceMs(process.env.AEE_LLM_HEALTH_STALE_MS, llmHealth.DEFAULT_STALE_MS),
+  };
+}
+
+// The client-facing health view for one endpoint id (AC3/AC6). No record →
+// { status: 'unknown' }.
+function llmHealthViewFor(id, map = loadLlmHealthMap()) {
+  return llmHealth.healthView(map[id]);
+}
+
+// Guard against two overlapping probes of the same endpoint (the poller and an
+// on-demand save/selection probe can both target one id).
+const llmHealthInFlight = new Set();
+
+// Probe one endpoint and persist the folded health record. Best-effort: never
+// throws (probeLlmEndpointTest always resolves within its 8s timeout). Re-reads
+// the health map immediately before writing so a concurrent probe's result is
+// not clobbered.
+async function probeAndRecordHealth(ep) {
+  if (!ep || !ep.id || llmHealthInFlight.has(ep.id)) return null;
+  llmHealthInFlight.add(ep.id);
+  try {
+    const token = readLlmEndpointToken(ep.authTokenId);
+    const probe = await probeLlmEndpointTest(ep.baseUrl, token, ep.authType);
+    const map = loadLlmHealthMap();
+    map[ep.id] = llmHealth.applyProbeResult(map[ep.id], probe);
+    saveLlmHealthMap(map);
+    return map[ep.id];
+  } catch (err) {
+    console.error(`[LLM-Health] Probe of ${ep.id} failed unexpectedly: ${err.message}`);
+    return null;
+  } finally {
+    llmHealthInFlight.delete(ep.id);
+  }
+}
+
+// Fire a background probe for an endpoint whose last-known status is stale
+// (AC5). Non-blocking — callers (e.g. GET model-options on agent selection)
+// don't await it; the next read picks up the refreshed status.
+function refreshHealthIfStale(ep) {
+  if (!ep || !ep.id) return;
+  const cfg = llmHealthConfig();
+  const rec = loadLlmHealthMap()[ep.id];
+  if (llmHealth.isStale(rec, Date.now(), cfg.staleMs)) {
+    probeAndRecordHealth(ep).catch(() => {});
+  }
+}
+
+// One poller pass: probe every provider whose status is due (interval for a
+// healthy one, exponential backoff for a failing one). Sequential so we never
+// fan a burst of outbound requests at once. Overlap-guarded.
+let llmHealthPassBusy = false;
+async function runLlmHealthPass() {
+  if (llmHealthPassBusy) return;
+  llmHealthPassBusy = true;
+  try {
+    const endpoints = listLlmEndpoints();
+    if (!endpoints.length) return;
+    const cfg = llmHealthConfig();
+    const dueIds = new Set(llmHealth.selectDueEndpointIds(endpoints, loadLlmHealthMap(), Date.now(), cfg));
+    for (const ep of endpoints) {
+      if (dueIds.has(ep.id)) await probeAndRecordHealth(ep);
+    }
+  } catch (err) {
+    console.error(`[LLM-Health] Poll pass error: ${err.message}`);
+  } finally {
+    llmHealthPassBusy = false;
+  }
+}
+
+let llmHealthTimer = null;
+function startLlmHealthPoller() {
+  if (llmHealthTimer) return;
+  const cfg = llmHealthConfig();
+  // Tick granularity: check for due endpoints at most every minute, but never
+  // slower than the configured interval — a short interval must still be honored.
+  const tickMs = Math.max(15_000, Math.min(60_000, cfg.intervalMs));
+  console.log(`[LLM-Health] Starting Model Provider health poller (interval=${Math.round(cfg.intervalMs / 1000)}s)`);
+  runLlmHealthPass().catch(() => {});
+  llmHealthTimer = setInterval(() => { runLlmHealthPass().catch(() => {}); }, tickMs);
+  // Never let the poller hold the process open on shutdown.
+  if (typeof llmHealthTimer.unref === 'function') llmHealthTimer.unref();
 }
 
 function llmTokenFingerprint(token) {
@@ -4012,11 +4139,20 @@ app.get('/api/agents/:id/model-options', (req, res) => {
     ? listLlmEndpoints().find(e => e.id === effEndpointId)
     : null;
   const teamId = agentTeamId(cfg);
+  // AC5: the bound provider's last-known health, so Agent Chat can warn (non-
+  // blocking) when the agent's endpoint is currently red. This GET fires on
+  // agent selection — trigger a fresh on-demand probe if the status is stale so
+  // the warning isn't shown off an old reading (non-blocking; the reading here
+  // stays honest and a subsequent open reflects the refresh).
+  if (endpoint) refreshHealthIfStale(endpoint);
   res.json({
     endpointId:     endpoint?.id || null,
     endpointName:   endpoint?.name || null,
     authType:       endpoint ? (endpoint.authType === 'oauth-token' ? 'oauth-token' : 'api-key') : null,
     baseUrl:        endpoint?.baseUrl || null,
+    // Persisted health of the effective bound endpoint (#1843); 'unknown' when
+    // never probed / no endpoint bound.
+    endpointHealth: endpoint ? llmHealthViewFor(endpoint.id) : llmHealth.healthView(null),
     // The provider is bound at the env level unless the agent carries an override.
     endpointOverride: cfg.llmEndpointOverride || null,
     envEndpointId:  env?.llmEndpointId || null,
@@ -10275,7 +10411,12 @@ app.get('/api/llm-endpoints', (req, res) => {
   // all. This also scopes the agent/env provider picker (AC10), which fetches
   // this same endpoint.
   const scope = getScope(req);
-  res.json(listLlmEndpoints().filter(ep => visibleCredential(scope, ep)).map(maskLlmEndpoint));
+  const healthMap = loadLlmHealthMap();
+  res.json(listLlmEndpoints()
+    .filter(ep => visibleCredential(scope, ep))
+    // Merge the persisted health status (#1843) so the Model Providers table
+    // renders it on page load with no click (AC3). No record → 'unknown' (AC6).
+    .map(ep => ({ ...maskLlmEndpoint(ep), health: llmHealth.healthView(healthMap[ep.id]) })));
 });
 
 // Selection options for the global assist model selector (#1210). Distinct from
@@ -10306,7 +10447,7 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
   // Fail closed: a provider the caller may not see is reported as absent (#800),
   // so a Team Admin cannot probe another team's provider ids by-id.
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
-  res.json(maskLlmEndpoint(ep));
+  res.json({ ...maskLlmEndpoint(ep), health: llmHealthViewFor(ep.id) });
 });
 
 app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
@@ -10390,7 +10531,11 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     createdAt: new Date().toISOString(),
   };
   saveLlmEndpointsIndex([...existing, entry]);
-  res.status(201).json(maskLlmEndpoint(entry));
+  // AC4: probe on save so a freshly-saved broken endpoint is flagged
+  // immediately. Best-effort (never throws; ~8s worst case only on an actually
+  // unreachable endpoint — exactly when the signal is worth waiting for).
+  const health = await probeAndRecordHealth(entry);
+  res.status(201).json({ ...maskLlmEndpoint(entry), health: llmHealth.healthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
@@ -10532,7 +10677,10 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   next.updatedAt = new Date().toISOString();
   list[idx] = next;
   saveLlmEndpointsIndex(list);
-  res.json(maskLlmEndpoint(next));
+  // AC4: re-probe on save so an edit (e.g. a repointed base URL or a rotated
+  // token) reflects its new reachability immediately. Best-effort.
+  const health = await probeAndRecordHealth(next);
+  res.json({ ...maskLlmEndpoint(next), health: llmHealth.healthView(health) });
 });
 
 app.put('/api/llm-endpoints/:id/models', apiLimiter, (req, res) => {
@@ -10584,6 +10732,9 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   }
   if (ep.authTokenId) deleteLlmEndpointToken(ep.authTokenId);
   saveLlmEndpointsIndex(list.filter(e => e.id !== ep.id));
+  // Drop the endpoint's persisted health record so it doesn't orphan (#1843).
+  const healthMap = loadLlmHealthMap();
+  if (ep.id in healthMap) { delete healthMap[ep.id]; saveLlmHealthMap(healthMap); }
   res.status(204).end();
 });
 
@@ -17087,4 +17238,5 @@ app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
+  try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

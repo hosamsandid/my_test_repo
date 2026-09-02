@@ -29,6 +29,7 @@ import { groupAgentsByTeam } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
+import { healthCellModel, healthCellDetail } from './provider-health-view.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
 
@@ -1124,6 +1125,36 @@ export default function ModelRegistry() {
                   <Star size={11} fill="currentColor" /> {def}
                 </span>
               : <span style={{ color: 'var(--eb-text-muted)' }}>(no default)</span>}
+          </span>
+        );
+      },
+    },
+    {
+      // Per-provider reachability (#1843), from the background health poller +
+      // probe-on-save. Current on page load from the persisted status — no click
+      // (AC3). Honest 'Unknown' when never probed (AC6).
+      key: 'health',
+      label: 'Health',
+      sortable: false,
+      render: (v, row) => {
+        if (row.readOnly) return '—'; // the .env fallback row is not a probed endpoint
+        const { label, tone } = healthCellModel(v);
+        const color = tone === 'ok' ? 'var(--eb-status-success)'
+                    : tone === 'error' ? 'var(--eb-status-error)'
+                    : 'var(--eb-text-secondary)';
+        const detail = healthCellDetail(v);
+        return (
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
+            <span title={detail} style={{ color, fontWeight: 600 }}>{label}</span>
+            {v && v.status === 'error' && (
+              <span title={detail} style={{
+                color: 'var(--eb-text-secondary)', maxWidth: 220,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{detail}</span>
+            )}
+            {v && v.checkedAt && (
+              <span style={{ color: 'var(--eb-text-muted)' }}><WhenCell iso={v.checkedAt} /></span>
+            )}
           </span>
         );
       },

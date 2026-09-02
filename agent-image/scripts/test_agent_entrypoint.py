@@ -330,45 +330,77 @@ class BuildHarvestHint(unittest.TestCase):
 
 
 class GithubEventDetail(unittest.TestCase):
-    def test_issues_event_includes_number_title_url(self):
+    def test_issues_event_returns_plain_and_html_pair(self):
         detail = github_event_detail("issues.labeled", {
             "issue": {"number": 470, "title": "Fix login bug",
                        "html_url": "https://github.com/o/r/issues/470"},
         })
-        self.assertEqual(
-            detail, "Issue #470: Fix login bug — https://github.com/o/r/issues/470")
+        self.assertEqual(detail, (
+            "#470 (https://github.com/o/r/issues/470): Fix login bug",
+            '<a href="https://github.com/o/r/issues/470">#470</a>: Fix login bug',
+        ))
 
-    def test_pull_request_event_includes_number_title_url(self):
+    def test_pull_request_event_uses_same_unified_format(self):
+        # AC2: PR detail has the SAME shape as issue detail — `#N` only, no
+        # "PR"/"Issue" prefix (the friendly label already distinguishes them).
         detail = github_event_detail("pull_request.opened", {
             "pull_request": {"number": 12, "title": "Add feature",
                               "html_url": "https://github.com/o/r/pull/12"},
         })
-        self.assertEqual(
-            detail, "PR #12: Add feature — https://github.com/o/r/pull/12")
+        self.assertEqual(detail, (
+            "#12 (https://github.com/o/r/pull/12): Add feature",
+            '<a href="https://github.com/o/r/pull/12">#12</a>: Add feature',
+        ))
 
     def test_pull_request_review_event_uses_pull_request_key(self):
         detail = github_event_detail("pull_request_review.submitted", {
             "pull_request": {"number": 12, "title": "Add feature",
                               "html_url": "https://github.com/o/r/pull/12"},
         })
+        self.assertEqual(detail, (
+            "#12 (https://github.com/o/r/pull/12): Add feature",
+            '<a href="https://github.com/o/r/pull/12">#12</a>: Add feature',
+        ))
+
+    def test_title_missing_still_emits_number_and_link(self):
+        # AC5: the old all-or-nothing gate is gone — a missing title degrades to
+        # `#N` + link instead of collapsing to nothing.
+        detail = github_event_detail("pull_request.labeled", {
+            "pull_request": {"number": 12, "html_url": "https://github.com/o/r/pull/12"},
+        })
+        self.assertEqual(detail, (
+            "#12 (https://github.com/o/r/pull/12)",
+            '<a href="https://github.com/o/r/pull/12">#12</a>',
+        ))
+
+    def test_url_missing_returns_none(self):
+        # No link possible without a url → no detail (caller shows label/repo only).
+        self.assertIsNone(github_event_detail("issues.labeled", {"issue": {"number": 1}}))
+
+    def test_html_escapes_title_and_url(self):
+        _, link_html = github_event_detail("issues.opened", {
+            "issue": {"number": 7, "title": "a <b> & \"c\"",
+                       "html_url": "https://x/7?a=1&b=2"},
+        })
         self.assertEqual(
-            detail, "PR #12: Add feature — https://github.com/o/r/pull/12")
+            link_html,
+            '<a href="https://x/7?a=1&amp;b=2">#7</a>: a &lt;b&gt; &amp; &quot;c&quot;')
 
     def test_push_event_includes_branch(self):
-        detail = github_event_detail("push", {"ref": "refs/heads/main"})
-        self.assertEqual(detail, "branch `main`")
+        self.assertEqual(
+            github_event_detail("push", {"ref": "refs/heads/main"}),
+            ("branch `main`", "branch <code>main</code>"))
 
     def test_push_event_includes_short_sha_when_present(self):
-        detail = github_event_detail("push", {
-            "ref": "refs/heads/main", "head": "abcdef1234567890",
-        })
-        self.assertEqual(detail, "branch `main` @ `abcdef1`")
+        self.assertEqual(
+            github_event_detail("push", {"ref": "refs/heads/main", "head": "abcdef1234567890"}),
+            ("branch `main` @ `abcdef1`",
+             "branch <code>main</code> @ <code>abcdef1</code>"))
 
     def test_unrecognized_event_returns_none(self):
         self.assertIsNone(github_event_detail("release.published", {"release": {}}))
 
     def test_missing_fields_returns_none(self):
-        self.assertIsNone(github_event_detail("issues.labeled", {"issue": {"number": 1}}))
         self.assertIsNone(github_event_detail("pull_request.opened", {}))
         self.assertIsNone(github_event_detail("push", {}))
 
@@ -461,7 +493,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertIn("Issue labeled", body)
-        self.assertIn("Issue #1: T", body)
+        self.assertIn("#1 (https://x/1): T", body)
 
     async def test_non_dict_label_in_payload_does_not_raise(self):
         """AC3: a malformed payload.label does not crash the notice."""
@@ -581,11 +613,18 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
                                    "html_url": "https://github.com/o/r/issues/470"}},
         }}
         await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
-        body = client.room_send.call_args.kwargs["content"]["body"]
-        self.assertIn("Issue #470: Fix login bug", body)
-        self.assertIn("https://github.com/o/r/issues/470", body)
+        content = client.room_send.call_args.kwargs["content"]
+        body = content["body"]
+        self.assertIn("#470 (https://github.com/o/r/issues/470): Fix login bug", body)
         self.assertIn("BA marked ready", body)
         self.assertNotIn("t1", body)
+        # AC3: the HTML formatted_body carries the abbreviated markdown link.
+        self.assertEqual(content["format"], "org.matrix.custom.html")
+        self.assertIn(
+            '<a href="https://github.com/o/r/issues/470">#470</a>: Fix login bug',
+            content["formatted_body"])
+        # AC3: the raw URL is no longer printed inline in the HTML.
+        self.assertNotIn(">https://github.com/o/r/issues/470<", content["formatted_body"])
 
     async def test_push_event_body_includes_branch(self):
         scheduler, client = self._scheduler()
@@ -608,6 +647,55 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("desc", body)
         self.assertNotIn("t1", body)
         self.assertNotIn("release.published", body)
+
+    # -- #1897: unified issue/PR notice with abbreviated link ------------------
+
+    async def test_pr_notice_shows_number_regardless_of_delivery_path(self):
+        """AC1: a PR notice shows `#N` even from an internal-transport delivery
+        whose synthetic payload carries a number + url (and here a title)."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event"}
+        ctx = {"github": {
+            "event": "pull_request.labeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "ready-for-documentation-update"},
+                        "pull_request": {"number": 123, "title": "Wire it up",
+                                          "html_url": "https://github.com/o/r/pull/123"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertIn("PR labeled", content["body"])
+        self.assertIn("#123 (https://github.com/o/r/pull/123): Wire it up", content["body"])
+        self.assertIn('<a href="https://github.com/o/r/pull/123">#123</a>: Wire it up',
+                      content["formatted_body"])
+
+    async def test_title_missing_degrades_to_link_only(self):
+        """AC5: an internal delivery with no resolved title still renders
+        `#N` + link (plain and HTML), never blank."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t1", "type": "github-event"}
+        ctx = {"github": {
+            "event": "pull_request.labeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "ready-for-documentation-update"},
+                        "pull_request": {"number": 123,
+                                          "html_url": "https://github.com/o/r/pull/123"}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertIn("#123 (https://github.com/o/r/pull/123)", content["body"])
+        self.assertIn('<a href="https://github.com/o/r/pull/123">#123</a>',
+                      content["formatted_body"])
+
+    async def test_cron_notice_has_no_formatted_body(self):
+        """AC3 scope: only github-event notices carry the HTML link — a cron
+        notice stays plain-text-only (no format/formatted_body keys)."""
+        scheduler, client = self._scheduler()
+        await scheduler._post_trigger_notice(
+            {"id": "c1", "type": "cron", "description": "nightly"}, None, "!room:local")
+        content = client.room_send.call_args.kwargs["content"]
+        self.assertNotIn("format", content)
+        self.assertNotIn("formatted_body", content)
 
 
 class DescribeInFlightMarker(unittest.TestCase):

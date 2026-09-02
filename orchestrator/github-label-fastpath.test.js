@@ -135,3 +135,11 @@ test('buildSyntheticEvent: pr shape uses pull_request + /pull/ url; actor falls 
   assert.deepEqual(ev.payload.pull_request, { number: 7, html_url: 'https://github.com/org/repo/pull/7' });
   assert.equal(ev.payload.issue, undefined);
 });
+
+test('buildSyntheticEvent: resolved title rides on the subject (#1897 AC8)', () => {
+  const ev = buildSyntheticEvent({ repo: 'org/repo', label: 'ready', kind: 'issue', number: 42, title: 'Fix login', actor: 'alice', eventId: 'x3', now: '2026-09-01T00:00:00Z' });
+  assert.equal(ev.payload.issue.title, 'Fix login');
+  // Blank/absent title is not carried (backward-compatible, notice degrades).
+  const noTitle = buildSyntheticEvent({ repo: 'org/repo', label: 'ready', kind: 'issue', number: 42, title: '', actor: 'alice', eventId: 'x4', now: '2026-09-01T00:00:00Z' });
+  assert.equal(noTitle.payload.issue.title, undefined);
+});

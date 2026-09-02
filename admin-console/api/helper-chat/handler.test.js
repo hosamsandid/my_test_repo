@@ -132,6 +132,18 @@ test('buildHelperChatPayload puts the corpus in system and maps turns', () => {
   assert.deepEqual(payload.messages[0], { role: 'user', content: 'hi' });
 });
 
+test('buildHelperChatPayload threads currentRoute to buildSystemPrompt (#1872 grounding)', () => {
+  const seen = {};
+  buildHelperChatPayload({
+    messages: [{ role: 'user', content: 'hi' }],
+    currentRouteLabel: 'Flows',
+    currentRoute: '/flows',
+    buildSystemPrompt: (label, route) => { seen.label = label; seen.route = route; return 'sp'; },
+  });
+  assert.equal(seen.label, 'Flows');
+  assert.equal(seen.route, '/flows');
+});
+
 // ── the handler ──────────────────────────────────────────────────────────────
 
 test('valid request streams delta then done', async () => {

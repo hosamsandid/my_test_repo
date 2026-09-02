@@ -18,8 +18,17 @@
 const fs = require('fs');
 const path = require('path');
 
+const helpRegistry = require('./help-registry');
+
 const DOCS_DIR = path.join(__dirname, 'docs');
 const PROMPT_FILE = path.join(__dirname, 'system-prompt.md');
+
+// The context-help topics (#1872) are the SINGLE SOURCE folded into the chat
+// grounding here — the very same files GET /api/helper/page-help serves the
+// panel, so there is no vendoring/parity test to maintain (unlike the docs/**
+// copies above). Loaded once at module init (fail-soft: a missing dir yields an
+// empty registry and the corpus is unchanged).
+const _helpRegistry = helpRegistry.loadRegistry();
 
 // List of files in the order they are concatenated (importance-ordered)
 const CORPUS_FILES = [
@@ -41,9 +50,9 @@ const CORPUS_FILES = [
   'walkthrough/06-knowledge.md',
 ];
 
-function buildSystemPrompt(currentRouteLabel) {
+function buildSystemPrompt(currentRouteLabel, currentRoute) {
   const promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
-  const corpus = CORPUS_FILES
+  const docsCorpus = CORPUS_FILES
     .map(f => {
       const full = path.join(DOCS_DIR, f);
       const content = fs.readFileSync(full, 'utf8');
@@ -51,11 +60,21 @@ function buildSystemPrompt(currentRouteLabel) {
     })
     .join('\n\n---\n\n');
 
+  // Append the curated per-page help topics so a page-specific question is
+  // answered from the very content the panel shows (§3.2). Empty when no topics
+  // exist yet — the docs corpus is then unchanged.
+  const helpFold = _helpRegistry.foldTopics();
+  const corpus = helpFold
+    ? `${docsCorpus}\n\n---\n\n### page-help topics\n\n${helpFold}`
+    : docsCorpus;
+
   const routeContext = currentRouteLabel
     ? `\n\nThe user is currently on the **${currentRouteLabel}** page.\n`
     : '';
+  // Point the model at the current page's help topic when one resolves.
+  const routePointer = helpRegistry.routeGroundingPointer(_helpRegistry, currentRoute);
 
-  return promptTemplate.replace('[corpus is appended here at runtime]', corpus) + routeContext;
+  return promptTemplate.replace('[corpus is appended here at runtime]', corpus) + routeContext + routePointer;
 }
 
 const SYSTEM_PROMPT_CHAR_LIMIT = 180_000; // same limit as flow-copilot.js

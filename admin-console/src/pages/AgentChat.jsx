@@ -9,6 +9,7 @@ import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
+import { emptyStateCta } from './agent-chat/empty-state';
 
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
@@ -534,9 +535,9 @@ export default function AgentChat() {
               alignItems: 'center',
               gap: 'var(--eb-space-3)',
             }}>
-              <span>No agents yet. Get started:</span>
+              <span>No agents yet.</span>
               <Link
-                to="/quickstart"
+                to={emptyStateCta().to}
                 style={{
                   display: 'block', width: '100%', boxSizing: 'border-box',
                   padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
@@ -544,25 +545,7 @@ export default function AgentChat() {
                   fontWeight: 600, textDecoration: 'none',
                 }}
               >
-                Create a single agent
-              </Link>
-              <Link
-                to="/team-setup"
-                style={{
-                  display: 'block', width: '100%', boxSizing: 'border-box',
-                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
-                  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
-                  border: '1px solid var(--eb-border-default)',
-                  fontWeight: 600, textDecoration: 'none',
-                }}
-              >
-                Set up a team
-              </Link>
-              <Link
-                to="/getting-started"
-                style={{ color: 'var(--eb-accent-primary)', textDecoration: 'none', fontSize: 'var(--eb-text-xs)' }}
-              >
-                New here? Read the Getting Started overview →
+                {emptyStateCta().label}
               </Link>
             </div>
           )}

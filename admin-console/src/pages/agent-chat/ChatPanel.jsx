@@ -31,6 +31,7 @@ import { resolveContextWindowTokens, computeContextFillLevel } from './context-w
 import { headerContextIndicator } from './session-info.js';
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
+import { providerWarningText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import {
@@ -1102,6 +1103,10 @@ export default function ChatPanel({
   const disabled = agent.enabled === false;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
+  // AC5 (#1843): non-blocking warning when the agent's bound Model Provider is
+  // currently red. The GET /model-options fetch (fired on agent selection) also
+  // triggers a fresh probe server-side when the status is stale.
+  const providerWarning = providerWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
 
   // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
   // only needs to kick a session off for this agent and know whether one is
@@ -1285,6 +1290,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {maintenanceBanner}
+        </div>
+      )}
+
+      {providerWarning && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {providerWarning}
         </div>
       )}
 

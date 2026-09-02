@@ -242,10 +242,51 @@ const TOPIC_CONTENT = [
       'reassign',
     ],
   },
+  {
+    id: 'token-usage',
+    routes: ['/token-usage'],
+    // #1885 lifted the Token Usage intro banner (what the page shows + how the
+    // two tabs differ), the reasoning behind the tokens-not-costs caveat, and
+    // the full attribution-tier explainer out of the `TIER_SIGNAL_HELP` InfoTip
+    // — which now carries only the four signal names. The topic additionally
+    // records what the banner never said: that only agent runs are recorded,
+    // the strongest-signal-wins rule, the shared / flow-mismatch flags, why the
+    // unattributed remainder is always reported, and that records are filed
+    // under the day the run happened.
+    concepts: [
+      'System Admin',
+      'Team filter',
+      'agent runs',
+      'Statistics',
+      'Work items',
+      'Group by',
+      'unknown',
+      'raw token count',
+      'never reads it',
+      'CSV',
+      'Input',
+      'Output',
+      'Cache write',
+      'Cache read',
+      'closes #N',
+      'flow',
+      'created',
+      'event',
+      'branch',
+      'strongest signal',
+      'shared',
+      'flow-mismatch',
+      'always',
+      'attributed',
+      'Invocations',
+      'Open session',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users …), never by dropping one.
+  // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
+  // E11 token-usage …), never by dropping one.
 ];
 
 const registry = loadRegistry();

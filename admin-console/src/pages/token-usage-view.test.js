@@ -25,7 +25,7 @@ import {
   STAT_TILE_HELP,
   TIER_SIGNAL_HELP,
   COST_NOTE,
-  PAGE_INTRO,
+  PAGE_DESCRIPTION,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -437,26 +437,34 @@ test('TIER_SIGNAL_HELP names all four TIER_LABEL signals, strongest first (#1151
   assert.match(TIER_SIGNAL_HELP, /attribution/i);
 });
 
+test('TIER_SIGNAL_HELP is a short label, not the full explainer (#1885)', () => {
+  // #1885 moved the per-signal definitions into help-topics/token-usage.md; the
+  // InfoTip keeps only the label + the ordering. Guard the size so a future edit
+  // does not quietly grow a second copy of the topic's table back into the page.
+  assert.ok(
+    TIER_SIGNAL_HELP.length <= 160,
+    `InfoTip label must stay short (was ${TIER_SIGNAL_HELP.length} chars) — the definitions live in the help topic`,
+  );
+  assert.doesNotMatch(TIER_SIGNAL_HELP, /wired into|created the linked|reacted to/i);
+});
+
 test('COST_NOTE states figures are token counts, not costs (#1151 AC1)', () => {
   assert.equal(typeof COST_NOTE, 'string');
   assert.match(COST_NOTE, /not cost/i);
   assert.match(COST_NOTE, /pric/i);
 });
 
-test('PAGE_INTRO is a plain-language banner that frames the page and both tabs', () => {
-  for (const key of ['lead', 'statistics', 'workItems']) {
-    assert.equal(typeof PAGE_INTRO[key], 'string', `${key} must be a string`);
-    assert.ok(PAGE_INTRO[key].trim().length > 0, `${key} must be non-empty`);
-  }
-  // The lead explains what the page is about (tokens/usage), in plain words.
-  assert.match(PAGE_INTRO.lead, /token/i);
-  // Each tab description leads with the exact tab label the TABS array renders,
-  // so the banner and the tab strip can never drift apart.
-  assert.match(PAGE_INTRO.statistics, /^Statistics\b/);
-  assert.match(PAGE_INTRO.workItems, /^Work items\b/);
+test('PAGE_DESCRIPTION is a single plain-language line about tokens (#1885)', () => {
+  assert.equal(typeof PAGE_DESCRIPTION, 'string');
+  assert.ok(PAGE_DESCRIPTION.trim().length > 0, 'must be non-empty');
+  assert.match(PAGE_DESCRIPTION, /token/i);
+  // #1885 replaced the multi-paragraph intro banner with one line next to the
+  // PageHelpButton — the tab framing and the tier explainer now live in
+  // help-topics/token-usage.md, so this must stay a single sentence-length line.
+  assert.ok(PAGE_DESCRIPTION.length <= 200, `must stay one line (was ${PAGE_DESCRIPTION.length} chars)`);
+  assert.doesNotMatch(PAGE_DESCRIPTION, /\n/);
 });
 
-test('PAGE_INTRO does not claim the figures are money (stays consistent with COST_NOTE)', () => {
-  const all = `${PAGE_INTRO.lead} ${PAGE_INTRO.statistics} ${PAGE_INTRO.workItems}`;
-  assert.doesNotMatch(all, /\$|\bcost\b|\bprice\b|\bdollar/i);
+test('PAGE_DESCRIPTION does not claim the figures are money (stays consistent with COST_NOTE)', () => {
+  assert.doesNotMatch(PAGE_DESCRIPTION, /\$|\bcost\b|\bprice\b|\bdollar/i);
 });

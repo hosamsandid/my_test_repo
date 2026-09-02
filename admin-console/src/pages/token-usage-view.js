@@ -199,35 +199,30 @@ export const STAT_TILE_HELP = {
     'Cache read — input tokens served from the provider prompt cache instead of being re-sent in full, so a repeated context costs less than the first time.',
 };
 
-// Help for the work-item attribution signal shown as "Signals" (table column)
-// and "Tier" (per-run detail) — the raw labels flow/created/event/branch
+// Short label for the work-item attribution signal shown as "Signals" (table
+// column) and "Tier" (per-run detail) — the raw labels flow/created/event/branch
 // (TIER_LABEL) carry no meaning on their own (#1151). One string serves both
-// surfaces so the definition never drifts between them.
+// surfaces so the definition never drifts between them. What each signal
+// actually means (and how the strongest-signal-wins rule works) lives in the
+// Token Usage help topic — help-topics/token-usage.md, #1885.
 export const TIER_SIGNAL_HELP =
-  'Attribution confidence — how the tokens for a run were tied to this work item, strongest signal first: flow (the run was wired into the flow that owns the work item), created (the run created the linked issue or PR), event (the run reacted to a GitHub issue/PR event), branch (matched only by branch name). Higher tiers are more certain.';
+  'Attribution confidence — how strongly a run could be tied to this work item, strongest signal first: flow, created, event, branch.';
 
 // Page-wide reminder that every figure on this page is a raw token count, not
-// money (#1151). Previously this caveat lived only in the export-button title.
+// money (#1151). It sits directly above the figures it guards, so the RULE
+// stays on the page; the reasoning (why nothing is priced here, and how to apply
+// your own prices via the exports) moved to the help topic in #1885.
 export const COST_NOTE =
-  'Figures are token counts, not costs — apply your provider per-model pricing separately.';
+  'Figures are token counts, not costs — apply your own per-model pricing.';
 
-// Plain-language page intro (the banner under the H1). Token Usage is one of
-// the most data-dense pages in the console — a first-time user lands on charts,
-// token-class names and two tabs with no framing for what they mean. Every peer
-// admin page (MCP Servers, GitHub Tokens, SSH Keys, Model Providers, Working
-// Environments, Skills) opens with a "what this page is" banner; this brings
-// Token Usage in line and states, in one place, what the page shows and how the
-// two tabs differ. Single-sourced here so the copy is unit-testable and never
-// drifts from the JSX (the token-usage-view.js convention, #651). `statistics`
-// and `workItems` lead with the exact tab labels rendered by TABS.
-export const PAGE_INTRO = {
-  lead:
-    'See how many tokens your agents used against the model provider — the raw usage behind every agent run, so you can tell where the spend goes.',
-  statistics:
-    'Statistics — the overall picture: the total for the selected period, how it trends over time, and a breakdown you can group by agent, team, model or day.',
-  workItems:
-    'Work items — usage tied to a specific GitHub issue and the pull request(s) that resolve it, so you can see how much one piece of work consumed.',
-};
+// Plain-language one-line page description (below the H1, next to the
+// PageHelpButton). Everything the removed intro banner said beyond this line —
+// what the page shows, how the two tabs differ, the attribution tiers, why
+// nothing is priced — now lives in help-topics/token-usage.md (#1885, epic
+// #1870). Single-sourced here so the copy stays unit-testable and never drifts
+// from the JSX (the token-usage-view.js convention, #651).
+export const PAGE_DESCRIPTION =
+  'How many tokens your agents used against the model provider — the raw usage behind every agent run, so you can tell where the spend goes.';
 
 // Build the flat-export download URL (#656) for a view. `kind` is
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current

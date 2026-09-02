@@ -5,7 +5,8 @@ import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_INTRO, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
+import PageHelpButton from '../components/PageHelpButton';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -598,27 +599,26 @@ export default function TokenUsage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {/* One-line description + the shared "?" (#1885, epic #1870). The intro
+          banner that used to sit here — what the page shows, how the two tabs
+          differ, and the attribution-tier explainer — is now the Token Usage
+          help topic (api/helper-chat/help-topics/token-usage.md), which also
+          records what the banner never said: that only agent runs are counted,
+          how the strongest-signal-wins attribution works, and why the
+          unattributed remainder is always reported. The per-tile InfoTips and
+          the tokens-not-costs line below the tabs stay at the figures they
+          explain. */}
+      <p style={{
+        margin: 0,
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+      }}>
+        <span>{PAGE_DESCRIPTION}</span>
+        <PageHelpButton label="How to read the Token Usage figures" size={14} style={{ padding: 0, flexShrink: 0 }} />
+      </p>
+
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
         <TeamFilter teams={teams} value={team} onChange={setTeam} />
-      </div>
-
-      {/* Plain-language intro banner — mirrors the "what this page is" banner
-          every peer admin page opens with; copy single-sourced in
-          token-usage-view.js (PAGE_INTRO). */}
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-        lineHeight: 1.6,
-      }}>
-        <p style={{ margin: 0 }}>{PAGE_INTRO.lead}</p>
-        <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-5)' }}>
-          <li>{PAGE_INTRO.statistics}</li>
-          <li style={{ marginTop: 'var(--eb-space-1)' }}>{PAGE_INTRO.workItems}</li>
-        </ul>
       </div>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', borderBottom: '1px solid var(--eb-border-default)' }}>

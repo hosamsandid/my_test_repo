@@ -50,6 +50,26 @@ test('nextEnabledIndex skips disabled items', () => {
   assert.equal(nextEnabledIndex(items, 2, -1), 0);
 });
 
+// #1922 promoted Reset Session to a primary toolbar button, so the menu now
+// carries a single item (Clear History). Keyboard traversal must still behave:
+// the lone item takes focus on open and every arrow key stays on it.
+test('a single-item menu focuses and keeps focus on its one item', () => {
+  const items = [CLEAR];
+  assert.equal(firstEnabledIndex(items), 0);
+  assert.equal(lastEnabledIndex(items), 0);
+  assert.equal(nextEnabledIndex(items, -1, 1), 0);  // open → first
+  assert.equal(nextEnabledIndex(items, -1, -1), 0); // End → last (same item)
+  assert.equal(nextEnabledIndex(items, 0, 1), 0);   // wraps onto itself
+  assert.equal(nextEnabledIndex(items, 0, -1), 0);
+});
+
+test('a single-item menu that is disabled offers no focus target', () => {
+  const items = [{ ...CLEAR, disabled: true }];
+  assert.equal(firstEnabledIndex(items), -1);
+  assert.equal(lastEnabledIndex(items), -1);
+  assert.equal(nextEnabledIndex(items, -1, 1), -1);
+});
+
 test('nextEnabledIndex returns -1 when nothing is enabled', () => {
   const items = [{ disabled: true }, { disabled: true }];
   assert.equal(nextEnabledIndex(items, 0, 1), -1);

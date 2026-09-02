@@ -94,8 +94,8 @@ const PAGE_ROUTES = new Set([
   '/about',
 ]);
 
-// Structural routes with no page help of their own (redirects, alias, dynamic
-// children, the orchestrator-wizard stub). Kept explicit so the coverage test
+// Structural routes with no page help of their own (redirects, dynamic children,
+// the orchestrator-wizard stub). Kept explicit so the coverage test
 // forces every new route to be classified as page-or-structural on purpose.
 const ALLOWLIST = new Set([
   '/',
@@ -129,8 +129,6 @@ const TOPIC_PENDING = {
   '/ssh-keys': '#1884 (E10 Credentials & GitHub access)',
   '/github-tokens': '#1884 (E10 Credentials & GitHub access)',
   '/my-credentials': '#1884 (E10 Credentials & GitHub access)',
-  '/token-usage': '#1885 (E11 Token Usage)',
-  '/maintenance-mode': '#1887 (E13 Maintenance Mode)',
 };
 
 // The full set of routes the help system knows about — every App.jsx path must

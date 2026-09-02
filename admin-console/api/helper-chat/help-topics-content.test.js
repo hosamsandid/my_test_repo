@@ -302,6 +302,39 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'credentials',
+    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
+    // SetupWizard's two credential steps). The topic additionally records what
+    // no box said: the three ownership tiers, the strict personal privacy
+    // guarantee, the per-operation-class runtime resolution order with
+    // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
+    concepts: [
+      'SSH key',
+      'GitHub token',
+      'deploy key',
+      'defense-in-depth',
+      'blast-radius',
+      'GH_TOKEN',
+      'fingerprint',
+      'Personal',
+      'Team',
+      'System',
+      'only the owner',
+      'break-glass',
+      'attributed writes',
+      'Event polling',
+      'preference among tiers',
+      'refused',
+      'rotate in place',
+      'create-new-and-repoint',
+      'Used by',
+      'read:org',
+      'SAML SSO',
+    ],
+  },
+  {
     id: 'token-usage',
     routes: ['/token-usage'],
     // #1885 lifted the Token Usage intro banner (what the page shows + how the
@@ -452,6 +485,11 @@ const TOPIC_CONTENT = [
     ],
   },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
+  // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
+  // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
+  // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
+  // E11 token-usage, E12 github-events, E13 maintenance-mode, E16 about/users,
+  // E17 settings …), never by dropping one.
   {
     id: 'settings',
     routes: ['modal:settings'],
@@ -476,11 +514,6 @@ const TOPIC_CONTENT = [
       'user record',
     ],
   },
-  // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
-  // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
-  // E6 environments, E7 access-users, E8 models, E9 mcp, E11 token-usage,
-  // E12 github-events, E13 maintenance-mode, E16 about/users, E17 settings …),
-  // never by dropping one.
 ];
 
 const registry = loadRegistry();

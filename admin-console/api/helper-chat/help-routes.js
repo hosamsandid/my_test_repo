@@ -126,9 +126,6 @@ const TOPIC_PENDING = {
   '/team-setup': '#1888 (E14 Creation & onboarding)',
   '/wizard/team': '#1888 (E14 Creation & onboarding) — via the /team-setup alias',
   '/role-templates': '#1888 (E14 Creation & onboarding)',
-  '/ssh-keys': '#1884 (E10 Credentials & GitHub access)',
-  '/github-tokens': '#1884 (E10 Credentials & GitHub access)',
-  '/my-credentials': '#1884 (E10 Credentials & GitHub access)',
 };
 
 // The full set of routes the help system knows about — every App.jsx path must
@@ -170,9 +167,10 @@ const CONTEXT_KEYS = {
   'modal:settings#display': { label: 'Settings · Display' },
   'wizard:setup': { label: 'First-run setup' },
   // The first-run wizard's three steps reuse the topics the corresponding
-  // console pages already own — no duplicate prose (AC2). `/ssh-keys` and
-  // `/github-tokens` are still TOPIC_PENDING to #1884, so those two steps show
-  // nothing until that topic lands; the alias needs no change when it does.
+  // console pages already own — no duplicate prose (AC2). All three resolve:
+  // `/models` (E8) and the credentials topic E10 (#1884) gave `/ssh-keys` +
+  // `/github-tokens`. A step whose aliased topic is ever missing renders no help
+  // box rather than an empty one.
   'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
   'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
   'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },

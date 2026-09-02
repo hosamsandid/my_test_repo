@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, GripVertical } from 'lucide-react';
+import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 import { buildGroups, groupKey, orderModel, filterModel } from './agent-list-model.js';
+import { isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
 // the model module directly (the grouping logic used to live in this file).
@@ -66,6 +67,13 @@ function saveOrder(order) {
  * @param {(id:string)=>void} onMarkAsUnread
  * @param {Record<string,string>} statuses  Map agentId → activityState
  * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'orchestrator',id:string}|{kind:'agent',id:string}} filter
+ * @param {boolean} showDisabled  Opt-in: also list disabled agents (#1928 AC6)
+ * @param {(target:{kind:'agent'|'team',agent?:object,group?:object}, anchor:{x:number,y:number})=>void} onRequestMenu
+ *   Lifecycle quick actions (#1928). The rail only reports *where* a menu was
+ *   asked for and *for what* — which entries it gets, and what they do, is the
+ *   caller's business (it owns the dialogs and the API calls). Omitted → the
+ *   rail renders no kebabs and right-click keeps the browser menu, so every
+ *   other embedding of this list is unaffected.
  */
 export default function AgentList({
   agents,
@@ -74,6 +82,8 @@ export default function AgentList({
   onMarkAsUnread,
   statuses = {},
   filter = { kind: 'all' },
+  showDisabled = false,
+  onRequestMenu = null,
 }) {
   const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
   useEffect(() => { saveOrder(sidebarOrder); }, [sidebarOrder]);
@@ -92,8 +102,8 @@ export default function AgentList({
     [rawGroups, rawSingles, sidebarOrder],
   );
   const { visibleGroups, visibleSingles, empty } = useMemo(
-    () => filterModel(orderedGroups, orderedSingles, filter),
-    [orderedGroups, orderedSingles, filter],
+    () => filterModel(orderedGroups, orderedSingles, filter, showDisabled),
+    [orderedGroups, orderedSingles, filter, showDisabled],
   );
 
   // Group and single-agent reorder are only offered when the full unfiltered
@@ -246,6 +256,7 @@ export default function AgentList({
           drag={drag}
           groupDragKey={groupKey(group)}
           dragEnabled={canReorder && visibleGroups.length > 1}
+          onRequestMenu={onRequestMenu}
         />
       ))}
 
@@ -267,6 +278,7 @@ export default function AgentList({
               dragScope="singles"
               dragKey={agent.id}
               dragEnabled={canReorder && visibleSingles.length > 1}
+              onRequestMenu={onRequestMenu}
             />
           ))}
         </>
@@ -300,12 +312,18 @@ const GroupSection = React.memo(function GroupSection({
   drag,
   groupDragKey,
   dragEnabled,
+  onRequestMenu,
 }) {
   const Icon = group.kind === 'team' ? Users : Layers;
   const count = group.children.length + (group.header ? 1 : 0);
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
+  // Team management (AC2) hangs off the group header. An orchestrator group gets
+  // no header menu: its lifecycle actions stay on the Agents page (epic D4).
+  const headerMenu = onRequestMenu && group.kind === 'team'
+    ? anchor => onRequestMenu({ kind: 'team', group }, anchor)
+    : null;
   // The Working Environment shared by this group's rows is shown once, on the
   // header; rows that inherit it drop their own line (#1451).
   const groupEnv = groupEnvironmentName(group);
@@ -324,6 +342,7 @@ const GroupSection = React.memo(function GroupSection({
         dragScope="groups"
         dragKey={groupDragKey}
         dragEnabled={dragEnabled}
+        onRequestMenu={headerMenu}
       />
       {!collapsed && group.header && (
         <AgentRow
@@ -333,6 +352,7 @@ const GroupSection = React.memo(function GroupSection({
           onMarkAsUnread={onMarkAsUnread}
           activityState={statuses[group.header.id] || 'idle'}
           environmentName={rowEnvironmentName(group.header, groupEnv)}
+          onRequestMenu={onRequestMenu}
         />
       )}
       {!collapsed && group.children.map((agent) => (
@@ -350,13 +370,14 @@ const GroupSection = React.memo(function GroupSection({
           dragScope={memberScope}
           dragKey={agent.id}
           dragEnabled={memberDragEnabled}
+          onRequestMenu={onRequestMenu}
         />
       ))}
     </>
   );
 });
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, onToggle, onReorder, drag, dragScope, dragKey, dragEnabled }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, onToggle, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
@@ -369,7 +390,19 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
       onMouseLeave={() => setHovered(false)}
       onDragOver={dnd ? dnd.onDragOver : undefined}
       onDrop={dnd ? dnd.onDrop : undefined}
+      onContextMenu={onRequestMenu ? e => {
+        e.preventDefault();
+        onRequestMenu({ x: e.clientX, y: e.clientY });
+      } : undefined}
       onKeyDown={e => {
+        // Shift+F10 / the Menu key are the platform keyboard paths to a context
+        // menu — without them the kebab would be the only keyboard route (AC9).
+        if (onRequestMenu && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+          e.preventDefault();
+          const r = e.currentTarget.getBoundingClientRect();
+          onRequestMenu({ x: r.right - 8, y: r.bottom });
+          return;
+        }
         if (!e.altKey || !dragEnabled) return;
         if (e.key === 'ArrowUp')   { e.preventDefault(); onReorder(dragScope, dragKey, -1); }
         if (e.key === 'ArrowDown') { e.preventDefault(); onReorder(dragScope, dragKey, 1); }
@@ -442,6 +475,13 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
        * drag; the keyboard path is Alt+↑/↓ (see aria-keyshortcuts above) — the
        * visible arrow buttons were removed as redundant with drag&drop (#1381).
        */}
+      {onRequestMenu && (
+        <KebabButton
+          label={`Team actions for ${label}`}
+          active={hovered}
+          onOpen={onRequestMenu}
+        />
+      )}
       {dnd && <DragGrip dnd={dnd} active={hovered} />}
       <span style={{
         flexShrink: 0,
@@ -514,10 +554,20 @@ const STATUS_DOT = {
 // actually pays off: a status poll re-renders only the rows whose
 // `activityState` string changed, not the whole list. The per-row click
 // closures are built inside — they only matter when the row does re-render.
-const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', environmentName = null, indent = false, onReorder, drag, dragScope, dragKey, dragEnabled }) {
+const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', environmentName = null, indent = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const Icon = iconForRole(agent.role);
-  const dot = STATUS_DOT[activityState] ?? STATUS_DOT.problem;
   const [hovered, setHovered] = useState(false);
+
+  // A disabled agent is only ever in this list because the caller opted in
+  // (#1928 AC6). Its state is read from the row's own payload rather than the
+  // `statuses` poll, which is keyed on the enabled-agent list and would leave
+  // such a row looking idle.
+  const openable = isChatOpenable(agent);
+  const dot = openable ? (STATUS_DOT[activityState] ?? STATUS_DOT.problem) : STATUS_DOT.disabled;
+
+  const requestMenu = onRequestMenu
+    ? anchor => onRequestMenu({ kind: 'agent', agent }, anchor)
+    : null;
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
 
@@ -533,10 +583,28 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMar
     <button
       role="option"
       aria-selected={selected}
-      onClick={() => onSelect(agent.id)}
+      aria-disabled={!openable || undefined}
+      // A disabled agent has no chat to open (the DM route rejects it), so the
+      // row opens its own menu instead — Enable sits right there, which beats
+      // both a silent no-op and a dead-end "agent disabled" panel (AC6).
+      title={!openable ? STATUS_DOT.disabled.label : undefined}
+      onClick={e => {
+        if (openable) { onSelect(agent.id); return; }
+        if (requestMenu) requestMenu({ x: e.clientX, y: e.clientY });
+      }}
       onDragOver={dnd ? dnd.onDragOver : undefined}
       onDrop={dnd ? dnd.onDrop : undefined}
+      onContextMenu={requestMenu ? e => {
+        e.preventDefault();
+        requestMenu({ x: e.clientX, y: e.clientY });
+      } : undefined}
       onKeyDown={e => {
+        if (requestMenu && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+          e.preventDefault();
+          const r = e.currentTarget.getBoundingClientRect();
+          requestMenu({ x: r.right - 8, y: r.bottom });
+          return;
+        }
         if (!e.altKey || !dragEnabled) return;
         if (e.key === 'ArrowUp')   { e.preventDefault(); onReorder(dragScope, dragKey, -1); }
         if (e.key === 'ArrowDown') { e.preventDefault(); onReorder(dragScope, dragKey, 1); }
@@ -570,18 +638,40 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMar
       <Icon size={18} style={{ flexShrink: 0, color: selected ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }} />
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          title={agent.displayName || agent.id}
-          style={{
-            fontSize: 'var(--eb-text-md)',
-            fontWeight: 'var(--eb-font-medium)',
-            color: 'var(--eb-text-primary)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {agent.displayName || agent.id}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+          <span
+            title={agent.displayName || agent.id}
+            style={{
+              fontSize: 'var(--eb-text-md)',
+              fontWeight: 'var(--eb-font-medium)',
+              color: openable ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {agent.displayName || agent.id}
+          </span>
+          {/*
+           * The word, not just the amber dot: with the opt-in on, a disabled row
+           * sits among enabled ones and has to read as disabled at a glance
+           * (AC6) — a colour alone would also fail anyone who can't see it.
+           */}
+          {!openable && (
+            <span style={{
+              flexShrink: 0,
+              padding: '0 4px',
+              borderRadius: 'var(--eb-radius-sm)',
+              border: '1px solid var(--eb-border-default)',
+              fontSize: 'var(--eb-text-xs)',
+              lineHeight: 1.5,
+              color: 'var(--eb-text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.04em',
+            }}>
+              Disabled
+            </span>
+          )}
         </div>
         {environmentName && (
           <div
@@ -638,6 +728,13 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMar
           >
             <MailOpen size={12} />
           </span>
+        )}
+        {requestMenu && (
+          <KebabButton
+            label={`Actions for ${agent.displayName || agent.id}`}
+            active={hovered}
+            onOpen={requestMenu}
+          />
         )}
         {dnd && <DragGrip dnd={dnd} active={hovered} />}
         <span
@@ -703,6 +800,59 @@ function makeRowDnd(drag, scope, key) {
       handlers.onEnd();
     },
   };
+}
+
+/**
+ * The kebab that opens a row's / group's lifecycle menu (#1928). Anchored at its
+ * own box rather than the pointer so the menu lands in the same place however it
+ * was opened, and it is a real focusable control so the menu is reachable by
+ * keyboard without knowing the Shift+F10 convention (AC9).
+ *
+ * Rendered as a `span[role=button]`: the rows it sits in are themselves
+ * `<button>`s, and a nested `<button>` is invalid HTML that browsers recover
+ * from by hoisting it out of its parent — the same reason the sibling
+ * mark-as-unread control is a span. Always mounted while a menu is available
+ * (faint at rest, full-strength on row hover) so its width never shifts the
+ * trailing cluster, and `stopPropagation` keeps a click off the row's own
+ * select/collapse handler.
+ */
+function KebabButton({ label, active, onOpen }) {
+  function open(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const r = e.currentTarget.getBoundingClientRect();
+    onOpen({ x: r.right, y: r.bottom + 2 });
+  }
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-haspopup="menu"
+      aria-label={label}
+      title="Actions"
+      onClick={open}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') open(e);
+      }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 16,
+        height: 16,
+        flexShrink: 0,
+        borderRadius: 'var(--eb-radius-sm)',
+        color: 'var(--eb-text-muted)',
+        cursor: 'pointer',
+        opacity: active ? 1 : 0.35,
+        transition: 'opacity var(--eb-transition-fast), color var(--eb-transition-fast)',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+      onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+    >
+      <MoreVertical size={13} />
+    </span>
+  );
 }
 
 /**

@@ -123,6 +123,13 @@ ENV PATH="${PATH}:/opt/aee/plugin-bin"
 
 ENV NODE_ENV=production
 
+# LOCAL OPT-OUT: this environment's Claude Code managed policy blocks MCP servers,
+# so the bundled aee-ask server is refused and every agent turn exits non-zero.
+# The flow does not use AskUserQuestion, so we skip injecting the MCP server.
+# Remove this line once the enterprise policy allowlists MCP (the entrypoint gate
+# defaults to off, so upstream behaviour is unchanged without it).
+ENV AEE_DISABLE_ASK_MCP=1
+
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]
 
 

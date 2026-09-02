@@ -11,6 +11,7 @@ import {
   askHandoff,
   seeAlsoLinks,
   askPromptChips,
+  topicActions,
   seenRoutesKey,
   autoOpenRouteKey,
   autoOpenPlan,
@@ -36,6 +37,43 @@ test('canonicalRoute collapses dynamic, alias and redirect routes', () => {
   assert.equal(canonicalRoute('/process/team-x'), '/flows');
   assert.equal(canonicalRoute('/plugins/foo/view'), null); // allowlisted viewer → no topic
   assert.equal(canonicalRoute('/agents'), '/agents');      // plain route unchanged
+});
+
+test('canonicalRoute sends the retired /getting-started bookmark to the app home', () => {
+  // #1874: the page is gone; /chats has no dedicated topic, so the face lands on
+  // the Overview that now carries the former Getting Started content.
+  assert.equal(canonicalRoute('/getting-started'), '/chats');
+  assert.equal(resolvePageTopic(PAYLOAD, '/getting-started'), null);
+  assert.equal(pageHelpState(PAYLOAD, '/getting-started').isOverview, true);
+  assert.equal(hasDedicatedTopic(PAYLOAD, '/getting-started'), false); // never auto-opens
+});
+
+// ── topicActions (#1874) ───────────────────────────────────────────────────────
+
+test('topicActions normalizes navigation and tour CTAs, dropping unusable rows', () => {
+  const topic = {
+    actions: [
+      { label: ' Create a single agent ', to: ' /quickstart ', primary: true },
+      { label: 'Take the Tour', action: 'tour' },
+      { label: 'Both given', to: '/models', action: 'tour' }, // `to` wins
+      { label: 'No target' },
+      { to: '/quickstart' },
+      { label: 'Bad verb', action: 'wipe' },
+      'not an object',
+      null,
+    ],
+  };
+  assert.deepEqual(topicActions(topic), [
+    { label: 'Create a single agent', to: '/quickstart', action: '', primary: true },
+    { label: 'Take the Tour', to: '', action: 'tour', primary: false },
+    { label: 'Both given', to: '/models', action: '', primary: false },
+  ]);
+});
+
+test('topicActions is empty for a topic without actions', () => {
+  assert.deepEqual(topicActions(null), []);
+  assert.deepEqual(topicActions({}), []);
+  assert.deepEqual(topicActions({ actions: 'nope' }), []);
 });
 
 // ── normalize + overview ───────────────────────────────────────────────────────

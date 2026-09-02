@@ -4,7 +4,7 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
-  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Compass, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -113,8 +113,9 @@ function GroupHeader({ label, expanded, onToggle }) {
 // Sidebar information architecture, re-cut by user task (#1595). Two tiers:
 //   • NAV_TOP     — ungrouped, primary/daily (Agent Chat, with its badges).
 //   • NAV_GROUPS  — collapsible accordions in workflow order (key = accordion +
-//                   persistence id; `section` = header label). Help is the final
-//                   group; the dynamic Plugins group is inserted just before it.
+//                   persistence id; `section` = header label). The dynamic
+//                   Plugins group is appended after them at runtime. There is no
+//                   Help group: help lives in the header Help panel (#1874).
 // Role gating (`adminOnly` / `credAdmin`) is unchanged from the old flat NAV.
 // Dynamically-appended UI-plugin entries (incl. the Patterns Catalog, now a
 // plugin) are added at runtime below — see `pluginSection`.
@@ -155,12 +156,6 @@ const NAV_GROUPS = [
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
-  ]},
-  // Help is a normal collapsible section at the tail of the nav — part of the
-  // scrolling accordion, not a pinned bottom cluster. The dynamic Plugins group
-  // is inserted just before it at runtime so Help stays the final section.
-  { key: 'help', section: 'Help', items: [
-    { path: '/getting-started', label: 'Getting Started', Icon: Compass },
   ]},
 ];
 
@@ -279,15 +274,10 @@ export default function Shell({ children }) {
       }
     : null;
 
-  // The full accordion list = static groups + the dynamic plugins group (when
-  // any UI plugins resolve), inserted just before the trailing Help group so Help
-  // stays the final nav section. Drives both active-group auto-expand and rendering.
-  const allGroups = (() => {
-    if (!pluginSection) return groups;
-    const helpIdx = groups.findIndex(g => g.key === 'help');
-    if (helpIdx === -1) return [...groups, pluginSection];
-    return [...groups.slice(0, helpIdx), pluginSection, ...groups.slice(helpIdx)];
-  })();
+  // The full accordion list = static groups + the dynamic plugins group (when any
+  // UI plugins resolve) appended last, so a long plugin list folds away at the tail
+  // of the nav. Drives both active-group auto-expand and rendering.
+  const allGroups = pluginSection ? [...groups, pluginSection] : groups;
 
   // ── Collapsible group state (#1595) ──────────────────────────────────
   // Which group holds the active route (auto-expanded on load / deep-link /

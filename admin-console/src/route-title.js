@@ -32,7 +32,7 @@ export const ROUTE_TITLES = {
   '/mcp': 'MCP Servers',
   '/environments': 'Working Environments',
   '/github-events': 'GitHub Event Log',
-  '/teams': 'Access & Users',
+  '/teams': 'Access',
   '/users': 'Users',
   '/token-usage': 'Token Usage',
   '/plugins': 'Plugins',

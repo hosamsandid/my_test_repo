@@ -122,7 +122,7 @@ These are properties of the current implementation, not configuration mistakes.
 | Caveat | What it means in practice |
 |---|---|
 | **All console users share one chat identity** | The console authenticates to Matrix with a single access token. Every logged-in person acts as the *same* Matrix user and sees the *same* DM rooms — so **everyone can read everyone's agent conversations.** Acceptable inside one trusted team; not acceptable across teams. |
-| **The single env-admin credential always works** | Per-user passwords exist (set on the Access & Users page), but login falls back to `ADMIN_USERNAME`/`ADMIN_PASSWORD` by design, so nobody can be locked out. That fallback also cannot be disabled. |
+| **The single env-admin credential always works** | Per-user passwords exist (set on the Users page), but login falls back to `ADMIN_USERNAME`/`ADMIN_PASSWORD` by design, so nobody can be locked out. That fallback also cannot be disabled. |
 | **No SSO** | There is a clean, documented swap-point for OIDC/SAML, but no implementation. |
 | **Authorization is coarse** | The API gate is binary: authenticated or not. Team roles scope *lists*, not every mutation. |
 | **No backup tooling** | Five stateful volumes and no dump/restore script — see below. |

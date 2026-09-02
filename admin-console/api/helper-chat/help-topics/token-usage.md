@@ -7,7 +7,7 @@ seeAlso:
   - { label: "Model Providers", to: "/models" }
   - { label: "GitHub Event Log", to: "/github-events" }
   - { label: "Agents", to: "/agents" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
 askPrompts:
   - "What is the difference between the Statistics and Work items tabs?"
   - "Why does this page show token counts instead of money?"

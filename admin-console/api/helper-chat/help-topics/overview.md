@@ -5,7 +5,7 @@ title: Welcome to Agent Studio
 summary: A quick tour of the core concepts — the home base of the Help panel.
 seeAlso:
   - { label: "Agents", to: "/agents" }
-  - { label: "Access & Users", to: "/teams" }
+  - { label: "Access", to: "/teams" }
   - { label: "Flows", to: "/flows" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "Knowledge", to: "/knowledge" }
@@ -35,7 +35,7 @@ big picture.
 - **Agents** — a single AI worker with its own workspace, prompt and memory. It
   can chat with you or run unattended on schedules and GitHub events, and it
   keeps a private notebook of what it has learned.
-- **Access & Users** — the human tenant (a *Team*) that every agent, environment
+- **Access** — the human tenant (a *Team*) that every agent, environment
   and credential belongs to, plus the people in it. This is *not* the Agent Team
   squad — that lives on the Agents page.
 - **Flows** — the wiring diagram of a team: which agent starts the work, how

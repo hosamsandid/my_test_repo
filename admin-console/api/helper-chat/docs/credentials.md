@@ -18,7 +18,7 @@ Every SSH key and GitHub token carries an **ownership tier** on its index entry 
 
 *(epic #1558 Phase 5, #1571; concept `personal-credentials-concept.md` §8, decision D6)*
 
-When a human is deactivated or removed (`DELETE /internal/admin/users/:id`, proxied from the Access & Users page), their personal credentials must not linger and their agents must not keep acting under a departed identity. The orchestrator runs `offboardOwner(userId)` **before** removing the user record, so a partial failure leaves the user recoverable:
+When a human is deactivated or removed (`DELETE /internal/admin/users/:id`, proxied from the Users page), their personal credentials must not linger and their agents must not keep acting under a departed identity. The orchestrator runs `offboardOwner(userId)` **before** removing the user record, so a partial failure leaves the user recoverable:
 
 1. **Pause** — every agent whose resolved identity was that person's personal credential (matched by `credential-resolution.selectAgentIdsForOwner`, so a team-member is matched via its parent team's owner) is **drained** — disabled in place, **not wiped**. In-flight work stops; the agent does not auto-resume, and re-enabling it is an explicit human decision.
 2. **Auto-delete** — all of that person's **personal** SSH keys and GitHub tokens are removed: the `_keys`/`_tokens` index entries **and** the 0600 secret files, leaving no residual copy. The person's **team/system** credentials are shared infrastructure and are **never** touched (even one whose `userId` happens to coincide).

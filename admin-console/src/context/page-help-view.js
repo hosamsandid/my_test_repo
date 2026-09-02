@@ -37,6 +37,37 @@ const DYNAMIC = [
   { match: (p) => /^\/process\/[^/]+$/.test(p), canonical: '/flows' },
 ];
 
+// ─── Non-route help contexts (E17 #1892, docs/helper-chat-concept.md §3.2) ───
+//
+// Not every help-worthy surface is a route: the Settings dialog is an overlay on
+// top of one, the first-run setup wizard is rendered *instead of* the Shell, and
+// a wizard step is a sub-state of a single route. So the panel's context widens
+// from a bare pathname to `{ route, overlay, step }`, and a topic claims a
+// namespaced key (`modal:settings`, `/team-setup#process`) in the very same
+// `routes:` front-matter list it claims a pathname in.
+//
+// Mirrors CONTEXT_KEYS in help-routes.js (see the note above about the
+// deliberate duplication) — the parity test diffs both copies.
+export const CONTEXT_KEYS = {
+  'modal:settings': { label: 'Settings dialog' },
+  'modal:settings#behavior': { label: 'Settings · Behavior' },
+  'modal:settings#model': { label: 'Settings · Model' },
+  'modal:settings#display': { label: 'Settings · Display' },
+  'wizard:setup': { label: 'First-run setup' },
+  'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
+  'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
+  'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
+  '/team-setup#process': { label: 'Agent Team Wizard · Process' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#team': { label: 'Agent Team Wizard · Team' },
+  '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
+  '/team-setup#review': { label: 'Agent Team Wizard · Review' },
+};
+
+// The overlay ids the app publishes, as constants so a call site cannot typo one.
+export const OVERLAY_SETTINGS = 'modal:settings';
+export const OVERLAY_SETUP_WIZARD = 'wizard:setup';
+
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {
   if (typeof pathname !== 'string' || !pathname) return null;
@@ -86,16 +117,130 @@ export function resolvePageTopic(payload, pathname) {
   return null;
 }
 
+// The ordered lookup keys for a help context, most specific first:
+//   overlay#step → overlay → route#step → canonicalRoute#step → route → canonicalRoute
+// The overlay leads because it is literally on top of the page; the route
+// candidates still follow, so an overlay with no topic of its own falls back to
+// the page underneath — and closing the overlay just drops the first candidates,
+// returning the panel to the page's own topic (AC1). Accepts a bare pathname for
+// call-site convenience. Mirrors helpContextKeys() in help-routes.js.
+export function helpContextKeys(context) {
+  const ctx = (context && typeof context === 'object') ? context : { route: context };
+  const route = typeof ctx.route === 'string' ? ctx.route : '';
+  const overlay = typeof ctx.overlay === 'string' ? ctx.overlay.trim() : '';
+  const step = typeof ctx.step === 'string' ? ctx.step.trim() : '';
+  const out = [];
+  const push = (k) => { if (k && !out.includes(k)) out.push(k); };
+  if (overlay) {
+    if (step) push(`${overlay}#${step}`);
+    push(overlay);
+  }
+  if (route) {
+    const canon = canonicalRoute(route);
+    if (step) {
+      push(`${route}#${step}`);
+      if (canon) push(`${canon}#${step}`);
+    }
+    push(route);
+    if (canon) push(canon);
+  }
+  return out;
+}
+
+// The route a context key delegates to, or '' — how the first-run wizard's steps
+// reuse the topics the console pages already own (no duplicate prose, AC2).
+export function contextAlias(key) {
+  const entry = CONTEXT_KEYS[String(key || '')];
+  return (entry && typeof entry.alias === 'string') ? entry.alias : '';
+}
+
+// Resolve a full help context to { topic, key }, or null when nothing claims any
+// candidate (the caller then shows the Overview fallback). A candidate matches
+// when a topic claims that exact key, or when the key aliases a route whose
+// topic answers it. Sibling of the server-side registry.resolveHelpContext.
+export function resolveHelpContext(payload, context) {
+  const { topics } = normalizePageHelp(payload);
+  const byRoute = indexByRoute(topics);
+  for (const key of helpContextKeys(context)) {
+    if (byRoute.has(key)) return { topic: byRoute.get(key), key };
+    const alias = contextAlias(key);
+    if (alias) {
+      const canon = canonicalRoute(alias);
+      if (byRoute.has(alias)) return { topic: byRoute.get(alias), key };
+      if (canon && byRoute.has(canon)) return { topic: byRoute.get(canon), key };
+    }
+  }
+  return null;
+}
+
 // The full render decision for the "This page" face:
-//   { topic, isOverview, overview }
+//   { topic, isOverview, overview, contextKey }
 // `topic` is what to render (the page topic, or the Overview topic as fallback);
 // `isOverview` tells the face to show the Overview home rather than a page topic
-// (so it can hide the "← Overview" home link, which would be a no-op there).
-export function pageHelpState(payload, pathname) {
+// (so it can hide the "← Overview" home link, which would be a no-op there);
+// `contextKey` is which candidate won — the overlay/step key when a non-route
+// context resolved it, so the face can label what it is showing help for.
+// Accepts a bare pathname (the pre-#1892 signature) or a context object.
+export function pageHelpState(payload, context) {
   const overview = overviewTopic(payload);
-  const topic = resolvePageTopic(payload, pathname);
-  if (topic) return { topic, isOverview: topic === overview, overview };
-  return { topic: overview, isOverview: true, overview };
+  const hit = resolveHelpContext(payload, context);
+  if (hit) return { topic: hit.topic, isOverview: hit.topic === overview, overview, contextKey: hit.key };
+  return { topic: overview, isOverview: true, overview, contextKey: '' };
+}
+
+// ── the subject stack (E17 #1892) ────────────────────────────────────────────
+//
+// A route is always known (the router owns it), but an overlay or a wizard step
+// is known only to the component that renders it. Those components *publish* a
+// subject `{ overlay, step }` while mounted and retract it on unmount, and the
+// most recently published one wins: open Settings on top of the Agent Team
+// Wizard and help follows the dialog; close it and help falls back to the step
+// underneath. Keeping it a stack rather than a single slot is what makes that
+// hand-back automatic instead of a co-ordination problem between two components.
+
+// Add or replace a subject, keeping insertion order and moving a re-published id
+// to the top (its content changed, so it is the freshest intent). Never mutates.
+export function upsertSubject(stack, id, subject) {
+  const rest = (Array.isArray(stack) ? stack : []).filter((s) => s && s.id !== id);
+  const overlay = (subject && typeof subject.overlay === 'string') ? subject.overlay.trim() : '';
+  const step = (subject && typeof subject.step === 'string') ? subject.step.trim() : '';
+  if (!id || (!overlay && !step)) return rest; // nothing to say → not a subject
+  return [...rest, { id, overlay, step }];
+}
+
+// Remove a subject by id (idempotent). Never mutates.
+export function removeSubject(stack, id) {
+  return (Array.isArray(stack) ? stack : []).filter((s) => s && s.id !== id);
+}
+
+// The winning subject — the top of the stack, or a blank one when it is empty.
+export function topSubject(stack) {
+  const list = Array.isArray(stack) ? stack.filter(Boolean) : [];
+  const top = list.length ? list[list.length - 1] : null;
+  return { overlay: (top && top.overlay) || '', step: (top && top.step) || '' };
+}
+
+// The label the face shows when help resolved through a non-route context, so it
+// is visible that the panel is answering for the dialog/step rather than the page
+// behind it. Empty for a plain route (the topic title already says where you are).
+export function contextLabel(key) {
+  const s = String(key || '');
+  if (!s || !CONTEXT_KEYS[s]) return '';
+  return CONTEXT_KEYS[s].label || '';
+}
+
+// The panel's z-index. It normally sits BELOW modals and side panels (50 vs
+// 60/61/9999) so a closed-over-content panel never covers a dialog — but help
+// *for* an open dialog has to be visible next to it, so an active overlay
+// context lifts the panel above the Modal layer. Pure decision, so the one place
+// this rule lives is unit-tested rather than buried in a style object.
+export const PANEL_Z_INDEX = 50;
+export const PANEL_Z_INDEX_OVER_MODAL = 10000;
+
+export function panelZIndex(context) {
+  const overlay = (context && typeof context === 'object' && typeof context.overlay === 'string')
+    ? context.overlay.trim() : '';
+  return overlay ? PANEL_Z_INDEX_OVER_MODAL : PANEL_Z_INDEX;
 }
 
 // True when the route has its own dedicated topic (drives first-run auto-open in

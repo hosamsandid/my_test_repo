@@ -21,7 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { canonicalRoute } = require('./help-routes');
+const { canonicalRoute, helpContextKeys, contextAlias } = require('./help-routes');
 
 const HELP_TOPICS_DIR = path.join(__dirname, 'help-topics');
 const OVERVIEW_ID = 'overview';
@@ -166,11 +166,37 @@ function buildRegistry(topics) {
     return null;
   }
 
+  // Resolve a full help context — `{ route, overlay, step }`, or a bare pathname
+  // — to its topic (E17 #1892). Walks the ordered candidate keys most-specific
+  // first; a candidate matches when a topic claims that exact key, or when the
+  // key aliases a route whose topic answers it. Returns { topic, key } so a
+  // caller can tell *which* context won, or null when nothing resolves.
+  function resolveHelpContext(context) {
+    for (const key of helpContextKeys(context)) {
+      if (byRoute.has(key)) return { topic: byRoute.get(key), key };
+      const alias = contextAlias(key);
+      if (alias) {
+        const aliased = topicForRoute(alias);
+        if (aliased) return { topic: aliased, key };
+      }
+    }
+    return null;
+  }
+
+  // The topic for a help context, or null — the `topicForRoute` sibling that
+  // understands overlays and wizard steps.
+  function topicForContext(context) {
+    const hit = resolveHelpContext(context);
+    return hit ? hit.topic : null;
+  }
+
   return {
     all: list,
     byId,
     overview,
     topicForRoute,
+    resolveHelpContext,
+    topicForContext,
     foldTopics: () => foldTopics(list),
   };
 }

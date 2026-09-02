@@ -4,6 +4,7 @@ import {
   Plus, MessageSquare, LayoutTemplate, PenTool, Rocket,
 } from 'lucide-react';
 import { createEntries } from './create-launcher-view';
+import PageHelpButton from '../components/PageHelpButton';
 
 /**
  * The unified "Create" launcher (#1665, Phase B/C of epic #1661).
@@ -43,10 +44,20 @@ export default function Create() {
       flexDirection: 'column',
       gap: 'var(--eb-space-6)',
     }}>
-      {/* Header */}
+      {/* Header. The one-line question stays; what each entry path produces (and
+          what "a team of one" means) is the create help topic — E14, #1888. */}
       <div>
-        <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-md)', lineHeight: 1.6 }}>
-          How would you like to start? Pick whichever fits — you can always change direction later.
+        <p style={{
+          margin: 0,
+          color: 'var(--eb-text-secondary)',
+          fontSize: 'var(--eb-text-md)',
+          lineHeight: 1.6,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+        }}>
+          <span>How would you like to start? Pick whichever fits — you can always change direction later.</span>
+          <PageHelpButton label="What does each of these create?" size={14} style={{ padding: 0, flexShrink: 0 }} />
         </p>
       </div>
 

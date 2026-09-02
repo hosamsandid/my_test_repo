@@ -12,6 +12,9 @@ import {
   sendKeybindingOptions,
 } from '../pages/agent-chat/message-send-keybinding.js';
 import { useAuth } from '../auth/AuthContext.jsx';
+import { useHelpSubject } from '../context/HelperChatContext.jsx';
+import PageHelpButton from './PageHelpButton.jsx';
+import { OVERLAY_SETTINGS } from '../context/page-help-view.js';
 import useTheme from '../hooks/useTheme.js';
 import { apiCall } from '../hooks/useApi.js';
 import {
@@ -33,6 +36,13 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
   const tabRefs = useRef({});
 
   const active = sectionById(resolveSectionId(activeId));
+
+  // Settings is a dialog, not a route, so the help panel cannot find it from the
+  // pathname (E17 #1892). Publish it as the active help subject while the modal is
+  // open — including the section, so a later per-section topic resolves without
+  // another wiring change — and retract it on close, which hands help straight
+  // back to the page underneath (AC1).
+  useHelpSubject({ overlay: OVERLAY_SETTINGS, step: active.id, active: open });
 
   // On open, land on the requested section when the caller deep-links to one
   // (e.g. the assist-error nudge opens Settings → Model, #1805); otherwise the
@@ -102,7 +112,13 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
           aria-labelledby={`settings-tab-${active.id}`}
           style={paneStyle}
         >
-          <h3 style={paneTitleStyle}>{active.label}</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+            <h3 style={paneTitleStyle}>{active.label}</h3>
+            {/* Opens the Help panel on the Settings topic rather than the page
+                behind the dialog — the panel is lifted above the modal layer while
+                this overlay subject is published. */}
+            <PageHelpButton label="What these settings do" size={14} style={{ padding: 0 }} />
+          </div>
           <p style={paneBlurbStyle}>{active.blurb}</p>
           {active.id === 'behavior' ? (
             <BehaviorSettings />

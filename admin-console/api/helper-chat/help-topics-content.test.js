@@ -17,7 +17,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { loadRegistry, baselineProblems } = require('./help-registry');
-const { KNOWN_ROUTE_PATHS } = require('./help-routes');
+const { KNOWN_ROUTE_PATHS, isKnownHelpKey } = require('./help-routes');
 
 // Concepts each topic must still carry, as case-insensitive substrings of the
 // rendered topic text (front-matter summary + body). Deliberately phrased as
@@ -439,11 +439,161 @@ const TOPIC_CONTENT = [
       'End Maintenance Mode',
     ],
   },
+  {
+    id: 'create',
+    routes: ['/create', '/quickstart'],
+    // #1888 lifted the launcher's tile prose, the one-assistant intro/detail
+    // pair and BOTH "what happens here" branches, and adds what neither said:
+    // an existing environment *and* an existing standalone agent are reused, and
+    // on the repository path the Name / Model Provider fields are not used.
+    concepts: [
+      'equally ranked',
+      'Describe what you need',
+      'Start from a ready-made setup',
+      'Build it yourself',
+      'one assistant',
+      'draft',
+      'team of one',
+      'Grow into a full team',
+      'creates a new team',
+      'default branch',
+      'reuses',
+      'Agent reused',
+      'not used',
+      'Model Provider',
+      'SSH key',
+      'GitHub token',
+    ],
+  },
+  {
+    id: 'team-setup',
+    routes: ['/team-setup'],
+    // #1888 lifted the wizard's header restatement + the Agent-Team-vs-access-
+    // scope line, the Working-Environment step intro, the Knowledge step's
+    // long prose and the go-live notice's follow-up advice.
+    concepts: [
+      'Agent Team',
+      'Access page',
+      'Process',
+      'Working Environment',
+      'Team ID',
+      'Knowledge',
+      'Review',
+      'global-pool',
+      'read-only',
+      'team-member',
+      'per-invocation',
+      'direct-message room',
+      'go live',
+      'Label suffix',
+      'extend',
+      'rolled back',
+      'Retry',
+      'create-only',
+      'Add role',
+    ],
+  },
+  {
+    id: 'role-templates',
+    routes: ['/role-templates'],
+    // #1888 lifted the Agent Templates intro paragraph and the invocation-mode
+    // field help, and adds the role-type / origin-badge / prompt-template
+    // detail the page only ever hinted at.
+    concepts: [
+      'Agent Template',
+      'Built-in',
+      'Edited',
+      'Custom',
+      'Save as template',
+      'future',
+      'independent copy',
+      'chat',
+      'reactive',
+      'pattern',
+      'persistent',
+      'per-invocation',
+      'autonomous',
+      'promptTemplate',
+      'Advanced',
+      'intrinsic',
+      'System Admin',
+    ],
+  },
+  {
+    id: 'users',
+    routes: ['/users'],
+    // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
+    // page intro box (records vs memberships, the global System-Admin flag) and
+    // adds what no surface said: the immutable subject, the user-store-then-env
+    // login order, and that Delete is an offboarding which pauses the person's
+    // agents and deletes their personal credentials first.
+    concepts: [
+      'Subject',
+      'immutable',
+      'System Admin',
+      'Team Admin',
+      'membership',
+      'fail-closed',
+      'password',
+      'ADMIN_USERNAME',
+      'offboarding',
+      'paused',
+      'personal SSH keys',
+      'best-effort',
+      'Access',
+    ],
+  },
+  {
+    id: 'about',
+    routes: ['/about'],
+    // #1891 (E16) — a net-new baseline topic for a page that never had help.
+    // What the version string actually is, how the contributor list is derived
+    // (and why a name can be missing), the CC-BY-4.0 attribution obligation,
+    // and where to take a problem report given there is no feedback form.
+    concepts: [
+      'git commit',
+      'not a release number',
+      '-dirty',
+      'unknown',
+      'build time',
+      'agents.local',
+      'commit count',
+      'Parakeet',
+      'CC-BY-4.0',
+      'no in-app feedback form',
+      'GitHub Event Log',
+    ],
+  },
+  {
+    id: 'settings',
+    routes: ['modal:settings'],
+    // #1892 authored this from the dialog itself (the first topic keyed on a
+    // non-route context). The load-bearing facts: assist model != agent model,
+    // and which preferences are browser-local vs on the user record.
+    concepts: [
+      'Behavior',
+      'Model',
+      'Display',
+      'send keybinding',
+      'IDE style',
+      'Chat style',
+      'Assist model',
+      'not the model your agents run on',
+      'Flow Copilot',
+      'oauth-token',
+      'single-user',
+      'Theme',
+      'Chat font size',
+      'in this browser only',
+      'user record',
+    ],
+  },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,
   // so two tickets in flight always conflict here. Resolve by keeping BOTH sides
   // in ticket order (E1 agents, E2 flows, E3 knowledge, E4 skills, E5 plugins,
   // E6 environments, E7 access-users, E8 models, E9 mcp, E10 credentials,
-  // E11 token-usage, E12 github-events, E13 maintenance-mode …), never by
+  // E11 token-usage, E12 github-events, E13 maintenance-mode, E14 create /
+  // team-setup / role-templates, E16 users / about, E17 settings …), never by
   // dropping one.
 ];
 
@@ -461,7 +611,10 @@ for (const spec of TOPIC_CONTENT) {
   test(`topic ${spec.id}: claims exactly its declared routes, and they resolve`, () => {
     assert.deepEqual(topic.routes, spec.routes);
     for (const route of spec.routes) {
-      assert.ok(KNOWN_ROUTE_PATHS.has(route), `${route} must be classified in help-routes.js`);
+      // Since E17 (#1892) a topic may also claim a non-route help context key
+      // (`modal:settings`, `/team-setup#process`), so the check is "a key the
+      // help system knows" rather than "a pathname".
+      assert.ok(isKnownHelpKey(route), `${route} must be classified in help-routes.js`);
       assert.equal(registry.topicForRoute(route)?.id, spec.id);
     }
   });

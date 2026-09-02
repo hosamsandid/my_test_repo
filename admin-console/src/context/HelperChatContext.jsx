@@ -17,6 +17,9 @@ import {
   markSeen,
   seenRoutesKey,
   parseSeenRoutes,
+  upsertSubject,
+  removeSubject,
+  topSubject,
 } from './page-help-view.js';
 
 // The empty topic set the provider starts with (and falls back to if the
@@ -42,7 +45,36 @@ export function useHelperChat() {
     sendMessage: () => {}, isStreaming: false, clearHistory: () => {},
     mode: 'chat', setMode: () => {}, openTour: () => {}, openHelpFor: () => {},
     pageHelp: EMPTY_PAGE_HELP, currentRoute: '/',
+    helpContext: { route: '/', overlay: '', step: '' },
+    publishHelpSubject: () => {}, retractHelpSubject: () => {},
+    registerHelpPanel: () => () => {},
   };
+}
+
+// ─── useHelpSubject (E17 #1892, docs/helper-chat-concept.md §3.2) ────────────
+//
+// The hook a non-route help surface uses to say what the panel should answer for
+// while it is on screen: an overlay (the Settings dialog, the first-run wizard)
+// and/or a sub-state (the current wizard step). Publishes on mount and whenever
+// the values change, retracts on unmount — so a dialog that closes automatically
+// hands help back to the page (or the step) underneath it, with no co-ordination
+// between the two components. Pass `active: false` to publish nothing (e.g. a
+// modal that stays mounted while closed).
+let _subjectSeq = 0;
+
+export function useHelpSubject({ overlay = '', step = '', active = true } = {}) {
+  const { publishHelpSubject, retractHelpSubject } = useHelperChat();
+  const idRef = useRef(null);
+  if (idRef.current === null) idRef.current = `help-subject-${++_subjectSeq}`;
+  const id = idRef.current;
+  useEffect(() => {
+    if (!active) {
+      retractHelpSubject(id);
+      return undefined;
+    }
+    publishHelpSubject(id, { overlay, step });
+    return () => retractHelpSubject(id);
+  }, [id, active, overlay, step, publishHelpSubject, retractHelpSubject]);
 }
 
 // The friendly label for the route the user is on, so the assistant can ground
@@ -72,6 +104,37 @@ export function HelperChatProvider({ children }) {
   const location = useLocation();
   const currentRoute = location.pathname;
   const { authenticated, user } = useAuth();
+
+  // The non-route part of the help context (E17 #1892): the stack of subjects
+  // published by whatever overlay/wizard step is on screen. The topmost one wins;
+  // every decision about the stack is pure in page-help-view.js.
+  const [subjects, setSubjects] = useState([]);
+  const publishHelpSubject = useCallback((id, subject) => {
+    setSubjects((prev) => upsertSubject(prev, id, subject));
+  }, []);
+  const retractHelpSubject = useCallback((id) => {
+    setSubjects((prev) => removeSubject(prev, id));
+  }, []);
+  // The full context the "This page" face resolves against: the live route plus
+  // the winning subject. Closing a dialog drops its subject, so the face falls
+  // straight back to the route's own topic (AC1).
+  const helpContext = useMemo(
+    () => ({ route: currentRoute, ...topSubject(subjects) }),
+    [currentRoute, subjects],
+  );
+
+  // Is a panel actually on screen? It is mounted in Shell.jsx, and the first-run
+  // setup wizard replaces the Shell entirely (App.jsx) — so during first run
+  // there is nowhere for the panel to appear. The panel registers itself here on
+  // mount; child effects run before the provider's own, so this is already set
+  // when the first-run auto-open effect below decides. Without the check that
+  // effect would open + persist "seen" for a route the user never saw the nudge
+  // on, silently burning the one nudge that route ever gets.
+  const panelCountRef = useRef(0);
+  const registerHelpPanel = useCallback(() => {
+    panelCountRef.current += 1;
+    return () => { panelCountRef.current -= 1; };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -122,6 +185,7 @@ export function HelperChatProvider({ children }) {
   // with only the Overview fallback never auto-open.
   useEffect(() => {
     if (!authenticated) return;
+    if (panelCountRef.current === 0) return; // no panel on screen (first-run setup)
     if (!pageHelp || !Array.isArray(pageHelp.topics) || pageHelp.topics.length === 0) return;
     let seen = [];
     let storageKey = null;
@@ -225,7 +289,8 @@ export function HelperChatProvider({ children }) {
   const value = useMemo(() => ({
     isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
     mode, setMode, openTour, openHelpFor, pageHelp, currentRoute,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute]);
+    helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel,
+  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel]);
 
   return (
     <HelperChatContext.Provider value={value}>

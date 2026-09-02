@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import html
 import json
 import os
 import queue
@@ -5675,32 +5676,48 @@ class TriggerScheduler:
     ])
 
     @staticmethod
-    def _github_event_detail(event_key: str, payload: dict) -> str | None:
-        """Best-effort human-readable detail for a `github-event` trigger notice.
+    def _github_event_detail(event_key: str, payload: dict) -> tuple[str, str] | None:
+        """Best-effort `(plain, html)` detail for a `github-event` trigger notice.
 
-        Returns None (caller falls back to the plain event/repo body) when the
-        event key isn't one we know how to describe, or the payload is
-        missing the fields we need — this must never raise.
+        Returns a ``(plain, html)`` pair, or ``None`` (caller falls back to the
+        plain event/repo body) when the event key isn't one we know how to
+        describe, or the payload is missing the fields we need — never raises.
+
+        Issue and PR events share **one** format (#1897): the work-item kind is
+        already in the friendly label ("Issue labeled" / "PR labeled"), so the
+        detail carries only ``#N``. It is built **additively** — the abbreviated
+        link is emitted whenever a number + url exist (plain ``#N (url)``, html
+        ``<a href="url">#N</a>``) and ``: <title>`` is appended only when a title
+        is present. A missing title therefore never wipes out the number and
+        link (the old all-or-nothing gate); it degrades to ``#N`` + link.
         """
         try:
+            item = None
             if event_key.startswith("issues."):
-                issue = payload.get("issue") or {}
-                number, title, url = issue.get("number"), issue.get("title"), issue.get("html_url")
-                if number is not None and title and url:
-                    return f"Issue #{number}: {title} — {url}"
+                item = payload.get("issue")
             elif event_key.startswith("pull_request.") or event_key.startswith("pull_request_review."):
-                pr = payload.get("pull_request") or {}
-                number, title, url = pr.get("number"), pr.get("title"), pr.get("html_url")
-                if number is not None and title and url:
-                    return f"PR #{number}: {title} — {url}"
-            elif event_key == "push":
+                item = payload.get("pull_request")
+            if isinstance(item, dict):
+                number, title, url = item.get("number"), item.get("title"), item.get("html_url")
+                if number is not None and url:
+                    nref = f"#{number}"
+                    plain = f"{nref} ({url})"
+                    link_html = f'<a href="{html.escape(str(url), quote=True)}">{html.escape(nref)}</a>'
+                    if title:
+                        plain = f"{plain}: {title}"
+                        link_html = f"{link_html}: {html.escape(str(title))}"
+                    return plain, link_html
+                return None
+            if event_key == "push":
                 ref = payload.get("ref")
                 if isinstance(ref, str) and ref:
                     branch = ref.removeprefix("refs/heads/")
                     head = payload.get("head")
                     if isinstance(head, str) and head:
-                        return f"branch `{branch}` @ `{head[:7]}`"
-                    return f"branch `{branch}`"
+                        short = head[:7]
+                        return (f"branch `{branch}` @ `{short}`",
+                                f"branch <code>{html.escape(branch)}</code> @ <code>{html.escape(short)}</code>")
+                    return (f"branch `{branch}`", f"branch <code>{html.escape(branch)}</code>")
         except Exception:
             pass
         return None
@@ -5718,6 +5735,10 @@ class TriggerScheduler:
         ttype = trigger.get("type", "")
         tid = trigger.get("id", "")
         gh = (ctx or {}).get("github") or {}
+
+        # Optional HTML rendering (AC3): only the github-event branch produces an
+        # abbreviated markdown link, so only it sets `formatted_body`.
+        formatted_body: str | None = None
 
         if ttype in ("cron", "once"):
             phrase = trigger.get("description") or "Scheduled trigger"
@@ -5741,17 +5762,29 @@ class TriggerScheduler:
 
             repo_short = repo.split("/")[-1] if repo else ""
 
+            # Build the plain-text body and the HTML formatted_body in parallel
+            # (#1897): identical field order/separators, differing only in the
+            # link/code rendering — `#N (url)` plain vs `<a href>`/`<code>` html.
             parts: list[str] = [friendly]
+            parts_html: list[str] = [html.escape(friendly)]
             if label_name:
                 parts.append(f"`{label_name}`")
+                parts_html.append(f"<code>{html.escape(label_name)}</code>")
             if repo_short:
                 parts.append(f"`{repo_short}`")
+                parts_html.append(f"<code>{html.escape(repo_short)}</code>")
             detail = self._github_event_detail(event_key, payload)
             if detail:
-                parts.append(detail)
+                detail_plain, detail_html = detail
+                parts.append(detail_plain)
+                parts_html.append(detail_html)
 
-            desc = f" — {trigger['description']}" if trigger.get("description") else ""
+            desc_text = trigger.get("description")
+            desc = f" — {desc_text}" if desc_text else ""
+            desc_html = f" — {html.escape(desc_text)}" if desc_text else ""
             body = f"⚡ Trigger fired — {' · '.join(parts)}{desc} — starting work…"
+            formatted_body = (
+                f"⚡ Trigger fired — {' · '.join(parts_html)}{desc_html} — starting work…")
         elif ttype == "http":
             phrase = trigger.get("description") or "Webhook trigger"
             body = f"⚡ Trigger fired — {phrase} — starting work…"
@@ -5768,6 +5801,13 @@ class TriggerScheduler:
                 "event": gh.get("event") or None,
             },
         }
+        # AC3: carry the HTML so the abbreviated `[#N](url)` link renders in the
+        # Admin Console and other Matrix clients; the plain `body` (`#N (url)`)
+        # stays the fallback for clients that ignore formatting. AC7: the
+        # `io.aee.trigger` structured keys are untouched.
+        if formatted_body is not None:
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = formatted_body
         await self._client.room_send(
             room_id=room_id,
             message_type="m.room.message",

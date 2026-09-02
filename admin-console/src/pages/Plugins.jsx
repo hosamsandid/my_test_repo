@@ -3,11 +3,11 @@ import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
-import PageHelpButton from '../components/PageHelpButton';
 import PluginTeamAssign from '../components/PluginTeamAssign';
 import { pluginRegistryRow } from './plugin-registry-view.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
+import { usePageActions } from '../context/PageActionsContext';
 
 // Plugin registry (#1547) — the operator-facing install surface for the plugin
 // system (docs/plugin-system-concept.md §4.1/§4.3).
@@ -249,13 +249,19 @@ export default function Plugins() {
     } finally { setBusy(false); }
   }
 
+  // E5 (#1879) removed /plugin-system outright, so the former "Learn about
+  // plugins" link is gone from here — the deep dive lives in the Plugins topic,
+  // reachable via the header Help button.
+  const headerAction = usePageActions(
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+      <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
+    </div>
+  );
+
   return (
-    <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', marginBottom: 'var(--eb-space-2)' }}>
-        <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 600, margin: 0 }}>Plugins</h1>
-        <PageHelpButton />
-        <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
-      </div>
+    <>
+      {headerAction}
+      <div style={{ padding: 'var(--eb-space-6)', maxWidth: 960 }}>
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0, maxWidth: 720 }}>
         Governed capability extensions — installing one starts its broker, granting it lets an
         agent or team use it.
@@ -344,5 +350,6 @@ export default function Plugins() {
         }
       />
     </div>
+    </>
   );
 }

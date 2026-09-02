@@ -94,10 +94,14 @@ function matchInternalListeners({ repo, label, kind }, agents) {
 // `payload.pull_request.number`) work byte-compatibly. `actor` carries the
 // producing agent, attributed — an internal emit is an explicit act, never
 // anonymous.
-function buildSyntheticEvent({ repo, label, kind, number, producerId, eventId, now }) {
+function buildSyntheticEvent({ repo, label, kind, number, title, producerId, eventId, now }) {
   const subject = {
     number,
     html_url: `https://github.com/${repo}/${kind === 'pr' ? 'pull' : 'issues'}/${number}`,
+    // #1897: carry the resolved title (best-effort, fetched by the caller) so
+    // the consumer's trigger notice shows `[#N](url): <title>`, not just `#N`.
+    // Absent when the fetch failed/timed out — the notice degrades to `#N`.
+    ...(typeof title === 'string' && title ? { title } : {}),
   };
   return {
     id: eventId,

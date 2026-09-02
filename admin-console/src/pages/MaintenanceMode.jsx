@@ -102,9 +102,6 @@ export default function MaintenanceMode() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <h1 style={{ fontSize: 'var(--eb-text-xl)', fontWeight: 'var(--eb-font-semibold)', margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <Wrench size={20} /> Maintenance Mode
-      </h1>
       <p style={{ margin: 0, color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)', maxWidth: 560 }}>
         Signals an upcoming platform restart so in-flight agent sessions can wind down.
         This does not stop, restart, or lock anything by itself — the actual restart stays a manual, external step.

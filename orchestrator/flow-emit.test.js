@@ -138,6 +138,22 @@ test('buildSyntheticEvent: pr emit carries payload.pull_request.number', () => {
   assert.equal(ev.payload.pull_request.number, 7);
   assert.equal(ev.payload.issue, undefined);
   assert.match(ev.payload.pull_request.html_url, /\/pull\/7$/);
+  // No title supplied → subject carries none (notice degrades to `#N`, #1897).
+  assert.equal(ev.payload.pull_request.title, undefined);
+});
+
+test('buildSyntheticEvent: resolved title rides on the subject (#1897 AC8)', () => {
+  const ev = buildSyntheticEvent({
+    repo: 'org/repo', label: 'ready', kind: 'issue', number: 42, title: 'Fix the bug',
+    producerId: 'dev', eventId: 'int:abc', now: '2026-08-02T10:00:00Z',
+  });
+  assert.equal(ev.payload.issue.title, 'Fix the bug');
+  // A blank/absent title is not carried (kept optional, backward-compatible).
+  const noTitle = buildSyntheticEvent({
+    repo: 'org/repo', label: 'ready', kind: 'issue', number: 42, title: '',
+    producerId: 'dev', eventId: 'int:abc', now: '2026-08-02T10:00:00Z',
+  });
+  assert.equal(noTitle.payload.issue.title, undefined);
 });
 
 test('eventKeyForKind maps both target kinds', () => {

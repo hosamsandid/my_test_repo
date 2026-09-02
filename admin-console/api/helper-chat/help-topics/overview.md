@@ -5,10 +5,17 @@ title: Welcome to Agent Studio
 summary: A quick tour of the core concepts — the home base of the Help panel.
 seeAlso:
   - { label: "Agents", to: "/agents" }
+  - { label: "Access & Users", to: "/teams" }
   - { label: "Flows", to: "/flows" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Model Providers", to: "/models" }
+  - { label: "Agent Chat", to: "/chats" }
+actions:
+  - { label: "Create a single agent", to: "/quickstart", primary: true }
+  - { label: "Set up a team", to: "/team-setup" }
+  - { label: "Connect a model provider", to: "/models" }
+  - { label: "Take the Tour", action: "tour" }
 askPrompts:
   - "How do I create my first agent?"
   - "What is the difference between an Agent, an Agent Team and a Flow?"
@@ -44,10 +51,12 @@ big picture.
 
 ## Where to go next
 
+The buttons below take you straight there:
+
 - **Create a single agent** — the fastest way to get one assistant running.
 - **Set up a team** — wire several agents into a process with the Agent Team
   Wizard.
 - **Connect a model provider** — the required first step if you have not yet.
+- **Take the Tour** — a guided walk-through of the console.
 
-Already have agents? Head to **Agent Chat** to talk to them, or take the guided
-**Tour** from the tab above.
+Already have agents? Head to **Agent Chat** to talk to them.

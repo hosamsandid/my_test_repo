@@ -5,7 +5,18 @@ import { documentTitleForPath } from './route-title';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
+import { useHelperChat } from './context/HelperChatContext';
 import { canAccessCredentialPages } from './pages/credential-scope-view';
+
+// Getting Started was retired (#1874): its six concept cards and CTAs are now the
+// Help panel's Overview face. An old bookmark should not land on a blank route, so
+// the path stays as a redirect to the app home and opens the Help panel — where
+// /chats, having no dedicated topic, resolves to that very Overview.
+function GettingStartedRedirect() {
+  const { openHelpFor } = useHelperChat();
+  useEffect(() => { openHelpFor(); }, [openHelpFor]);
+  return <Navigate to="/chats" replace />;
+}
 
 // The Process Canvas now lives inside Flows; preserve old deep links.
 function ProcessTeamRedirect() {
@@ -73,7 +84,6 @@ const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
 const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const About = lazy(() => import('./pages/About'));
-const GettingStarted = lazy(() => import('./pages/GettingStarted'));
 
 // Keeps the browser tab title in step with the active route so tabs, history
 // and bookmarks are distinguishable (route-title.js). Renders nothing; lives
@@ -174,7 +184,7 @@ export default function App() {
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
           <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
-          <Route path="/getting-started" element={<GettingStarted />} />
+          <Route path="/getting-started" element={<GettingStartedRedirect />} />
           <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>

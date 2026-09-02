@@ -60,6 +60,25 @@ function parseInlineObject(value) {
   return obj;
 }
 
+// Parse a `actions:` list item into a normalized call-to-action, or null when it
+// is not actionable (#1874, concept §5). A CTA either navigates (`to`) or invokes
+// a panel verb (`action`, currently only `tour` → useHelperChat().openTour()); a
+// label is mandatory, since a nameless button is not a CTA. `primary: true` marks
+// the one accented button (the former Getting Started page had exactly one).
+const CTA_ACTIONS = new Set(['tour']);
+
+function parseCtaObject(value) {
+  const obj = parseInlineObject(value);
+  const label = (obj.label || '').trim();
+  const to = (obj.to || '').trim();
+  const action = (obj.action || '').trim();
+  if (!label) return null;
+  if (!to && !CTA_ACTIONS.has(action)) return null;
+  const cta = { label, to, action: to ? '' : action };
+  if (obj.primary === 'true') cta.primary = true;
+  return cta;
+}
+
 // Parse a help-topic markdown string into a normalized topic object. Never
 // throws on a well-formed-enough file; a topic with no front-matter returns
 // null (the loader skips it). `id` defaults to the passed fallback (the filename
@@ -77,11 +96,12 @@ function parseTopic(raw, fallbackId) {
     summary: '',
     seeAlso: [],
     askPrompts: [],
+    actions: [],
     body: (body || '').trim(),
   };
 
   const lines = fm.split(/\r?\n/);
-  let listKey = null; // 'seeAlso' | 'askPrompts' | 'routes' while inside a block list
+  let listKey = null; // 'seeAlso' | 'actions' | 'askPrompts' | 'routes' while inside a block list
   for (const line of lines) {
     if (!line.trim()) continue;
     const listItem = line.match(/^\s+-\s*(.*)$/);
@@ -90,6 +110,9 @@ function parseTopic(raw, fallbackId) {
       if (listKey === 'seeAlso') {
         const obj = item.startsWith('{') ? parseInlineObject(item) : { label: stripQuotes(item), to: '' };
         if (obj.label || obj.to) topic.seeAlso.push({ label: obj.label || '', to: obj.to || '' });
+      } else if (listKey === 'actions') {
+        const act = item.startsWith('{') ? parseCtaObject(item) : null;
+        if (act) topic.actions.push(act);
       } else {
         topic[listKey].push(stripQuotes(item));
       }
@@ -101,7 +124,7 @@ function parseTopic(raw, fallbackId) {
     const value = kv[2].trim();
     if (value === '') {
       // A block key (its items follow on indented lines).
-      if (key === 'seeAlso' || key === 'askPrompts' || key === 'routes') listKey = key;
+      if (key === 'seeAlso' || key === 'askPrompts' || key === 'routes' || key === 'actions') listKey = key;
       else listKey = null;
       continue;
     }
@@ -195,6 +218,7 @@ function baselineTopic({ id, routes = [], title, summary = '', keyTasks = [], se
     summary,
     seeAlso,
     askPrompts,
+    actions: [],
     body,
   };
 }
@@ -247,6 +271,7 @@ function loadRegistry(dir = HELP_TOPICS_DIR) {
 module.exports = {
   HELP_TOPICS_DIR,
   OVERVIEW_ID,
+  CTA_ACTIONS,
   parseTopic,
   buildRegistry,
   foldTopics,

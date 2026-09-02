@@ -35,10 +35,14 @@ const ALIASES = {
 // Redirect sources (App.jsx <Navigate to=…>). A user never lingers on these, but
 // resolving them to the destination's topic keeps help correct if one is hit
 // directly. `/process/:teamId` is handled by the dynamic collapse below.
+// `/getting-started` joined them in G1 (#1874): the page is gone and its content
+// is the Overview face, so an old bookmark degrades to the app home — where the
+// topic-less route resolves to that very Overview.
 const REDIRECTS = {
   '/': '/chats',
   '/blueprints': '/agents',
   '/briefings': '/flows',
+  '/getting-started': '/chats',
   '/process': '/flows',
 };
 
@@ -53,10 +57,10 @@ const DYNAMIC = [
 ];
 
 // Every content route that shows page help (own topic or Overview fallback).
-// Mirrors the non-structural routes in App.jsx. `/getting-started` is still a
-// page route here — G1 (#1874) removes it and this list drops it in the same
-// commit. `/plugin-system` is gone as of E5 (#1879): the route was removed
-// outright (no redirect, concept §9) and its content lives in the Plugins topic.
+// Mirrors the non-structural routes in App.jsx. Two routes have already left
+// this list: `/getting-started` in G1 (#1874) — the page is gone and it is now a
+// redirect source above — and `/plugin-system` in E5 (#1879), removed outright
+// (no redirect, concept §9) with its content folded into the Plugins topic.
 const PAGE_ROUTES = new Set([
   '/agents',
   '/chats',
@@ -79,7 +83,6 @@ const PAGE_ROUTES = new Set([
   '/users',
   '/flows',
   '/knowledge',
-  '/getting-started',
   '/about',
 ]);
 
@@ -90,6 +93,7 @@ const ALLOWLIST = new Set([
   '/',
   '/blueprints',
   '/briefings',
+  '/getting-started',
   '/process',
   '/process/:teamId',
   '/chats/:agentId',

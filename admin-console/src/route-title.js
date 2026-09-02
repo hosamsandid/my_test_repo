@@ -37,7 +37,6 @@ export const ROUTE_TITLES = {
   '/token-usage': 'Token Usage',
   '/plugins': 'Plugins',
   '/maintenance-mode': 'Maintenance Mode',
-  '/getting-started': 'Getting Started',
   '/create': 'Create',
   '/quickstart': 'One assistant',
   '/team-setup': 'Agent Team Wizard',

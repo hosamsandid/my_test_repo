@@ -176,6 +176,16 @@ files ship alongside the existing `helper-chat/docs/**`, `system-prompt.md` and
 - Clean the parallel route→label / document-title maps: `BREADCRUMBS`
   (`breadcrumbs.js:6–29`) and `ROUTE_TITLES` (`route-title.js`) drop `/getting-started`.
 
+**As built (G1, #1874):** the *page* is deleted, but the **path** is kept as a redirect
+(`GettingStartedRedirect` → opens the Help panel, then `<Navigate to="/chats">`) so an old
+bookmark degrades gracefully (epic AC4) instead of resolving to a blank route — the app has no
+catch-all. `/getting-started` therefore moves from `PAGE_ROUTES` to `ALLOWLIST` + `REDIRECTS`
+(`help-routes.js` / `page-help-view.js`), joining `/blueprints` and `/briefings`. This is
+**deliberately not** the treatment `/plugin-system` gets: E5 removes that one outright, per the
+resolved decision above. The CTAs are carried by a new topic front-matter field `actions[]`
+(`{label, to}` navigations plus `{label, action: "tour"}` → `openTour()`, one optional
+`primary: true`), rendered as the CTA row of the "This page" face.
+
 `/plugin-system` (`PluginSystemHelp.jsx`) is folded into the **Plugins** topic as a "deep dive"
 section; the route is **removed outright** (no redirect — resolved decision, §9). The "Learn
 about plugins" link on the Plugins page (`Plugins.jsx:257–263`) and the `PluginSystemHelp` page

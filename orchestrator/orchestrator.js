@@ -32,6 +32,7 @@ const {
   KINDS: KNOWLEDGE_KINDS,
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
+const { createKeyedMutex } = require("./keyed-mutex");
 const flowEmit = require("./flow-emit");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
@@ -1285,6 +1286,30 @@ function _flowGithubGetJson(apiPath, token) {
     req.on("timeout", () => req.destroy(new Error(`GitHub ${apiPath} → timeout`)));
     req.end();
   });
+}
+
+// #1897 AC8: best-effort resolution of an issue/PR title for a synthetic
+// internal-delivery event. The trigger notice shows `[#N](url): <title>` when
+// the title is known; internal-transport (flow-emit) and plugin-fast-path
+// deliveries synthesize a minimal `{number, html_url}` subject with NO title
+// (only poller-delivered PRs are enriched today), so we fetch it here with the
+// repo's team token — exactly as the poller does for PRs. Never throws and
+// never blocks the hand-off: any missing-token/failure/timeout degrades to a
+// null title, and the notice then shows `[#N](url)` with no title (AC5).
+async function fetchWorkItemTitle(repoFullName, kind, number) {
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const apiPath = kind === "pr"
+      ? `/repos/${repoFullName}/pulls/${number}`
+      : `/repos/${repoFullName}/issues/${number}`;
+    const detail = await _flowGithubGetJson(apiPath, token);
+    return detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+  } catch (err) {
+    console.error(`[Orchestrator] title fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return null;
+  }
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -3785,12 +3810,23 @@ function _walkShardFiles(root) {
   return out;
 }
 
+// Serialize the KB push per team. Concurrent agents on one team otherwise all
+// fetch/rebase/push the shared branch at once, lose the fast-forward race
+// (non-fast-forward reject → retry storm) and stack up git subprocesses. One
+// push at a time per team keeps them conflict-free and the git work bounded.
+const _kbPushMutex = createKeyedMutex();
+
 // Push the agent's local KB commits to the shared branch. Fetch-rebase-retry so
 // a concurrent agent's push can't make us lose our (own-shard-only) append.
+// ASYNC: the git steps run through execFileP so the orchestrator event loop
+// keeps serving HTTP / the poller while git talks to the remote — a synchronous
+// execFileSync here previously froze the whole control plane for the multi-
+// second SSH round-trips (worst under the very concurrency this now serializes).
 // Throws caller-facing Errors (safe to return over the internal API).
-function agentKnowledgePush(id) {
+async function agentKnowledgePush(id) {
   const cfg = loadAgentConfig(id);
-  const env = teamKnowledgeEnv(agentKnowledgeTeamId(cfg || {}), cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null); // #570: per-team knowledge config
+  const teamId = agentKnowledgeTeamId(cfg || {});
+  const env = teamKnowledgeEnv(teamId, cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null); // #570: per-team knowledge config
   const repoRef = env?.knowledgeStore?.repoRef || null;
   if (!repoRef || !repoRef.url) throw new Error("no knowledge repo is configured for this agent");
 
@@ -3801,36 +3837,39 @@ function agentKnowledgePush(id) {
 
   const branch = knowledgeSync.resolveKnowledgeBranch(env);
   const gitEnv = _buildKbGitEnv(repoRef, env);
-  const run = (args, timeout = 30_000) =>
-    execFileSync("git", args, { cwd: kbDir, env: gitEnv, stdio: "pipe", timeout }).toString();
+  const run = async (args, timeout = 30_000) =>
+    String((await execFileP("git", args, { cwd: kbDir, env: gitEnv, timeout })).stdout);
 
-  const current = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  // Local read (no network) — cheap, no need to hold the per-team lock for it.
+  const current = (await run(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (!knowledgeSync.knowledgeBranchAllowed(current, branch)) {
     throw new Error(`knowledge push refused: checkout is on '${current}', not ${branch}`);
   }
 
-  let lastErr = "";
-  for (let attempt = 1; attempt <= knowledgeSync.MAX_PUSH_RETRIES; attempt++) {
-    // Rebase our local commits onto the latest shared tip (clean: each agent
-    // only ever touches its own shard file). Both steps tolerate a not-yet-
-    // existing remote branch (first push on the team).
-    try {
-      run(["fetch", "origin", branch]);
-      run(["rebase", `origin/${branch}`]);
-    } catch {
-      try { run(["rebase", "--abort"]); } catch { /* nothing to abort */ }
+  return _kbPushMutex(teamId, async () => {
+    let lastErr = "";
+    for (let attempt = 1; attempt <= knowledgeSync.MAX_PUSH_RETRIES; attempt++) {
+      // Rebase our local commits onto the latest shared tip (clean: each agent
+      // only ever touches its own shard file). Both steps tolerate a not-yet-
+      // existing remote branch (first push on the team).
+      try {
+        await run(["fetch", "origin", branch]);
+        await run(["rebase", `origin/${branch}`]);
+      } catch {
+        try { await run(["rebase", "--abort"]); } catch { /* nothing to abort */ }
+      }
+      try {
+        const out = await run(["push", "--set-upstream", "origin", branch]);
+        return { ok: true, branch, output: agentGitOps.sanitizeGitOutput(out).trim() };
+      } catch (err) {
+        lastErr = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString());
+        if (!knowledgeSync.isRetryablePushError(lastErr)) break;
+      }
     }
-    try {
-      const out = run(["push", "--set-upstream", "origin", branch]);
-      return { ok: true, branch, output: agentGitOps.sanitizeGitOutput(out).trim() };
-    } catch (err) {
-      lastErr = agentGitOps.sanitizeGitOutput((err.stderr || err.stdout || err.message || "").toString());
-      if (!knowledgeSync.isRetryablePushError(lastErr)) break;
-    }
-  }
-  const e = new Error(`knowledge push failed: ${String(lastErr).trim().slice(0, 400)}`);
-  e.gitFailed = true;
-  throw e;
+    const e = new Error(`knowledge push failed: ${String(lastErr).trim().slice(0, 400)}`);
+    e.gitFailed = true;
+    throw e;
+  });
 }
 
 // ── Canonical KB clone + live feed (Shared Agent Learning, Phase 2) ──────────
@@ -11719,8 +11758,10 @@ async function main() {
           }));
           const listeners = flowEmit.matchInternalListeners(
             { repo, label, kind: target.kind }, agents);
+          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+          const title = await fetchWorkItemTitle(repo, target.kind, target.number);
           const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number,
+            repo, label, kind: target.kind, number: target.number, title,
             producerId: agentId,
             eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
             now: new Date().toISOString(),
@@ -11803,8 +11844,10 @@ async function main() {
           }));
           const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
           const now = new Date().toISOString();
+          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+          const title = await fetchWorkItemTitle(repo, kind, number);
           const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, actor,
+            repo, label, kind, number, title, actor,
             eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
             now,
           });
@@ -12835,7 +12878,7 @@ async function main() {
       const id = decodeURIComponent(knPushMatch[1]);
       let body = '';
       req.on('data', (d) => { body += d; });
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const cfg = loadAgentConfig(id);
           if (!cfg) {
@@ -12843,7 +12886,7 @@ async function main() {
             res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
             return;
           }
-          const result = agentKnowledgePush(id);
+          const result = await agentKnowledgePush(id);
           // Phase 2: echo the pushed entry summary into the live feed + refresh
           // the team's canonical clone. Best-effort — never fails the push.
           try {

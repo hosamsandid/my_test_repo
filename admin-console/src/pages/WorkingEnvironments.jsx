@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info, Package } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -12,6 +12,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
+import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { usePageActions } from '../context/PageActionsContext';
 
 const labelStyle = {
@@ -252,15 +253,31 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     githubTokenId: initial?.githubTokenId || '',
     llmEndpointId: initial?.llmEndpointId || '',
     defaultModelId: initial?.defaultModelId || '',
+    toolchainId: initial?.toolchainId || '',
   }));
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
+  const { data: toolchainData } = useApi('/api/toolchains');
 
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
+  // Agent toolchain (#1940). The registry is read-only here: registering an
+  // image reference is a System-Admin action on the Toolchains list, and the
+  // server refuses it from this form regardless of what the UI shows.
+  const toolchainRows = toolchainOptions(toolchainData?.toolchains, toolchainData?.runtime);
+  const toolchainNotice = toolchainEmptyState(toolchainData?.toolchains, {
+    canManage: !!toolchainData?.canManage,
+    defaultImage: toolchainData?.defaultImage,
+  });
+  const toolchainWarning = toolchainChangeWarning({
+    isEdit,
+    initialToolchainId: initial?.toolchainId || null,
+    toolchainId: form.toolchainId || null,
+    agentCount: initial?.agentCount || 0,
+  });
   const selectedEndpoint = llmEndpoints.find(e => e.id === form.llmEndpointId) || null;
   const endpointModels = selectedEndpoint?.models || [];
 
@@ -324,6 +341,8 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       githubTokenId: form.githubTokenId || null,
       llmEndpointId: form.llmEndpointId || null,
       defaultModelId: form.defaultModelId || null,
+      // An ID, never an image reference (#1940) — the server resolves it.
+      toolchainId: form.toolchainId || null,
     });
   };
 
@@ -577,6 +596,70 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
+      {/* Agent toolchain (#1940). A select over the operator registry, never a
+          free-text image field: an agent container receives this environment's
+          SSH key, GitHub token and model credential, so choosing the image is
+          choosing what runs with those secrets. A System Admin registers a
+          toolchain; here you only pick one. */}
+      <div style={{
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-3)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Package size={14} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            Agent toolchain
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+          <div style={labelStyle}>Toolchain</div>
+          <select
+            value={form.toolchainId}
+            onChange={e => update('toolchainId', e.target.value)}
+            disabled={toolchainRows.length === 0}
+            style={{ ...inputStyle, opacity: toolchainRows.length ? 1 : 0.5 }}
+          >
+            <option value="">
+              — default agent image{toolchainData?.defaultImage ? ` (${toolchainData.defaultImage})` : ''} —
+            </option>
+            {toolchainRows.map(t => (
+              <option key={t.id} value={t.id} disabled={!t.available}>
+                {t.label}{t.hint ? ` — ${t.hint}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {toolchainNotice && (
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            {toolchainNotice}
+          </div>
+        )}
+
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Which container image agents in this environment are spawned from. The default image carries Python and Node; a toolchain adds a language stack (a JDK and Maven, say) so an agent can actually build the repository. Every other environment keeps the default.
+        </div>
+
+        {/* AC5: a spawn-time image is fixed for a container's lifetime, so a
+            change can only reach a running agent by recreating it — say so
+            before the click, as the credential-rotate panel does. */}
+        {toolchainWarning && (
+          <div role="alert" style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+            padding: 'var(--eb-space-2)',
+            background: 'var(--eb-status-warning-bg)',
+            borderRadius: 'var(--eb-radius-md)',
+          }}>
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+            <span>{toolchainWarning}</span>
+          </div>
+        )}
+      </div>
+
       <div>
         <div style={labelStyle}>Additional instructions for agents (CLAUDE.md)</div>
         <div style={helpTextStyle}>
@@ -647,8 +730,249 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
   );
 }
 
+// The System-Admin half of the toolchain registry (#1940 AC6): register an
+// image so environments can select it, or remove one nothing selects any more.
+// It lives on this page rather than in its own nav entry because a toolchain has
+// exactly one consumer — the Toolchain field on the form next to it — and the
+// authorisation gate is the same shape as the Plugins page's install: the
+// button is hidden for a Team Admin AND the route answers 403, so hiding it is
+// convenience, not the control.
+function ToolchainRegistryPanel({ data, onChanged }) {
+  const [form, setForm] = useState({ id: '', name: '', image: '', description: '', platforms: ['podman', 'kubernetes'] });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const toolchains = data?.toolchains || [];
+  const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const togglePlatform = (p) => setForm(f => ({
+    ...f,
+    platforms: f.platforms.includes(p) ? f.platforms.filter(x => x !== p) : [...f.platforms, p],
+  }));
+
+  async function add() {
+    setBusy(true); setErr(null);
+    try {
+      await apiCall('POST', '/api/toolchains', {
+        id: form.id.trim(),
+        name: form.name.trim(),
+        image: form.image.trim(),
+        description: form.description.trim(),
+        platforms: form.platforms,
+      });
+      setForm({ id: '', name: '', image: '', description: '', platforms: ['podman', 'kubernetes'] });
+      onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function remove(id) {
+    setBusy(true); setErr(null);
+    try {
+      await apiCall('DELETE', `/api/toolchains/${encodeURIComponent(id)}`);
+      onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  // Install a SHIPPED variant (#1941). Deliberately a bare `{ id }`: the image
+  // reference is read server-side from the seeded manifest, so the operator
+  // never retypes it and cannot typo it. The same route, the same validator —
+  // only the door differs.
+  async function install(id) {
+    setBusy(true); setErr(null);
+    try {
+      await apiCall('POST', '/api/toolchains', { id });
+      onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  const canAdd = form.id.trim() && form.name.trim() && form.image.trim() && form.platforms.length > 0;
+  const available = availableToolchains(data?.available, data?.runtime);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      {err && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
+        }}>{err}</div>
+      )}
+
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+        A toolchain is a container image derived from the default agent image, adding one language
+        stack. Registering it here is what makes it selectable on a Working Environment — it grants
+        nothing on its own. Only a System Admin can register one, because an agent container
+        receives its environment's SSH key, GitHub token and model credential: whoever picks the
+        image picks what runs with those secrets.
+        {data?.defaultImage && (
+          <> Environments without a toolchain run <code>{data.defaultImage}</code>.</>
+        )}
+      </div>
+
+      {/* The variants this repository SHIPS (#1941) — built by
+          `make toolchain-images`, seeded by `make seed-toolchains`. One click
+          installs one, because the image reference comes from its manifest;
+          the hand-registration form below stays for everything we do not ship. */}
+      {available.length > 0 && (
+        <div>
+          <div style={labelStyle}>Available to install</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+            {available.map(t => (
+              <div key={t.id} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+              }}>
+                <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                  <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+                    {t.name} <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({t.id})</span>
+                  </div>
+                  {/* The plain-language description is the whole point of the
+                      manifest field — this is what is read before installing. */}
+                  {t.description && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {t.description}
+                    </div>
+                  )}
+                  {versionSourceLine(t) && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {versionSourceLine(t)}
+                    </div>
+                  )}
+                  {t.image && (
+                    <div style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', wordBreak: 'break-all', marginTop: 'var(--eb-space-1)' }}>
+                      {t.image}
+                    </div>
+                  )}
+                  {t.reason && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {t.reason}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => install(t.id)}
+                  disabled={busy || !t.installable}
+                  style={{
+                    flex: '0 0 auto',
+                    padding: 'var(--eb-space-1) var(--eb-space-3)',
+                    background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                    border: 'none', borderRadius: 'var(--eb-radius-md)',
+                    fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                    cursor: (busy || !t.installable) ? 'not-allowed' : 'pointer',
+                    opacity: (busy || !t.installable) ? 0.5 : 1,
+                  }}
+                >Install</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div style={labelStyle}>Registered toolchains</div>
+        {toolchains.length === 0 ? (
+          <div style={{ ...helpTextStyle, marginTop: 'var(--eb-space-2)' }}>
+            None yet — every agent runs the default image.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+            {toolchains.map(t => (
+              <div key={t.id} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+              }}>
+                <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                  <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+                    {t.name} <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({t.id})</span>
+                  </div>
+                  <div style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', wordBreak: 'break-all' }}>
+                    {t.image}
+                    {/* What the runtime actually pulls, when the deployment
+                        rewrites it (#1941 AC11: a cluster pulls from its
+                        Artifact Registry under the pinned release tag). Shown
+                        only when it DIFFERS — an ImagePullBackOff is otherwise
+                        debugged against a reference nothing pulls. */}
+                    {t.effectiveImage && t.effectiveImage !== t.image && (
+                      <> → {t.effectiveImage}</>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                    {(t.platforms || []).join(', ')}
+                    {t.environments?.length > 0 && (
+                      <> · selected by {t.environments.map(e => e.name || e.id).join(', ')}</>
+                    )}
+                  </div>
+                </div>
+                {/* Removal is refused server-side while an environment still
+                    selects it — otherwise those agents would start refusing to
+                    spawn, which is correct but a terrible way to find out. */}
+                <IconButton
+                  icon={Trash2}
+                  label={t.environments?.length > 0 ? 'Clear it on its environments first' : 'Remove'}
+                  danger
+                  disabled={busy || t.environments?.length > 0}
+                  onClick={() => remove(t.id)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      }}>
+        <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>Register a toolchain</div>
+        <FormInput label="ID *" value={form.id} onChange={v => update('id', v)} placeholder="jvm-21" />
+        <FormInput label="Name *" value={form.name} onChange={v => update('name', v)} placeholder="JVM 21 (JDK + Maven)" />
+        <div>
+          <FormInput label="Image *" value={form.image} onChange={v => update('image', v)} placeholder="localhost/as-agent-jvm-21:latest" />
+          <div style={helpTextStyle}>
+            The image tag as the runtime resolves it. On Kubernetes it must exist in the registry
+            the cluster's nodes pull from — a <code>localhost/…</code> tag from a developer machine
+            does not, which is what the platforms below are for.
+          </div>
+        </div>
+        <FormInput label="Description" value={form.description} onChange={v => update('description', v)} placeholder="Temurin JDK 21 + Maven, via mise" />
+        <div>
+          <div style={labelStyle}>Platforms *</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-4)', marginTop: 'var(--eb-space-1)' }}>
+            {['podman', 'kubernetes'].map(p => (
+              <label key={p} style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={form.platforms.includes(p)} onChange={() => togglePlatform(p)} />
+                {p}
+              </label>
+            ))}
+          </div>
+          <div style={helpTextStyle}>
+            Where this image is actually pullable. This stack runs on <code>{data?.runtime || 'podman'}</code>.
+          </div>
+        </div>
+        <button
+          onClick={add}
+          disabled={busy || !canAdd}
+          style={{
+            alignSelf: 'flex-start',
+            padding: 'var(--eb-space-2) var(--eb-space-4)',
+            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+            border: 'none', borderRadius: 'var(--eb-radius-md)',
+            fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+            cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit',
+            opacity: (busy || !canAdd) ? 0.6 : 1,
+          }}
+        >
+          {busy ? 'Saving…' : 'Register toolchain'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function WorkingEnvironments() {
   const { data: envs, loading, error, refetch } = useApi('/api/environments');
+  const { data: toolchainData, refetch: refetchToolchains } = useApi('/api/toolchains');
   const [panelMode, setPanelMode] = useState(null);
   const [selected, setSelected] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -742,12 +1066,24 @@ export default function WorkingEnvironments() {
   }
 
   const headerAction = usePageActions(
-    <button
-      onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
-      style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
-    >
-      <Plus size={15} /> New Environment
-    </button>
+    <>
+      {/* Hidden for a Team Admin as a courtesy; the routes behind it answer 403
+          regardless (#1940 AC6 is enforced server-side, not by this button). */}
+      {toolchainData?.canManage && (
+        <button
+          onClick={() => { setPanelMode('toolchains'); setSelected(null); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+        >
+          <Package size={15} /> Toolchains
+        </button>
+      )}
+      <button
+        onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
+        style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
+      >
+        <Plus size={15} /> New Environment
+      </button>
+    </>
   );
 
   if (loading) {
@@ -809,6 +1145,20 @@ export default function WorkingEnvironments() {
             onCancel={() => { setPanelMode(null); setSelected(null); }}
             saving={saving}
             error={formError}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'toolchains'}
+        onClose={() => setPanelMode(null)}
+        title="Agent toolchains"
+        width="560px"
+      >
+        {panelMode === 'toolchains' && (
+          <ToolchainRegistryPanel
+            data={toolchainData}
+            onChanged={() => { refetchToolchains(); refetch(); }}
           />
         )}
       </SidePanel>

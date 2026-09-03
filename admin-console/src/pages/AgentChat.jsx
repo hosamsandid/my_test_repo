@@ -13,6 +13,8 @@ import RightRail from './agent-chat/RightRail';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { emptyStateCta } from './agent-chat/empty-state';
+import PageHelpButton from '../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
 
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
@@ -534,6 +536,17 @@ export default function AgentChat() {
             >
               <Plus size={14} />
             </RailHeaderButton>
+            {/* #1972: the left rail's own "?" — grouping, reordering, the
+                disabled opt-in, the row menu and this "+" are a surface of their
+                own, so it lands on the agent-list chapter rather than the top of
+                the topic. The row sits above an empty list too, so the "?" is
+                reachable before there is any agent to explain. */}
+            <PageHelpButton
+              label="What the agent list can do"
+              size={14}
+              section={AGENT_CHAT_HELP_SECTIONS.agentList}
+              style={{ padding: 2, flexShrink: 0 }}
+            />
           </div>
         )}
 
@@ -608,7 +621,6 @@ export default function AgentChat() {
               agents={agents}
               selectedAgentId={agentId || null}
               onSelect={handleSelect}
-              onMarkAsUnread={handleMarkAsUnread}
               statuses={agentStatuses}
               filter={listFilter}
               showDisabled={showDisabled}
@@ -720,6 +732,8 @@ export default function AgentChat() {
         chatAgents={agents || []}
         onChanged={refetch}
         onOpenSettings={handleOpenSettings}
+        onMarkAsUnread={handleMarkAsUnread}
+        statuses={agentStatuses}
       />
     </div>
   );

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, Loader2, ArrowLeft, RefreshCw } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import AgentEditForm from '../agent-lifecycle/AgentEditForm.jsx';
 import { isFormDirty } from '../agent-lifecycle/agent-edit-form-model.js';
 import {
@@ -171,6 +173,15 @@ export default function AgentSettingsPanel({
       >
         <RefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : {}} />
       </button>
+      {/* #1972: this tab's "?" — the draft-keeping, the apply-immediately fields
+          and why the tab can point at another agent. Like Outcomes it is a
+          conditional tab, so the "?" is only ever there with the surface. */}
+      <PageHelpButton
+        label="How the Settings tab behaves"
+        size={13}
+        section={AGENT_CHAT_HELP_SECTIONS.settings}
+        style={{ padding: 2 }}
+      />
     </div>
   );
 

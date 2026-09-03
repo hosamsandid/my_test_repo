@@ -13,6 +13,7 @@ import {
   validateLaunch,
   buildLaunchBody,
   launchSubmitLabel,
+  launchResultMessage,
   splitNdjson,
   runLaunchStream,
   TEAM_ID_RE,
@@ -249,6 +250,34 @@ test('launchSubmitLabel: extend > materialize-now > create', () => {
   assert.equal(launchSubmitLabel({ materializeNow: true }), 'Create team');
   assert.equal(launchSubmitLabel({ materializeNow: false }), 'Create team (stubs)');
   assert.equal(launchSubmitLabel({}), 'Create team'); // default = materialize-now
+});
+
+// ─── launchResultMessage (#1955) ─────────────────────────────────────────────
+
+test('launchResultMessage: a stub launch is not reported as a ready team', () => {
+  const stub = launchResultMessage({ teamName: 'Acme', created: ['a-dev', 'a-qa'], materialized: false });
+  assert.match(stub, /created/);
+  assert.match(stub, /2 agent\(s\) as stubs/);
+  assert.doesNotMatch(stub, /ready/); // nothing is cloned or running yet
+  assert.match(stub, /Enable a member to materialize it/); // says how to finish
+});
+
+test('launchResultMessage: materialized (or a pre-#1955 payload) keeps the ready wording', () => {
+  const now = 'Team Acme ready — 2 agent(s) created.';
+  assert.equal(launchResultMessage({ teamName: 'Acme', created: ['a', 'b'], materialized: true }), now);
+  // No `materialized` key at all: read as the backend default (materialize-now),
+  // never guessed as a stub — an older stream payload must not be relabelled.
+  assert.equal(launchResultMessage({ teamName: 'Acme', created: ['a', 'b'] }), now);
+  assert.equal(launchResultMessage({ teamName: 'Acme' }), 'Team Acme ready — 0 agent(s) created.');
+});
+
+test('launchResultMessage: an explicit server message still wins in either mode', () => {
+  for (const materialized of [true, false, undefined]) {
+    assert.equal(
+      launchResultMessage({ teamName: 'Acme', message: 'extended', materialized }),
+      'Team Acme: extended',
+    );
+  }
 });
 
 test('splitNdjson: complete lines parsed, partial retained, bad lines collected', () => {

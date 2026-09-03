@@ -30,4 +30,8 @@ patches:
       kind: Deployment
       labelSelector: app.kubernetes.io/name=agent-studio
   - path: patch-agent-image.yaml
+  # Toolchain variant images (#1941 AC11) — the orchestrator half rides on
+  # patch-agent-image.yaml above; this is the admin-console half (a
+  # strategic-merge patch can only address one object, see that file's header).
+  - path: patch-toolchain-prefix.yaml
   - path: patch-instance-id.yaml

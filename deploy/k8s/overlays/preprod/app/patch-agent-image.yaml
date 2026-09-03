@@ -1,6 +1,20 @@
 # The agent image is an ENV VAR on the orchestrator (it spawns agent pods at
 # runtime), so the kustomize images: transformer never sees it — this patch
 # carries the AR path, and set-images.sh rewrites the tag at deploy time.
+#
+# Same story for the TOOLCHAIN image prefix (#1941 AC11): a variant image is
+# named by a registered toolchain manifest at runtime, so it is never a pod
+# image field either. The manifest declares the bare `as-agent-jvm:latest`; this
+# prefix is what turns it into the AR reference the cluster's nodes can pull.
+# The prefix carries NO tag — the tag stays in the manifest, which is why
+# deploy-gke.yml pushes each variant under the bare tag its manifest names
+# (alongside the immutable release tag), and why render-check.sh asserts the
+# release path pushes exactly the tags the shipped manifests reference.
+#
+# preprod pulls from the SAME Artifact Registry as test (one shared registry,
+# two namespaces), so this value is identical to the test overlay's — what
+# differs between the two environments is the namespace and the ingress, never
+# the registry.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,5 +28,12 @@ spec:
           env:
             - name: AGENT_IMAGE
               value: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/as-agent:latest
+            - name: AEE_TOOLCHAIN_IMAGE_PREFIX
+              value: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio
+            # Placeholder, rewritten to the release tag by set-images.sh at
+            # deploy time (never committed pinned — the checked-in value must
+            # keep `kubectl kustomize` rendering, exactly like every newTag:).
+            - name: AEE_TOOLCHAIN_IMAGE_TAG
+              value: latest
             - name: AEE_AGENT_IMAGE_PULL_POLICY
               value: Always

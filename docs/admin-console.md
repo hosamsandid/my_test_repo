@@ -99,41 +99,41 @@ The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 actions — and per-resource visibility — arrive with later tickets (#302/#304);
 today any authenticated operator can manage teams.
 
-## Agent Teams — surfacing missing blueprint roles (#1375)
+## Agent Teams — the missing-role suggestion was removed (#1959)
 
-An **Agent Team** assembled piecewise from a reference process template (dev +
-reviewer only, say) runs part of the SDLC loop and then stalls at the first
-missing role's terminal label — a missing `merger` leaves `ready-to-merge` idle
-(the final merge stays a manual click); a missing `reworker` leaves
-`revisions-required` idle. The Agents page (`/agents`) surfaces that gap on the
-expanded **Agent Team** card: below the member list it lists the roles the team
-is missing relative to its source template, each with an **Add `<role>` role**
-button.
+The platform used to guess which "loop-closing" role an **Agent Team** was
+missing and offer a one-click **Add `<role>` role** (#1375): a warning block on
+the expanded team card on `/agents`, and extra entries in the team's context menu
+in Agent Chat. **That capability is gone as of #1959 — removed, not moved.**
 
-- **Source-template inference.** The team config does *not* persist which template
-  it came from (`POST /api/teams` flattens the bundle into members and discards the
-  template identity). It is inferred client-side (pure `src/pages/missing-roles-view.js`,
-  unit-tested) from two signals the team agent *does* persist: the gate/brake **label
-  registry** (`team.labels[]`, #928 — the strongest fingerprint, since each shipped
-  template has a distinct registry; matched by containment, suffix-stripped for #902)
-  and the **present member role-ids** (recovered from each member id `<teamId>-<roleId>`).
-  When nothing clearly matches, nothing is shown — the hint is purely additive, so
-  unrelated or fully-covered teams sprout no buttons.
-- **Which roles are missing** is decided once the template is known, by a template-
-  aware, display-name-aware fulfilment check (`fulfilledRoleIds`, #1556) so a role a
-  member visibly provides is never offered: a template role whose id ends in a digit
-  (`developer-2`) is recognised as its own role and not collapsed onto the base
-  (`developer`); a genuine second instance (`<teamId>-<roleId>-<n>` where only the base
-  is a template role) still counts the base present; and a member whose id does not
-  encode the template role id (a clone, a doubled `agent-` prefix) is matched to its
-  role by display name.
-- **One-click add.** The button reuses the existing member-create endpoint via its
-  process-template branch — `POST /api/agents/:teamId/members { processTemplateId, roleId }`
-  — which mirrors the Team-Setup wizard's per-role materialisation (systemPrompt +
-  `{{var}}` substitution, `sessionPolicy`, triggers with repo/claim/transport, the
-  team's own `labelSuffix`) for that one role, so the added member is identical to one
-  created at team-setup time. The new member is then **disabled** (`PUT enabled:false`)
-  so nothing wakes until the operator enables it; a toast confirms.
+- **Why.** It rested on an *inference*, because the team config never persists
+  which process template it came from (`POST /api/teams` flattens the bundle into
+  members and discards the template identity). The source template had to be
+  guessed from the team's label registry and its members' ids, and the guess was
+  conservative to the point of being unhelpful: on the teams where a gap was real
+  it often matched nothing and showed nothing, and where it did match, "missing"
+  was a statement about a template the team may deliberately have diverged from.
+  A suggestion an operator cannot check is worse than no suggestion, and it was
+  retired by requester decision rather than re-homed.
+- **What replaces it.** Growing a team is now always an explicit choice:
+  **Add member** (same menu, same `POST /api/agents/:teamId/members` route — it
+  posts no body, so it takes the free-form branch and yields a blank
+  `<teamId>-<n>` member inheriting the team's prompt), or wiring the role in the
+  **Flow editor**, which is the surface that materialises a role *from a role
+  template* (the route's `templateId` branch) and where the flow's actual gaps are
+  visible as unconsumed labels and advisory lints rather than inferred. Both
+  branches of the route are unchanged.
+- **What went with it.** The pure inference module (`src/pages/missing-roles-view.js`),
+  the team-card warning block, the `add-role:*` menu entries, and the
+  `{ processTemplateId, roleId }` shape of `POST /api/agents/:teamId/members`.
+  That request shape is now **refused** with a `400` and the code
+  `process-template-role-removed` rather than quietly doing something else — a
+  fall-through would have created a member named after the role but without the
+  template's prompt, session policy or triggers.
+- **Existing members are unaffected.** Anything added through the old branch keeps
+  working exactly as before; only the way of creating new ones is gone. Nothing
+  about the Team-Setup wizard, the Flow Editor's role handling or team creation
+  changed.
 
 ## Audit trail (#305)
 
@@ -171,7 +171,7 @@ Each row shows the agent's Working Environment name below its display name. Insi
 
 Reorder the list by dragging the grip handle (⠿, visible on hover) to relocate an item in one gesture; keyboard users can reorder the focused item with `Alt+↑`/`Alt+↓`. Groups, standalone agents, and members within a group each reorder independently; a drag cannot move an item out of its own list. Order persists in `localStorage` (`agentChat.sidebarOrder`) and survives reload. Group and standalone-agent reorder require the **All agents** filter (the other groups/singles are hidden under a filter, so a move would be ambiguous); member-within-a-group reorder is additionally available under a **single-team** filter, since that view shows the team's complete ordered member set and writes the same order it would unfiltered (#1725).
 
-Manage agents in place without a trip to `/agents` (#1928). Open a row's context menu — the kebab revealed on hover, a right-click, or `Menu`/`Shift+F10` from the keyboard — for **Enable/Disable**, **Settings**, **Clone**, **Export (ZIP)**, **Save as template** and the confirmation-guarded **Reset to stub** / **Delete**; a team group header offers the team-wide **Enable/Disable** fan-out (with a partial-failure report), **Add member**, **Add `<role>` role**, **Team settings**, **Export team**, **Open in Flow Editor** and **Delete team**. The **+** control in the rail header creates a **New agent** or imports one, and the imported agent joins the list without a page reload. Every action runs the *same* dialog, confirmation and request as its Agents-page counterpart, and an action you may not perform is shown inert with a reason rather than failing at the server. A **show disabled agents** toggle (off by default, remembered per user) additionally lists paused agents so they can be re-enabled from here; a disabled agent is marked as such and cannot be opened as a chat until it is enabled — its **Settings** entry still opens its configuration in the right rail, so it can be reconfigured while paused (#1929).
+Manage agents in place without a trip to `/agents` (#1928). Open a row's context menu — the kebab revealed on hover, a right-click, or `Menu`/`Shift+F10` from the keyboard — for **Enable/Disable**, **Settings**, **Clone**, **Export (ZIP)**, **Save as template** and the confirmation-guarded **Reset to stub** / **Delete**; a team group header offers the team-wide **Enable/Disable** fan-out (with a partial-failure report), **Add member**, **Team settings**, **Export team**, **Open in Flow Editor** and **Delete team** (the **Add `<role>` role** entries are gone — see *the missing-role suggestion was removed* above). The **+** control in the rail header creates a **New agent** or imports one, and the imported agent joins the list without a page reload. Every action runs the *same* dialog, confirmation and request as its Agents-page counterpart, and an action you may not perform is shown inert with a reason rather than failing at the server. A **show disabled agents** toggle (off by default, remembered per user) additionally lists paused agents so they can be re-enabled from here; a disabled agent is marked as such and cannot be opened as a chat until it is enabled — its **Settings** entry still opens its configuration in the right rail, so it can be reconfigured while paused (#1929). The same menu also leads with a chat-only **Mark as unread** entry — it flips the row back to its unread indicator and, unlike the management actions below it, never depends on your permissions; it is greyed out rather than hidden when it does not apply (the row is already unread, or is disabled/offline and has no chat to open). It replaces the mail icon that used to appear on row hover, so the drag grip no longer shifts sideways when you hover a row (#1938). The menu closes with a **What these actions do…** entry that opens the Help panel at the agent-list chapter of the Agent Chat topic — a menu cannot host the shared "?" button, so the affordance is an entry; it is always enabled, since it changes nothing (#1972).
 
 ### Middle panel — Chat
 

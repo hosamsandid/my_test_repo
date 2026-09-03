@@ -151,6 +151,29 @@ invariants; `deploy/k8s/set-images.sh <env> <tag>` pins the image tag in the
 working tree at deploy time — the checked-in placeholder stays `latest`, so
 never commit a pinned tag (`git checkout -- deploy/k8s/overlays` to reset).
 
+### Agent toolchain images (#1940)
+
+`AGENT_IMAGE` (base `40-orchestrator.yaml`, overridden by
+`overlays/{test,preprod}/app/patch-agent-image.yaml`) remains the
+**installation-wide default** — the image every agent whose Working Environment
+names no toolchain is spawned from. It is still the only agent image reference in
+the manifests, so `set-images.sh` and `render-check.sh` need no change: a
+**toolchain** image is registered at runtime by a System Admin
+(`POST /api/toolchains` → `/workspace/toolchains/index.json`), never in a
+manifest, and therefore never travels through the release tooling.
+
+The consequence for a hosted stack is that **nothing pushes a toolchain image for
+you**. A variant must exist in the Artifact Registry the cluster's nodes pull
+from before an environment selects it; `AEE_AGENT_IMAGE_PULL_POLICY` and
+`AEE_IMAGE_PULL_SECRET` then apply to it exactly as to the default image (they
+are pod-spec fields, independent of which image is named). A `localhost/…` tag
+built with `make toolchain-images` on a developer machine does not exist there —
+register such a variant with `platforms: ["podman"]` and the console will not
+offer it on a Kubernetes stack. If a selected toolchain's image cannot be pulled,
+the agent pod is deleted after two `ImagePullBackOff` sightings and the
+orchestrator log names the environment and the toolchain rather than only the
+k8s reason.
+
 ## Releases & deploys (trunk-based, manual)
 
 `main` is the trunk. A **release** is an annotated tag on a main commit:

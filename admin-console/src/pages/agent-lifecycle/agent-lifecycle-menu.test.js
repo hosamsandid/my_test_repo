@@ -159,17 +159,25 @@ test('without a visible team row the fan-out toggle is omitted, not guessed', ()
   ]);
 });
 
-test('missing loop-closing roles each become their own entry', () => {
-  const items = buildTeamMenu({
-    teamId: 't1',
-    team: { enabled: true },
-    missingRoles: [{ id: 'reviewer', displayName: 'Code Reviewer' }, { id: 'qs' }],
-  });
-  assert.ok(keys(items).includes('add-role:reviewer'));
-  assert.ok(keys(items).includes('add-role:qs'));
-  assert.equal(byKey(items, 'add-role:reviewer').label, 'Add Code Reviewer role');
-  // No displayName → fall back to the id rather than render "Add undefined role".
-  assert.equal(byKey(items, 'add-role:qs').label, 'Add qs role');
+test('#1959 — the team menu carries no add-role entry, and cannot be talked into one', () => {
+  // The missing-role suggestion was retired: no `add-role:*` key on any shape of
+  // the menu, and a leftover `missingRoles` argument from an un-migrated caller
+  // is ignored rather than re-growing the entries.
+  const shapes = [
+    buildTeamMenu({ teamId: 't1', team: { enabled: true } }),
+    buildTeamMenu({ teamId: 't1', team: null }),
+    buildTeamMenu({ teamId: 't1', team: { enabled: true }, canManage: false }),
+    buildTeamMenu({
+      teamId: 't1',
+      team: { enabled: true },
+      missingRoles: [{ id: 'reviewer', displayName: 'Code Reviewer' }, { id: 'qs' }],
+    }),
+  ];
+  for (const items of shapes) {
+    assert.ok(!keys(items).some(k => k.startsWith('add-role')), 'no add-role entry');
+    // Growing a team is still offered — just as an explicit choice.
+    assert.ok(keys(items).includes('add-member'));
+  }
 });
 
 test('AC8 — team mutations are inert without rights; navigation stays live', () => {

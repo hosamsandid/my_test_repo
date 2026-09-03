@@ -9,16 +9,23 @@ import { useHelperChat } from '../context/HelperChatContext';
 // fallback when the route has none). The big "what this page is" boxes go away
 // during Phase-3 extraction; this small control replaces them.
 //
+// An optional `section` (#1972) names the chapter of the page's topic to land
+// on — the slug of its heading — so a "?" placed next to one surface of a busy
+// page opens the explanation of *that* surface rather than the top of a long
+// topic. Omit it and the behaviour is exactly as before; a slug that matches no
+// heading also just renders the topic from the top, so a chapter-less surface
+// can never produce an empty or broken "?".
+//
 // Deliberately markup-only (no decisions of its own) — it just wires the click
 // to useHelperChat().openHelpFor(); the JSX stays uncovered per the #651
 // convention.
-export default function PageHelpButton({ label = 'Help for this page', size = 16, style }) {
+export default function PageHelpButton({ label = 'Help for this page', size = 16, style, section = '' }) {
   const { openHelpFor } = useHelperChat();
   const { pathname } = useLocation();
   return (
     <button
       type="button"
-      onClick={() => openHelpFor(pathname)}
+      onClick={() => openHelpFor(pathname, { section })}
       title={label}
       aria-label={label}
       style={{

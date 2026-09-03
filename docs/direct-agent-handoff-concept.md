@@ -42,13 +42,13 @@ words along** — a label is one bit of vocabulary, not a message.
 
 | Building block | Where | Status for this design |
 |---|---|---|
-| Durable per-agent FIFO queue | `enqueuePending()` → `pending-triggers.json` (`orchestrator/orchestrator.js:7057-7074`) | ✅ reused as-is |
+| Durable per-agent FIFO queue | `enqueuePending()` → `pending-triggers.json` (`orchestrator/orchestrator.js:7175-7192`) | ✅ reused as-is |
 | Queue drain, one entry at a time, tail persisted first | `_drain_pending_one` (`agent-image/scripts/agent-entrypoint.py:5317-5377`) | ✅ reused as-is |
 | `kind`-discriminated dispatch | `_handle_pending_entry` (`agent-entrypoint.py:5394-5498`) | ✅ new branch here |
 | Agent-wide serialization | `WorkspaceGate` (`agent-entrypoint.py:3976`), acquired in `_execute` (`:5856`) | ✅ the run must pass through it |
 | Blast-radius runaway backstop | `TriggerBackstop` (#611, `agent-entrypoint.py:3899-3973`), evaluated inside `_execute_guarded` | ✅ the AC-6 answer |
 | Untrusted-payload prompt framing | the `<external-event source="github">` block (`agent-entrypoint.py:6094-6106`) | ✅ the shape the note reuses |
-| Internal transport + event-log row | `POST /internal/flow-emit` (`orchestrator/orchestrator.js:11736-11800`) | ✅ the mould, not the endpoint |
+| Internal transport + event-log row | `POST /internal/flow-emit` (`orchestrator/orchestrator.js:11854-11918`) | ✅ the mould, not the endpoint |
 | Cross-agent rendezvous over the same queue | `loop-verify` (#933, `agent-entrypoint.py:5436-5443`) | ✅ evidence the substrate is stable |
 | **Label-free, artifact-free wake + flow edge** | — | ❌ **this concept** |
 | **Free-form agent→agent message channel** | — | ❌ deferred (§12 P4) |
@@ -70,7 +70,7 @@ decision, so they are recorded here rather than quietly worked around.
    Neither is sufficient; §5.3 routes the wake through `_execute` instead,
    which is the only path that holds both guards.
 2. **The queue is unbounded.** `enqueuePending` read-modify-writes a JSON array
-   with no cap, no dedupe and no TTL (`orchestrator.js:7057-7074`). #1528's
+   with no cap, no dedupe and no TTL (`orchestrator.js:7175-7192`). #1528's
    "bounded queue vs unbounded growth" question therefore has a factual
    answer today — *unbounded* — and §9 decides deliberately not to change that
    for one new `kind`.
@@ -85,7 +85,7 @@ decision, so they are recorded here rather than quietly worked around.
    constraint the new endpoint introduces — it is not inherited from #1172.
 
 Two smaller corrections: `source: 'internal'` *is* stamped on the event-log row
-by the flow-emit route (`orchestrator.js:11778-11789`), so #1528's decision 6
+by the flow-emit route (`orchestrator.js:11896-11907`), so #1528's decision 6
 is right about the writer — but the GitHub Event Log page never renders a
 `source` column at all (`admin-console/src/pages/GithubEventLog.jsx:330-370`),
 so "already renders internal deliveries" overstates it. And `EDGE_STYLES.handoff`
@@ -339,8 +339,8 @@ makes the Flow Editor author it.
   no-op.
 - **Same team only.** The endpoint resolves both ends' team the way the rest
   of the platform does — `cfg.parentTeamId || cfg.teamId || null`
-  (the idiom at `orchestrator/orchestrator.js:1871`; `parentTeamId` is the
-  migrated name of the legacy `parentGroupId`, `orchestrator.js:799-800`) —
+  (the idiom at `orchestrator/orchestrator.js:1989`; `parentTeamId` is the
+  migrated name of the legacy `parentGroupId`, `orchestrator.js:845-846`) —
   and refuses `403 cross-team` when they differ or either is null. This is
   **stricter than the #1172 path**, which has no team gate at all
   (§2.1 item 4); a label hand-off is at least visible on a shared repo, whereas
@@ -354,8 +354,8 @@ makes the Flow Editor author it.
 ### 6.1 What "authorization" does and does not mean here
 
 Stated plainly, because AC-4 uses the word: the whole `:4002` internal API is
-**unauthenticated** — one `http.createServer` (`orchestrator.js:10459`) bound
-on the container network (`orchestrator.js:14648-14650`), with no token, HMAC
+**unauthenticated** — one `http.createServer` (`orchestrator.js:10577`) bound
+on the container network (`orchestrator.js:14766-14768`), with no token, HMAC
 or header check on `/internal/flow-emit` or any sibling. `aee-emit` sends its
 `agentId` in the body with no credential (`aee-emit:140-145`), so a producer's
 identity is **self-asserted**; the trust boundary is network position, not
@@ -379,7 +379,7 @@ first-class — not optional, and not merely written.
 
 **Writer.** One row per hand-off, through the same
 `githubEventLog.record({ ...buildEventEntry(…), source: 'internal', emittedBy })`
-shape the flow-emit route uses (`orchestrator.js:11778-11789`), carrying
+shape the flow-emit route uses (`orchestrator.js:11896-11907`), carrying
 producer, target and note.
 
 **But `buildEventEntry` is GitHub-event-shaped** — `eventId`, `repo`, `event`,
@@ -469,7 +469,7 @@ it is P3's to settle with real data (§13 Q1). Neither `handover-dm` nor
   backstop bounds *execution*, which is the resource that actually matters.
   The pending-queue tab already lets an operator see and cancel entries
   (`GET /api/pending-queue`, `DELETE /api/agents/:id/pending/:entryId` —
-  `admin-console/api/api.js:415-423`), which is the escape hatch.
+  `admin-console/api/api.js:429-437`), which is the escape hatch.
 
 ## 10. Flow-Editor representation (AC 8)
 
@@ -603,9 +603,9 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 | `admin-console/api/process-template.js:1104-1147` | `expandGithubChannels` — the only writer of a consumer's derived `triggers.json` entry |
 | `admin-console/api/label-suffix.js:76-80`, `:203-212` | the `setLabel` suffix stamper that must **not** touch `to` |
 | `orchestrator/flow-emit.js:29-135` | the pure-core mould: validate → match → entry shape |
-| `orchestrator/orchestrator.js:11736-11800` | the `/internal/flow-emit` route — the I/O + event-log pattern to mirror |
-| `orchestrator/orchestrator.js:7057-7074` | `enqueuePending` — unbounded, id-stamped, single-event-loop |
-| `orchestrator/orchestrator.js:1871`, `:799-800` | how a team is resolved from a config (`parentTeamId \|\| teamId`) |
+| `orchestrator/orchestrator.js:11854-11918` | the `/internal/flow-emit` route — the I/O + event-log pattern to mirror |
+| `orchestrator/orchestrator.js:7175-7192` | `enqueuePending` — unbounded, id-stamped, single-event-loop |
+| `orchestrator/orchestrator.js:1989`, `:799-800` | how a team is resolved from a config (`parentTeamId \|\| teamId`) |
 | `agent-image/scripts/aee-emit` | the CLI shape, exit codes, and the fail-closed wording to adapt |
 | `agent-image/scripts/agent-entrypoint.py:5394-5498` | `_handle_pending_entry` — where the `wake-agent` branch goes |
 | `agent-image/scripts/agent-entrypoint.py:5502-5563` | `_execute_handover_dm` — the precedent **not** to copy (no gate, no backstop) |

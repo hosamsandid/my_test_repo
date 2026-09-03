@@ -17,6 +17,7 @@ askPrompts:
   - "Which hand-off kind should I pick — label, PR channel, issue channel or artifact?"
   - "How do I make the flow wait for a person to approve?"
   - "Why is the Materialize button greyed out?"
+  - "Why are my agents 'Not initialised' after I materialized the draft?"
 ---
 
 ## What can I do here?
@@ -44,10 +45,15 @@ to it.
 
 You always edit a **Draft** first — a live **Team** keeps running while you
 design. Add agents, draw the hand-offs between them, then **Materialize** the
-draft to turn it into a real, running team. Materialize needs at least one agent
-before it can turn a design into a team, and while a Copilot proposal is on
-screen the structural buttons pause, because the canvas is previewing the
-proposal rather than the draft underneath.
+draft to turn it into a real team. The Materialize dialog decides how far each
+agent is taken: **Materialize agents now** is off here by default, so the members
+are created as **stubs** — they appear in the team with their prompts and
+triggers, but no repository is cloned and nothing is running until you enable
+one (a process can have dozens of members, and each materialisation clones the
+repository). Tick it and every member is provisioned right away. Materialize
+needs at least one agent before it can turn a design into a team, and while a
+Copilot proposal is on screen the structural buttons pause, because the canvas
+is previewing the proposal rather than the draft underneath.
 
 - **Flow Copilot** — describe the process in plain language (roles, hand-offs,
   human approval gates) and it proposes a complete flow on the canvas; you

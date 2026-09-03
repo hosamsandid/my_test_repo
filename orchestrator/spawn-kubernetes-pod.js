@@ -65,16 +65,30 @@ const fs = require('fs');
 const https = require('https');
 const { EventEmitter, PassThrough } = require('stream');
 const { validateHostMountPath, CONTEXT_MOUNT_TARGET } = require('./context-mount');
+const {
+  DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
+  missingImageMessage,
+} = require('./toolchain-registry');
 
 const NAMESPACE = process.env.AEE_K8S_NAMESPACE || readFile('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'default').trim();
 const API_HOST = process.env.KUBERNETES_SERVICE_HOST;
 const API_PORT = process.env.KUBERNETES_SERVICE_PORT || '443';
 const CA = readFileBuffer('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
 
-const AGENT_IMAGE = process.env.AGENT_IMAGE || 'as-agent:latest';
+// Installation-wide default agent image (#1940 AC9). Since #1940 this is only
+// the DEFAULT: the image a pod is actually created from arrives through the
+// seam as `spawnContainer({ image })`, resolved per Working Environment by
+// orchestrator/toolchain-registry.js. Exported so the resolver reads the
+// default from the active runtime rather than re-deriving it.
+const DEFAULT_AGENT_IMAGE = process.env.AGENT_IMAGE || BUILTIN_AGENT_IMAGE;
 // IfNotPresent suits local clusters (kind: images are side-loaded, never
 // pullable). On a real registry with a mutable :latest tag set Always, or a
 // node's stale cache keeps winning after every image push.
+// #1940 AC8: the pull policy and the pull secret apply to a toolchain variant
+// exactly as to the default image — they are pod-spec fields, independent of
+// WHICH image is named. A variant must therefore be pushed to the Artifact
+// Registry the cluster's nodes pull from; the compose path's `localhost/…`
+// tags do not exist there, which is what a toolchain's `platforms` field is for.
 const AGENT_IMAGE_PULL_POLICY = process.env.AEE_AGENT_IMAGE_PULL_POLICY || 'IfNotPresent';
 const AGENT_SERVICE_ACCOUNT = process.env.AEE_AGENT_SERVICE_ACCOUNT || 'agent-studio-agent';
 const IMAGE_PULL_SECRET = process.env.AEE_IMAGE_PULL_SECRET || '';
@@ -112,6 +126,15 @@ const FATAL_WAITING_REASONS = new Set([
   'CreateContainerConfigError',
   'CreateContainerError',
   'RunContainerError',
+]);
+
+// The subset of the above that means "the named image could not be obtained" —
+// the Kubernetes equivalent of a missing image in the local podman store, and
+// therefore the only reasons that earn the #1940 AC7 toolchain sentence.
+const IMAGE_PULL_REASONS = new Set([
+  'ImagePullBackOff',
+  'ErrImageNeverPull',
+  'InvalidImageName',
 ]);
 
 function readFile(path, fallback) {
@@ -374,6 +397,15 @@ async function pollPodExit(podName, handle) {
         fatalSightings += 1;
         if (fatalSightings >= 2) {
           safeWrite(handle.stderr, `[spawn-kubernetes-pod] pod ${podName} cannot start: ${fatal} — deleting\n`);
+          // #1940 AC7: on a toolchain image, an image-pull failure is the
+          // Kubernetes form of "the selected toolchain's image is missing".
+          // `ImagePullBackOff` alone names neither the environment nor the
+          // toolchain, so add the sentence that does — the podman path gets the
+          // same wording from its pre-create probe.
+          if (handle._toolchain && IMAGE_PULL_REASONS.has(fatal)) {
+            safeWrite(handle.stderr,
+              `[spawn-kubernetes-pod] ${missingImageMessage({ ...handle._toolchain, image: handle._image, runtime: 'kubernetes' })}\n`);
+          }
           await deletePod(podName).catch(() => null);
           finalizeHandle(handle, 1);
           return;
@@ -426,7 +458,7 @@ function buildContextHostPathVolumes(contextMounts) {
   return { volumes, volumeMounts };
 }
 
-function buildPodManifest(id, env, podName, contextMounts) {
+function buildPodManifest(id, env, podName, contextMounts, image) {
   const memory = parseMemoryQuantity(AGENT_MEM_LIMIT);
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>
@@ -463,7 +495,9 @@ function buildPodManifest(id, env, podName, contextMounts) {
       terminationGracePeriodSeconds: 20,
       containers: [{
         name: 'as-agent',
-        image: AGENT_IMAGE,
+        // #1940 AC2/AC8: the RESOLVED image, never the module-level default —
+        // the caller decided which toolchain (if any) this agent runs on.
+        image,
         imagePullPolicy: AGENT_IMAGE_PULL_POLICY,
         env: envToK8s(env),
         volumeMounts: [...volumeMounts, ...ctx.volumeMounts],
@@ -480,8 +514,15 @@ function buildPodManifest(id, env, podName, contextMounts) {
   return pod;
 }
 
-function spawnContainer({ id, env, contextMounts }) {
+// `image` (#1940) is the container image for THIS agent, resolved per Working
+// Environment by the caller (orchestrator.js → resolveAgentImage) — the same
+// seam contract as spawn-container.js. `toolchain` is the
+// {toolchainId, environmentId, environmentName} context of a NON-default image,
+// carried only so an image-pull failure can be worded as AC7 requires.
+function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
   const handle = new EventEmitter();
+  handle._toolchain = toolchain;
+  handle._image = image;
   handle.stdout = new PassThrough();
   handle.stderr = new PassThrough();
   handle.killed = false;
@@ -526,7 +567,16 @@ function spawnContainer({ id, env, contextMounts }) {
         finalizeHandle(handle, 0);
         return;
       }
-      const manifest = buildPodManifest(id, env, podName, contextMounts);
+      // #1940 AC2: the image is the caller's decision, and a missing one is a
+      // seam contract violation rather than a k8s error — refuse here so it
+      // cannot degrade into a pod with an `undefined` image.
+      if (!image) {
+        throw new Error(
+          `refusing to spawn ${id}: no container image was resolved. The container-runtime ` +
+          'seam requires spawnContainer({ image }) (#1940) — see resolveAgentImage.',
+        );
+      }
+      const manifest = buildPodManifest(id, env, podName, contextMounts, image);
       for (const vm of manifest.spec.containers[0].volumeMounts) {
         if (!vm.name.startsWith('ctx-')) continue;
         const vol = manifest.spec.volumes.find((v) => v.name === vm.name);
@@ -613,6 +663,9 @@ module.exports = {
   PLUGIN_SIDECARS_SUPPORTED: true,
   perAgentNetworkName: () => null,
   AGENT_NETWORK: null,
+  // Installation-wide default image (#1940 AC9) — the orchestrator reads the
+  // fallback link of the resolution chain from whichever runtime is selected.
+  DEFAULT_AGENT_IMAGE,
   // Pure helpers exposed for unit tests only — not part of the runtime seam.
   _internal: {
     safeName,

@@ -103,6 +103,26 @@ test('buildPodManifest isolates the agent via subPath and carries both scoping l
   assert.deepEqual(sec.capabilities.drop, ['ALL']);
 });
 
+// #1940 AC2/AC8 — the pod is created from the image the CALLER resolved, and
+// the two image knobs an operator already relies on keep applying to it.
+test('buildPodManifest uses the resolved image, not a module-level default', () => {
+  const pod = buildPodManifest('a1', {}, 'p', [], 'europe-west4-docker.pkg.dev/proj/aee/as-agent-jvm:v1');
+  assert.equal(pod.spec.containers[0].image, 'europe-west4-docker.pkg.dev/proj/aee/as-agent-jvm:v1');
+});
+
+test('buildPodManifest keeps the pull policy alongside a toolchain image (AC8)', () => {
+  const dflt = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest');
+  const variant = buildPodManifest('a1', {}, 'p', [], 'localhost/as-agent-jvm:latest');
+  // A variant differs from the default in the image field and nothing else —
+  // pull policy, pull secret and the whole isolation setup are image-agnostic.
+  assert.equal(variant.spec.containers[0].imagePullPolicy, dflt.spec.containers[0].imagePullPolicy);
+  assert.deepEqual(variant.spec.imagePullSecrets, dflt.spec.imagePullSecrets);
+  assert.deepEqual(
+    { ...variant.spec.containers[0], image: null },
+    { ...dflt.spec.containers[0], image: null },
+  );
+});
+
 test('buildContextHostPathVolumes renders hostPath volumes with per-folder read-only semantics', () => {
   withContextGate('1', () => {
     const { volumes, volumeMounts } = buildContextHostPathVolumes([

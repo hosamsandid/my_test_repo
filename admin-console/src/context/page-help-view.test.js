@@ -33,6 +33,9 @@ import {
   upsertSubject,
   removeSubject,
   topSubject,
+  sectionSlug,
+  topicSections,
+  findSectionIndex,
 } from './page-help-view.js';
 
 const PAYLOAD = {
@@ -373,4 +376,54 @@ test('both copies build the same candidate list for every registered context', (
       `client and server disagree on the candidates for ${JSON.stringify(ctx)}`,
     );
   }
+});
+
+// ─── Chapter deep-linking (#1972) ────────────────────────────────────────────
+
+test('sectionSlug strips markdown decoration and collapses punctuation', () => {
+  assert.equal(sectionSlug('The agent list'), 'the-agent-list');
+  assert.equal(sectionSlug('Sessions — watching a run'), 'sessions-watching-a-run');
+  assert.equal(sectionSlug('A loop is a run, not a subscription'), 'a-loop-is-a-run-not-a-subscription');
+  assert.equal(sectionSlug('**Bold** and `code`'), 'bold-and-code');
+  assert.equal(sectionSlug('  Trailing punctuation!  '), 'trailing-punctuation');
+  // Fail-soft: a missing/blank heading is "no target", never a crash.
+  assert.equal(sectionSlug(''), '');
+  assert.equal(sectionSlug(null), '');
+  assert.equal(sectionSlug(undefined), '');
+});
+
+test('topicSections reads the ## and ### headings, in order, with their level', () => {
+  const body = [
+    'intro prose',
+    '## First chapter',
+    'text',
+    '### A sub-heading',
+    '#### too deep to be a chapter',
+    '# a title, not a chapter',
+    '```',
+    '## not a heading, it is inside a fence — but we do not parse fences',
+    '```',
+    '## Second chapter',
+  ].join('\n');
+  const got = topicSections(body);
+  assert.deepEqual(got.map(s => [s.level, s.slug]), [
+    [2, 'first-chapter'],
+    [3, 'a-sub-heading'],
+    [2, 'not-a-heading-it-is-inside-a-fence-but-we-do-not-parse-fences'],
+    [2, 'second-chapter'],
+  ]);
+  assert.deepEqual(topicSections(''), []);
+  assert.deepEqual(topicSections(null), []);
+});
+
+test('findSectionIndex matches a heading by slug and degrades to -1', () => {
+  const headings = ['What the Agent Chat page is', 'The agent list', 'The chat header'];
+  assert.equal(findSectionIndex(headings, 'the-agent-list'), 1);
+  // The caller may pass the heading text itself — it slugs both sides.
+  assert.equal(findSectionIndex(headings, 'The chat header'), 2);
+  // -1 is the "render from the top" signal: no section asked for, an unknown
+  // chapter, or a surface whose chapter was reworded away.
+  assert.equal(findSectionIndex(headings, ''), -1);
+  assert.equal(findSectionIndex(headings, 'a-chapter-that-went-away'), -1);
+  assert.equal(findSectionIndex(null, 'the-agent-list'), -1);
 });

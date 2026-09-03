@@ -210,9 +210,14 @@ with the product (`core-sdlc`, `extended-sdlc`); you can export your own and sha
 *Read more:* [process-template-format.md](process-template-format.md)
 
 ### Materialize
-Turn a draft or template into real, running agents: creates the team agent, one member
-per role, their triggers and their DM rooms — in one transaction that rolls back on
-failure.
+Turn a draft or template into real agents: creates the team agent and one member per
+role with its prompt and triggers — in one transaction that rolls back on failure. A
+checkbox on the launch step, **Materialize agents now**, decides how far each member is
+taken: ticked, every member is provisioned immediately (Matrix identity, repository
+clone, running container) and gets its DM room; unticked, the members are laid out as
+**stubs** — config and triggers only, nothing cloned and nothing running — and each is
+provisioned when you enable it. The Team-Setup wizard ticks it by default; the canvas'
+Materialize dialog leaves it off, because a process can have dozens of members.
 
 ---
 

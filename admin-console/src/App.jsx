@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useParams, useSearchParams, useLocation } from 'react-router';
 import Shell from './components/Shell';
+import { RouteErrorBoundary } from './components/ErrorBoundary.js';
 import { documentTitleForPath } from './route-title';
 import SetupWizard from './pages/SetupWizard';
 import Login from './pages/Login';
@@ -147,6 +148,13 @@ export default function App() {
   return (
     <Shell>
       <DocumentTitle />
+      {/* Error containment (#1974): the boundary sits INSIDE Shell and around
+          Suspense/Routes, so a render throw in any page shows a recoverable
+          card in the content area while the navigation stays usable — instead
+          of unmounting the tree up to #root and blanking the page. It resets
+          itself on a route change (keyed on location.pathname), so navigating
+          away clears the error without a manual reload. */}
+      <RouteErrorBoundary>
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
           <Route path="/"             element={<Navigate to="/chats" replace />} />
@@ -188,6 +196,7 @@ export default function App() {
           <Route path="/about" element={<About />} />
         </Routes>
       </Suspense>
+      </RouteErrorBoundary>
     </Shell>
   );
 }

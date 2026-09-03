@@ -5,10 +5,9 @@ import remarkGfm from 'remark-gfm';
 import {
   Plus, Trash2, Layers, ChevronDown, ChevronRight,
   Edit, MessageCircle, RefreshCw, Power, PowerOff, FileText,
-  Workflow, Info, Download, Upload, Copy, UserPlus, BookmarkPlus,
+  Workflow, Info, Download, Upload, Copy, BookmarkPlus,
 } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
-import { inferMissingRoles } from './missing-roles-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -1083,7 +1082,7 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
 }
 
 /* ── Team Card ──────────────────────────────────────────────────────── */
-function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onExtractTemplateChild, navigate, addingMember, busyIds, processTemplates, addingRoleKey }) {
+function TeamCard({ agent, onEdit, onDelete, onAddMember, onActivate, onDeactivate, onToggleEnabled, onToggleTeam, onEditChild, onDeleteChild, onExport, onCloneChild, onExtractTemplateChild, navigate, addingMember, busyIds }) {
   const expandedKey = `aee_team_expanded_${agent.id}`;
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(expandedKey) !== 'false'; } catch { return true; }
@@ -1095,14 +1094,6 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
   });
 
   const children = agent.children || [];
-
-  // Loop-closing roles this team is missing relative to its inferred source
-  // process template (#1375). Null unless a template clearly matches — so
-  // unrelated / fully-covered teams show nothing.
-  const missingRoles = useMemo(
-    () => inferMissingRoles(agent, children, processTemplates),
-    [agent, children, processTemplates],
-  );
 
   return (
     <div style={{
@@ -1213,45 +1204,6 @@ function TeamCard({ agent, onEdit, onDelete, onAddMember, onAddRole, onActivate,
             />
           ))
         )
-      )}
-
-      {/* Missing loop-closing roles (#1375). Additive hint: only shown when the
-          team clearly matches a reference template and is missing roles from it.
-          Adding a role reuses the members endpoint and starts it disabled. */}
-      {expanded && missingRoles && missingRoles.missing.length > 0 && (
-        <div style={{
-          padding: 'var(--eb-space-4)',
-          borderTop: '1px solid var(--eb-border-default)',
-          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-        }}>
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Info size={13} style={{ flexShrink: 0 }} />
-            Missing roles from the <strong style={{ color: 'var(--eb-text-secondary)' }}>{missingRoles.templateName}</strong> loop.
-            Add one to close a gap (e.g. no <code>merger</code> ⇒ merges stay manual). New roles start disabled.
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-2)' }}>
-            {missingRoles.missing.map(role => {
-              const busy = addingRoleKey === `${agent.id}:${role.id}`;
-              return (
-                <button
-                  key={role.id}
-                  onClick={() => onAddRole(agent, missingRoles.templateId, role)}
-                  disabled={!!addingRoleKey}
-                  title={`Add the ${role.displayName} role from the ${missingRoles.templateName} template (starts disabled)`}
-                  style={{
-                    background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-                    borderRadius: 'var(--eb-radius-md)', cursor: addingRoleKey ? 'not-allowed' : 'pointer',
-                    padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-                    display: 'flex', alignItems: 'center', gap: 4, color: 'var(--eb-text-secondary)',
-                    opacity: addingRoleKey && !busy ? 0.5 : 1,
-                  }}
-                >
-                  <UserPlus size={13} /> {busy ? 'Adding…' : `Add ${role.displayName} role`}
-                </button>
-              );
-            })}
-          </div>
-        </div>
       )}
     </div>
   );
@@ -1366,13 +1318,6 @@ export default function Agents() {
   const [actionError, setActionError] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
   const [addingMemberId, setAddingMemberId] = useState(null);
-  // Missing-blueprint-role detection (#1375): the full reference process-template
-  // bundles (roles + label registry), fetched once and handed to each TeamCard so
-  // it can infer which loop-closing roles the team is missing. The `/api/process-templates`
-  // list is slim (no roles/labels), so each bundle is fetched by id.
-  const [processTemplates, setProcessTemplates] = useState([]);
-  const [addingRoleKey, setAddingRoleKey] = useState(null); // `${teamId}:${roleId}` while adding
-  const [addRoleNotice, setAddRoleNotice] = useState(null); // { text } success toast
   const [busyIds, setBusyIds] = useState(new Set());
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
@@ -1407,26 +1352,6 @@ export default function Agents() {
     ...teamMembers.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
     ...bpInstances.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
   ].sort(byName);
-
-  // Load the full reference process-template bundles once (#1375). Best-effort:
-  // if the pool isn't seeded or the fetch fails, the missing-role hints simply
-  // don't appear — the rest of the page is unaffected. Only runs when at least
-  // one Agent Team exists to compare against.
-  useEffect(() => {
-    if (teams.length === 0) return;
-    if (processTemplates.length > 0) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { templates } = await apiCall('GET', '/api/process-templates');
-        const list = Array.isArray(templates) ? templates : [];
-        const bundles = await Promise.all(list.map(t =>
-          apiCall('GET', `/api/process-templates/${encodeURIComponent(t.id)}`).catch(() => null)));
-        if (!cancelled) setProcessTemplates(bundles.filter(Boolean));
-      } catch { /* pool not seeded / unreachable — no hints, no error */ }
-    })();
-    return () => { cancelled = true; };
-  }, [teams.length, processTemplates.length]);
 
   function openPanel(mode, agent) {
     setSaveError(null);
@@ -1688,35 +1613,6 @@ export default function Agents() {
     }
   }
 
-  // Add a loop-closing role a team is missing, from its inferred source process
-  // template (#1375). Reuses the members endpoint's process-template branch, then
-  // disables the fresh member so nothing wakes until the operator confirms (AC3).
-  async function handleAddRole(team, templateId, role) {
-    const key = `${team.id}:${role.id}`;
-    setAddingRoleKey(key);
-    setActionError(null);
-    setAddRoleNotice(null);
-    try {
-      const created = await apiCall('POST', `/api/agents/${team.id}/members`, {
-        processTemplateId: templateId,
-        roleId: role.id,
-      });
-      const memberId = (created && created.id) || `${team.id}-${role.id}`;
-      // Start disabled — reuse the existing member disable path (PUT enabled:false)
-      // rather than a new backend field, so nothing wakes until the operator
-      // enables it. Best-effort: the role is already added even if this fails.
-      try {
-        await apiCall('PUT', `/api/agents/${memberId}`, { enabled: false });
-      } catch { /* member added; leave enable state to the operator */ }
-      setAddRoleNotice({ text: `Added ${role.displayName || role.id} (disabled). Enable it when you're ready to close the loop.` });
-      refetch();
-    } catch (e) {
-      setActionError(e.message);
-    } finally {
-      setAddingRoleKey(null);
-    }
-  }
-
   async function handleDelete() {
     setDeleteBusy(true);
     try {
@@ -1845,13 +1741,6 @@ export default function Agents() {
         </div>
       )}
 
-      {addRoleNotice && (
-        <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-success-bg, var(--eb-bg-elevated))', border: '1px solid var(--eb-status-success)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-          {addRoleNotice.text}
-          <button onClick={() => setAddRoleNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-status-success)', cursor: 'pointer', fontSize: 'var(--eb-text-sm)' }}>Dismiss</button>
-        </div>
-      )}
-
       {totalCount === 0 ? (
         <div style={{
           padding: 'var(--eb-space-8)', textAlign: 'center',
@@ -1904,9 +1793,6 @@ export default function Agents() {
               navigate={navigate}
               addingMember={addingMemberId === t.id}
               busyIds={busyIds}
-              processTemplates={processTemplates}
-              addingRoleKey={addingRoleKey}
-              onAddRole={handleAddRole}
               onEdit={a => openPanel('edit', a)}
               onDelete={a => setDeleteTarget(a)}
               onAddMember={handleAddMember}

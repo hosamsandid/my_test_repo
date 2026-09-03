@@ -7,6 +7,9 @@ import { FlowGraph } from './process/FlowGraph';
 import ConfirmDialog from '../components/ConfirmDialog';
 import PageHelpButton from '../components/PageHelpButton';
 import { usePageActions } from '../context/PageActionsContext';
+import Tooltip from '../components/Tooltip';
+import { shouldWrapTooltip } from '../components/tooltip-wrap';
+import { PAGE_ACTION_TITLES } from './process-toolbar-hints';
 
 // The process graph/editor is a heavy module (custom SVG renderer + dialogs) —
 // load it only when a process scope is actually selected.
@@ -516,19 +519,32 @@ export default function Briefings() {
         ref={importInputRef} type="file" accept="application/json,.json"
         onChange={onImportFile} style={{ display: 'none' }}
       />
-      <button
-        onClick={() => importInputRef.current?.click()}
-        disabled={importBusy}
-        style={{ ...HEADER_SECONDARY_BTN, cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1 }}
+      {/* #1999: the three create actions never said what they do. Each wears the
+          shared dark Tooltip (hover + keyboard focus); the visible button text
+          stays the accessible name. Import swaps its hint while busy, since the
+          "import a file" sentence contradicts a button that is mid-read. */}
+      <Tooltip label={importBusy ? PAGE_ACTION_TITLES.importBusy : PAGE_ACTION_TITLES.import}>
+        <button
+          onClick={() => importInputRef.current?.click()}
+          disabled={importBusy}
+          style={{ ...HEADER_SECONDARY_BTN, cursor: importBusy ? 'not-allowed' : 'pointer', opacity: importBusy ? 0.6 : 1 }}
+        >
+          <Upload size={14} /> {importBusy ? 'Importing…' : 'Import'}
+        </button>
+      </Tooltip>
+      <Tooltip
+        label={PAGE_ACTION_TITLES.describe}
+        wrap={shouldWrapTooltip(PAGE_ACTION_TITLES.describe)}
       >
-        <Upload size={14} /> {importBusy ? 'Importing…' : 'Import'}
-      </button>
-      <button onClick={describeFlow} style={HEADER_SECONDARY_BTN}>
-        <Sparkles size={14} /> Describe flow…
-      </button>
-      <button onClick={newProcess} style={HEADER_PRIMARY_BTN}>
-        <Plus size={15} /> New flow
-      </button>
+        <button onClick={describeFlow} style={HEADER_SECONDARY_BTN}>
+          <Sparkles size={14} /> Describe flow…
+        </button>
+      </Tooltip>
+      <Tooltip label={PAGE_ACTION_TITLES.newFlow}>
+        <button onClick={newProcess} style={HEADER_PRIMARY_BTN}>
+          <Plus size={15} /> New flow
+        </button>
+      </Tooltip>
     </div>
   );
 

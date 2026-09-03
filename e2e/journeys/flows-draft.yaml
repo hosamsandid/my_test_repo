@@ -44,7 +44,7 @@ steps:
     voiceover: |
       A draft is an editable process that exists before any team is created — nothing is live, nothing spawned. Here's a fresh, empty one called Simple SDLC. Let's add our first agent.
     narrative: |
-      This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams, a Drafts section, and the BriefingPack flows. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
+      This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams and a Drafts section. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
 
       I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you materialise. Along the top are the actions I'll use: Add agent, Stages, Materialize, Export. Let's add our first agent.
     assert:

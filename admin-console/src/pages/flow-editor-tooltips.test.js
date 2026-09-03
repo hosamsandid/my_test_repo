@@ -83,7 +83,7 @@ test('no native title attribute is left in the flow header row', () => {
 
 // ─── A. Flows page-action bar (Briefings.jsx) ──────────────────────────────
 
-test('all three page-action buttons are wrapped in a Tooltip', () => {
+test('every page-action button is wrapped in a Tooltip', () => {
   assert.match(briefings, /import \{ PAGE_ACTION_TITLES \} from '\.\/process-toolbar-hints'/);
   for (const key of ['import', 'describe', 'newFlow']) {
     assert.match(
@@ -92,6 +92,28 @@ test('all three page-action buttons are wrapped in a Tooltip', () => {
       `the ${key} button has no tooltip`,
     );
   }
+  // #1965 added a fourth. Its copy lives in its own pure module rather than in
+  // PAGE_ACTION_TITLES — the whole point of the sentence is that this action is
+  // NOT one of the create actions those titles describe — but "no button is
+  // left unexplained" has to keep covering it.
+  assert.match(
+    briefings,
+    /<Tooltip[\s\S]{0,200}?IMPORT_BRIEFINGS_COPY\.tooltip\b/,
+    'the BriefingPack-import button has no tooltip',
+  );
+});
+
+test('the page-action bar has a tooltip for every button it renders', () => {
+  // Counted rather than enumerated, so a fifth action added without a hint
+  // fails here instead of quietly slipping past the list above.
+  const bar = briefings.slice(
+    briefings.indexOf('const headerAction = usePageActions('),
+    briefings.indexOf('  return (\n    <>'),
+  );
+  assert.ok(bar.length > 500, 'page-action bar slice not found — update the markers');
+  const buttons = (bar.match(/<button\b/g) || []).length;
+  const tooltips = (bar.match(/<Tooltip\b/g) || []).length;
+  assert.equal(tooltips, buttons, `${buttons} page-action buttons but ${tooltips} tooltips`);
 });
 
 // ─── C. Canvas control row (flow-graph-render.js) ──────────────────────────

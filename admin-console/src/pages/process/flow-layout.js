@@ -349,10 +349,13 @@ function computeFlowLayout(ids, edges, { stageOf = null, stageOrder = [], groupO
 // ── over-wide column wrapping ────────────────────────────────────────────────
 
 // A column holds every node the layering put in one layer, and for a hierarchy
-// that means every sibling of one parent. A BriefingPack pack whose root has 270
-// children therefore puts 270 cards in ONE column, and at 320px per card plus a
-// gap that is a canvas ~100 000px wide and ~400px tall (measured: 81 BPs already
-// give 15 637px, 324 give 58 428px, 648 give 115 525px). "Fit to view" then runs
+// that means every sibling of one parent. A root with 270 children therefore
+// puts 270 cards in ONE column, and at 320px per card plus a gap that is a
+// canvas ~100 000px wide and ~400px tall. The measurements come from the
+// hierarchy that forced this — BriefingPack packs, removed from the editor in
+// #1965 — but the runaway is a property of any wide parent, so the wrap
+// outlives them: 81 nodes already give 15 637px, 324 give 58 428px, 648 give
+// 115 525px. "Fit to view" then runs
 // into the renderer's 10% zoom floor and still shows a sliver, so there is no
 // zoom level at which such a flow can be read or worked on.
 //

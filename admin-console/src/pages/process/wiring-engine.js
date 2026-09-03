@@ -333,9 +333,9 @@ export async function unwireEscalation({ humanOps }, { human, label }) {
 
 /**
  * Wire a data-flow hand-off. With a name: a name-keyed artifact (output on A,
- * input on B — path is a hint). With only a path: a path-keyed artifact
- * (BriefingPack-style). With neither: a plain ordering dependency. The
- * artifact ports upsert on their match key, so re-wiring is a no-op.
+ * input on B — path is a hint). With only a path: a path-keyed artifact. With
+ * neither: a plain ordering dependency. The artifact ports upsert on their
+ * match key, so re-wiring is a no-op.
  */
 export async function wireArtifactFlow({ ops }, { from, to, name, hint, description }) {
   const nm = String(name || '').trim();

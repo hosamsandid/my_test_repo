@@ -11,12 +11,20 @@
 //
 // The line between "gone" and "deliberately retained" matters here more than on
 // the orchestrator side, because this file KEEPS real BriefingPack code on
-// purpose (AC6 / R3): the BP → flow-draft import is explicitly out of scope for
-// this phase, so `briefingsToUnified`, the `?workspace=` graph projection and
-// `POST /api/process/drafts/import-briefings` must all still be present. A
-// blanket `doesNotMatch(/bp-explorer/)` would therefore be wrong — it would
-// fail on the very code the ticket says to leave alone. Each assertion below is
-// anchored on the specific route that went away instead.
+// purpose (AC6 / R3): the BP → flow-draft import is the migration path off the
+// model, so `briefingsToUnified` and
+// `POST /api/process/drafts/import-briefings` must still be present. A blanket
+// `doesNotMatch(/bp-explorer/)` would therefore be wrong — it would fail on the
+// very code the ticket says to leave alone. Each assertion below is anchored on
+// the specific route that went away instead.
+//
+// #1965 (Phase 4) moved that line twice, and both halves are asserted at the
+// bottom of this file:
+//   - the `?workspace=` graph projection is no longer retained; it went with
+//     the Flows page's BriefingPack listing that was its only caller;
+//   - the retained import no longer READS through bp-explorer. It walks the
+//     mission directory in Node (`briefings-fs.js`) behind `safeAgentPath`,
+//     which is what lets Phase 2 (#1963) delete the service.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -86,11 +94,58 @@ test('AC6: the BP → flow-draft import is still present', () => {
   assert.match(CODE, /\/api\/process\/drafts\/import-briefings/);
 });
 
-test('R3: BP_EXPLORER_URL is retained for the import paths that still read it', () => {
-  assert.match(CODE, /BP_EXPLORER_URL/);
-  // One definition plus the consumers the import paths need. Asserted as a
-  // floor, not an exact count, so adding a legitimate consumer does not fail —
-  // the point is that the constant did not become dead alongside a live route.
+/* ── #1965 (Phase 4): the graph projection went, the import was ported ───── */
+
+// Slice one route's body out of this 14k-line file, so a match anywhere else
+// cannot stand in for the route under test. The end anchor is searched FROM the
+// start offset (an earlier `\napp.` would otherwise yield an empty slice and a
+// silently vacuous assertion).
+function routeBody(marker) {
+  const from = CODE.indexOf(marker);
+  assert.notEqual(from, -1, `route not found: ${marker}`);
+  const end = CODE.indexOf('\napp.', from + marker.length);
+  const body = CODE.slice(from, end === -1 ? undefined : end);
+  assert.ok(body.length > 200, `route slice for ${marker} looks empty — update the anchor`);
+  return body;
+}
+
+test('#1965 AC1: the BP source of the unified graph endpoint is gone', () => {
+  // The endpoint itself is RETAINED and must keep serving the live source
+  // unchanged (AC6) — this asserts only that its `?workspace=` branch went.
+  const route = routeBody("app.get('/api/flows/graph'");
+  assert.doesNotMatch(route, /req\.query\.workspace/, 'the BP branch still reads ?workspace=');
+  assert.doesNotMatch(route, /BP_EXPLORER_URL/, 'the graph route still calls bp-explorer');
+  assert.doesNotMatch(route, /briefingsToUnified/, 'the graph route still maps BP packs');
+  // …and the live half it must not have taken with it.
+  assert.match(route, /source: 'live'/);
+  assert.match(route, /buildUnifiedGraph\(/);
+});
+
+test('#1965 AC3: the import reads the filesystem, not bp-explorer', () => {
+  const route = routeBody("app.post('/api/process/drafts/import-briefings'");
+  assert.doesNotMatch(route, /BP_EXPLORER_URL/, 'the import still calls bp-explorer');
+  assert.doesNotMatch(route, /\bfetch\(/, 'the import still makes an HTTP call');
+  assert.match(route, /readBriefingPacks\(/, 'the import must read packs off disk');
+});
+
+test('#1965 AC3: the import resolves its path through the shared containment barrier', () => {
+  const route = routeBody("app.post('/api/process/drafts/import-briefings'");
+  // `safeAgentPath` is the resolver every sibling workspace handler uses: it
+  // realpaths the agent root and refuses traversal, absolute paths and
+  // outward-pointing symlinks. A null return must end the request.
+  assert.match(route, /safeAgentPath\(/);
+  assert.match(route, /if\s*\(!missionDir\)[\s\S]{0,160}?res\.status\(400\)/);
+  // The old contract took a bare absolute path no barrier ever saw.
+  assert.doesNotMatch(route, /req\.body\?\.workspace/, 'the unguarded workspace body field is back');
+});
+
+test('#1965: bp-explorer is no longer reachable from either BP flow path', () => {
+  // BP_EXPLORER_URL is still legitimately defined and used — by the workspace
+  // directory picker, which #1965 does not touch (it is Phase 2's to remove
+  // with the service). So this is anchored on the two routes that DID stop
+  // using it rather than on the constant, which would fail for the wrong
+  // reason. The definition plus that one consumer is the expected floor.
   const uses = (CODE.match(/BP_EXPLORER_URL/g) || []).length;
   assert.ok(uses >= 2, `expected the definition plus >=1 consumer, saw ${uses}`);
+  assert.doesNotMatch(CODE, /BP_EXPLORER_URL[^\n]*api\/briefings/, 'the /api/briefings fetch is back');
 });

@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router';
 import { Github, ArrowRight, AlertCircle, CheckCircle, Info } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import PageHelpButton from '../components/PageHelpButton';
+import { CREATE_HELP_SECTIONS } from './create-help-sections.js';
 import {
   quickstartEndpoint,
   quickstartBody,
@@ -125,7 +126,11 @@ export default function QuickStart() {
         }}>{QUICKSTART_COPY.heading}</h2>
         {/* One-line description + "?" (E14, #1888). The second paragraph that
             re-described the same thing is gone; what each submit path creates
-            lives in the `create` help topic. */}
+            lives in the `create` help topic. Since #1992 the header's "?" lands
+            on the fast-lane chapter — the one that answers "what gets created
+            here?" for both the repo-less and the repository path; the
+            team-of-one chapter is deep-linked from the note at the foot of the
+            page, which is the surface that actually raises it. */}
         <p style={{
           fontSize: 'var(--eb-text-md)',
           color: 'var(--eb-text-secondary)',
@@ -136,7 +141,12 @@ export default function QuickStart() {
           gap: 'var(--eb-space-2)',
         }}>
           <span>{QUICKSTART_COPY.intro}</span>
-          <PageHelpButton label="What gets created here?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+          <PageHelpButton
+            label="What gets created here?"
+            size={14}
+            style={{ padding: 0, flexShrink: 0 }}
+            section={CREATE_HELP_SECTIONS.fastLane}
+          />
         </p>
       </div>
 
@@ -397,7 +407,21 @@ export default function QuickStart() {
             }}>
               <Info size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0, marginTop: 2 }} />
               <span>
-                Before you can start, please:
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+                  Before you can start, please:
+                  {/* The prerequisite chapter's "?" (#1992). This checklist is
+                      the one surface that names EVERY outstanding requirement
+                      for the submission as filled in, which is why the chapter
+                      hangs off it rather than off the three warning cards —
+                      each of those already carries its own direct fix-link, and
+                      the chapter explains why the two disagree sometimes. */}
+                  <PageHelpButton
+                    label="What do I need before I can start?"
+                    size={14}
+                    style={{ padding: 0, flexShrink: 0 }}
+                    section={CREATE_HELP_SECTIONS.prerequisites}
+                  />
+                </span>
                 <ul style={{ margin: 'var(--eb-space-1) 0 0', paddingLeft: 'var(--eb-space-4)' }}>
                   {submitBlockers.map(r => (
                     <li key={r.field}>{r.message}</li>
@@ -448,6 +472,17 @@ export default function QuickStart() {
         <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
           {QUICKSTART_COPY.growCtaLabel} →
         </Link>
+        {/* The team-of-one chapter's "?" (#1992). The note keeps its one-line
+            framing — it is what stops the fast lane reading as a separate mode —
+            and the chapter behind the "?" carries the consequence the line has
+            no room for: growing creates a NEW team rather than converting this
+            assistant. */}
+        <PageHelpButton
+          label="What does growing into a full team do?"
+          size={14}
+          style={{ padding: 0, marginLeft: 'var(--eb-space-2)', flexShrink: 0, verticalAlign: 'middle' }}
+          section={CREATE_HELP_SECTIONS.teamOfOne}
+        />
       </div>
     </div>
   );

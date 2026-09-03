@@ -10,6 +10,7 @@ import { apiCall } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import AgentCreateForm from './agent-lifecycle/AgentCreateForm.jsx';
 import PageHelpButton from '../components/PageHelpButton';
+import { CREATE_HELP_SECTIONS } from './create-help-sections.js';
 
 /**
  * The unified "Create" launcher (#1665, Phase B/C of epic #1661).
@@ -88,7 +89,9 @@ export default function Create() {
       gap: 'var(--eb-space-6)',
     }}>
       {/* Header. The one-line question stays; what each entry path produces (and
-          what "a team of one" means) is the create help topic — E14, #1888. */}
+          what "a team of one" means) is the create help topic — E14, #1888.
+          Since #1992 the "?" names its chapter explicitly rather than relying on
+          the entry paths happening to be the topic's first section. */}
       <div>
         <p style={{
           margin: 0,
@@ -100,7 +103,12 @@ export default function Create() {
           gap: 'var(--eb-space-2)',
         }}>
           <span>How would you like to start? Pick whichever fits — you can always change direction later.</span>
-          <PageHelpButton label="What does each of these create?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+          <PageHelpButton
+            label="What does each of these create?"
+            size={14}
+            style={{ padding: 0, flexShrink: 0 }}
+            section={CREATE_HELP_SECTIONS.entryPaths}
+          />
         </p>
       </div>
 

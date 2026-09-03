@@ -109,6 +109,10 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // for all twelve. If you are the child ticket that hits it again, the right move
 // is to open the route-scoped-folding ticket rather than to raise this a fourth
 // time.
+//
+// Running total, so the next child does not have to measure to find out how much
+// room is left: #1993 (credentials, the second child) took the assembled prompt
+// to 314 766 — ~25 000 of headroom, i.e. two or three more topics of that size.
 const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
 function measureSystemPrompt() {

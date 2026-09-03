@@ -321,6 +321,25 @@ generic, so there is no shared plumbing left to build. Two things every child in
    registration buys only the z-index lift. `/flows`' `EdgeDialogs` "?" (added by E2) has the
    same latent problem and is still unfixed.
 
+**A multi-route topic is the strongest case for chapters, not an exception to them.** The
+Credentials child (#1993) is the first where one topic file is claimed by *three* routes
+(`/ssh-keys`, `/github-tokens`, `/my-credentials`, since E10 #1884). Before chapters, every
+one of those pages' "?" opened the same shared explanation at the top — so two of the three
+pages always started their reader a third of a document away from their own subject. The
+pattern applies unchanged (one `credentials-help-sections.js`, one `section=` per page
+header, the two guards); what is new is that the per-page chapters and the *cross-page*
+chapters live in one file, which settles the "does every chapter need its own affordance?"
+question for the rest of the epic: **no.** The panel renders the whole topic and merely
+scrolls to the requested heading, so a chapter with no "?" is one scroll from wherever a deep
+link lands — never unreachable. A child should therefore give a "?" to a **surface**, and let
+the shared concept chapters be found by reading on. Two things a multi-route child must check
+that a single-route one need not: whether an **alias** in `CONTEXT_KEYS` renders the topic
+somewhere else (the SetupWizard's two credential steps alias `/ssh-keys` and `/github-tokens`
+and render the *whole body* inline via `SetupStepHelp`, so expanding the topic lengthens that
+collapsible too), and whether a page's "?" sits inside a permission branch (My Credentials'
+must stay outside its `canOwn` branch — the single-admin who cannot own personal credentials
+is exactly the reader who needs the chapter explaining why).
+
 **Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set: #1990's
 Skills topic alone fit under the old 300k ceiling (~297.9k), but #1956's unrelated
 `docs/admin-console.md` additions landing on main in the same window took the assembled prompt
@@ -330,7 +349,8 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time.
+a fourth time. **Running total:** #1993 (credentials) took the assembled prompt to **314,766**
+of 340,000 — roughly two or three more topics of that size before the stop-gap is spent.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

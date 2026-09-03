@@ -332,6 +332,21 @@ const TOPIC_CONTENT = [
     // no box said: the three ownership tiers, the strict personal privacy
     // guarantee, the per-operation-class runtime resolution order with
     // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
+    //
+    // #1993 (epic #1981) widened it into a per-surface reference. This is the
+    // first MULTI-ROUTE topic, so the chapters matter more here than anywhere
+    // else: three pages share one file, and without them a reader arriving from
+    // GitHub Tokens landed at the top of an explanation opening with SSH.
+    // Chapters 2/3/4 are the deep-link targets of the three page headers;
+    // 1/5/6 are the cross-page story and carry no "?" of their own.
+    chapters: [
+      'Why both an SSH key and a GitHub token',
+      'SSH keys',
+      'GitHub tokens',
+      'My Credentials',
+      'Ownership tiers and privacy',
+      'Rotation and runtime resolution',
+    ],
     concepts: [
       'SSH key',
       'GitHub token',

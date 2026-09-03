@@ -17,6 +17,8 @@ import { outcomeCardMinHeight, OUTCOME_COL_BOTTOM, OUTCOME_GROW_MIN } from './ou
 import { previewStrokeColor, portRectAnchor, screenPointToCanvas } from './drag-preview-anchor';
 import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-chat/trigger-summary';
 import { clampPan } from './pan-clamp';
+import { attachTooltip } from '../../components/tooltip-dom';
+import { CANVAS_TITLES, orientationTitle, archivedTitle, stagesTitle } from './flow-canvas-hints';
 
 // Single source of truth for edge colours and legend names (#402, #1009).
 // Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
@@ -2752,7 +2754,13 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
   // ─── Toolbar setup ────────────────────────────────────────────────────
 
-  function makeToolBtn(label, fn) {
+  // Tooltip handles for the control-row buttons (#1999). Collected so cleanup()
+  // can destroy them: the tooltip span lives in document.body, not in the
+  // viewport subtree this module tears down, so an open one would outlive the
+  // button it describes.
+  const toolBtnTips = [];
+
+  function makeToolBtn(label, fn, title) {
     const b = document.createElement('button');
     b.textContent = label;
     b.style.cssText = 'padding:4px 10px;font-size:11px;border-radius:4px;border:1px solid var(--eb-border-default);background:var(--eb-bg-elevated);backdrop-filter:blur(4px);color:var(--eb-text-secondary);cursor:pointer;transition:border-color 0.1s,color 0.1s;';
@@ -2762,26 +2770,35 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       b.style.color       = b._active ? '#3b82f6' : 'var(--eb-text-secondary)';
     });
     b.addEventListener('click', fn);
+    // The imperative twin of the React <Tooltip> — same .eb-tooltip look, same
+    // placement math, same hover+focus triggers. `b._tip` lets the three
+    // toggles relabel their hint when they relabel themselves.
+    b._tip = attachTooltip(b, title);
+    toolBtnTips.push(b._tip);
     return b;
   }
 
   function updateArchivedBtn(btn) {
     btn._active            = state.showArchived;
+    btn._tip?.setLabel(archivedTitle(state.showArchived));
     btn.style.borderColor  = state.showArchived ? '#3b82f6' : 'var(--eb-border-default)';
     btn.style.color        = state.showArchived ? '#3b82f6' : 'var(--eb-text-secondary)';
     btn.style.background   = state.showArchived ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';
   }
 
-  toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }));
-  toolbarEl.appendChild(makeToolBtn('Expand All',   () => expandAll()));
-  toolbarEl.appendChild(makeToolBtn('Collapse All', () => collapseAll()));
+  toolbarEl.appendChild(makeToolBtn('Fit',          () => { state.userTransform = false; fitToView(); }, CANVAS_TITLES.fit));
+  toolbarEl.appendChild(makeToolBtn('Expand All',   () => expandAll(), CANVAS_TITLES.expandAll));
+  toolbarEl.appendChild(makeToolBtn('Collapse All', () => collapseAll(), CANVAS_TITLES.collapseAll));
 
   function updateOrientationBtn(btn) {
     const active = state.orientation === 'vertical';
     btn._active            = active;
     btn.textContent        = active ? 'Flow →' : 'Flow ↓';
-    btn.title              = 'Toggle flow direction (' +
-      (active ? 'left to right' : 'top to bottom') + ')';
+    // "Flow →" is not a name a screen reader can act on, so the button carries
+    // the descriptive hint as its accessible name too (the native title= this
+    // replaced was the only thing making it readable at all).
+    btn.setAttribute('aria-label', orientationTitle(state.orientation));
+    btn._tip?.setLabel(orientationTitle(state.orientation));
     btn.style.borderColor  = active ? '#3b82f6' : 'var(--eb-border-default)';
     btn.style.color        = active ? '#3b82f6' : 'var(--eb-text-secondary)';
     btn.style.background   = active ? 'rgba(59,130,246,0.15)' : 'var(--eb-bg-elevated)';
@@ -2794,7 +2811,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     state.userTransform = false;
     render();
     requestAnimationFrame(() => fitToView());
-  });
+  }, orientationTitle(state.orientation));
   updateOrientationBtn(orientationBtn);
   toolbarEl.appendChild(orientationBtn);
 
@@ -2804,13 +2821,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     updateArchivedBtn(archivedBtn);
     recomputeRoots();
     render();
-  });
+  }, archivedTitle(state.showArchived));
   updateArchivedBtn(archivedBtn);
   toolbarEl.appendChild(archivedBtn);
 
   // Stages toggle (#362 E): group + band nodes by their manual stage.
   const updateStagesBtn = (btn) => {
     btn.textContent = state.showStages ? 'Stages: on' : 'Stages';
+    btn._tip?.setLabel(stagesTitle(state.showStages));
     btn.style.color = state.showStages ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)';
   };
   const stagesBtn = makeToolBtn('Stages', () => {
@@ -2819,7 +2837,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     updateStagesBtn(stagesBtn);
     state.userTransform = false;
     render();
-  });
+  }, stagesTitle(state.showStages));
   updateStagesBtn(stagesBtn);
   toolbarEl.appendChild(stagesBtn);
 
@@ -2839,6 +2857,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     viewport.removeEventListener('wheel', onWheel);
     document.removeEventListener('click', onDocClickCloseZoomMenu);
     resizeObserver.disconnect();
+    // Before the buttons go: their tooltips are portaled into document.body, so
+    // one left open would survive the subtree removal below.
+    for (const tip of toolBtnTips) tip.destroy();
+    toolBtnTips.length = 0;
     // Remove injected DOM
     while (viewport.firstChild) viewport.removeChild(viewport.firstChild);
   }

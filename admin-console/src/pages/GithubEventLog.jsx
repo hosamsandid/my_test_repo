@@ -10,6 +10,7 @@ import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-que
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
+import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -388,7 +389,22 @@ function ProcessedEventsView() {
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
         Events already handled, one outcome per subscriber. Read-only.
       </p>
-      <OutcomeLegend />
+      {/* The legend decodes the chips at the point of decision (#1886) and stays;
+          the "?" beside it opens the longer Outcomes chapter, which additionally
+          carries the "my agent never woke up" path and the polled-vs-never-polled
+          rule the legend has no room for (#1995). It sits outside <details> — a
+          button inside <summary> would be a second control in a toggle. */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-1)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <OutcomeLegend />
+        </div>
+        <PageHelpButton
+          label="What the outcomes mean, and why an agent did not wake up"
+          size={14}
+          section={GITHUB_EVENTS_HELP_SECTIONS.outcomes}
+          style={{ marginTop: 'var(--eb-space-2)', flexShrink: 0 }}
+        />
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
         <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
@@ -396,6 +412,12 @@ function ProcessedEventsView() {
         <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
+        <PageHelpButton
+          label="What this table shows"
+          size={14}
+          section={GITHUB_EVENTS_HELP_SECTIONS.processed}
+          style={{ flexShrink: 0 }}
+        />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -544,6 +566,12 @@ function PendingQueueView() {
         <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
+        <PageHelpButton
+          label="Why entries wait here, and what Cancel does"
+          size={14}
+          section={GITHUB_EVENTS_HELP_SECTIONS.pending}
+          style={{ flexShrink: 0 }}
+        />
         {!loading && <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>{total} entr{total === 1 ? 'y' : 'ies'} waiting</span>}
         {notice && <span style={{ color: noticeColor, fontSize: 'var(--eb-text-sm)' }}>{notice.text}</span>}
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
@@ -594,7 +622,15 @@ export default function GithubEventLog() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         {PAGE_DESCRIPTION}
-        <PageHelpButton label="How events reach an agent" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        {/* The page-level "?" keeps the shared button and now names the first
+            chapter explicitly (#1995) — the topic opens at the top either way,
+            but the constant records the intent and is guarded like the rest. */}
+        <PageHelpButton
+          label="How events reach an agent"
+          size={14}
+          section={GITHUB_EVENTS_HELP_SECTIONS.page}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </p>
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-1)', borderBottom: '1px solid var(--eb-border-default)' }}>

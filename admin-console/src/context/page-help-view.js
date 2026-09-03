@@ -70,6 +70,11 @@ export const CONTEXT_KEYS = {
   // help *behind* the surface it explains).
   'modal:skill-detail': { label: 'Skill detail' },
   'modal:skills-merge': { label: 'Merge skills' },
+  // The two Knowledge-page side panels that render *over* the page (#1985) —
+  // same story: no topic of their own, registered so their published subject is
+  // a known key and the panel lifts above them (both are z-index 60/61).
+  'modal:knowledge-config': { label: 'Team knowledge configuration' },
+  'modal:knowledge-skill': { label: 'Knowledge · skill inspector' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -77,6 +82,8 @@ export const OVERLAY_SETTINGS = 'modal:settings';
 export const OVERLAY_SETUP_WIZARD = 'wizard:setup';
 export const OVERLAY_SKILL_DETAIL = 'modal:skill-detail';
 export const OVERLAY_SKILLS_MERGE = 'modal:skills-merge';
+export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
+export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

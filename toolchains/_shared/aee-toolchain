@@ -172,6 +172,21 @@ setup_env() {
   export MISE_DATA_DIR MISE_CACHE_DIR MISE_STATE_DIR MISE_GLOBAL_CONFIG_FILE MISE_YES
   mkdir -p "$MISE_CACHE_DIR" "$MISE_STATE_DIR" "$root/mise" 2>/dev/null || true
 
+  # A project's committed `.mise.toml` is a *local* config, and mise refuses to
+  # read a local config it has not been told to trust (its guard against a
+  # hostile repository shipping a malicious tool version). Left untrusted, the
+  # pin is seen-but-ignored: `mise which`/`mise install` resolve nothing and the
+  # project would silently build on no runtime at all. An agent's workspace is
+  # its OWN repository clones — placed there by the platform, trusted by
+  # construction — so the workspace (and, for an operator shell whose pin sits
+  # above it, the pin's own directory) is marked trusted here. The image's
+  # baseline is a *global* config, which mise trusts implicitly, so this is only
+  # load-bearing on the pinned path.
+  trusted="$(resolve_workspace)"
+  [ -n "$pin" ] && trusted="$trusted:$(dirname "$pin")"
+  MISE_TRUSTED_CONFIG_PATHS="${trusted}${MISE_TRUSTED_CONFIG_PATHS:+:$MISE_TRUSTED_CONFIG_PATHS}"
+  export MISE_TRUSTED_CONFIG_PATHS
+
   # Per-variant cache redirection (Maven's local repository, Gradle's home, …).
   # Declared by the variant, expanded here so it can reference the root — the
   # generic mechanism that keeps this script free of Java specifics.
@@ -232,21 +247,24 @@ cmd_exec() {
   setup_env "$pin"
   strip_shim_dir
 
-  # Warm path first: if the tool already resolves, skip the install entirely —
-  # that is the common case on every run after the first, and `mise install` is
-  # not free.
+  # Make sure everything the pin names is installed before handing off. This
+  # must cover ALL pinned tools, not just the one being invoked: a checkout that
+  # resolves `mvn` (Maven, unchanged) can still have an uninstalled `java` after
+  # the pin was bumped, and running with JAVA_HOME pointing at a JDK that is not
+  # there is exactly how AC6 (a pin change taking effect with no respawn) breaks.
+  # `mise install` is the idempotent primitive for this — it downloads only what
+  # is missing and is cheap (~0.1s) when the workspace cache is already warm, so
+  # it runs on every pinned invocation rather than being gated on a single-tool
+  # probe. The baseline (no pin) is pre-installed in the image and read-only, so
+  # nothing is ever installed into it here.
+  if [ -n "$pin" ]; then
+    "$MISE_BIN" install || die "could not install the versions pinned in '$pin'" 1
+  fi
   if ! "$MISE_BIN" which "$tool" >/dev/null 2>&1; then
     if [ -n "$pin" ]; then
-      # Cold path: the pin names a version that is not in this workspace's
-      # cache yet (first run, or the pin just changed — AC6's whole point).
-      "$MISE_BIN" install || die "could not install the versions pinned in '$pin'" 1
+      die "'$tool' is not provided by the versions pinned in '$pin' — add it there (e.g. \`mise use maven@3.9\`) and commit" 1
     fi
-    if ! "$MISE_BIN" which "$tool" >/dev/null 2>&1; then
-      if [ -n "$pin" ]; then
-        die "'$tool' is not provided by the versions pinned in '$pin' — add it there (e.g. \`mise use maven@3.9\`) and commit" 1
-      fi
-      die "'$tool' is not part of this image's baseline ($AEE_TOOLCHAIN_BASELINE) — pin it in [$AEE_TOOLCHAIN_PIN_FILES] and commit" 1
-    fi
+    die "'$tool' is not part of this image's baseline ($AEE_TOOLCHAIN_BASELINE) — pin it in [$AEE_TOOLCHAIN_PIN_FILES] and commit" 1
   fi
   exec "$MISE_BIN" exec -- "$tool" "$@"
 }

@@ -13,7 +13,10 @@ testable on the fast CI lane:
     per agent);
   * no pin falls back to the image baseline, and with no baseline either it is
     a NAMED error rather than `mvn: command not found` (AC9);
-  * the warm path does not run an install, the cold path does;
+  * a pinned exec always ensures the pinned tools are installed (the idempotent
+    `mise install`), so a pin change to a tool OTHER than the one invoked still
+    takes effect (AC6) instead of running with JAVA_HOME pointing at an absent
+    JDK; the baseline (no pin) is never installed into;
   * the shim directory is stripped from PATH before handing off, so a tool the
     version manager cannot resolve fails instead of recursing into this script
     forever.
@@ -233,23 +236,30 @@ class ToolchainCliTest(unittest.TestCase):
         p = self.run_cli(["doctor"], AEE_WORKSPACE=None, AGENT_ID="team-x-dev")
         self.assertIn("/workspace/agents/team-x-dev", p.stdout)
 
-    # ── warm vs cold ────────────────────────────────────────────────────────
+    # ── the pinned install path ─────────────────────────────────────────────
 
-    def test_the_warm_path_does_not_run_an_install(self):
+    def test_a_pinned_exec_installs_even_when_the_invoked_tool_resolves(self):
+        # The AC6 regression: `mvn` (Maven) is unchanged and already resolves,
+        # but the pin bumped `java`, whose new version is not installed yet.
+        # Gating the install on whether the INVOKED tool resolves skips it and
+        # runs with JAVA_HOME pointing at an absent JDK, so a pinned exec runs
+        # the idempotent `mise install` unconditionally.
         self.pin()
         p = self.run_cli(["exec", "mvn", "test"], STUB_WHICH_OK="1")
         self.assertEqual(p.returncode, 0, p.stderr)
         calls = [l for l in self.calls().splitlines() if l.startswith("argv:")]
-        self.assertNotIn("argv: install", calls)
+        self.assertIn("argv: install", calls)
         self.assertIn("ran: mvn test", self.calls())
 
-    def test_the_cold_path_installs_the_pinned_versions_then_runs(self):
+    def test_a_pinned_exec_installs_before_resolving_then_runs(self):
         self.pin()
         p = self.run_cli(["exec", "mvn", "test"])  # `which` fails until install ran
         self.assertEqual(p.returncode, 0, p.stderr)
         calls = [l for l in self.calls().splitlines() if l.startswith("argv:")]
-        self.assertEqual(calls[0], "argv: which mvn")
-        self.assertIn("argv: install", calls)
+        # install runs first (it is what makes the tool resolvable), then the
+        # which-probe that turns a genuinely-unprovided tool into a named error.
+        self.assertEqual(calls[0], "argv: install")
+        self.assertIn("argv: which mvn", calls)
         self.assertIn("ran: mvn test", self.calls())
 
     def test_a_failing_install_names_the_pin_file(self):

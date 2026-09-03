@@ -123,6 +123,7 @@ understanding intent — do not read them as descriptions of current behaviour.
 | [multi-user-concept.md](multi-user-concept.md) | Enterprise identity, SSO, isolation, audit | partly shipped (login, teams, audit); SSO open |
 | [personal-credentials-concept.md](personal-credentials-concept.md) | Per-human GitHub tokens & SSH keys — agents act under their owner's identity | proposal |
 | [agent-toolchains-concept.md](agent-toolchains-concept.md) | Language stacks (Java/Maven and beyond) in an agent container — image per Working Environment, version pinned in the project repo | proposal (epic #1939) |
+| [direct-agent-handoff-concept.md](direct-agent-handoff-concept.md) | A `wakeAgent` outcome action that wakes the next agent inside the platform — no label, no issue/PR, no GitHub trace | proposal (#1528) |
 | [skill-lifecycle-concept.md](skill-lifecycle-concept.md) | Skill identity, versioning, transfer | open epic |
 | [skill-aggregation-concept.md](skill-aggregation-concept.md) | Domain playbooks instead of one-lesson-per-skill | proposal |
 | [knowledge-skill-ux-concept.md](knowledge-skill-ux-concept.md) | Redesign of the Knowledge page's skills column | proposal |

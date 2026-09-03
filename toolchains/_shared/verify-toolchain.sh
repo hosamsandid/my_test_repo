@@ -105,14 +105,18 @@ fi
 # ── AC9: no pin at all ──────────────────────────────────────────────────────
 step "AC9 — a project that pins nothing"
 new_workspace nopin ""
-OUT="$(in_agent "$WORK/nopin" demo-nopin sample 'aee-toolchain doctor; echo ---; java -version 2>&1 | head -1')"
+# `java -version` prints to stderr and, on an arm64 host, prepends an "Unable to
+# get SVE vector length" VM warning line — so we keep the whole output (no
+# `head -1`, which would strip the real `openjdk version "..."` line) and match
+# it case-insensitively.
+OUT="$(in_agent "$WORK/nopin" demo-nopin sample 'aee-toolchain doctor; echo ---; java -version')"
 echo "$OUT" | sed 's/^/         /'
 if grep -q 'falling back to the image baseline' <<<"$OUT"; then
   ok "the fallback is stated out loud, not silent"
 else
   bad "doctor did not report the baseline fallback"
 fi
-if grep -qE 'openjdk|java) version' <<<"$OUT"; then
+if grep -qiE '(openjdk|java) version "' <<<"$OUT"; then
   ok "java resolves from the baseline (no 'command not found')"
 else
   bad "java did not resolve for an unpinned project"

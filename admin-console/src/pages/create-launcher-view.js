@@ -21,6 +21,15 @@
 // and nothing else. What the path actually produces (draft vs wizard vs fast
 // lane, what gets created, what "a team of one" implies) is the `create` help
 // topic — E14 of epic #1870 (#1888).
+// The direct single-agent form (#1956) is a *state of* `/create`, not a route
+// of its own: the Agent Chat header's primary action leads to plain `/create`
+// (AC3), and the form has to be reachable from there without a second page. A
+// query param says so in the URL — deep-linkable, back-button-correct, and no
+// new route/breadcrumb entry for what is one panel.
+export const SINGLE_AGENT_PARAM = 'form';
+export const SINGLE_AGENT_VALUE = 'agent';
+export const SINGLE_AGENT_ROUTE = `/create?${SINGLE_AGENT_PARAM}=${SINGLE_AGENT_VALUE}`;
+
 const CREATE_ENTRIES = [
   {
     key: 'describe',
@@ -60,6 +69,22 @@ const CREATE_ENTRIES = [
     // forced through the right-sizing flow (#1667 Phase D, AC4).
     to: '/quickstart',
   },
+  {
+    key: 'single-agent',
+    icon: 'UserPlus',
+    title: 'Create a single agent',
+    // The one entry that names the artifact on purpose: it is the "I know what
+    // I want" path, and someone who reaches for it already knows the word. The
+    // description says what it costs (you fill the fields in) so it does not
+    // read as a second, better version of the `chat` fast lane above.
+    description: 'Set the id, role, Working Environment and system prompt yourself.',
+    // Stays ON the launcher (#1956): the direct create form is hosted here in a
+    // side panel rather than on a route of its own, so `New Agent` in Agent
+    // Chat's header can hand over to plain `/create` and the four guided tiles
+    // stay visible behind it. Deep-linkable, and still a plain <Link> like
+    // every other tile, so the keyboard/screen-reader path is unchanged.
+    to: SINGLE_AGENT_ROUTE,
+  },
 ];
 
 export function createEntries() {
@@ -81,4 +106,29 @@ export function hasForcedDefault(entries = CREATE_ENTRIES) {
   return entries.some(
     (e) => e.default === true || e.primary === true || e.recommended === true,
   );
+}
+
+// Is the direct single-agent form open? Accepts whatever the caller has: a
+// `URLSearchParams`, a raw `?a=b` / `a=b` string, or nothing. Kept pure so the
+// renderer's one branch is asserted without mounting a router.
+export function isSingleAgentFormOpen(search) {
+  if (!search) return false;
+  const params = typeof search === 'string'
+    ? new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+    : search;
+  if (typeof params.get !== 'function') return false;
+  return params.get(SINGLE_AGENT_PARAM) === SINGLE_AGENT_VALUE;
+}
+
+// Where a freshly created agent should land the user. A `team` agent hosts no
+// chat of its own (it is a prompt template plus a group header in the rail), so
+// deep-linking to `/chats/<teamId>` would drop the user on an empty chat — the
+// rail is the honest destination for it. Everything else is a real DM room.
+// Guessing wrong here is exactly the dead end the create form must not create,
+// so the decision is data, not an inline ternary.
+export function createdAgentDestination(agent) {
+  const id = agent && typeof agent.id === 'string' ? agent.id.trim() : '';
+  if (!id) return '/chats';
+  if (agent.role === 'team') return '/chats';
+  return `/chats/${encodeURIComponent(id)}`;
 }

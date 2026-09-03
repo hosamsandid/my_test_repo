@@ -21,7 +21,10 @@ const pagesDir = join(here, '..', 'pages');
 const ID_HINT_PAGES = [
   'Blueprints.jsx',
   'Teams.jsx',
-  'Agents.jsx',
+  // The Agents page itself no longer renders an id field: its create form —
+  // the only one it had — moved into the shared `agent-lifecycle/` module in
+  // #1956, and the edit form has none (an id is immutable after creation).
+  join('agent-lifecycle', 'AgentCreateForm.jsx'),
   'ModelRegistry.jsx',
   'SshKeys.jsx',
   'GithubTokens.jsx',

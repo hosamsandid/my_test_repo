@@ -36,6 +36,7 @@ const rail = code(read('./RightRail.jsx'));
 const panel = code(read('./AgentSettingsPanel.jsx'));
 const agentsPage = code(read('../Agents.jsx'));
 const editForm = code(read('../agent-lifecycle/AgentEditForm.jsx'));
+const createForm = code(read('../agent-lifecycle/AgentCreateForm.jsx'));
 
 /* ── AC7: one form, two surfaces ─────────────────────────────────── */
 
@@ -64,14 +65,19 @@ test('the form and its sub-controls live in exactly one place', () => {
 });
 
 test('the shared field controls are imported back, not re-typed', () => {
-  // The create form still renders these, so the move only works if it imports
-  // the same ones the edit form does.
-  assert.match(agentsPage, /from '\.\/agent-lifecycle\/agent-form-fields\.jsx'/);
+  // #1929 asserted this on the Agents page, because the create form that
+  // renders these controls was still defined there. #1956 moved that form into
+  // `agent-lifecycle/AgentCreateForm.jsx`, so the importer moved with it — the
+  // invariant is unchanged (one definition, imported by whoever renders it),
+  // only its address is.
+  assert.match(createForm, /from '\.\/agent-form-fields\.jsx'/);
   for (const symbol of ['ROLE_INFO', 'RoleDetailBanner', 'MissionDirectoryField', 'repoDirName']) {
-    assert.doesNotMatch(
-      agentsPage, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
-      `${symbol} must not be redefined on the Agents page`,
-    );
+    for (const [name, src] of [['the Agents page', agentsPage], ['the create form', createForm]]) {
+      assert.doesNotMatch(
+        src, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
+        `${symbol} must not be redefined in ${name}`,
+      );
+    }
   }
 });
 

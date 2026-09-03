@@ -2,7 +2,7 @@
 id: create
 routes: ["/create", "/quickstart"]
 title: Creating something new
-summary: The four ways to start — describe it, use a ready-made setup, build it yourself, or spin up one assistant — and what each of them actually creates.
+summary: The five ways to start — describe it, use a ready-made setup, build it yourself, spin up one assistant, or fill in a single agent yourself — and what each of them actually creates.
 seeAlso:
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Flows", to: "/flows" }
@@ -12,7 +12,8 @@ seeAlso:
   - { label: "SSH Keys", to: "/ssh-keys" }
   - { label: "GitHub Tokens", to: "/github-tokens" }
 askPrompts:
-  - "Which of the four ways to start should I pick?"
+  - "Which of the five ways to start should I pick?"
+  - "What is the difference between one assistant and creating a single agent?"
   - "What exactly gets created when I create one assistant?"
   - "Do I have to decide between a single agent and a team up front?"
   - "What do I need before I can create anything?"
@@ -26,11 +27,16 @@ from the persistent control in the sidebar and from the `/create` route — both
 open the same launcher.
 
 The launcher asks *how* you would like to start, not *what kind of thing* you are
-making. You never have to know the words agent / team / flow / template to choose,
-and none of the four tiles is a highlighted default: they are equally ranked
-because none of them is the "right" one. You can always change direction later.
+making. You never have to know the words agent / team / flow / template to choose
+among the first four, and none of them is a highlighted default: they are
+equally ranked because none of them is the "right" one. You can always change
+direction later.
 
-## The four ways in
+The fifth entry is deliberately different. **Create a single agent** is the "I
+already know exactly what I want" path and is the one place the launcher names
+the artifact, because that is the point of it.
+
+## The five ways in
 
 | Entry | What it does | Where it lands |
 |---|---|---|
@@ -38,11 +44,32 @@ because none of them is the "right" one. You can always change direction later.
 | **Start from a ready-made setup** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
 | **Build it yourself** | Lay the pieces out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
 | **Just give me one assistant to chat with** | Spin up a single assistant you can talk to right away — no wiring, no roles. | The one-assistant form |
+| **Create a single agent** | Fill in the fields yourself: id, role, Working Environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
 
 Two of these produce a **draft** — an editable flow that is *not* live. Agents
 exist only once you materialise the draft into a team. One runs the guided
-**wizard**, and one is the **fast lane** to a lone chat agent. They all end in the
-same place (running agents); they differ only in how much you decide up front.
+**wizard**, one is the **fast lane** to a lone chat agent, and one is the direct
+form. They all end in the same place (running agents); they differ only in how
+much you decide up front.
+
+## One assistant, or one agent?
+
+The two single-agent paths are not the same thing, and the difference is who
+decides.
+
+**Just give me one assistant to chat with** is the fast lane: you give it a name
+(or a repository) and it works out the rest — it creates or reuses a Working
+Environment, picks the branch off the remote, and names the assistant after the
+repository. Choose it when you want to be talking to something in a minute.
+
+**Create a single agent** decides nothing for you. You pick the id, the role
+(a plain agent, an Agent Team template or an orchestrator), the Working
+Environment it binds to, its skills and its system prompt — and it creates
+exactly that, on an environment that must already exist. Choose it when the
+answer to each of those is already settled. It is the same form the Agents page
+uses, so what it produces is identical.
+
+Both leave you with something you can grow later; neither is a one-way door.
 
 ## A single agent is a team of one
 

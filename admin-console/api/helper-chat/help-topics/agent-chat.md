@@ -92,9 +92,13 @@ menu reads the same for everyone; the server enforces the same boundary
 independently. A **disabled** agent has no chat to open, so clicking its row
 opens this menu instead — which is where *Enable* is.
 
-**The "+" menu** in the rail header adds an agent: **New agent** hands over to
-the create launcher, and **Import agent** takes an exported agent ZIP — the
-imported agent joins the list without a reload.
+**Adding an agent** is done from the page header, not the list. **New Agent**
+(top right) hands over to the create launcher, where *Create a single agent*
+opens the direct form; **Import Agent** next to it takes an exported agent ZIP
+and asks for an id and a team before it lands. The imported agent joins the list
+without a reload — but if the list filter is narrowed at the time, the
+confirmation says so rather than letting it arrive out of sight. Both buttons
+are greyed out with the reason when you may not create agents.
 
 ## The chat header
 

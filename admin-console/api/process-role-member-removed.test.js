@@ -58,8 +58,11 @@ test('the two unrelated branches of the same route are untouched', () => {
   assert.ok(/inBody\.templateId/.test(route));
   assert.ok(route.includes('loadAgentTemplate'));
   assert.ok(route.includes('buildMemberFromTemplate'));
-  // … and the free-form pass-through, which is the `outBody = inBody` default.
-  assert.ok(/let outBody = inBody;/.test(route));
+  // … and the free-form pass-through, which is the `outBody` default. #1958
+  // spreads the incoming body instead of aliasing it so the resolved
+  // materialization preference rides along; the pass-through of every other
+  // caller-supplied key is what this assertion pins.
+  assert.ok(/let outBody = \{ \.\.\.inBody, materialize \};/.test(route));
   // Still proxied to the orchestrator's own member-create, unchanged.
   assert.ok(route.includes('/internal/teams/'));
 });

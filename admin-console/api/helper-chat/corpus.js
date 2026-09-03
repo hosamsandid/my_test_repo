@@ -111,8 +111,12 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // time.
 //
 // Running total, so the next child does not have to measure to find out how much
-// room is left: #1993 (credentials, the second child) took the assembled prompt
-// to 314 766 — ~25 000 of headroom, i.e. two or three more topics of that size.
+// room is left. Measured ON THE MERGE, not on the branch — four children have
+// landed (#1990 Skills, #1995 GitHub Event Log, #1994 Token Usage, #1993
+// credentials) and together they take the assembled prompt to 322 243, leaving
+// 17 757 (94.8% used). The last two cost ~9 950 each, so ONE more topic of that
+// size fits — not two or three — with about nine children still open. Whoever
+// picks up the next one: open the route-scoped-folding ticket first.
 const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
 function measureSystemPrompt() {

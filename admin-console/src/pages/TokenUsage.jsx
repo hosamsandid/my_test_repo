@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
+import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
@@ -451,6 +452,15 @@ function WorkItemDetail({ item, since, team, navigate }) {
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               Tier
               <InfoTip title="Tier" text={TIER_SIGNAL_HELP} size={12} />
+              {/* The InfoTip names the four signals; the "?" opens the chapter
+                  that explains what each one means and why only the strongest
+                  is counted (#1994). */}
+              <PageHelpButton
+                label="How a run is tied to a work item"
+                size={12}
+                style={{ padding: 0 }}
+                section={TOKEN_USAGE_HELP_SECTIONS.attribution}
+              />
             </span>
           </th><th style={{ padding: 4, textAlign: 'right' }}>Tokens</th><th style={{ padding: 4 }} />
         </tr></thead>
@@ -529,8 +539,14 @@ function WorkItemsTab({ team }) {
     { key: 'tiers', label: (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         Signals
-        <span onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+        <span onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           <InfoTip title="Signals" text={TIER_SIGNAL_HELP} size={12} />
+          <PageHelpButton
+            label="What the attribution signals mean"
+            size={12}
+            style={{ padding: 0 }}
+            section={TOKEN_USAGE_HELP_SECTIONS.attribution}
+          />
         </span>
       </span>
     ) },
@@ -585,8 +601,8 @@ function WorkItemsTab({ team }) {
 
 /* ── Main page ─────────────────────────────────────────────────────── */
 const TABS = [
-  { key: 'statistics', label: 'Statistics' },
-  { key: 'work-items', label: 'Work items' },
+  { key: 'statistics', label: 'Statistics', help: TOKEN_USAGE_HELP_SECTIONS.statistics, helpLabel: 'What the Statistics tab shows' },
+  { key: 'work-items', label: 'Work items', help: TOKEN_USAGE_HELP_SECTIONS.workItems, helpLabel: 'What the Work items tab shows' },
 ];
 
 export default function TokenUsage() {
@@ -614,7 +630,7 @@ export default function TokenUsage() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>{PAGE_DESCRIPTION}</span>
-        <PageHelpButton label="How to read the Token Usage figures" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton label="How to read the Token Usage figures" size={14} style={{ padding: 0, flexShrink: 0 }} section={TOKEN_USAGE_HELP_SECTIONS.page} />
       </p>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
@@ -635,7 +651,17 @@ export default function TokenUsage() {
               cursor: 'pointer',
             }}
           >
-            {t.label}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              {t.label}
+              <span onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+                <PageHelpButton
+                  label={t.helpLabel}
+                  size={13}
+                  style={{ padding: 0 }}
+                  section={t.help}
+                />
+              </span>
+            </span>
           </div>
         ))}
       </div>

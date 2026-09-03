@@ -82,6 +82,7 @@ const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { admitsToChatList } = require('./matrix-agent-list');
+const { parseMemberMaterialize } = require('./member-materialize');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 // Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
@@ -3179,8 +3180,19 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
   // session policy + triggers with per-member `{{repoFullName}}`/`{{agentId}}`
   // (and the rest of the team vars) substituted identically. The orchestrator
   // still enforces member-id uniqueness (409 on collision, E1/AC-7).
+  //
+  // Materialization preference (#1958): `materialize: false` creates the member
+  // as a STUB — config + triggers, no Matrix user, no clone, no container — the
+  // mode `addTeamMember` has always supported but this route never asked for.
+  // Absent means materialize now, so every pre-#1958 caller is unaffected; the
+  // resolved value is written onto the outgoing body EXPLICITLY (rather than
+  // left to the orchestrator's `!== false` default) so the two branches below
+  // cannot drift apart in what they forward.
   const inBody = req.body || {};
-  let outBody = inBody;
+  const materializePref = parseMemberMaterialize(inBody);
+  if (materializePref.error) return res.status(400).json({ error: materializePref.error });
+  const { materialize } = materializePref;
+  let outBody = { ...inBody, materialize };
   if (typeof inBody.templateId === 'string' && inBody.templateId) {
     const template = loadAgentTemplate(inBody.templateId);
     if (!template) return res.status(400).json({ error: `Role template '${inBody.templateId}' not found` });
@@ -3195,6 +3207,11 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       memberId,
       memberDisplayName,
       vars: { ...resolved.vars, agentId: memberId },
+      // Label-suffix stamping and `{{var}}` resolution above are untouched by
+      // the mode (#1958, E3): a stub carries the same fully-substituted prompt
+      // and triggers a materialized member would, so materializing it later
+      // yields an indistinguishable agent (AC3).
+      materialize,
     });
   } else if (typeof inBody.processTemplateId === 'string' && inBody.processTemplateId) {
     // Add-role-from-a-PROCESS-template (#1375) is GONE (#1959). It existed only

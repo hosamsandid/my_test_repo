@@ -304,6 +304,19 @@ a full per-surface reference and every surface gained a chapter-linked "?". This
 product decision, not a regression of E15 — the extraction table above records what each
 ticket *lifted*, not a ceiling on what a topic may later cover.
 
+The epic's children widen their own E-ticket the same way, and record it here rather than
+leaving the next reader to read the growth as scope creep. So far: **E4 → #1990** (Skills:
+six chapters, "?" on every action surface) and **E12 → #1995** (GitHub Event Log: E12 lifted
+only the intro and the two tab leads, so the *columns* of the Processed-events table, the
+`source` the UI never renders, the polled-vs-never-polled rule and the queue's no-expiry
+promise were undocumented anywhere; the topic is now four chapters — what the log is ·
+Processed events · Outcomes · Pending queue — with a "?" on the table toolbar, the outcome
+legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-surface reference
+with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
+`TIER_SIGNAL_HELP` attribution-tier explainer), and **E10 → #1993** (Credentials: a
+per-surface reference with a "?" on each of the three pages the one topic serves —
+`/ssh-keys`, `/github-tokens` and `/my-credentials`).
+
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
 densest pages first), each ticket adding only prose, a `<page>-help-sections.js` slug
@@ -349,8 +362,12 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time. **Running total:** #1993 (credentials) took the assembled prompt to **314,766**
-of 340,000 — roughly two or three more topics of that size before the stop-gap is spent.
+a fourth time. **Running total, measured on each merge so the next child need not:** with the
+Skills (#1990), GitHub Event Log (#1995), Token Usage (#1994) and credentials (#1993) children
+in, the assembled prompt is **322 243 of 340 000 — 94.8% used, 17 757 left**. The last two
+children cost ~9 950 each, so roughly ONE more topic of that size fits, not two or three, and
+about nine children are still open. The paragraph above is no longer predicting a trend: the
+route-scoped-folding ticket is now the next step, not a later one.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

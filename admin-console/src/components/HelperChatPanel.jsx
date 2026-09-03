@@ -5,7 +5,7 @@ import { useHelperChat } from '../context/HelperChatContext';
 import { SafeMarkdown, ensureAgentChatMdCss, ThinkingDots } from '../pages/agent-chat/Message.jsx';
 import useVoiceRecorder from '../hooks/useVoiceRecorder.js';
 import { SUGGESTED_PROMPTS } from '../context/helper-chat-model.js';
-import { pageHelpState, seeAlsoLinks, askPromptChips, topicActions, askHandoff, panelZIndex, contextLabel } from '../context/page-help-view.js';
+import { pageHelpState, seeAlsoLinks, askPromptChips, topicActions, askHandoff, panelZIndex, contextLabel, findSectionIndex } from '../context/page-help-view.js';
 import HelperChatTour from './HelperChatTour.jsx';
 
 // Helper Chat panel (#1735, Phase 1.3). A non-blocking slide-in help assistant,
@@ -175,8 +175,9 @@ function TabBar({ mode, setMode }) {
 // that hand off to Ask. When the route has no dedicated topic (or the user
 // clicks the Home affordance) it renders the Overview topic instead, and the
 // "← Overview" link is hidden (it would be a no-op there).
-function PageFace({ pageHelp, context, atOverview, onHome, onNavigate, onAskPrompt, onTour }) {
+function PageFace({ pageHelp, context, atOverview, section, onHome, onNavigate, onAskPrompt, onTour }) {
   const resolved = pageHelpState(pageHelp, context);
+  const bodyRef = useRef(null);
   // atOverview forces the Overview home regardless of the current route.
   const showingOverview = atOverview || resolved.isOverview;
   const topic = atOverview ? (resolved.overview || resolved.topic) : resolved.topic;
@@ -184,6 +185,30 @@ function PageFace({ pageHelp, context, atOverview, onHome, onNavigate, onAskProm
   // step — E17 #1892), name it: the topic title alone would look like help for
   // the page behind the dialog.
   const forContext = atOverview ? '' : contextLabel(resolved.contextKey);
+
+  // Chapter deep-link (#1972): a "?" next to one surface asks for the chapter
+  // that explains it. The headings carry no ids (the markdown pipeline is shared
+  // with Agent Chat and its sanitiser would strip them), so the target is found
+  // by slugging the rendered heading text — the same rule the drift guard uses.
+  // Re-runs on the nonce, so pressing the same "?" again re-scrolls. Every other
+  // outcome lands at the top: no section asked for (the page-level "?" or the
+  // header Help button), or a slug that matches nothing — better than leaving
+  // the reader wherever the previously-opened chapter left them.
+  const sectionSlugWanted = (section && section.slug) || '';
+  const sectionNonce = (section && section.nonce) || 0;
+  useEffect(() => {
+    const root = bodyRef.current;
+    if (!root) return;
+    // Scroll the panel's own scroller, not via scrollIntoView — the panel is
+    // position:fixed, and scrollIntoView would also scroll every scrollable
+    // ancestor, i.e. the page behind it.
+    const scroller = root.closest('[data-help-scroll]');
+    if (!scroller) return;
+    const headings = Array.from(root.querySelectorAll('h2, h3'));
+    const idx = findSectionIndex(headings.map((h) => h.textContent || ''), sectionSlugWanted);
+    if (idx < 0) { scroller.scrollTop = 0; return; }
+    scroller.scrollTop += headings[idx].getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  }, [sectionSlugWanted, sectionNonce, topic]);
 
   if (!topic) {
     return (
@@ -246,7 +271,7 @@ function PageFace({ pageHelp, context, atOverview, onHome, onNavigate, onAskProm
       </div>
 
       {topic.body ? (
-        <div className="agent-chat-md">
+        <div className="agent-chat-md" ref={bodyRef}>
           <SafeMarkdown body={topic.body} />
         </div>
       ) : null}
@@ -340,7 +365,7 @@ function PageFace({ pageHelp, context, atOverview, onHome, onNavigate, onAskProm
 }
 
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, registerHelpPanel } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, helpSection, registerHelpPanel } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
   const navigate = useNavigate();
@@ -476,11 +501,12 @@ export default function HelperChatPanel() {
         </div>
       ) : isPage ? (
         /* "This page" face (#1873) */
-        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        <div data-help-scroll style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
           <PageFace
             pageHelp={pageHelp}
             context={helpContext}
             atOverview={atOverview}
+            section={helpSection}
             onHome={() => setAtOverview(true)}
             onNavigate={(to) => navigate(to)}
             onAskPrompt={seedAsk}

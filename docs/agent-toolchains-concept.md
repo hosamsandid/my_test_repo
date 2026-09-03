@@ -116,7 +116,12 @@ criteria on #1940:
 
 ## 4. Stack — a toolchain registry of derived images
 
-*(Child #1941.)*
+*(Child #1941 — **shipped**. The `toolchains/<id>/` source tree, `make
+toolchain-images` / `make seed-toolchains`, the per-variant base-contract smoke
+test and the first JVM bootstrap variant are live; `validateToolchainManifest`
+governs the manifest and `resolveToolchainImage` joins the deployment's prefix +
+release tag onto it at spawn time. Operator + project guide:
+`docs/agent-toolchains.md`.)*
 
 ```
 toolchains/<id>/toolchain.json    # id, name, description, image tag, platforms
@@ -149,6 +154,12 @@ further layer, not a new mechanism — but pre-building every combination is
 the matrix explosion this concept exists to avoid.
 
 ## 5. Version — pinned in the project repository
+
+*(Shipped with #1941. The JVM variant carries **mise** as its version manager
+(not `sdkman`, which needs a login shell the agent's `sh -c` calls never are);
+the project repository pins via a committed `.mise.toml`, and a repository that
+pinned for a different manager (`.sdkmanrc` / `.java-version`) is told so by
+name. See `docs/agent-toolchains.md`.)*
 
 The image carries the **bootstrap**, not the version:
 

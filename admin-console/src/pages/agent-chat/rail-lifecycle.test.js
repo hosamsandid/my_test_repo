@@ -15,8 +15,11 @@ import {
   matrixAgentsUrl,
   mergeAgentConfigs,
   canMarkUnread,
+  withChatDialogLabels,
 } from './rail-lifecycle.js';
-import { NO_RIGHTS_HINT, TEAM_LOCKED_HINT, buildAgentMenu } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import {
+  NO_RIGHTS_HINT, TEAM_LOCKED_HINT, buildAgentMenu, buildTeamMenu,
+} from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 function fakeStorage(initial = {}) {
   const map = { ...initial };
@@ -436,4 +439,59 @@ test('#1957 AC7 — a caller who may not manage the stub gets no working Materia
   const toggle = items.find(i => i.key === 'toggle-enabled');
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.title, NO_RIGHTS_HINT);
+});
+
+/* ── deferred materialization of a new member (#1958) ────────────────── */
+
+test('#1958 AC1 — the rail promises the dialog it now opens', () => {
+  const { items } = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+    agents: AGENTS,
+  });
+  const add = items.find(i => i.key === 'add-member');
+  assert.equal(add.label, 'Add member…');
+  // The key is the contract with the host's switch — only the wording moved.
+  assert.equal(add.disabled, false);
+});
+
+test('#1958 — the shared descriptor keeps the Agents page honest', () => {
+  // That page's Add member is still a bare materializing POST, so the ellipsis
+  // must NOT have been pushed down into buildTeamMenu: it would promise a
+  // dialog that surface does not have.
+  const shared = buildTeamMenu({ team: AGENTS[1], teamId: 'zeta', canManage: true });
+  assert.equal(shared.find(i => i.key === 'add-member').label, 'Add member');
+});
+
+test('#1958 — withChatDialogLabels is idempotent and touches nothing else', () => {
+  const once = withChatDialogLabels([
+    { key: 'add-member', label: 'Add member' },
+    { key: 'delete-team', label: 'Delete team…' },
+    { key: 'export-team', label: 'Export team' },
+  ]);
+  assert.deepEqual(once.map(i => i.label), ['Add member…', 'Delete team…', 'Export team']);
+  assert.deepEqual(withChatDialogLabels(once), once, 're-running must not add a second ellipsis');
+  assert.deepEqual(withChatDialogLabels([]), []);
+  assert.deepEqual(withChatDialogLabels(undefined), []);
+});
+
+test('#1958 — the relabel preserves the gating the entry arrived with', () => {
+  // A busy team and an unmanageable team must still yield an inert entry: the
+  // map has to copy the descriptor, not rebuild it.
+  const busy = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+    agents: AGENTS,
+    busyIds: new Set(['zeta']),
+  }).items.find(i => i.key === 'add-member');
+  assert.equal(busy.label, 'Add member…');
+  assert.equal(busy.disabled, true);
+
+  const noRights = railMenuItems({
+    target: {
+      kind: 'team',
+      group: { id: 'zeta', displayName: 'Zeta Team', header: { ...AGENTS[1], canManage: false } },
+    },
+    agents: AGENTS,
+  }).items.find(i => i.key === 'add-member');
+  assert.equal(noRights.disabled, true);
+  assert.equal(noRights.title, NO_RIGHTS_HINT);
 });

@@ -14,6 +14,7 @@ const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
 const githubEventLog = require('./github-event-log');
+const clientErrorLog = require('./client-error-log');
 const usageLog = require('./usage-log');
 const { summarize } = require('./usage-summary');
 const prEventsLog = require('./pr-events-log');
@@ -1539,6 +1540,33 @@ app.post('/api/maintenance-mode/activate', (req, res) => {
 app.post('/api/maintenance-mode/deactivate', (req, res) => {
   maintenanceMode.deactivate();
   res.json(maintenanceMode.getStatus());
+});
+
+/* ─── Client error telemetry (#1974) ────────────────────────────────── */
+// The console's React error boundaries post one report per contained render
+// error, so a white-screen trigger is observed centrally instead of only in
+// the reporting user's browser console. Purely observational — nothing reads
+// this to make a decision.
+//
+// Its own tight limiter (a fresh instance, so it never shares a counter with
+// apiLimiter): the client already dedupes and caps per window, but the server
+// must not depend on a client that is by definition misbehaving when it calls.
+const clientErrorLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+});
+
+app.post('/api/client-errors', clientErrorLimiter, (req, res) => {
+  const built = clientErrorLog.buildClientErrorEvent(req.body, { actor: req.user && req.user.sub });
+  if (!built.ok) return res.status(400).json({ error: built.error });
+  clientErrorLog.record(built.event);
+  // Also to the container log, which is the surface an operator already has
+  // (the Logs page streams it) — the JSONL file is the durable copy.
+  console.warn(clientErrorLog.logLine(built.event));
+  res.status(204).end();
 });
 
 /* ─── Setup Status ──────────────────────────────────────────────────── */

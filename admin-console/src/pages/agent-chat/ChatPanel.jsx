@@ -28,6 +28,7 @@ import {
 import LearningBadge from '../../components/LearningBadge';
 import PageHelpButton from '../../components/PageHelpButton';
 import VirtualList from '../../components/VirtualList.jsx';
+import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
 import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
 import { headerContextIndicator } from './session-info.js';
 import SessionInfoPopover from './SessionInfoPopover.jsx';
@@ -1058,6 +1059,48 @@ export default function ChatPanel({
   // already running (to disable the entry point + quick dictation).
   const transcription = useTranscriptionSession();
 
+  // One transcript row. Extracted out of the VirtualList prop (#1974) so the
+  // per-event error boundary wraps it in exactly ONE place: with the branches
+  // inline, a fourth message type added later would have silently returned an
+  // unguarded row, and a single malformed event would blank the whole page.
+  const renderTranscriptRow = (msg, i) => {
+    if (msg.type === 'context-reset') {
+      return <ContextResetSeparator ts={msg.ts} />;
+    }
+    if (msg.type === 'user-stop') {
+      return <UserStopSeparator ts={msg.ts} />;
+    }
+    const cid = correlationByEvent.get(msg.event_id) || null;
+    // Quick-reply state (#1663): a question is answerable only while it
+    // is the newest message and no answer references it; a disabled
+    // composer (offline / mid-send / maintenance) blocks a click either way.
+    const isQuestion = !!msg[ASK_QUESTION_FIELD];
+    const qState = isQuestion
+      ? questionState({
+          index: i,
+          messageCount: messages.length,
+          answer: askAnswersByQuestion.get(msg.event_id),
+          disabled: disabled || !roomId || sending || maintenance.active,
+        })
+      : null;
+    return (
+      <div
+        data-cid={cid || ''}
+        onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
+        onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
+      >
+        <Message
+          message={msg}
+          agentUserId={agent.userId}
+          onRelaunchLoop={handleRelaunchLoop}
+          onAnswerQuestion={handleAnswerQuestion}
+          questionAnswerable={qState?.answerable}
+          questionAnswer={qState}
+        />
+      </div>
+    );
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
       {/* Header */}
@@ -1393,43 +1436,11 @@ export default function ChatPanel({
           overscan={8}
           gap={12}
           stickToBottom={atBottom}
-          renderItem={(msg, i) => {
-            if (msg.type === 'context-reset') {
-              return <ContextResetSeparator ts={msg.ts} />;
-            }
-            if (msg.type === 'user-stop') {
-              return <UserStopSeparator ts={msg.ts} />;
-            }
-            const cid = correlationByEvent.get(msg.event_id) || null;
-            // Quick-reply state (#1663): a question is answerable only while it
-            // is the newest message and no answer references it; a disabled
-            // composer (offline / mid-send / maintenance) blocks a click either way.
-            const isQuestion = !!msg[ASK_QUESTION_FIELD];
-            const qState = isQuestion
-              ? questionState({
-                  index: i,
-                  messageCount: messages.length,
-                  answer: askAnswersByQuestion.get(msg.event_id),
-                  disabled: disabled || !roomId || sending || maintenance.active,
-                })
-              : null;
-            return (
-              <div
-                data-cid={cid || ''}
-                onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
-                onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
-              >
-                <Message
-                  message={msg}
-                  agentUserId={agent.userId}
-                  onRelaunchLoop={handleRelaunchLoop}
-                  onAnswerQuestion={handleAnswerQuestion}
-                  questionAnswerable={qState?.answerable}
-                  questionAnswer={qState}
-                />
-              </div>
-            );
-          }}
+          renderItem={(msg, i) => (
+            <EventErrorBoundary agentId={agent.id} eventId={msg.event_id}>
+              {renderTranscriptRow(msg, i)}
+            </EventErrorBoundary>
+          )}
         />
 
         {(showSendingDots || showThinking) && (

@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router';
 
@@ -19,6 +21,7 @@ import RowContextMenu from './RowContextMenu.jsx';
 import {
   deleteTargetFor,
   existingIds as existingIdsOf,
+  importedAgentFilterNote,
   mergeAgentConfigs,
   railMenuItems,
   teamOptions,
@@ -60,10 +63,23 @@ import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
  * @param {Record<string,string>} props.statuses
  *        agentId → activity state, the same map the rail renders its dots
  *        from. Read only to decide whether "Mark as unread" applies.
+ * @param {{kind:string, id?:string}} props.listFilter
+ *        the rail's current filter spec. Read for one thing only: after an
+ *        import, whether the new agent is inside it (#1956 AC4) — a narrowed
+ *        filter would otherwise swallow it with a success message that says it
+ *        joined the list.
+ *
+ * Since #1956 the host is also the *owner* of the import round-trip rather than
+ * one dispatch target of the (now removed) rail "+" menu: the header button
+ * lives in `AgentChat`, outside this tree, so the picker is reached through the
+ * imperative `openImportPicker()` handle below. The file input and the dialog
+ * stay here, together, for the same reason they always were — the whole
+ * round-trip lives with the dialog it opens.
  */
-export default function RailLifecycleHost({
-  request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread, statuses = {},
-}) {
+const RailLifecycleHost = forwardRef(function RailLifecycleHost({
+  request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread,
+  statuses = {}, listFilter = { kind: 'all' },
+}, ref) {
   const navigate = useNavigate();
   const location = useLocation();
   const { openHelpFor } = useHelperChat();
@@ -85,6 +101,18 @@ export default function RailLifecycleHost({
   const [importFile, setImportFile] = useState(null);
   const [extractTemplateIds, setExtractTemplateIds] = useState(() => new Set());
   const importInputRef = useRef(null);
+
+  // The only thing this component exposes upwards: open the ZIP picker. The
+  // header's `Import Agent` is one click (AC4) — the picker opens immediately
+  // and the id/team dialog follows once a file is chosen, exactly as the old
+  // menu entry behaved.
+  useImperativeHandle(ref, () => ({
+    openImportPicker() {
+      setActionError(null);
+      setNotice(null);
+      importInputRef.current?.click();
+    },
+  }), []);
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -285,10 +313,17 @@ export default function RailLifecycleHost({
     const resp = await fetch('/api/agents/import', { method: 'POST', body: formData });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) {
-      setNotice(`Agent '${data.agentId}' imported${data.parentTeamId ? ` into team '${data.parentTeamId}'` : ''} and started.`);
+      // The new agent joins the list from the refreshed payload — no reload
+      // (#1928 AC3). Whether it is actually *visible* also depends on the rail
+      // filter, which the header button that started this knows nothing about
+      // (#1956 AC4), so say so rather than let it land out of sight.
+      const hidden = importedAgentFilterNote(listFilter, data.agentId, data.parentTeamId);
+      setNotice(
+        `Agent '${data.agentId}' imported${data.parentTeamId ? ` into team '${data.parentTeamId}'` : ''} and started.`
+        + (hidden || ''),
+      );
       setImportFile(null);
       closePanel();
-      // The new agent joins the list from the refreshed payload — no reload (AC3).
       refresh();
     }
     return { ok: resp.ok, status: resp.status, data };
@@ -367,12 +402,6 @@ export default function RailLifecycleHost({
       return;
     }
 
-    if (target?.kind === 'create') {
-      if (kind === 'new-agent') navigate('/create');
-      if (kind === 'import-agent') importInputRef.current?.click();
-      return;
-    }
-
     if (target?.kind === 'agent') {
       // Act on the fullest record we have — the merged config carries the
       // `children` a team/orchestrator delete has to name.
@@ -429,8 +458,9 @@ export default function RailLifecycleHost({
         />
       )}
 
-      {/* The rail's "Import agent" file picker. Kept here (not in the rail
-          header) so the whole import round-trip lives with the dialog it opens. */}
+      {/* The "Import Agent" file picker, opened from the page-action header via
+          `openImportPicker()` (#1956). Kept here, not next to the button, so the
+          whole import round-trip lives with the dialog it opens. */}
       <input
         ref={importInputRef}
         type="file"
@@ -557,7 +587,9 @@ export default function RailLifecycleHost({
       <RailToast text={notice} tone="success" onClose={() => setNotice(null)} />
     </>
   );
-}
+});
+
+export default RailLifecycleHost;
 
 /**
  * A quick action's outcome, reported where the rail can see it.

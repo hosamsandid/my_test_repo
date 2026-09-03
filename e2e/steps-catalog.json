@@ -366,7 +366,7 @@
     {
       "name": "create.open",
       "module": "create",
-      "description": "Open the unified \"Create\" launcher and confirm all four equally-ranked entry tiles are showing. This is the new single front door for starting something — the capture point for the launcher screenshot.",
+      "description": "Open the unified \"Create\" launcher and confirm every entry tile is showing. This is the single front door for starting something — the capture point for the launcher screenshot.",
       "params": [],
       "example": "- action:\n    do: create.open"
     },

@@ -3,10 +3,11 @@
 // The launcher (`/create`, also reachable from the persistent "+ Create" control
 // in the sidebar) is the single front door for starting anything new: four
 // equally-ranked, plainly-labelled tiles (Describe · Start from a ready-made
-// setup · Build it yourself · Just one assistant to chat with). It replaced the
-// old scatter of separate Single-Agent / Team-Wizard / Flows entry points, so a
-// journey that used to deep-link straight into `/team-setup` now enters through
-// this launcher and picks the "ready-made setup" tile.
+// setup · Build it yourself · Just one assistant to chat with), plus the direct
+// "Create a single agent" form (#1956). It replaced the old scatter of separate
+// Single-Agent / Team-Wizard / Flows entry points, so a journey that used to
+// deep-link straight into `/team-setup` now enters through this launcher and
+// picks the "ready-made setup" tile.
 //
 // As with the other modules, every function takes (ctx, params); ctx bundles
 // { page, request }. The launcher tiles carry stable data-testids
@@ -14,19 +15,20 @@
 // the visible headings are asserted as the human-readable capture reference.
 const { expect } = require('@playwright/test');
 
-// The four launcher tiles, keyed as in create-launcher-view.js. Heading text is
-// the visible title; testid is the stable click/selection hook.
+// The launcher tiles, keyed as in create-launcher-view.js. Heading text is the
+// visible title; testid is the stable click/selection hook.
 const ENTRIES = {
   describe: { testid: 'create-entry-describe', title: 'Describe what you need' },
   template: { testid: 'create-entry-template', title: 'Start from a ready-made setup' },
   build: { testid: 'create-entry-build', title: 'Build it yourself' },
   chat: { testid: 'create-entry-chat', title: 'Just give me one assistant to chat with' },
+  'single-agent': { testid: 'create-entry-single-agent', title: 'Create a single agent' },
 };
 
 /**
- * Open the unified "Create" launcher and confirm all four equally-ranked entry
- * tiles are showing. This is the new single front door for starting something —
- * the capture point for the launcher screenshot.
+ * Open the unified "Create" launcher and confirm every entry tile is showing.
+ * This is the single front door for starting something — the capture point for
+ * the launcher screenshot.
  *
  * @example
  * - action:

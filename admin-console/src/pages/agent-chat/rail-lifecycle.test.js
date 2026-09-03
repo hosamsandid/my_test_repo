@@ -10,7 +10,7 @@ import {
   existingIds,
   deleteTargetFor,
   isTeamLocked,
-  buildCreateMenu,
+  importedAgentFilterNote,
   railMenuItems,
   matrixAgentsUrl,
   mergeAgentConfigs,
@@ -168,16 +168,39 @@ test('isTeamLocked is true only for a member of a listed, disabled team', () => 
   assert.equal(isTeamLocked(dev, AGENTS.filter(a => a.id !== 'alpha')), false);
 });
 
-test('buildCreateMenu offers exactly the two existing surfaces', () => {
-  assert.deepEqual(buildCreateMenu().map(i => i.key), ['new-agent', 'import-agent']);
-  assert.ok(buildCreateMenu().every(i => i.disabled === false));
+// --------------------------------------------------------------------- #1956
+
+test('the rail no longer builds a create menu — the header owns those actions', async () => {
+  // #1956 AC2: neither create nor import may be reachable from two interactive
+  // places, so the "+" menu is gone rather than merely unrendered. Asserted on
+  // the module's exports (a leftover builder would be the first step back).
+  const mod = await import('./rail-lifecycle.js');
+  assert.equal(mod.buildCreateMenu, undefined);
+  assert.deepEqual(railMenuItems({ target: { kind: 'create' }, agents: AGENTS }), { items: [], label: '' });
+});
+
+test('importedAgentFilterNote stays silent when the new agent is visible (AC4)', () => {
+  assert.equal(importedAgentFilterNote({ kind: 'all' }, 'zeta', undefined), null);
+  assert.equal(importedAgentFilterNote(undefined, 'zeta', undefined), null);
+  // Filtered to the very agent that just landed.
+  assert.equal(importedAgentFilterNote({ kind: 'agent', id: 'zeta' }, 'zeta', undefined), null);
+  // Filtered to the team it was imported into.
+  assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'alpha'), null);
+  assert.equal(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'omega'), null);
+  // An unknown filter kind is reported visible — a wrong "hidden" note next to
+  // an agent the user can see would be worse than no note.
+  assert.equal(importedAgentFilterNote({ kind: 'something-new' }, 'zeta', undefined), null);
+});
+
+test('importedAgentFilterNote reports an import the filter swallows (AC4)', () => {
+  const other = importedAgentFilterNote({ kind: 'agent', id: 'dev' }, 'zeta', undefined);
+  assert.ok(other && /filter/i.test(other), 'names the filter as the reason');
+  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', undefined));
+  assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'));
+  assert.ok(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'alpha'));
 });
 
 test('railMenuItems routes each target kind to its own menu', () => {
-  const create = railMenuItems({ target: { kind: 'create' }, agents: AGENTS });
-  assert.deepEqual(create.items.map(i => i.key), ['new-agent', 'import-agent']);
-  assert.equal(create.label, 'Add an agent');
-
   const solo = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
   assert.equal(solo.label, 'Actions for Solo');
   assert.deepEqual(solo.items.map(i => i.key), [

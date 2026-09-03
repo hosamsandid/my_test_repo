@@ -1,9 +1,14 @@
-import React from 'react';
-import { Link } from 'react-router';
+import React, { useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import {
-  Plus, MessageSquare, LayoutTemplate, PenTool, Rocket,
+  Plus, MessageSquare, LayoutTemplate, PenTool, Rocket, UserPlus,
 } from 'lucide-react';
-import { createEntries } from './create-launcher-view';
+import {
+  createEntries, createdAgentDestination, isSingleAgentFormOpen,
+} from './create-launcher-view';
+import { apiCall } from '../hooks/useApi';
+import SidePanel from '../components/SidePanel';
+import AgentCreateForm from './agent-lifecycle/AgentCreateForm.jsx';
 import PageHelpButton from '../components/PageHelpButton';
 
 /**
@@ -21,6 +26,13 @@ import PageHelpButton from '../components/PageHelpButton';
  * unit-tested create-launcher-view.js, so the empty-state guidance of each
  * target (no Model Provider, no saved setups, …) is inherited unchanged rather
  * than re-implemented here.
+ *
+ * The one exception is the fifth entry, **Create a single agent** (#1956): the
+ * direct create form used to exist only on the Agents page, which is being
+ * retired, so the launcher hosts it here in a side panel keyed on a query param
+ * rather than handing off elsewhere. The form itself is the SHARED
+ * `agent-lifecycle/AgentCreateForm` — same fields, same validation gate, same
+ * `POST /api/agents` — so this page cannot drift from the Agents page's copy.
  */
 
 // Map the icon name carried by each pure entry to its lucide component. Keeping
@@ -31,10 +43,41 @@ const ICONS = {
   LayoutTemplate,
   PenTool,
   Rocket,
+  UserPlus,
 };
 
 export default function Create() {
   const entries = createEntries();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const singleAgentOpen = isSingleAgentFormOpen(searchParams);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  // Closing drops the param rather than navigating, so the launcher stays put
+  // and Back still leaves the page (`replace`, so an open/close pair does not
+  // stack two history entries the user has to press Back through twice).
+  function closeSingleAgent() {
+    setSaveError(null);
+    setSearchParams({}, { replace: true });
+  }
+
+  // The Agents page's `handleCreateAgent`, minus the list it has and this page
+  // has not: the same raw form object, the same endpoint. On success there is
+  // no list to refetch here, so the user is taken to the agent they just made.
+  async function handleCreateAgent(form) {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const created = await apiCall('POST', '/api/agents', form);
+      navigate(createdAgentDestination({ id: created?.id || form.id, role: form.role }));
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div style={{
       padding: 'var(--eb-space-8) var(--eb-space-6)',
@@ -120,6 +163,23 @@ export default function Create() {
           );
         })}
       </div>
+
+      <SidePanel
+        open={singleAgentOpen}
+        onClose={closeSingleAgent}
+        title="New Agent"
+        width="600px"
+        loading={saving}
+      >
+        {singleAgentOpen && (
+          <AgentCreateForm
+            onSave={handleCreateAgent}
+            onCancel={closeSingleAgent}
+            saving={saving}
+            error={saveError}
+          />
+        )}
+      </SidePanel>
     </div>
   );
 }

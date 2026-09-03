@@ -1,7 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useSearchParams, Link } from 'react-router';
-import { MessageCircle, Loader2, Plus, Eye, EyeOff } from 'lucide-react';
+import { useParams, useNavigate, useSearchParams } from 'react-router';
+import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
+import { usePageActions } from '../context/PageActionsContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
@@ -12,9 +14,37 @@ import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
-import { emptyStateCta } from './agent-chat/empty-state';
+import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
+import { describeAgentCreateAccess } from './agent-lifecycle/agent-create-access.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
+
+// Page-action header buttons (#1956). Copied from the convention the other
+// #1847/#1912-migrated pages share (`Briefings.jsx`): accent for the page's
+// primary create action, bordered/elevated for the secondary one, lucide icon
+// left of the label, primary rightmost.
+const HEADER_PRIMARY_BTN = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: '6px 12px',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+  border: 'none', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+};
+
+const HEADER_SECONDARY_BTN = {
+  display: 'inline-flex', alignItems: 'center', gap: 6,
+  padding: '6px 12px',
+  background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+  cursor: 'pointer', whiteSpace: 'nowrap',
+};
+
+// A refused action is shown inert with its reason rather than hidden (AC6).
+const headerBtnDisabled = (base) => ({
+  ...base, cursor: 'not-allowed', opacity: 0.55,
+});
 
 const LEFT_WIDTH_KEY  = 'agentChat.leftWidth';
 const RIGHT_WIDTH_KEY = 'agentChat.rightWidth';
@@ -129,6 +159,16 @@ export default function AgentChat() {
     [],
   );
   const closeMenu = useCallback(() => setMenuRequest(null), []);
+
+  // The list-level create/import actions live in the Shell's page-action header
+  // like every other page's (#1956) — Agent Chat used to be the one route with
+  // an empty slot, which is why they had to be invented as a rail "+" menu.
+  // `Import Agent` reaches the round-trip that still lives in the lifecycle
+  // host (the file input + the shared `ImportAgentForm`) through its imperative
+  // handle, so there is exactly one import implementation in the chat.
+  const railHostRef = useRef(null);
+  const { user } = useAuth();
+  const createAccess = describeAgentCreateAccess(user);
 
   // Local map agentId -> roomId, for rooms we created during this session
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
@@ -478,7 +518,30 @@ export default function AgentChat() {
   // the padding via negative margins so the chat occupies the full pane.
   const PAGE_HEIGHT = 'calc(100vh - var(--eb-header-height))';
 
+  const headerActions = usePageActions(
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>
+      <button
+        onClick={() => railHostRef.current?.openImportPicker()}
+        disabled={!createAccess.allowed}
+        title={createAccess.hint || undefined}
+        style={createAccess.allowed ? HEADER_SECONDARY_BTN : headerBtnDisabled(HEADER_SECONDARY_BTN)}
+      >
+        <Upload size={14} /> Import Agent
+      </button>
+      <button
+        onClick={() => navigate(CREATE_ROUTE)}
+        disabled={!createAccess.allowed}
+        title={createAccess.hint || undefined}
+        style={createAccess.allowed ? HEADER_PRIMARY_BTN : headerBtnDisabled(HEADER_PRIMARY_BTN)}
+      >
+        <Plus size={15} /> New Agent
+      </button>
+    </div>
+  );
+
   return (
+    <>
+    {headerActions}
     <div
       ref={containerRef}
       style={{
@@ -503,10 +566,11 @@ export default function AgentChat() {
         {/*
           Rail header. The former "Agents (N)" heading was dropped (#1921): the
           context is obvious and the count added nothing. The row still never
-          renders while the list is loading, but it now survives an *empty* list
-          — since #1928 it carries the "+" create control, which is precisely
-          what someone with no agents needs; the filter alone stays conditional
-          on there being something to filter.
+          renders while the list is loading, but it survives an *empty* list: it
+          carries the disabled-agents opt-in — which is how someone whose only
+          agents are paused finds them — and the rail's "?". The filter alone
+          stays conditional on there being something to filter. (The create "+"
+          it carried since #1928 moved to the page header in #1956.)
         */}
         {agents && (
           <div style={{
@@ -530,17 +594,12 @@ export default function AgentChat() {
               on={showDisabled}
               onToggle={() => setShowDisabled(v => !v)}
             />
-            <RailHeaderButton
-              label="New or import an agent"
-              onOpen={anchor => handleRequestMenu({ kind: 'create' }, anchor)}
-            >
-              <Plus size={14} />
-            </RailHeaderButton>
             {/* #1972: the left rail's own "?" — grouping, reordering, the
-                disabled opt-in, the row menu and this "+" are a surface of their
-                own, so it lands on the agent-list chapter rather than the top of
-                the topic. The row sits above an empty list too, so the "?" is
-                reachable before there is any agent to explain. */}
+                disabled opt-in and the row menu are a surface of their own, so
+                it lands on the agent-list chapter rather than the top of the
+                topic. The row sits above an empty list too, so the "?" is
+                reachable before there is any agent to explain. (The create "+"
+                that used to sit here moved to the page header in #1956.) */}
             <PageHelpButton
               label="What the agent list can do"
               size={14}
@@ -601,18 +660,11 @@ export default function AgentChat() {
               alignItems: 'center',
               gap: 'var(--eb-space-3)',
             }}>
-              <span>No agents yet.</span>
-              <Link
-                to={emptyStateCta().to}
-                style={{
-                  display: 'block', width: '100%', boxSizing: 'border-box',
-                  padding: '8px 12px', borderRadius: 'var(--eb-radius-md)',
-                  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
-                  fontWeight: 600, textDecoration: 'none',
-                }}
-              >
-                {emptyStateCta().label}
-              </Link>
+              {/* A text pointer, not a second button (#1956 AC7): the create
+                  action now lives in the page header, and the house pattern is
+                  that an empty state names it rather than competing with it. */}
+              <span>{emptyStatePointer().lead}</span>
+              <span>{emptyStatePointer().hint}</span>
             </div>
           )}
 
@@ -727,6 +779,7 @@ export default function AgentChat() {
           its portaled menu and side panels are never clipped by the column's
           overflow, and so a mutation can refresh the list the rail renders. */}
       <RailLifecycleHost
+        ref={railHostRef}
         request={menuRequest}
         onClose={closeMenu}
         chatAgents={agents || []}
@@ -734,8 +787,10 @@ export default function AgentChat() {
         onOpenSettings={handleOpenSettings}
         onMarkAsUnread={handleMarkAsUnread}
         statuses={agentStatuses}
+        listFilter={listFilter}
       />
     </div>
+    </>
   );
 }
 
@@ -772,44 +827,6 @@ function RailHeaderToggle({ on, onToggle }) {
       }}
     >
       {on ? <Eye size={14} /> : <EyeOff size={14} />}
-    </button>
-  );
-}
-
-/**
- * The rail header's "+" control. Opens a menu anchored at the button's own
- * bottom-left corner, so the same `RowContextMenu` that serves the row kebabs
- * and right-clicks — all of which are anchored at a *point* — serves this too.
- */
-function RailHeaderButton({ label, onOpen, children }) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-haspopup="menu"
-      onClick={e => {
-        const r = e.currentTarget.getBoundingClientRect();
-        onOpen({ x: r.left, y: r.bottom + 4 });
-      }}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 26,
-        height: 26,
-        flexShrink: 0,
-        background: 'none',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-sm)',
-        color: 'var(--eb-text-secondary)',
-        cursor: 'pointer',
-        transition: 'color var(--eb-transition-fast), background var(--eb-transition-fast)',
-      }}
-      onMouseEnter={e => { e.currentTarget.style.background = 'var(--eb-bg-hover)'; }}
-      onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
-    >
-      {children}
     </button>
   );
 }

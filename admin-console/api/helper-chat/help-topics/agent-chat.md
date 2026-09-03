@@ -81,10 +81,9 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
-  whole team, **Add member**, **Add `<role>` role** for a role the team is
-  missing, **Team settings…** (which opens the team's own Settings tab here
-  rather than jumping to another page), **Export team**, **Open in Flow Editor**
-  and **Delete team**.
+  whole team, **Add member**, **Team settings…** (which opens the team's own
+  Settings tab here rather than jumping to another page), **Export team
+  (ZIP)**, **Open in Flow Editor** and **Delete team**.
 - **What these actions do…** — the last entry opens this chapter. A menu cannot
   carry a "?" button, so the help is an entry like any other.
 

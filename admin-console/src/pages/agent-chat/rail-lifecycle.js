@@ -213,19 +213,6 @@ export function helpMenuItem() {
 }
 
 /**
- * Split a chosen menu key into the action and its argument. Only the team menu's
- * add-role entries carry one (`add-role:<roleId>`), and a role id may itself
- * contain a colon, so the key is split once from the left rather than by every
- * separator — the host then switches on `kind` alone.
- */
-export function parseMenuKey(key) {
-  if (typeof key !== 'string' || !key) return { kind: '', arg: null };
-  const at = key.indexOf(':');
-  if (at < 0) return { kind: key, arg: null };
-  return { kind: key.slice(0, at), arg: key.slice(at + 1) || null };
-}
-
-/**
  * Resolve a menu request from the rail into the items to render and the menu's
  * accessible name — the one place that decides *which* menu a click gets, so
  * the host component stays a renderer.
@@ -239,13 +226,12 @@ export function parseMenuKey(key) {
  * @param {{kind:'agent'|'team'|'create', agent?:object, group?:object}} o.target
  * @param {object[]} o.agents
  * @param {Set<string>} o.busyIds     ids with a mutation in flight
- * @param {{id:string,displayName?:string}[]} o.missingRoles  team menu only
  * @param {string} o.activityState    the row's activity state (agent menu only,
  *                                    from the chat's status poll) — decides
  *                                    whether "Mark as unread" applies (#1938)
  */
 export function railMenuItems({
-  target, agents = [], busyIds = new Set(), missingRoles = [], activityState = 'idle',
+  target, agents = [], busyIds = new Set(), activityState = 'idle',
 } = {}) {
   if (!target) return { items: [], label: '' };
 
@@ -289,7 +275,6 @@ export function railMenuItems({
           teamId: group.id,
           canManage: team ? team.canManage !== false : true,
           busy: busyIds.has(group.id),
-          missingRoles,
         }),
         helpMenuItem(),
       ],

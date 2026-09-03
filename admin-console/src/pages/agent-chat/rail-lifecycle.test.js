@@ -11,7 +11,6 @@ import {
   deleteTargetFor,
   isTeamLocked,
   buildCreateMenu,
-  parseMenuKey,
   railMenuItems,
   matrixAgentsUrl,
   mergeAgentConfigs,
@@ -172,17 +171,6 @@ test('isTeamLocked is true only for a member of a listed, disabled team', () => 
 test('buildCreateMenu offers exactly the two existing surfaces', () => {
   assert.deepEqual(buildCreateMenu().map(i => i.key), ['new-agent', 'import-agent']);
   assert.ok(buildCreateMenu().every(i => i.disabled === false));
-});
-
-test('parseMenuKey splits once from the left so a colon in a role id survives', () => {
-  assert.deepEqual(parseMenuKey('delete'), { kind: 'delete', arg: null });
-  assert.deepEqual(parseMenuKey('add-role:developer'), { kind: 'add-role', arg: 'developer' });
-  // A role id that itself contains a colon must arrive intact.
-  assert.deepEqual(parseMenuKey('add-role:a:b'), { kind: 'add-role', arg: 'a:b' });
-  // Degenerate shapes never throw and never produce a bogus action.
-  assert.deepEqual(parseMenuKey('add-role:'), { kind: 'add-role', arg: null });
-  assert.deepEqual(parseMenuKey(''), { kind: '', arg: null });
-  assert.deepEqual(parseMenuKey(null), { kind: '', arg: null });
 });
 
 test('railMenuItems routes each target kind to its own menu', () => {
@@ -348,16 +336,16 @@ test('railMenuItems omits the fan-out toggle for a header-less team group', () =
   assert.ok(items.some(i => i.key === 'delete-team'));
 });
 
-test('railMenuItems appends one entry per missing role', () => {
+test('#1959 — the rail team menu appends no add-role entry', () => {
+  // The missing-role suggestion is gone, and with it the only menu key that ever
+  // carried an argument — every key the host dispatches on is now a bare action.
   const { items } = railMenuItems({
     target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
     agents: AGENTS,
-    missingRoles: [{ id: 'merger', displayName: 'Merger' }, { id: 'reworker' }],
+    missingRoles: [{ id: 'merger', displayName: 'Merger' }],
   });
   const keys = items.map(i => i.key);
-  assert.ok(keys.includes('add-role:merger'));
-  assert.ok(keys.includes('add-role:reworker'));
-  assert.equal(items.find(i => i.key === 'add-role:merger').label, 'Add Merger role');
-  // Falls back to the id when the template ships no display name.
-  assert.equal(items.find(i => i.key === 'add-role:reworker').label, 'Add reworker role');
+  assert.ok(!keys.some(k => k.startsWith('add-role')));
+  assert.ok(!keys.some(k => k.includes(':')), 'no menu key carries an argument');
+  assert.ok(keys.includes('add-member'));
 });

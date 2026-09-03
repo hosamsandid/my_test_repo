@@ -289,5 +289,21 @@ test('#1958 AC4 — no create-then-disable workaround has crept back in', () => 
   // straight after the member POST is the shape to keep out.
   assert.doesNotMatch(host, /\/members`[\s\S]{0,400}?enabled: false/);
   assert.doesNotMatch(host, /Enable it when you/);
-  assert.doesNotMatch(host, /\(disabled\)/);
+  // Anchored on the notice copy, not a bare `(disabled)`: this repo's dominant
+  // style-helper idiom is `const fooStyle = (disabled) => ({…})`, so the loose
+  // form would fail the day this file grows one — for a reason unrelated to
+  // #1958, leaving the next reader to reverse-engineer why.
+  assert.doesNotMatch(host, /Added .*\(disabled\)/);
+});
+
+test('#1958 — a failed Add member closes the dialog so its error is readable', () => {
+  // The dialog's overlay is position:fixed at zIndex 9999 and RailToast portals
+  // at 1200, with no stacking context between them — so a dialog left open on
+  // failure buries the toast under its own backdrop AND eats the click that
+  // would dismiss it (the click lands on the backdrop and cancels instead).
+  // Same resolution as the confirmDelete sibling in this file.
+  assert.match(
+    host,
+    /addMemberBody\([\s\S]{0,400}?catch \(e\) \{[\s\S]{0,200}?setAddMemberTeamId\(null\)/,
+  );
 });

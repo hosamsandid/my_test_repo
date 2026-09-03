@@ -420,7 +420,13 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       // the rail otherwise (the row appears in a collapsed section, #1957).
       setNotice(addMemberNotice(result));
     } catch (e) {
+      // Close the dialog on failure too, exactly as confirmDelete does: the
+      // error goes to a RailToast, which portals at zIndex 1200 while this
+      // dialog's overlay is fixed at 9999 — left open, the dialog would bury
+      // its own error message under the backdrop and swallow the click that
+      // dismisses it.
       setActionError(e.message);
+      setAddMemberTeamId(null);
     } finally {
       markBusy(teamId, false);
     }

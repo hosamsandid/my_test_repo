@@ -483,7 +483,7 @@ test('runtime memory hint no longer names a 2-file subset that contradicts the 5
 // ---- blueprint path --------------------------------------------------------
 
 test('blueprint instances get a shared-memory section and a blueprint memory hint', () => {
-  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'bp-instance', env: null, blueprintId: 'abc123', autonomous: true });
+  const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, blueprintId: 'abc123', autonomous: true });
   assert.ok(md.includes('## Memory System (Shared — Blueprint Instance)'));
   assert.ok(md.includes('abc123'));
   const hint = buildMemoryHint('abc123');

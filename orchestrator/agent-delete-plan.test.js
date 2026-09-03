@@ -5,14 +5,19 @@ const assert = require('node:assert');
 
 const { isGracefulDeleteRole, TeardownRegistry } = require('./agent-delete-plan');
 
-test('isGracefulDeleteRole: only bp-instance keeps the graceful commit window', () => {
-  assert.strictEqual(isGracefulDeleteRole('bp-instance'), true);
-});
-
-test('isGracefulDeleteRole: every non-BP role is force-removed', () => {
-  for (const role of ['agent', 'team-member', 'team', 'orchestrator', 'ephemeral', undefined, null, '']) {
+// #1962 removed the BriefingPack model. `bp-instance` was the only role that
+// ever took the graceful commit window, so the predicate is now constantly
+// false — including for the two retired role names, which a leftover config on
+// an upgraded stack can still carry.
+test('isGracefulDeleteRole: no role keeps the graceful commit window any more', () => {
+  for (const role of ['agent', 'team-member', 'team', 'ephemeral', undefined, null, '']) {
     assert.strictEqual(isGracefulDeleteRole(role), false, `role ${JSON.stringify(role)} should not be graceful`);
   }
+});
+
+test('isGracefulDeleteRole: a leftover bp-instance/orchestrator config is force-removed too', () => {
+  assert.strictEqual(isGracefulDeleteRole('bp-instance'), false);
+  assert.strictEqual(isGracefulDeleteRole('orchestrator'), false);
 });
 
 test('TeardownRegistry: begin arms the guard, has() reports it, finish clears it', () => {

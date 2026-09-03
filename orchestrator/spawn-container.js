@@ -419,11 +419,16 @@ async function listAgentContainers(id) {
 }
 
 // Ensure the agent's own container is gone before we touch the network. With
-// `graceful` (bp-instance only), prefer the graceful path: the SIGTERM sent by
-// stopAgentProcess lets the agent commit partial work, exit and autoremove
-// within the grace window; fall back to force-remove so teardown always makes
-// progress. Non-BP agents (`graceful: false`, #1791) have no bound repo and
-// nothing to flush, so we skip the up-to-8s poll and force-remove immediately.
+// `graceful`, prefer the graceful path: the SIGTERM sent by stopAgentProcess
+// lets the agent commit partial work, exit and autoremove within the grace
+// window; fall back to force-remove so teardown always makes progress. Agents
+// with nothing to flush (`graceful: false`, #1791) skip the up-to-8s poll and
+// force-remove immediately.
+//
+// `graceful` is decided by `isGracefulDeleteRole` in agent-delete-plan.js,
+// which since #1962 (BriefingPack removal) is false for every supported role —
+// `bp-instance` was the only one that flushed a bound repo on shutdown. The
+// flag stays because it is the seam the next such role would use.
 async function ensureAgentContainerGone(id, { graceful = true } = {}) {
   if (graceful) {
     for (let attempt = 0; attempt < AGENT_STOP_GRACE_POLLS; attempt++) {
@@ -447,9 +452,9 @@ async function ensureAgentContainerGone(id, { graceful = true } = {}) {
 
 async function removePerAgentNetwork(id, { graceful = true } = {}) {
   const name = perAgentNetworkName(id);
-  // 1. Make sure the agent's own container is gone. `graceful` (bp-instance
-  //    only, #1791) allows the SIGTERM-driven commit + autoremove window before
-  //    force-removing; non-BP agents force-remove immediately.
+  // 1. Make sure the agent's own container is gone. `graceful` (#1791) allows
+  //    the SIGTERM-driven commit + autoremove window before force-removing;
+  //    agents with nothing to flush force-remove immediately.
   await ensureAgentContainerGone(id, { graceful });
   // 2. Disconnect the persistent service containers (orchestrator + conduwuit).
   //    Force so a half-attached service still comes off. 404 / "not connected"

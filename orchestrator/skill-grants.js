@@ -4,9 +4,8 @@
 // agent construct, never on the Working Environment:
 //
 //   - team agents (`role: "team"`) carry `skills[]` — the team's active set
-//   - standalone agents / orchestrators carry their own `skills[]`
+//   - standalone agents carry their own `skills[]`
 //   - team-members inherit the parent team's list unless `skillsOverride` is set
-//   - bp-instances inherit the parent orchestrator's list the same way
 //
 // The Working Environment is a pure infrastructure template (repo, credentials,
 // MCP, additionalContext); its legacy `skills[]` field is migrated onto the
@@ -27,11 +26,10 @@ function effectiveSkills(cfg, loadCfg = null) {
   if (Array.isArray(cfg.skillsOverride)) return cfg.skillsOverride;
   // The construct's own grant.
   if (Array.isArray(cfg.skills)) return cfg.skills;
-  // Inherit from the parent construct.
-  const parentId =
-    cfg.role === "team-member" ? cfg.parentTeamId :
-    cfg.role === "bp-instance" ? cfg.parentOrchestratorId :
-    null;
+  // Inherit from the parent construct. `team-member` is the only inheriting
+  // role — `bp-instance` (which inherited from its parent orchestrator) went
+  // with the BriefingPack model in #1962.
+  const parentId = cfg.role === "team-member" ? cfg.parentTeamId : null;
   if (parentId && typeof loadCfg === "function") {
     const parent = loadCfg(parentId);
     if (parent && Array.isArray(parent.skills)) return parent.skills;
@@ -48,11 +46,10 @@ function hasSkillGrant(skills) {
 // One-time grant migration: copy the legacy env grant onto a config that does
 // not carry `skills` yet. Returns the migrated config, or null when nothing to
 // do. Idempotent — an existing `skills` field always wins; team-members keep
-// the inherit/override model and are never touched; bp-instances inherit from
-// their parent orchestrator (which is itself migrated), so they are skipped too.
+// the inherit/override model and are never touched.
 function migrateSkillGrant(cfg, env) {
   if (!cfg) return null;
-  if (cfg.role === "team-member" || cfg.role === "bp-instance") return null;
+  if (cfg.role === "team-member") return null;
   if (Array.isArray(cfg.skills)) return null;
   const inherited = env && Array.isArray(env.skills) ? [...env.skills] : [];
   return { ...cfg, skills: inherited };
@@ -90,7 +87,7 @@ function planSkillSync({ members = [], skillName, includeMembers = [] } = {}) {
 // the orchestrator persists it. A team-member writes its own `skillsOverride`
 // (which REPLACES the inherited team set, so the current effective grant is
 // materialized first to preserve inherited skills); any other construct
-// (standalone / orchestrator / bp-instance) writes its own `skills[]`.
+// (standalone agent / team) writes its own `skills[]`.
 // Idempotent set insert (activate) / remove (deactivate). This is what makes
 // `install` a true activation-equivalent: the grant now survives a full re-seed.
 function planAgentGrantEdit(cfg, skillName, active, loadCfg = null) {

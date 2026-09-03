@@ -45,13 +45,18 @@ test("team-member with a missing parent resolves to empty, no throw", () => {
   assert.deepEqual(effectiveSkills({ role: "team-member", parentTeamId: "gone" }), []);
 });
 
-test("bp-instance inherits from its parent orchestrator", () => {
+// Removal guard (#1962): `bp-instance` used to inherit from its parent
+// orchestrator via `parentOrchestratorId`. Both roles went with the
+// BriefingPack model, so `team-member`/`parentTeamId` is the only inheritance
+// path left — a leftover BP config on an upgraded stack must NOT reach through
+// `parentOrchestratorId` any more.
+test("a leftover bp-instance no longer inherits through parentOrchestratorId", () => {
   const load = (id) => (id === "orch" ? { role: "orchestrator", skills: ["ace-engineering"] } : null);
   assert.deepEqual(
     effectiveSkills({ role: "bp-instance", parentOrchestratorId: "orch" }, load),
-    ["ace-engineering"],
+    [],
   );
-  // Its own recorded grant wins over inheritance.
+  // Its own recorded grant is still read — that path is role-agnostic.
   assert.deepEqual(
     effectiveSkills({ role: "bp-instance", parentOrchestratorId: "orch", skills: ["own"] }, load),
     ["own"],
@@ -83,9 +88,8 @@ test("migration is idempotent — an existing skills field always wins", () => {
   assert.equal(migrateSkillGrant({ role: "team", skills: ["kept"] }, { skills: ["x"] }), null);
 });
 
-test("migration skips team-members and bp-instances (they inherit)", () => {
+test("migration skips team-members (they inherit)", () => {
   assert.equal(migrateSkillGrant({ role: "team-member" }, { skills: ["x"] }), null);
-  assert.equal(migrateSkillGrant({ role: "bp-instance" }, { skills: ["x"] }), null);
 });
 
 test("migration with no env / no env.skills writes an empty grant", () => {

@@ -1,0 +1,15 @@
+{
+  "toolchainVersion": 1,
+  "id": "jvm",
+  "name": "JVM — Java + Maven (version pinned by the project)",
+  "stack": "jvm",
+  "description": "Lets an agent build and test a Java project: compile, run unit tests, run Maven. The image carries no fixed JDK — it carries the mise version manager, and each repository declares the exact Java and Maven version it wants in a committed .mise.toml. Updating Java is a commit in that repository, not a platform release, and two repositories can sit on different Java versions at once. A repository that pins nothing gets the image baseline (Java 21 / Maven 3.9). The runtime is downloaded on first use and cached in the agent's own workspace, so it survives a respawn.",
+  "image": "as-agent-jvm:latest",
+  "platforms": [
+    "podman",
+    "kubernetes"
+  ],
+  "versionSource": "bootstrap",
+  "versionManager": "mise",
+  "baseline": "java temurin-21, maven 3.9"
+}

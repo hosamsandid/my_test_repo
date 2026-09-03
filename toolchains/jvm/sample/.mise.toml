@@ -1,0 +1,7 @@
+# The whole point of the bootstrap variant: this file — committed in the
+# PROJECT repository, not in the platform — decides which Java and Maven the
+# agent builds with. Change it, commit, and the next run uses the new version:
+# no image build, no registry push, no respawn (#1941 AC6).
+[tools]
+java = "temurin-21"
+maven = "3.9"

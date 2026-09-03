@@ -1330,6 +1330,17 @@ function resolveImageForAgent(config) {
     toolchains: loadToolchains(),
     defaultImage: DEFAULT_AGENT_IMAGE,
     runtime: normalizeRuntime(process.env.AEE_CONTAINER_RUNTIME),
+    // Where THIS deployment keeps its toolchain variant images (#1941 AC11).
+    // A manifest declares the bare `as-agent-jvm:latest` the build produces;
+    // a cluster pulls it from its Artifact Registry under the release's tag.
+    // Both halves arrive on the deployment (the same overlay patch that carries
+    // AGENT_IMAGE, pinned per release by deploy/k8s/set-images.sh) and are empty
+    // on a local Podman stack, where the image IS in the local store under that
+    // bare tag. Applied here at spawn time rather than baked into the registry
+    // entry at install time, so a release re-pin reaches a toolchain that was
+    // registered long before it, with no operator re-install.
+    imagePrefix: process.env.AEE_TOOLCHAIN_IMAGE_PREFIX || "",
+    imageTag: process.env.AEE_TOOLCHAIN_IMAGE_TAG || "",
   });
   if (resolved.error) return { error: resolved.error, message: resolved.message };
   return {

@@ -157,6 +157,51 @@ jobs:
             docker push "$AR/$img:${TAG}"
           done
 
+      # Toolchain variant images (#1941 AC11). A variant is never a pod `image:`
+      # field — it is named by a toolchain manifest at RUNTIME — so the kustomize
+      # images: transformer never sees it and set-images.sh pins its tag onto
+      # AEE_TOOLCHAIN_IMAGE_TAG instead. This step is the other half of that
+      # contract: every variant is pushed under the SAME ${TAG}, so a release can
+      # never ship a manifest referencing a tag nobody pushed.
+      #
+      # Discovery is deliberately the same shape as `make toolchain-images` and
+      # the CI base-contract job: every toolchains/<id>/ carrying a toolchain.json,
+      # `_`-prefixed directories skipped as shared material, the repo name read
+      # out of the manifest's `image`. Adding a stack therefore stays "one
+      # Dockerfile and one manifest" with no edit to this workflow (AC14), and an
+      # installation that ships no variant simply builds nothing here.
+      - name: Build and push toolchain variant images
+        run: |
+          set -euo pipefail
+          built=0
+          for dir in toolchains/*/; do
+            id="$(basename "$dir")"
+            case "$id" in _*) continue ;; esac
+            [ -f "$dir/toolchain.json" ] || continue
+            # `as-agent-jvm:latest` -> `as-agent-jvm`. The manifest's own tag is
+            # the LOCAL build's placeholder and is deliberately discarded here:
+            # what a cluster pulls is this release's immutable tag.
+            ref="$(sed -n 's/.*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/toolchain.json" | head -1)"
+            repo="${ref%%:*}"
+            if [ -z "$repo" ]; then
+              echo "::error::$id/toolchain.json declares no image"; exit 1
+            fi
+            # BUILD CONTEXT is `toolchains/` (every variant COPYs the shared
+            # bootstrap from _shared/, and a context cannot reach a sibling dir).
+            # The base is pinned to the as-agent image built from THIS commit,
+            # not the variant Dockerfile's `as-agent:latest` default — a variant
+            # must layer onto the release it ships with.
+            docker build \
+              --build-arg "AGENT_BASE_IMAGE=$AR/as-agent:${TAG}" \
+              -t "$AR/$repo:${TAG}" -f "$dir/Dockerfile" toolchains/
+            # The gate travels with the release, not just with the PR: a variant
+            # that drifted off the base contract must not reach the registry.
+            AEE_CONTAINER_CLI=docker ./toolchains/_shared/base-contract-check.sh "$AR/$repo:${TAG}" "$id"
+            docker push "$AR/$repo:${TAG}"
+            built=$((built + 1))
+          done
+          echo "[toolchain-images] pushed $built variant image(s) under :${TAG}"
+
       - name: Pin overlay to the tag
         run: ./deploy/k8s/set-images.sh "${{ inputs.environment }}" "${TAG}"
 

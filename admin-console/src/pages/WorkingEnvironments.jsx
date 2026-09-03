@@ -12,7 +12,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
-import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from './toolchain-select-view.js';
+import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { usePageActions } from '../context/PageActionsContext';
 
 const labelStyle = {
@@ -772,7 +772,20 @@ function ToolchainRegistryPanel({ data, onChanged }) {
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
 
+  // Install a SHIPPED variant (#1941). Deliberately a bare `{ id }`: the image
+  // reference is read server-side from the seeded manifest, so the operator
+  // never retypes it and cannot typo it. The same route, the same validator —
+  // only the door differs.
+  async function install(id) {
+    setBusy(true); setErr(null);
+    try {
+      await apiCall('POST', '/api/toolchains', { id });
+      onChanged();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
   const canAdd = form.id.trim() && form.name.trim() && form.image.trim() && form.platforms.length > 0;
+  const available = availableToolchains(data?.available, data?.runtime);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -795,6 +808,66 @@ function ToolchainRegistryPanel({ data, onChanged }) {
         )}
       </div>
 
+      {/* The variants this repository SHIPS (#1941) — built by
+          `make toolchain-images`, seeded by `make seed-toolchains`. One click
+          installs one, because the image reference comes from its manifest;
+          the hand-registration form below stays for everything we do not ship. */}
+      {available.length > 0 && (
+        <div>
+          <div style={labelStyle}>Available to install</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+            {available.map(t => (
+              <div key={t.id} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-3)',
+                border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+              }}>
+                <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                  <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+                    {t.name} <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({t.id})</span>
+                  </div>
+                  {/* The plain-language description is the whole point of the
+                      manifest field — this is what is read before installing. */}
+                  {t.description && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {t.description}
+                    </div>
+                  )}
+                  {versionSourceLine(t) && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {versionSourceLine(t)}
+                    </div>
+                  )}
+                  {t.image && (
+                    <div style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', wordBreak: 'break-all', marginTop: 'var(--eb-space-1)' }}>
+                      {t.image}
+                    </div>
+                  )}
+                  {t.reason && (
+                    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', lineHeight: 1.5, marginTop: 'var(--eb-space-1)' }}>
+                      {t.reason}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => install(t.id)}
+                  disabled={busy || !t.installable}
+                  style={{
+                    flex: '0 0 auto',
+                    padding: 'var(--eb-space-1) var(--eb-space-3)',
+                    background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                    border: 'none', borderRadius: 'var(--eb-radius-md)',
+                    fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                    cursor: (busy || !t.installable) ? 'not-allowed' : 'pointer',
+                    opacity: (busy || !t.installable) ? 0.5 : 1,
+                  }}
+                >Install</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div>
         <div style={labelStyle}>Registered toolchains</div>
         {toolchains.length === 0 ? (
@@ -815,6 +888,14 @@ function ToolchainRegistryPanel({ data, onChanged }) {
                   </div>
                   <div style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', wordBreak: 'break-all' }}>
                     {t.image}
+                    {/* What the runtime actually pulls, when the deployment
+                        rewrites it (#1941 AC11: a cluster pulls from its
+                        Artifact Registry under the pinned release tag). Shown
+                        only when it DIFFERS — an ImagePullBackOff is otherwise
+                        debugged against a reference nothing pulls. */}
+                    {t.effectiveImage && t.effectiveImage !== t.image && (
+                      <> → {t.effectiveImage}</>
+                    )}
                   </div>
                   <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
                     {(t.platforms || []).join(', ')}

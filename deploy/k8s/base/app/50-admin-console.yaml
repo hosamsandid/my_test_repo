@@ -49,6 +49,29 @@ spec:
             # AEE_K8S_CONTEXT_HOSTPATH=1 opt-in via the agent-studio-env Secret.
             - name: AEE_CONTAINER_RUNTIME
               value: kubernetes
+            # The console needs the SAME toolchain image prefix as the
+            # orchestrator (#1941 AC11), not because it spawns anything, but
+            # because it is the side that RESOLVES a seeded manifest into the
+            # image reference an operator sees and installs
+            # (`toolchainImagePrefix()` in api.js → the byte-identical
+            # `admin-console/api/toolchain-registry.js`). Set on one side only,
+            # the console would show and store a bare tag while the
+            # orchestrator resolved a registry path — the install review would
+            # then describe an image the cluster never pulls.
+            #
+            # Empty here for the same reason as on the orchestrator: base is the
+            # kind/local flavour with side-loaded images. The hosted overlays
+            # patch it (overlays/{test,preprod}/app/patch-toolchain-prefix.yaml).
+            - name: AEE_TOOLCHAIN_IMAGE_PREFIX
+              value: ""
+            # The release tag those variant images carry. Same story as the
+            # prefix: the manifest's `:latest` is the tag a developer's local
+            # build produces, while a release pushes an IMMUTABLE tag and pins
+            # it here via deploy/k8s/set-images.sh — so a cluster never pulls a
+            # mutable `:latest` off a real registry. Empty here (kind side-loads
+            # the bare tag) and rewritten by set-images.sh in the hosted overlays.
+            - name: AEE_TOOLCHAIN_IMAGE_TAG
+              value: ""
           ports:
             - containerPort: 4000
           readinessProbe:

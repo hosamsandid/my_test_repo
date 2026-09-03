@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from './toolchain-select-view.js';
+import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 
 const JVM = { id: 'jvm-21', name: 'JVM 21', image: 'localhost/as-agent-jvm:latest', platforms: ['podman'], description: 'JDK 21 + Maven' };
 const GO = { id: 'go-1-23', name: 'Go 1.23', image: 'ar/as-agent-go:v1', platforms: ['podman', 'kubernetes'] };
@@ -72,4 +72,68 @@ test('with no running agents the warning drops the interruption claim', () => {
   const w = toolchainChangeWarning({ isEdit: true, initialToolchainId: null, toolchainId: 'jvm-21', agentCount: 0 });
   assert.doesNotMatch(w, /interrupted/);
   assert.match(w, /next time an agent in this environment starts/);
+});
+
+// ── #1941: the shipped variants ────────────────────────────────────────────
+
+test('availableToolchains: a shipped variant is installable on a runtime it declares', () => {
+  const rows = availableToolchains([{
+    id: 'jvm', name: 'JVM', description: 'Java + Maven', ok: true,
+    image: 'as-agent-jvm:latest', effectiveImage: 'ar.example.com/p/as-agent-jvm:v1',
+    platforms: ['podman', 'kubernetes'],
+  }], 'kubernetes');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].installable, true);
+  assert.equal(rows[0].reason, '');
+  // The operator is shown what will ACTUALLY be pulled, not the manifest's
+  // placeholder tag — otherwise the install review describes a different image.
+  assert.equal(rows[0].image, 'ar.example.com/p/as-agent-jvm:v1');
+});
+
+test('availableToolchains: a podman-only variant is listed but not installable on kubernetes', () => {
+  const [row] = availableToolchains([{
+    id: 'jvm', name: 'JVM', ok: true, image: 'as-agent-jvm:latest', platforms: ['podman'],
+  }], 'kubernetes');
+  assert.equal(row.installable, false);
+  assert.match(row.reason, /not available on the 'kubernetes' runtime/);
+});
+
+test('availableToolchains: an invalid manifest is KEPT with its errors, never dropped', () => {
+  // A silently shorter list cannot answer "where is the JVM toolchain?".
+  const [row] = availableToolchains([{ id: 'jvm', ok: false, errors: ['versionSource is required'] }], 'podman');
+  assert.equal(row.broken, true);
+  assert.equal(row.installable, false);
+  assert.match(row.reason, /versionSource is required/);
+});
+
+test('availableToolchains: tolerates a missing/garbage payload', () => {
+  assert.deepEqual(availableToolchains(undefined, 'podman'), []);
+  assert.deepEqual(availableToolchains([null, {}, { id: '' }], 'podman'), []);
+  // effectiveImage absent (a pre-#1941 server) falls back to the bare image.
+  const [row] = availableToolchains([{ id: 'x', ok: true, image: 'as-agent-x:latest', platforms: ['podman'] }], 'podman');
+  assert.equal(row.image, 'as-agent-x:latest');
+});
+
+test('versionSourceLine states whether a version update is a commit or a release', () => {
+  const boot = versionSourceLine({ versionSource: 'bootstrap', versionManager: 'mise', baseline: 'java temurin-21' });
+  assert.match(boot, /commit in that repository/);
+  assert.match(boot, /via mise/);
+  assert.match(boot, /pins nothing gets java temurin-21/);
+
+  const baked = versionSourceLine({ versionSource: 'baked', baseline: 'java temurin-21' });
+  assert.match(baked, /platform release/);
+  assert.match(baked, /airgapped/);
+
+  // A pre-#1941 registry entry declares neither — say nothing rather than guess.
+  assert.equal(versionSourceLine({}), '');
+  assert.equal(versionSourceLine(null), '');
+});
+
+test('availableToolchains carries the version fields, so a row needs no second lookup', () => {
+  const [row] = availableToolchains([{
+    id: 'jvm', name: 'JVM', ok: true, image: 'as-agent-jvm:latest', platforms: ['podman'],
+    versionSource: 'bootstrap', versionManager: 'mise', baseline: 'java temurin-21, maven 3.9',
+  }], 'podman');
+  assert.match(versionSourceLine(row), /commit in that repository/);
+  assert.match(versionSourceLine(row), /via mise/);
 });

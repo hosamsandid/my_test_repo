@@ -53,6 +53,22 @@ expect_grep   "$KIND_APP" 'imagePullPolicy: Never'          "kind: side-loaded i
 expect_absent "$KIND_APP" 'pkg\.dev'                        "kind: no registry paths"
 expect_absent "$KIND_APP" 'kind: Ingress'                   "kind: no Ingress"
 expect_grep   "$KIND_APP" 'value: as-agent:latest'          "kind: AGENT_IMAGE is bare as-agent:latest"
+# #1941 AC11. Asserted POSITIVELY (the var declared with an empty value) rather
+# than by absence: a kind node side-loads a variant under exactly the bare tag
+# its manifest names, so a non-empty prefix here would point every agent pod at
+# a registry this flavour never pushes to — and an accidentally DELETED var
+# would look identical to a correct empty one if we only checked for absence.
+expect_grep   "$KIND_APP" 'name: AEE_TOOLCHAIN_IMAGE_PREFIX'  "kind: toolchain image prefix declared"
+expect_grep   "$KIND_APP" 'name: AEE_TOOLCHAIN_IMAGE_TAG'     "kind: toolchain image tag declared"
+# ...and both are EMPTY: 2 vars x 2 Deployments = 4, the only `value: ""` in the
+# app base. A count, not a bare grep, because "declared" and "empty" are two
+# different failures and only the pair together says "kind pulls the bare tag".
+kind_tc_n="$(grep -c 'value: ""' "$KIND_APP")" || kind_tc_n=0
+if [ "$kind_tc_n" -eq 4 ]; then
+  note "kind: toolchain prefix+tag empty on both deployments (bare local tag)"
+else
+  fail "kind: expected 4 empty toolchain env values, found $kind_tc_n"
+fi
 expect_absent "$KIND_APP" 'namespace: agent-studio-preprod' "kind: namespace untouched"
 
 echo "== kind-e2e overlay"
@@ -69,6 +85,17 @@ done
 expect_grep   "$TEST_APP" 'imagePullPolicy: Always'                          "test: pull policy Always"
 expect_absent "$TEST_APP" 'imagePullPolicy: Never'                           "test: no Never left"
 expect_grep   "$TEST_APP" "value: $AR_PATH/as-agent:"                        "test: AGENT_IMAGE from Artifact Registry"
+# #1941 AC11: the toolchain image prefix must reach BOTH the orchestrator (which
+# spawns from it) and the admin-console (which shows the operator what will be
+# pulled). They live in two strategic-merge patches — one per Deployment — so a
+# PAIR count is the thing worth asserting: a single hit means one of the two
+# patches was dropped from kustomization.yaml and the two halves now disagree.
+tc_n="$(grep -c "value: $AR_PATH$" "$TEST_APP")" || tc_n=0
+if [ "$tc_n" -eq 2 ]; then
+  note "test: toolchain image prefix on both orchestrator and admin-console"
+else
+  fail "test: expected 2 AEE_TOOLCHAIN_IMAGE_PREFIX values, found $tc_n"
+fi
 expect_grep   "$TEST_APP" 'global-static-ip-name: agent-studio-ip$'          "test: static IP agent-studio-ip"
 expect_grep   "$TEST_APP" '- agent-studio\.projectroots-acn\.com'            "test: cert domain"
 expect_absent "$TEST_APP" 'agent-studio-preprod'                             "test: no preprod values"
@@ -81,6 +108,16 @@ expect_absent "$PRE_CORE" 'namespace: agent-studio$'                           "
 expect_absent "$PRE_APP"  'namespace: agent-studio$'                           "preprod app: no stray agent-studio namespace"
 expect_grep   "$PRE_APP"  'value: agent-studio-preprod'                        "preprod: AEE_INSTANCE_ID=agent-studio-preprod"
 expect_grep   "$PRE_APP"  'global-static-ip-name: agent-studio-preprod-ip'     "preprod: static IP agent-studio-preprod-ip"
+# #1941 AC11 — same pair invariant as test (see there). preprod additionally
+# proves its patch matched at all: patch-toolchain-prefix.yaml names the BASE
+# namespace so the overlay's namespace transformer can rewrite it, and a patch
+# that failed to match would silently contribute nothing rather than error.
+pre_tc_n="$(grep -c "value: $AR_PATH$" "$PRE_APP")" || pre_tc_n=0
+if [ "$pre_tc_n" -eq 2 ]; then
+  note "preprod: toolchain image prefix on both orchestrator and admin-console"
+else
+  fail "preprod: expected 2 AEE_TOOLCHAIN_IMAGE_PREFIX values, found $pre_tc_n"
+fi
 expect_grep   "$PRE_APP"  '- agent-studio-preprod\.projectroots-acn\.com'      "preprod: cert domain"
 # RoleBinding subjects live in core — the namespace transformer must rewrite them.
 if awk '/kind: RoleBinding/,0' "$PRE_CORE" | grep -q 'namespace: agent-studio-preprod'; then
@@ -102,6 +139,20 @@ for env in test preprod; do
     note "$env pinned: all 4 image refs carry :$CHECK_TAG"
   else
     fail "$env pinned: expected 4 refs with :$CHECK_TAG, found $n"
+  fi
+  # #1941 AC11, the load-bearing half: a variant image is named by a toolchain
+  # manifest at RUNTIME, so it is never a pod `image:` field and the four refs
+  # above cannot cover it. Its tag rides on AEE_TOOLCHAIN_IMAGE_TAG (both
+  # Deployments), which set-images.sh must pin to the SAME release tag the
+  # deploy workflow pushed each variant under — otherwise a release ships a
+  # manifest referencing a tag nobody pushed and every toolchain agent lands in
+  # ImagePullBackOff. Counted as a bare value (no leading colon), which is also
+  # why it does not inflate the count above.
+  tn="$(grep -c "value: $CHECK_TAG$" "$SIM")" || tn=0
+  if [ "$tn" -eq 2 ]; then
+    note "$env pinned: toolchain image tag pinned on both deployments"
+  else
+    fail "$env pinned: expected 2 AEE_TOOLCHAIN_IMAGE_TAG values of $CHECK_TAG, found $tn"
   fi
 done
 

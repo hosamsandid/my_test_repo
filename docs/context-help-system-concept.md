@@ -315,7 +315,9 @@ legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-sur
 with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
 `TIER_SIGNAL_HELP` attribution-tier explainer), and **E10 → #1993** (Credentials: a
 per-surface reference with a "?" on each of the three pages the one topic serves —
-`/ssh-keys`, `/github-tokens` and `/my-credentials`).
+`/ssh-keys`, `/github-tokens` and `/my-credentials`), and **E3 → #1985** (Knowledge: a
+per-surface reference with a deep-linked "?" on each surface, written deliberately leaner
+than its siblings — ~4.7k rather than ~12k — because the grounding budget was nearly spent).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the

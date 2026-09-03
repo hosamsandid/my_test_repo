@@ -196,6 +196,23 @@ export function markUnreadItem(agent, activityState) {
 }
 
 /**
+ * The chat-rail-only "What these actions do…" entry (#1972).
+ *
+ * The row menu is one of the surfaces the epic gives a "?", and a menu cannot
+ * host a button: `RowContextMenu` renders a flat list of real, index-walked
+ * entries, so a help *item* is the only affordance that does not break its
+ * keyboard traversal. Like `markUnreadItem` it is chat-only and lives here
+ * rather than in the shared `buildAgentMenu` the Agents page also renders —
+ * that page's own topic already covers lifecycle.
+ *
+ * Always last, always enabled, and fenced off from the actions above it: it is
+ * the one entry that changes nothing.
+ */
+export function helpMenuItem() {
+  return { key: 'help', label: 'What these actions do…', disabled: false, separated: true };
+}
+
+/**
  * Split a chosen menu key into the action and its argument. Only the team menu's
  * add-role entries carry one (`add-role:<roleId>`), and a role id may itself
  * contain a colon, so the key is split once from the left rather than by every
@@ -255,6 +272,7 @@ export function railMenuItems({
       items: [
         markUnreadItem(agent, activityState),
         ...lifecycle.map((item, i) => (i === 0 ? { ...item, separated: true } : item)),
+        helpMenuItem(),
       ],
     };
   }
@@ -265,13 +283,16 @@ export function railMenuItems({
     const team = group.header || (agents || []).find(a => a && a.id === group.id && a.role === 'team') || null;
     return {
       label: `Team actions for ${group.displayName || group.id}`,
-      items: buildTeamMenu({
-        team,
-        teamId: group.id,
-        canManage: team ? team.canManage !== false : true,
-        busy: busyIds.has(group.id),
-        missingRoles,
-      }),
+      items: [
+        ...buildTeamMenu({
+          team,
+          teamId: group.id,
+          canManage: team ? team.canManage !== false : true,
+          busy: busyIds.has(group.id),
+          missingRoles,
+        }),
+        helpMenuItem(),
+      ],
     };
   }
 

@@ -8484,7 +8484,14 @@ app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
  * realpath-and-contain resolver every sibling workspace handler uses — so a
  * pack tree outside the agent's workspace root is refused here rather than
  * trusted. `path` is relative to the agent root and may be omitted for the root
- * itself. */
+ * itself.
+ *
+ * One behavioural difference from the service, deliberately not ported: packs
+ * are read from the CHECKED-OUT tree only. bp-explorer additionally overlaid
+ * unmerged `agent/*` branches and took the winning branch's `brief.md` body,
+ * which fed each role's drafted prompt — see the note in `briefings-fs.js` for
+ * why chasing refs the platform no longer writes (#1962 removed the claim
+ * endpoint) is not worth a git spawn per request. */
 app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   const agentId = typeof req.body?.agentId === 'string' ? req.body.agentId.trim() : '';
   if (!agentId) return res.status(400).json({ error: 'agentId is required' });
@@ -8500,8 +8507,9 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   }
 
   let packs;
+  let skipped;
   try {
-    ({ packs } = readBriefingPacks(missionDir));
+    ({ packs, skipped } = readBriefingPacks(missionDir));
   } catch (err) {
     // A missing / empty / unparseable pack tree is a user-fixable condition,
     // so it must read as a sentence rather than a stack trace. Anything else is
@@ -8521,7 +8529,16 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
-  res.status(201).json(draft);
+  // `skipped` names the packs that carried no resolvable id and so contribute
+  // no role. `readBriefingPacks` collects it precisely because a draft quietly
+  // missing a role is the failure a user cannot tell from a bug — reporting it
+  // is what makes that collection worth anything. Reported on the RESPONSE and
+  // deliberately not written into the persisted draft: the draft is a
+  // process-template bundle, and a read-time diagnostic is not part of that
+  // shape. Omitted when nothing was skipped, so the normal response body is
+  // byte-identical to before.
+  const partial = Array.isArray(skipped) && skipped.length > 0;
+  res.status(201).json(partial ? { ...draft, skipped } : draft);
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */

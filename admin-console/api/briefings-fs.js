@@ -14,13 +14,30 @@
  * "The parts it consumes" is the whole design constraint. The only consumer is
  * `briefingsToUnified()` (unified-graph.js), and it reads nine fields:
  * `id`, `slug`, `title`, `body`, `stage`, `artifacts`, `depends_on`, `parent`,
- * `children` / `is_parent`. Everything else bp-explorer computed — the git
- * branch/worktree status overlay, `_derive_status_from_children`, rigor, claim
- * and revision bookkeeping — fed `status`, and `briefingsToUnified` drops
- * `status` on purpose (its own decision 2). None of it is ported, and the
- * resulting draft is byte-identical for it. What IS ported is ported
- * faithfully, including bp-explorer's quirks (see `parseFrontmatter`), because
- * AC2 asks for the same draft the service produced.
+ * `children` / `is_parent`. `_derive_status_from_children`, rigor, claim and
+ * revision bookkeeping all fed `status`, and `briefingsToUnified` drops
+ * `status` on purpose (its own decision 2), so dropping them changes nothing.
+ * What IS ported is ported faithfully, including bp-explorer's quirks (see
+ * `parseFrontmatter`), because AC2 asks for the same draft the service made.
+ *
+ * ONE deliberate behavioural difference, and it is not a `status`-only one.
+ * bp-explorer's **agent-branch overlay** (`load_all_briefings`, server.py) also
+ * scanned `refs/heads/agent/*` + `refs/remotes/origin/agent/*` and, when a
+ * branch's status outranked main's, took that branch's `brief.md` wholesale —
+ * `bp["body"] = branch_body`, not just the status field. `body` is load-bearing:
+ * `briefingsToUnified` maps it to `content`, and `unifiedToProcessTemplate`
+ * resolves a role's prompt as `systemPrompt || content`. So for a pack claimed
+ * on an unmerged agent branch, the old importer drafted the role prompt from
+ * that branch and this one drafts it from the checked-out tree.
+ *
+ * That is scoped out rather than ported, on purpose: #1962 removed
+ * `POST /internal/agents/:id/claim`, so the platform no longer creates agent
+ * branches, and porting `discover_agent_branches` + `git show` would mean
+ * spawning git inside a request to chase refs nothing writes any more. The
+ * consequence is stated plainly here, in the route comment and in
+ * RELEASE_NOTES instead of being claimed away — if you are migrating a
+ * repository whose packs still carry unmerged agent-branch edits, merge those
+ * branches before importing and the drafts match.
  *
  * Layout convention, inherited from bp-explorer's `resolve_workspace`: packs
  * live at `<missionDir>/artifacts/briefings/**\/brief.md`, and directory
@@ -110,7 +127,14 @@ function parseFrontmatter(text) {
       currentKey = null;
     }
   };
-  // One layer of surrounding double quotes, as upstream's `.strip('"')` chain.
+  // Strip ONE layer of surrounding double quotes — deliberately not the same as
+  // upstream. Python's `.strip('"')`, which bp-explorer applies to list items
+  // and object values, removes EVERY leading and trailing quote, so an
+  // unbalanced `"a` / `b"` pair reduces differently there (measured: upstream
+  // yields `a` / `b`, this yields `"a` / `b"`). Only malformed frontmatter can
+  // tell the difference, and a balanced value — every well-formed pack — is
+  // identical, so the single layer stays: it is the conservative reading, and
+  // `depends_on` list items do reach `dependsOn` in the draft.
   const unquote = (s) => (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"' ? s.slice(1, -1) : s);
 
   for (const raw of fmLines) {
@@ -305,9 +329,18 @@ function readBriefingPacks(missionDir) {
     packs.push({
       id,
       slug: typeof meta.slug === 'string' && meta.slug ? meta.slug : dirSlug,
-      // Upstream reads `mission` first and only then `title`; an empty
-      // `mission:` therefore wins over a `title:`, and briefingsToUnified's
-      // own `title || slug || id` chain handles the fallback from there.
+      // Upstream reads `mission` first and only then `title`, and so do we.
+      // The `typeof === 'string'` guard is a deliberate DIVERGENCE for one
+      // malformed shape: a bare `mission:` with no value parses to `[]`, which
+      // upstream's `meta.get("mission", …)` returns as-is and which is truthy
+      // in its `title || slug || id` chain — so upstream ends up with a `[]`
+      // title, while the guard here falls through to `title:`. Measured, and
+      // this side is the better behaviour; it is the only place the two differ
+      // on `title`. A well-formed pack is identical either way, and
+      // briefingsToUnified's own `title || slug || id` chain still handles the
+      // fallback from there. (`stage:` diverges the same way, `[]` vs `''`,
+      // and briefingsToUnified's own typeof guard absorbs it — no draft
+      // difference at all.)
       title: typeof meta.mission === 'string' ? meta.mission : (typeof meta.title === 'string' ? meta.title : ''),
       stage: typeof meta.stage === 'string' ? meta.stage : '',
       depends_on: asList(meta['depends-on']),

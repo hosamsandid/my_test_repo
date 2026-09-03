@@ -201,11 +201,14 @@ test('AC5 — the .bp-node class family survives (it is every node, a naming leg
   // The ticket's Trap: `.bp-node` is the class of EVERY node in the flow
   // editor, and the e2e flow journeys select on it. A removal sweep that took
   // it would leave the editor rendering and every journey failing.
+  // Phrased as the requirement, not as the failure: these are RETENTION
+  // assertions in a file otherwise full of removals, and a message reading
+  // "the node class is gone" next to an `assert.match` inverts on a quick scan.
   const render = RAW['process/flow-graph-render.js'];
-  assert.match(render, /'bp-node'/, 'the node class is gone');
-  assert.match(render, /bp-node-human/, 'the human-node class is gone');
-  assert.match(render, /bp-graph-styles/, 'the style element id is gone');
-  assert.match(render, /bp-badge\b/, 'the badge classes are gone');
+  assert.match(render, /'bp-node'/, 'bp-node must survive — it is every node\'s class');
+  assert.match(render, /bp-node-human/, 'bp-node-human must survive — human nodes still use it');
+  assert.match(render, /bp-graph-styles/, 'bp-graph-styles must survive — it is the style element id');
+  assert.match(render, /bp-badge\b/, 'bp-badge must survive — the badge classes are still produced');
 });
 
 test('AC5 — the shared edge/wiring surfaces keep their behaviour', () => {

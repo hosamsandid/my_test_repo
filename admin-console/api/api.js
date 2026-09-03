@@ -88,6 +88,9 @@ const { validatePluginManifest } = require('./plugin-manifest');
 // file at spawn time.
 const {
   validateToolchain,
+  validateToolchainManifest,
+  toolchainFromManifest,
+  resolveToolchainImage,
   normalizeRegistry: normalizeToolchainRegistry,
   normalizeRuntime: normalizeToolchainRuntime,
   DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
@@ -11773,6 +11776,67 @@ function saveToolchains(list) {
   writeJsonAtomic(TOOLCHAINS_INDEX, list);
 }
 
+// The SHIPPED variants (#1941): `toolchains/<id>/toolchain.json` from this
+// repository, seeded into the pool by `make seed-toolchains` exactly like a
+// reference plugin. Seeding installs nothing — it only makes the manifest
+// readable here, so installing a variant is picking an id whose description an
+// operator just read, instead of retyping an image reference from a Dockerfile.
+//
+// `_`-prefixed directories hold material shared between variants (the bootstrap
+// script), never a variant — the same convention `listPluginDirs` uses.
+const POOL_TOOLCHAINS_DIR = path.join(POOL_DIR, 'toolchains');
+
+// Where a variant's image actually lives in THIS deployment (#1941 AC11). A
+// manifest declares the bare `repo:tag` the build produces; a cluster pulls the
+// same image from its Artifact Registry under the release's tag. Both halves
+// arrive as env vars on the deployment (the overlay patch that carries
+// AGENT_IMAGE, pinned per release by deploy/k8s/set-images.sh) and are empty on
+// a local Podman stack.
+//
+// The console is DISPLAY-ONLY here. The registry entry it persists keeps the
+// manifest's bare tag and the orchestrator resolves the deployment reference at
+// spawn time — persisting a release-pinned reference would go stale on the next
+// release. This is used to show an operator what will actually be pulled, and
+// the console gets the same two env vars for exactly that reason: shown from one
+// side and resolved from the other, the install review would otherwise describe
+// an image the cluster never pulls.
+function toolchainImageRef(image) {
+  return resolveToolchainImage(image, {
+    prefix: process.env.AEE_TOOLCHAIN_IMAGE_PREFIX || '',
+    tag: process.env.AEE_TOOLCHAIN_IMAGE_TAG || '',
+  });
+}
+
+// Read + validate one seeded manifest. Never throws: an invalid manifest is
+// reported WITH its errors rather than hidden, so an operator can see why a
+// variant they expected is not installable (the readPluginDir discipline).
+function readSeededToolchain(id) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,39}$/.test(id)) return { id, ok: false, errors: ['invalid toolchain id'] };
+  const file = path.join(POOL_TOOLCHAINS_DIR, id, 'toolchain.json');
+  // Containment: the id is regex-bounded above (no slashes), re-checked here
+  // because this path is attacker-adjacent.
+  if (!path.resolve(file).startsWith(path.resolve(POOL_TOOLCHAINS_DIR) + path.sep)) {
+    return { id, ok: false, errors: ['invalid toolchain id'] };
+  }
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (err) { return { id, ok: false, errors: [`cannot read toolchain.json: ${err.message}`] }; }
+  const v = validateToolchainManifest(parsed, { dirId: id });
+  if (!v.ok) return { id, ok: false, errors: v.errors };
+  return { id, ok: true, manifest: v.manifest };
+}
+
+function listSeededToolchains() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(POOL_TOOLCHAINS_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort();
+  } catch { return []; }
+  return entries.map(readSeededToolchain);
+}
+
 // Which environments currently select a toolchain — used to refuse a removal
 // that would leave an environment pointing at nothing (its agents would then
 // refuse to spawn with `toolchain-not-registered`, which is correct but a
@@ -11790,9 +11854,31 @@ app.get('/api/toolchains', (req, res) => {
   const toolchains = listToolchains().map((t) => ({
     ...t,
     environments: environmentsUsingToolchain(t.id),
+    // What the orchestrator will ACTUALLY pull for this entry (#1941 AC11).
+    // The stored `image` is the manifest's bare tag; on a cluster the pull is
+    // from the Artifact Registry under the pinned release tag. Reported next to
+    // it rather than instead of it, so an operator debugging an ImagePullBackOff
+    // can see both the registered name and the resolved reference.
+    effectiveImage: toolchainImageRef(t.image),
   }));
+  // The shipped-but-not-yet-installed variants (#1941), each with the
+  // plain-language description the System Admin is meant to read BEFORE
+  // installing. An invalid manifest is listed with its errors rather than
+  // dropped, so "where is the JVM toolchain?" has an answer.
+  const installed = new Set(toolchains.map((t) => t.id));
+  const available = listSeededToolchains()
+    .filter((entry) => !installed.has(entry.id))
+    .map((entry) => (entry.ok
+      ? {
+        ...toolchainFromManifest(entry.manifest),
+        effectiveImage: toolchainImageRef(entry.manifest.image),
+        versionManager: entry.manifest.versionManager,
+        ok: true,
+      }
+      : { id: entry.id, ok: false, errors: entry.errors }));
   res.json({
     toolchains,
+    available,
     // The installation-wide default every environment without a toolchain uses
     // (AC1/AC9) — shown so an operator can see what "no toolchain" resolves to.
     defaultImage: process.env.AGENT_IMAGE || BUILTIN_AGENT_IMAGE,
@@ -11803,7 +11889,28 @@ app.get('/api/toolchains', (req, res) => {
 
 app.post('/api/toolchains', heavyLimiter, (req, res) => {
   if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
-  const v = validateToolchain(req.body || {});
+  const body = req.body || {};
+  // TWO DOORS, ONE GATEKEEPER (#1941). A bare `{ id }` installs a SHIPPED
+  // variant: the image reference is then read from the seeded manifest, so the
+  // operator never retypes it and cannot typo it. Anything else is still the
+  // #1940 path — a hand-registered entry for an image this repository does not
+  // ship. Either way the result goes through `validateToolchain` before it is
+  // persisted, and either way what is PERSISTED is the reference as declared:
+  // the deployment's registry path and release tag are applied at spawn time
+  // (AC11), so this file never carries a reference that a release can stale.
+  let candidate = body;
+  if (body.id && body.image === undefined) {
+    const seeded = readSeededToolchain(String(body.id));
+    if (!seeded.ok) {
+      return res.status(400).json({
+        error: `Toolchain '${body.id}' is not available to install: ${seeded.errors.join('; ')}. `
+          + 'Shipped toolchains reach the pool via `make seed-toolchains`; for anything else, supply the image reference.',
+        errors: seeded.errors,
+      });
+    }
+    candidate = toolchainFromManifest(seeded.manifest);
+  }
+  const v = validateToolchain(candidate);
   if (!v.ok) return res.status(400).json({ error: v.errors[0], errors: v.errors });
   const list = listToolchains();
   if (list.some((t) => t.id === v.toolchain.id)) {

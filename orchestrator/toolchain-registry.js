@@ -24,9 +24,22 @@
 //
 // WHAT THIS DOES NOT DO. It never touches an image store or a registry — image
 // PRESENCE is a runtime fact, so the impure adapters probe for it and render the
-// refusal with `missingImageMessage()`. It also ships no toolchain: the
-// `toolchains/<id>/` source tree, `make toolchain-images` and the first JVM
-// variant are #1941.
+// refusal with `missingImageMessage()`.
+//
+// #1941 ADDS THE SOURCE SIDE. A toolchain image is now built from a source tree
+// in this repository (`toolchains/<id>/toolchain.json` + `Dockerfile`,
+// `make toolchain-images`), seeded into the pool like a reference plugin, and
+// installed into the registry above by id — so the System Admin no longer types
+// an image reference for a shipped variant. `validateToolchainManifest` is the
+// validator for that SOURCE manifest and `toolchainFromManifest` projects it
+// onto the registry entry `validateToolchain` already governs: ONE schema, two
+// entry points, so a hand-registered entry and a seeded one cannot diverge.
+// `resolveToolchainImage` applies the deployment's image prefix and release tag
+// (both empty on a local Podman stack, the Artifact Registry path + the pinned
+// release tag on a cluster) to the bare `repo:tag` a manifest declares — the
+// manifest can know neither where a given installation pushed its images nor
+// which release it is running. It runs at SPAWN time, inside `resolveAgentImage`,
+// so a release re-pin reaches toolchains that were installed long before it.
 //
 // DUPLICATED, byte-identical, at admin-console/api/toolchain-registry.js — the
 // two container images copy disjoint file sets, so this pure module lives in
@@ -51,6 +64,29 @@ const MAX_NAME_LEN = 120;
 const MAX_DESCRIPTION_LEN = 600;
 const MAX_STACK_LEN = 60;
 const MAX_IMAGE_LEN = 512;
+const MAX_BASELINE_LEN = 200;
+
+// How a toolchain's RUNTIME VERSION is decided (#1941 AC1, concept §5). This is
+// the field that keeps the version axis out of the image set:
+//
+//   'bootstrap' — the image ships a version MANAGER; the project repository
+//                 pins the version (a committed `.mise.toml`), so a version
+//                 update is a commit in that repository, not a platform
+//                 release. The default shape of every variant.
+//   'baked'     — the runtime is fixed in the image. Deliberately supported as
+//                 the AIRGAP EXCEPTION (nothing may be fetched at runtime), in
+//                 which case the version axis collapses back into the image ON
+//                 PURPOSE and every version change is a platform release.
+//
+// An operator reads this before installing, which is why it reaches the
+// registry entry rather than staying in the source manifest: "where does the
+// Java version come from" is answerable from the Toolchains panel.
+const VERSION_SOURCES = ['bootstrap', 'baked'];
+
+// Source-manifest schema version — the `pluginVersion: 1` discipline. Bumped
+// only for a breaking shape change, so an older manifest fails loudly at build
+// time instead of being half-read.
+const TOOLCHAIN_MANIFEST_VERSION = 1;
 
 // Charset gate for an image reference. Deliberately a single character class
 // with one quantifier (linear, no backtracking) rather than a full
@@ -142,6 +178,15 @@ function validateToolchain(raw) {
 
   const description = optionalText(src.description, 'description', MAX_DESCRIPTION_LEN, errors);
   const stack = optionalText(src.stack, 'stack', MAX_STACK_LEN, errors);
+  // OPTIONAL here, REQUIRED in a source manifest (below). An entry registered
+  // before #1941 has neither field, and normalizeRegistry must keep reading it —
+  // dropping a live environment's toolchain over a missing informational string
+  // would refuse its spawns.
+  const versionSource = optionalText(src.versionSource, 'versionSource', 20, errors);
+  if (versionSource && !VERSION_SOURCES.includes(versionSource)) {
+    errors.push(`versionSource must be ${VERSION_SOURCES.join(' or ')}`);
+  }
+  const baseline = optionalText(src.baseline, 'baseline', MAX_BASELINE_LEN, errors);
 
   if (errors.length) return { ok: false, errors };
   return {
@@ -153,8 +198,125 @@ function validateToolchain(raw) {
       stack,
       image: img.image,
       platforms: plat.platforms,
+      versionSource,
+      baseline,
     },
   };
+}
+
+// Validate one SOURCE manifest — `toolchains/<id>/toolchain.json` in this
+// repository (#1941 AC1). Stricter than the registry entry above on exactly the
+// fields a shipped variant must not leave to chance:
+//
+//   * `toolchainVersion` must match, so a future shape change fails at build
+//     time rather than being partially honoured;
+//   * `description` is REQUIRED — it is what the System Admin reads before
+//     installing, and an unexplained image is not installable in good faith;
+//   * `versionSource` is REQUIRED — "does this ship a pinned runtime?" is the
+//     one question that decides whether a JDK update is a commit or a release,
+//     so it may not be implied;
+//   * a `bootstrap` variant must name its `versionManager` (the thing that
+//     resolves the project's pin) and a `baked` one must not, since there is
+//     nothing to resolve.
+//
+// `dirId` (the directory the manifest was read from) is compared to `id` when
+// given — the same guard `readPluginDir` applies, so a copied directory cannot
+// silently register under the id it was copied from.
+function validateToolchainManifest(raw, opts) {
+  const { dirId = null } = opts || {};
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const errors = [];
+
+  if (Number(src.toolchainVersion) !== TOOLCHAIN_MANIFEST_VERSION) {
+    errors.push(`toolchainVersion must be ${TOOLCHAIN_MANIFEST_VERSION}`);
+  }
+  if (!String(src.description == null ? '' : src.description).trim()) {
+    errors.push('description is required (it is what an operator reads before installing)');
+  }
+  const versionSource = String(src.versionSource == null ? '' : src.versionSource).trim();
+  if (!versionSource) errors.push(`versionSource is required (${VERSION_SOURCES.join(' or ')})`);
+
+  const versionManager = optionalText(src.versionManager, 'versionManager', MAX_STACK_LEN, errors);
+  if (versionSource === 'bootstrap' && !versionManager) {
+    errors.push("a 'bootstrap' toolchain must name its versionManager");
+  }
+  if (versionSource === 'baked' && versionManager) {
+    errors.push("a 'baked' toolchain resolves no version and must not name a versionManager");
+  }
+
+  const base = validateToolchain(src);
+  if (!base.ok) errors.push(...base.errors);
+
+  if (base.ok && dirId && base.toolchain.id !== dirId) {
+    errors.push(`manifest id '${base.toolchain.id}' does not match directory '${dirId}'`);
+  }
+
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, manifest: { ...base.toolchain, toolchainVersion: TOOLCHAIN_MANIFEST_VERSION, versionManager } };
+}
+
+// Project a validated source manifest onto a registry entry. Deliberately NOT a
+// second validator: the install route runs the result back through
+// `validateToolchain`, so the registry file keeps exactly one gatekeeper no
+// matter which door an entry came through.
+//
+// The image is carried through VERBATIM — the bare `repo:tag` the manifest
+// declares. Where that image lives in a given deployment is decided at SPAWN
+// time by `resolveToolchainImage` (below), not here: a registry entry persisted
+// with a release-pinned Artifact Registry reference would go stale on the next
+// release and force the operator to re-install a toolchain they never changed.
+function toolchainFromManifest(manifest) {
+  const m = manifest && typeof manifest === 'object' ? manifest : {};
+  return {
+    id: m.id,
+    name: m.name,
+    description: m.description,
+    stack: m.stack,
+    image: m.image,
+    platforms: Array.isArray(m.platforms) ? [...m.platforms] : [...KNOWN_PLATFORMS],
+    versionSource: m.versionSource || '',
+    baseline: m.baseline || '',
+  };
+}
+
+// Where the variant's image actually lives, per deployment (#1941 AC11).
+//
+// A manifest declares the bare `repo:tag` the build produces (`as-agent-jvm:latest`
+// — what `make toolchain-images` leaves in a developer's local image store, and
+// what a kind node has side-loaded). A cluster pulls the same image from an
+// Artifact Registry under the release's immutable tag, so the deployment
+// supplies both halves as env vars set by the same overlay patch that carries
+// `AGENT_IMAGE` and pinned per release by `set-images.sh`:
+//
+//   AEE_TOOLCHAIN_IMAGE_PREFIX  the registry path      (empty locally)
+//   AEE_TOOLCHAIN_IMAGE_TAG     the release tag        (empty locally)
+//
+// Keeping BOTH out of the manifest is what lets one checked-in manifest serve
+// every deployment — the repo cannot know where an installation pushed its
+// images, nor which release it is running. And keeping the resolution at SPAWN
+// time (rather than baking it into the persisted registry entry at install
+// time) is what makes an upgrade invisible to the operator: the next release
+// pins a new tag and the same registry entry resolves to the new image.
+//
+// An image that already carries a registry host (`/`) or a digest (`@`) is
+// returned UNCHANGED — a System Admin who deliberately typed a full reference
+// for their own image (the #1940 hand-registration path) is not second-guessed,
+// and a digest is pinned by definition.
+function resolveToolchainImage(image, opts) {
+  const { prefix = '', tag = '' } = opts || {};
+  const ref = String(image == null ? '' : image).trim();
+  if (!ref) return ref;
+  if (ref.includes('/') || ref.includes('@')) return ref;
+
+  const pre = String(prefix == null ? '' : prefix).trim().replace(/\/+$/, '');
+  const wantTag = String(tag == null ? '' : tag).trim();
+  // `repo:tag` → split on the LAST colon; a reference with no tag keeps none.
+  const colon = ref.lastIndexOf(':');
+  const repo = colon === -1 ? ref : ref.slice(0, colon);
+  const ownTag = colon === -1 ? '' : ref.slice(colon + 1);
+  const finalTag = wantTag || ownTag;
+  const named = finalTag ? `${repo}:${finalTag}` : repo;
+  return pre ? `${pre}/${named}` : named;
 }
 
 // Fold a persisted registry file into the list the resolver reads. An entry that
@@ -226,6 +388,13 @@ function resolveAgentImage(opts) {
     toolchains = [],
     defaultImage = DEFAULT_AGENT_IMAGE,
     runtime = 'podman',
+    // Where THIS deployment keeps its toolchain variant images (#1941 AC11).
+    // Empty on a local Podman stack / a kind node, where the image sits in the
+    // local store under exactly the bare tag the manifest names. Applied here
+    // rather than at install time so a release re-pin reaches an already
+    // registered toolchain — see `resolveToolchainImage`.
+    imagePrefix = '',
+    imageTag = '',
   } = opts || {};
 
   const fallback = String(defaultImage || '').trim() || DEFAULT_AGENT_IMAGE;
@@ -256,7 +425,7 @@ function resolveAgentImage(opts) {
     };
   }
   return {
-    image: toolchain.image,
+    image: resolveToolchainImage(toolchain.image, { prefix: imagePrefix, tag: imageTag }),
     toolchainId: toolchain.id,
     toolchain,
     source: 'toolchain',
@@ -305,9 +474,14 @@ module.exports = {
   DEFAULT_AGENT_IMAGE,
   TOOLCHAIN_ID_RE,
   KNOWN_PLATFORMS,
+  VERSION_SOURCES,
+  TOOLCHAIN_MANIFEST_VERSION,
   normalizeRuntime,
   validateImageRef,
   validateToolchain,
+  validateToolchainManifest,
+  toolchainFromManifest,
+  resolveToolchainImage,
   normalizeRegistry,
   findToolchain,
   supportsRuntime,

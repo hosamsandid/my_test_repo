@@ -76,3 +76,76 @@ export function toolchainChangeWarning({ isEdit = false, initialToolchainId = nu
     ? `Saving will ${action} and restart ${who}. A container's image is fixed for its lifetime, so running agents have to be recreated — any work in flight is interrupted. Save at a quiet moment.`
     : `Saving will ${action}. It takes effect the next time an agent in this environment starts.`;
 }
+
+// ── The shipped variants, #1941 ─────────────────────────────────────────────
+//
+// `GET /api/toolchains` now also returns `available`: the toolchains this
+// repository SHIPS (`toolchains/<id>/toolchain.json`, seeded into the pool by
+// `make seed-toolchains`) that are not installed yet. Installing one is a bare
+// `POST /api/toolchains { id }` — the image reference comes from the manifest,
+// so the operator never retypes it and cannot typo it.
+//
+// The hand-registration form stays: this repository does not ship every stack a
+// customer runs. What the two doors share is the gatekeeper, not the UI.
+
+// Rows for the "Available to install" list. An entry whose manifest failed
+// validation is KEPT, carrying its errors — "where is the JVM toolchain?" must
+// have an answer, and a silently shorter list is the one shape that cannot
+// answer it. `installable` is false for those and for a variant this stack's
+// runtime cannot pull, so the button state is decided here rather than inline.
+export function availableToolchains(available, runtime) {
+  const rt = runtime === 'kubernetes' ? 'kubernetes' : 'podman';
+  return (Array.isArray(available) ? available : [])
+    .filter(t => t && t.id)
+    .map(t => {
+      if (t.ok === false) {
+        return {
+          id: t.id,
+          name: t.id,
+          broken: true,
+          installable: false,
+          reason: `Manifest is invalid: ${(t.errors || []).join('; ')}`,
+        };
+      }
+      const platforms = Array.isArray(t.platforms) && t.platforms.length ? t.platforms : [];
+      const supported = platforms.includes(rt);
+      return {
+        id: t.id,
+        name: t.name || t.id,
+        description: t.description || '',
+        // What the runtime will ACTUALLY pull here — on a cluster that is the
+        // Artifact Registry path under the pinned release tag, not the bare tag
+        // the manifest declares. Shown so an install review is honest about it.
+        image: t.effectiveImage || t.image || '',
+        platforms,
+        // Carried through so the row is the ONE shape the JSX renders — the
+        // version story is what an operator is meant to read before installing
+        // (`versionSourceLine` below), so it must not need a second lookup.
+        versionSource: t.versionSource || '',
+        versionManager: t.versionManager || '',
+        baseline: t.baseline || '',
+        broken: false,
+        installable: supported,
+        reason: supported
+          ? ''
+          : `Declares platforms [${platforms.join(', ') || 'none'}], so it is not available on the '${rt}' runtime this installation uses.`,
+      };
+    });
+}
+
+// One line describing where the runtime version comes from — the field that
+// decides whether a JDK update is a commit in the project repo or a platform
+// release, so it belongs in front of the operator BEFORE they install, not in
+// the concept doc.
+export function versionSourceLine(entry) {
+  const t = entry || {};
+  if (t.versionSource === 'baked') {
+    return `Runtime version is fixed in the image${t.baseline ? ` (${t.baseline})` : ''} — updating it is a platform release. Intended for airgapped installations.`;
+  }
+  if (t.versionSource === 'bootstrap') {
+    const mgr = t.versionManager ? ` via ${t.versionManager}` : '';
+    const base = t.baseline ? ` A repository that pins nothing gets ${t.baseline}.` : '';
+    return `Each repository pins its own runtime version${mgr}, so updating it is a commit in that repository — no image rebuild.${base}`;
+  }
+  return '';
+}

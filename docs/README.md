@@ -72,6 +72,7 @@ story end to end and are the closest thing to a user manual.
 | [model-providers.md](model-providers.md) | Connecting an LLM endpoint; API-key vs. Claude-subscription auth |
 | [mcp-servers.md](mcp-servers.md) | Connecting live knowledge sources via MCP |
 | [context-mount.md](context-mount.md) | Giving agents live access to one or more host folders, read-only by default (local env, admin-only) |
+| [agent-toolchains.md](agent-toolchains.md) | Giving an agent a language stack it can actually build with: pinning your project's version, adding a toolchain, locked-down networks |
 | [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) | **"My agent doesn't answer"** — the runbook. Start here when something is broken |
 | [hosting/gcp/gke-runbook.md](hosting/gcp/gke-runbook.md) | **GKE hosting runbook** — first-time bootstrap, env-file/credential model, and symptom-keyed troubleshooting for the hosted test/preprod environments |
 | [collaboration-mode-faq.md](collaboration-mode-faq.md) | **Collaboration-mode FAQ** — the common questions about running Agent Studio with a team (concurrency, shared knowledge, credentials, access control), with resolutions and known gaps |

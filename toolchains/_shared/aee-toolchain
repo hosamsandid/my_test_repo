@@ -1,0 +1,338 @@
+#!/bin/sh
+# aee-toolchain — resolve a project's pinned language runtime and run a tool
+# with it (#1941; concept docs/agent-toolchains-concept.md §5).
+#
+# WHY THIS EXISTS. A toolchain variant image ships a version MANAGER, not a
+# version: the project repository pins the exact runtime (a committed
+# `.mise.toml`), so a JDK update is a commit in that repository instead of a
+# platform release (build → registry push → deploy check → respawn of every
+# affected environment). This script is the piece that makes that true at
+# runtime — it decides, per invocation, which config applies and where the
+# downloaded runtime is cached.
+#
+# WHY IT IS NOT A `mise activate` SHELL HOOK. The agent's shell calls come from
+# the Claude CLI as non-interactive, non-login `sh -c` invocations, which source
+# no profile. A hook in `.bashrc`/`.profile` would therefore be invisible to
+# exactly the caller that matters. So the variant image puts a fixed directory
+# (`/opt/aee/toolchain-bin`) on PATH and symlinks one entry per tool at this
+# script — the same shape as the platform's `/opt/aee/plugin-bin` hook, and for
+# the same reason its comment gives: an env var the entrypoint mutates reaches
+# the CLI's children but is invisible to `podman exec`, so an operator
+# debugging the agent would get "command not found" for a runtime that is in
+# fact installed.
+#
+# WHY THE CACHE IS UNDER THE WORKSPACE. Every respawn recreates the container,
+# so anything downloaded into the container filesystem is lost; the per-agent
+# workspace is a volume mount and survives (concept §1, property 3). Pointing
+# the version manager's data dir at `<workspace>/.aee-toolchain` is therefore
+# what makes a re-download unnecessary after a respawn — and, because each
+# agent has its own workspace mount, it is also what keeps two projects on two
+# Java versions from touching each other's cache.
+#
+# EXIT CODES follow docs/cli-contract.md: 0 ok · 1 domain error (nothing pinned,
+# tool not in the project's config) · 2 usage error. A tool's own exit code is
+# passed through unchanged, because the caller is really running that tool.
+
+set -u
+
+SELF_NAME="$(basename "$0")"
+CLI_NAME="aee-toolchain"
+
+# ── variant configuration ───────────────────────────────────────────────────
+# Everything stack-specific comes from a file the VARIANT ships, so this script
+# stays generic: adding the next stack is a Dockerfile plus that file, and this
+# logic is never edited for a particular language (#1941 AC14).
+#
+#   AEE_TOOLCHAIN_ID           the toolchain id (for messages)
+#   AEE_TOOLCHAIN_PIN_FILES    config filenames that count as a project pin
+#   AEE_TOOLCHAIN_SHIMS        tool names the image symlinks at this script
+#   AEE_TOOLCHAIN_BASELINE     human-readable baseline, empty if none is shipped
+#   AEE_TOOLCHAIN_BASELINE_DATA  image-side version-manager data dir, if any
+#   AEE_TOOLCHAIN_ALT_PINS     other ecosystems' pin files, named in the
+#                              "nothing pinned" error so a repo that pinned for
+#                              a DIFFERENT version manager is told so
+TOOLCHAIN_ENV_FILE="${AEE_TOOLCHAIN_ENV_FILE:-/opt/aee/toolchain/toolchain.env}"
+
+AEE_TOOLCHAIN_ID="${AEE_TOOLCHAIN_ID:-}"
+AEE_TOOLCHAIN_PIN_FILES="${AEE_TOOLCHAIN_PIN_FILES:-.mise.toml mise.toml .config/mise/config.toml .tool-versions}"
+AEE_TOOLCHAIN_SHIMS="${AEE_TOOLCHAIN_SHIMS:-}"
+AEE_TOOLCHAIN_BASELINE="${AEE_TOOLCHAIN_BASELINE:-}"
+AEE_TOOLCHAIN_BASELINE_DATA="${AEE_TOOLCHAIN_BASELINE_DATA:-}"
+AEE_TOOLCHAIN_ALT_PINS="${AEE_TOOLCHAIN_ALT_PINS:-}"
+AEE_TOOLCHAIN_EXTRA_ENV="${AEE_TOOLCHAIN_EXTRA_ENV:-}"
+
+if [ -f "$TOOLCHAIN_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$TOOLCHAIN_ENV_FILE"
+fi
+
+MISE_BIN="${AEE_TOOLCHAIN_MISE:-/opt/aee/toolchain/bin/mise}"
+SHIM_DIR="${AEE_TOOLCHAIN_SHIM_DIR:-/opt/aee/toolchain-bin}"
+
+die() { printf '%s: %s\n' "$CLI_NAME" "$1" >&2; exit "${2:-1}"; }
+
+usage() {
+  cat <<EOF
+$CLI_NAME — run a build tool on the version this project pins.
+
+Usage:
+  $CLI_NAME exec <tool> [args...]   run <tool> on the resolved version
+  $CLI_NAME run <cmd> [args...]     run any command with the toolchain in scope
+                                    (use this for ./mvnw, ./gradlew, make)
+  $CLI_NAME install                 pre-install what this project pins
+  $CLI_NAME env                     print the environment as export lines
+  $CLI_NAME doctor                  show what resolves, and from where
+  $CLI_NAME --help                  this text
+
+The tools ${AEE_TOOLCHAIN_SHIMS:-(none)} are also on PATH directly, so plain
+\`mvn test\` works and picks up this project's pin from the current directory.
+
+Pin the version by committing one of: $AEE_TOOLCHAIN_PIN_FILES
+EOF
+}
+
+# ── where the workspace is ──────────────────────────────────────────────────
+# `AEE_WORKSPACE` is set on every agent container by the orchestrator (it is
+# the same variable a granted plugin CLI reads to find its own config), so it is
+# the primary source. The AGENT_ID form is the documented fallback for an
+# operator shell; `$HOME` is the last resort so `--help`/`doctor` still work in
+# a bare `podman run` — which is exactly what the base-contract smoke test does.
+resolve_workspace() {
+  if [ -n "${AEE_WORKSPACE:-}" ]; then printf '%s' "$AEE_WORKSPACE"; return; fi
+  if [ -n "${AGENT_ID:-}" ]; then printf '/workspace/agents/%s' "$AGENT_ID"; return; fi
+  printf '%s' "${HOME:-/tmp}"
+}
+
+toolchain_root() {
+  if [ -n "${AEE_TOOLCHAIN_ROOT:-}" ]; then printf '%s' "$AEE_TOOLCHAIN_ROOT"; return; fi
+  printf '%s/.aee-toolchain' "$(resolve_workspace)"
+}
+
+# ── where the project's pin is ──────────────────────────────────────────────
+# Walk up from the current directory, because an agent's workspace holds one or
+# more repository clones and the tool is run from inside one of them. The FIRST
+# match wins, so a module can pin over its monorepo root.
+find_pin() {
+  dir="$(pwd -P 2>/dev/null || pwd)"
+  while :; do
+    for candidate in $AEE_TOOLCHAIN_PIN_FILES; do
+      if [ -f "$dir/$candidate" ]; then printf '%s/%s' "$dir" "$candidate"; return 0; fi
+    done
+    [ "$dir" = "/" ] && return 1
+    dir="$(dirname "$dir")"
+  done
+}
+
+# Other ecosystems' pin files, reported in the "nothing pinned" error: a repo
+# that committed an `.sdkmanrc` HAS declared its intent, and telling it "no
+# toolchain version pinned" without naming what was found would be obtuse.
+find_alt_pin() {
+  [ -n "$AEE_TOOLCHAIN_ALT_PINS" ] || return 1
+  dir="$(pwd -P 2>/dev/null || pwd)"
+  while :; do
+    for candidate in $AEE_TOOLCHAIN_ALT_PINS; do
+      if [ -f "$dir/$candidate" ]; then printf '%s/%s' "$dir" "$candidate"; return 0; fi
+    done
+    [ "$dir" = "/" ] && return 1
+    dir="$(dirname "$dir")"
+  done
+}
+
+# ── the resolved environment ────────────────────────────────────────────────
+# Two cases, one variable that differs: the version manager's DATA dir (where
+# runtimes are installed).
+#
+#   pinned    -> the workspace cache. Survives a respawn, isolated per agent.
+#   not pinned-> the image's baseline install, read-only and already populated,
+#                so a repository that has not pinned still builds and pays no
+#                download (this is the "version you get if you do not pin",
+#                documented as such; concept §8 open question 3).
+#
+# They are deliberately NOT merged into one data dir with a global config: a
+# baseline installed at build time lives in the image, and making the workspace
+# inherit it would mean copying hundreds of megabytes into every agent's volume.
+setup_env() {
+  root="$(toolchain_root)"
+  pin="${1:-}"
+  if [ -n "$pin" ]; then
+    MISE_DATA_DIR="$root/mise"
+    # A project pin must not be silently widened by an image-side global config
+    # (that is how "I pinned 17 and got 21" happens), so the global config is
+    # pointed at a path that does not exist.
+    MISE_GLOBAL_CONFIG_FILE="$root/mise/global-none.toml"
+  else
+    MISE_DATA_DIR="${AEE_TOOLCHAIN_BASELINE_DATA:-$root/mise}"
+    MISE_GLOBAL_CONFIG_FILE="${AEE_TOOLCHAIN_BASELINE_CONFIG:-$MISE_DATA_DIR/config.toml}"
+  fi
+  # Cache and state always live in the workspace: the image layer is read-only
+  # at runtime, and a cache is exactly the thing that must survive a respawn.
+  MISE_CACHE_DIR="$root/cache"
+  MISE_STATE_DIR="$root/state"
+  MISE_YES=1
+  export MISE_DATA_DIR MISE_CACHE_DIR MISE_STATE_DIR MISE_GLOBAL_CONFIG_FILE MISE_YES
+  mkdir -p "$MISE_CACHE_DIR" "$MISE_STATE_DIR" "$root/mise" 2>/dev/null || true
+
+  # Per-variant cache redirection (Maven's local repository, Gradle's home, …).
+  # Declared by the variant, expanded here so it can reference the root — the
+  # generic mechanism that keeps this script free of Java specifics.
+  if [ -n "$AEE_TOOLCHAIN_EXTRA_ENV" ]; then
+    AEE_TOOLCHAIN_ROOT="$root"
+    export AEE_TOOLCHAIN_ROOT
+    # shellcheck disable=SC1090
+    [ -f "$AEE_TOOLCHAIN_EXTRA_ENV" ] && . "$AEE_TOOLCHAIN_EXTRA_ENV"
+  fi
+}
+
+# Remove the shim directory from PATH before handing off to the version
+# manager. Without this, a tool the manager cannot resolve falls through to a
+# PATH lookup, finds this very script under that name, and recurses forever.
+strip_shim_dir() {
+  new=""
+  IFS=:
+  for part in $PATH; do
+    [ "$part" = "$SHIM_DIR" ] && continue
+    if [ -z "$new" ]; then new="$part"; else new="$new:$part"; fi
+  done
+  unset IFS
+  PATH="$new"
+  export PATH
+}
+
+require_mise() {
+  [ -x "$MISE_BIN" ] && return 0
+  command -v mise >/dev/null 2>&1 && { MISE_BIN="$(command -v mise)"; return 0; }
+  die "version manager not found at '$MISE_BIN' — this image is not a toolchain variant" 1
+}
+
+no_pin_error() {
+  alt="$(find_alt_pin || true)"
+  msg="no toolchain version pinned for this project."
+  if [ -n "$alt" ]; then
+    msg="$msg Found '$alt', which this image's version manager does not read."
+  fi
+  msg="$msg Commit one of [$AEE_TOOLCHAIN_PIN_FILES] at the repository root"
+  msg="$msg (for example: \`mise use java@21 maven@3.9\`, which writes .mise.toml — commit it)."
+  if [ -n "$AEE_TOOLCHAIN_BASELINE" ]; then
+    msg="$msg Without a pin this image falls back to its baseline ($AEE_TOOLCHAIN_BASELINE)."
+  else
+    msg="$msg This image ships no baseline runtime, so there is nothing to fall back to."
+  fi
+  die "$msg" 1
+}
+
+# ── subcommands ─────────────────────────────────────────────────────────────
+
+cmd_exec() {
+  tool="${1:-}"
+  [ -n "$tool" ] || { usage >&2; exit 2; }
+  shift
+  require_mise
+  pin="$(find_pin || true)"
+  if [ -z "$pin" ] && [ -z "$AEE_TOOLCHAIN_BASELINE_DATA" ]; then no_pin_error; fi
+  setup_env "$pin"
+  strip_shim_dir
+
+  # Warm path first: if the tool already resolves, skip the install entirely —
+  # that is the common case on every run after the first, and `mise install` is
+  # not free.
+  if ! "$MISE_BIN" which "$tool" >/dev/null 2>&1; then
+    if [ -n "$pin" ]; then
+      # Cold path: the pin names a version that is not in this workspace's
+      # cache yet (first run, or the pin just changed — AC6's whole point).
+      "$MISE_BIN" install || die "could not install the versions pinned in '$pin'" 1
+    fi
+    if ! "$MISE_BIN" which "$tool" >/dev/null 2>&1; then
+      if [ -n "$pin" ]; then
+        die "'$tool' is not provided by the versions pinned in '$pin' — add it there (e.g. \`mise use maven@3.9\`) and commit" 1
+      fi
+      die "'$tool' is not part of this image's baseline ($AEE_TOOLCHAIN_BASELINE) — pin it in [$AEE_TOOLCHAIN_PIN_FILES] and commit" 1
+    fi
+  fi
+  exec "$MISE_BIN" exec -- "$tool" "$@"
+}
+
+# `run` exists for the commands this image cannot shim: a repository's own
+# `./mvnw` / `./gradlew` wrapper, or a Makefile that calls the compiler itself.
+# Those resolve `java` through JAVA_HOME rather than through PATH, so they need
+# the version manager's env applied to the whole command instead of one tool.
+cmd_run() {
+  [ "$#" -gt 0 ] || { usage >&2; exit 2; }
+  require_mise
+  pin="$(find_pin || true)"
+  if [ -z "$pin" ] && [ -z "$AEE_TOOLCHAIN_BASELINE_DATA" ]; then no_pin_error; fi
+  setup_env "$pin"
+  strip_shim_dir
+  [ -n "$pin" ] && "$MISE_BIN" install >/dev/null 2>&1
+  exec "$MISE_BIN" exec -- "$@"
+}
+
+cmd_install() {
+  require_mise
+  pin="$(find_pin || true)"
+  [ -n "$pin" ] || no_pin_error
+  setup_env "$pin"
+  strip_shim_dir
+  printf 'installing the versions pinned in %s (cache: %s)\n' "$pin" "$MISE_DATA_DIR"
+  "$MISE_BIN" install
+}
+
+cmd_env() {
+  pin="$(find_pin || true)"
+  setup_env "$pin"
+  for var in MISE_DATA_DIR MISE_CACHE_DIR MISE_STATE_DIR MISE_GLOBAL_CONFIG_FILE; do
+    eval "printf 'export %s=%s\n' \"$var\" \"\$$var\""
+  done
+}
+
+# `doctor` answers the question an operator actually has — "which JDK is this
+# agent using, and why" — without them having to know the resolution rules.
+cmd_doctor() {
+  pin="$(find_pin || true)"
+  setup_env "$pin"
+  printf 'toolchain:   %s\n' "${AEE_TOOLCHAIN_ID:-<none>}"
+  printf 'workspace:   %s\n' "$(resolve_workspace)"
+  printf 'cache root:  %s\n' "$(toolchain_root)"
+  if [ -n "$pin" ]; then
+    printf 'version pin: %s (project)\n' "$pin"
+  elif [ -n "$AEE_TOOLCHAIN_BASELINE" ]; then
+    printf 'version pin: none — falling back to the image baseline (%s)\n' "$AEE_TOOLCHAIN_BASELINE"
+  else
+    printf 'version pin: none, and this image ships no baseline\n'
+  fi
+  printf 'data dir:    %s\n' "$MISE_DATA_DIR"
+  if [ -x "$MISE_BIN" ]; then
+    printf 'manager:     %s (%s)\n' "$MISE_BIN" "$("$MISE_BIN" --version 2>/dev/null || echo unknown)"
+  else
+    printf 'manager:     MISSING at %s\n' "$MISE_BIN"
+    return 1
+  fi
+  strip_shim_dir
+  for tool in $AEE_TOOLCHAIN_SHIMS; do
+    printf '  %-8s %s\n' "$tool" "$("$MISE_BIN" which "$tool" 2>/dev/null || echo 'not resolved')"
+  done
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+# Invoked under a tool's own name (the symlinks the image creates), the script
+# IS that tool: `mvn test` must behave like Maven, so there is no subcommand to
+# parse. `mise` is passed through with the resolved environment so an operator
+# can inspect the very state the shims use.
+if [ "$SELF_NAME" != "$CLI_NAME" ]; then
+  if [ "$SELF_NAME" = "mise" ]; then
+    require_mise
+    setup_env "$(find_pin || true)"
+    strip_shim_dir
+    exec "$MISE_BIN" "$@"
+  fi
+  cmd_exec "$SELF_NAME" "$@"
+fi
+
+case "${1:-}" in
+  exec)              shift; cmd_exec "$@" ;;
+  run)               shift; cmd_run "$@" ;;
+  install)           shift; cmd_install "$@" ;;
+  env)               cmd_env ;;
+  doctor)            cmd_doctor ;;
+  -h|--help|help|'') usage; exit 0 ;;
+  *)                 printf '%s: unknown subcommand: %s\n' "$CLI_NAME" "$1" >&2; usage >&2; exit 2 ;;
+esac

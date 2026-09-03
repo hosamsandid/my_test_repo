@@ -105,7 +105,7 @@ GIT_COMMIT_TIME := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo)
 # would always fall back to "unknown".
 export GIT_COMMIT GIT_DIRTY GIT_CONTRIBUTORS GIT_COMMIT_TIME
 
-.PHONY: up down restart build agent-image plugin-images update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys tour-manifest tour-manifest\:check tour-screenshots tour-screenshots\:check
+.PHONY: up down restart build agent-image plugin-images toolchain-images toolchain-verify seed-toolchains update ps logs help seed-pool seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins e2e e2e-gate e2e-up e2e-down e2e-kind e2e-kind-up e2e-kind-down docs-journeys docs-journeys-check docs-deck video-journeys tour-manifest tour-manifest\:check tour-screenshots tour-screenshots\:check
 
 # `up` depends on `agent-image` so a fresh bring-up always has the per-agent
 # runtime image built (the agent image is NOT a compose service — it's pulled
@@ -156,6 +156,51 @@ agent-image:
 		sleep 15; \
 	done
 
+# Toolchain variant images (#1941, concept docs/agent-toolchains-concept.md §4).
+# Each `toolchains/<id>/` carries toolchain.json + Dockerfile; the image is an
+# added LAYER on the published agent image, so `agent-image` is a prerequisite.
+#
+# BUILD CONTEXT is `toolchains/`, not `toolchains/<id>/`, because every variant
+# COPYs the shared bootstrap from `_shared/` and a build context cannot reach a
+# sibling directory — the same reason the plugin brokers build from the repo
+# root. `_`-prefixed directories are shared material, never a variant (the
+# convention `listPluginDirs` already uses).
+#
+# NOT CHAINED into `build` — deliberately diverging from the `plugin-images`
+# precedent (AC4 asked for a decision, not a coin flip). A broker image is a
+# few MB and every installation that installs a plugin needs it; a toolchain
+# variant downloads a JDK (hundreds of MB) and is only needed by installations
+# that actually register one, so chaining it would tax every `make build` for a
+# capability most stacks never select. Run it explicitly, then install the
+# toolchain in the console. Not chained into `up` either, same as
+# `plugin-images`.
+toolchain-images: agent-image
+	@echo "Building toolchain variant images..."
+	@set -e; for dir in toolchains/*/; do \
+	  id="$$(basename $$dir)"; \
+	  case "$$id" in _*) continue ;; esac; \
+	  [ -f "$$dir/toolchain.json" ] || { echo "  skipping $$id (no toolchain.json)"; continue; }; \
+	  tag="$$(sed -n 's/.*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $$dir/toolchain.json | head -1)"; \
+	  [ -n "$$tag" ] || { echo "  ERROR: $$id/toolchain.json declares no image" >&2; exit 1; }; \
+	  echo "  $$id -> $$tag"; \
+	  n=0; max=3; \
+	  until podman build -t "$$tag" -f "$$dir/Dockerfile" toolchains/; do \
+	    n=$$((n+1)); \
+	    if [ $$n -ge $$max ]; then echo "toolchain-images: $$id failed after $$max attempts" >&2; exit 1; fi; \
+	    echo "toolchain-images: $$id failed (attempt $$n/$$max) — likely a transient registry pull; retrying in 15s…" >&2; \
+	    sleep 15; \
+	  done; \
+	  ./toolchains/_shared/base-contract-check.sh "$$tag" "$$id"; \
+	done
+	@echo "Done. Toolchain images:"
+	@podman images --filter reference='as-agent-*' --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
+
+# Demonstrate a built variant end to end (#1941 AC5-AC9/AC12): a real container,
+# a real `mvn test`, a pin change with no rebuild, two projects on two versions,
+# and the measured cold/warm cost. Needs the images built first.
+toolchain-verify:
+	./toolchains/_shared/verify-toolchain.sh as-agent-jvm:latest jvm
+
 update:
 	@echo "Pulling latest changes from git..."
 	git pull --ff-only
@@ -172,7 +217,7 @@ logs:
 	$(foreach svc,$(SERVICES),$(COMPOSE) -f $(COMPOSE_FILE) logs -f --tail=100 $(svc) &)
 	wait
 
-seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins
+seed-pool: seed-skills seed-memory seed-templates seed-process-templates seed-mcp-servers seed-plugins seed-toolchains
 	@echo "Seeding pool CLAUDE.md from $(SKILL_POOL_DEFAULTS)/CLAUDE.md..."
 	@if [ ! -f "$(SKILL_POOL_DEFAULTS)/CLAUDE.md" ]; then \
 	  echo "ERROR: $(SKILL_POOL_DEFAULTS)/CLAUDE.md not found in repo" >&2; \
@@ -266,6 +311,26 @@ seed-plugins:
 	  alpine sh -c 'rm -rf /pool/plugins && mkdir -p /pool/plugins && cp -r /src/. /pool/plugins/'
 	@echo "Done. Pool plugins contents:"
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/plugins/
+
+# Toolchain manifests (#1941): each `toolchains/<id>/` carries toolchain.json.
+# Seeded into the pool as /pool/toolchains/<id>/ so the console can offer the
+# shipped variants for one-click install (`POST /api/toolchains {id}` reads the
+# manifest server-side) instead of a System Admin retyping an image reference.
+# Seeding installs NOTHING — install is still the deliberate System-Admin act,
+# exactly like a plugin. The Dockerfiles are not seeded: the pool is read by the
+# console, and images are built on the host by `make toolchain-images`.
+seed-toolchains:
+	@if [ ! -d "$(CURDIR)/toolchains" ]; then \
+	  echo "ERROR: $(CURDIR)/toolchains not found in repo" >&2; \
+	  exit 1; \
+	fi
+	@echo "Seeding toolchain manifests into volume $(SKILL_POOL_VOLUME)..."
+	podman run --rm --security-opt label=disable \
+	  -v $(SKILL_POOL_VOLUME):/pool \
+	  -v $(CURDIR)/toolchains:/src:ro \
+	  alpine sh -c 'rm -rf /pool/toolchains && mkdir -p /pool/toolchains && cd /src && for d in */; do id="$${d%/}"; case "$$id" in _*) continue ;; esac; [ -f "$$id/toolchain.json" ] || continue; mkdir -p "/pool/toolchains/$$id"; cp "$$id/toolchain.json" "/pool/toolchains/$$id/"; done'
+	@echo "Done. Pool toolchains contents:"
+	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/toolchains/
 
 # ── E2E (Playwright) ────────────────────────────────────────────────────────
 # The disposable `aee-e2e` compose project (#666, docs/e2e-testing-concept.md).
@@ -395,4 +460,4 @@ video-journeys:
 	  && npm run render:iban-story
 
 help:
-	@echo "Targets: up, down, restart, build, agent-image, plugin-images, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, e2e, e2e-gate, e2e-up, e2e-down, e2e-kind, e2e-kind-up, e2e-kind-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys, tour-manifest, tour-manifest:check, tour-screenshots, tour-screenshots:check"
+	@echo "Targets: up, down, restart, build, agent-image, plugin-images, toolchain-images, toolchain-verify, update, ps, logs, seed-pool, seed-skills, seed-memory, seed-templates, seed-process-templates, seed-mcp-servers, seed-plugins, seed-toolchains, e2e, e2e-gate, e2e-up, e2e-down, e2e-kind, e2e-kind-up, e2e-kind-down, docs-journeys, docs-journeys-check, docs-deck, video-journeys, tour-manifest, tour-manifest:check, tour-screenshots, tour-screenshots:check"

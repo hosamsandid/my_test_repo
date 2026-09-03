@@ -24,7 +24,10 @@ role. It is a blueprint, not an agent. Nothing on this page runs.
 
 Three surfaces build agents from these templates: the **Agent Team Wizard** (every
 role in a process template resolves to one), the **Flow editor**'s *Add agent →
-From a template* tab, and **Add role** on a team's card on the Agents page.
+From a template* tab, and **Add member** on a team's card on the Agents page. (A
+fourth used to exist — an **Add `<role>` role** button that guessed the role a
+team was missing — and was removed, because the guess relied on inferring a source
+template a team never records.)
 
 The catalog ships around two dozen mature roles — Business Analyst, Developer, Code
 Reviewer, Reworker, Dispatcher, Issue Triage, Documentation Sync and more. They are

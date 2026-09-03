@@ -103,9 +103,12 @@ stored on it.
   Anything that could not be removed is named explicitly instead of being silently
   swallowed.
 - The wizard is **create-only**. To grow a team that already exists, wire the new
-  role in the Flow editor, or use **Add role** on the team's card on the Agents
-  page — that adds the member through the same pipeline and leaves it disabled
-  until you enable it.
+  role in the Flow editor, or use **Add member** on the team's card on the Agents
+  page (or in the Agent Chat rail) — that adds the member through the same
+  pipeline. The old **Add role** button, which guessed which role the team was
+  missing and added it in one click, was **removed**: it depended on inferring the
+  team's source template, which a team never records, so its suggestions could be
+  neither trusted nor checked. Growing a team is now always an explicit choice.
 
 Need a flow that no template covers? Author it from **+ Create** — describe it in
 plain language, or start blank in the canvas — then come back here (or launch it

@@ -34,7 +34,7 @@
 
 **Add a skill:** Drop a `SKILL.md` into the skill-pool volume under `skills/<name>/SKILL.md`. It becomes available to grant to a team or an agent immediately (on the Agents page, in the Team-Setup wizard, or on the Knowledge page).
 
-**Add an agent:** Admin Console → Agents → New Agent. Choose a role, pick a Working Environment, write a system prompt, save.
+**Add an agent:** Admin Console → **+ Create** → *Create a single agent* (or Agents → New Agent — the same form). Choose a role, pick a Working Environment, write a system prompt, save.
 
 **Schedule autonomous work:** Agent Chat → right rail → Triggers tab.
 

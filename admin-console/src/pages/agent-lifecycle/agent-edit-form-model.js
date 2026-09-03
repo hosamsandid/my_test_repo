@@ -21,9 +21,13 @@ import { PROMPT_MODES, resolvePromptMode } from '../prompt-mode-view.js';
 /**
  * Roles whose skills live on the agent construct itself, rather than being
  * inherited from (or overriding) a parent team.
+ *
+ * `orchestrator` left the set with the role (#1964): a leftover config is not
+ * editable through this form any more, and keeping it here would render a skill
+ * picker whose grant nothing resolves.
  */
 export function hasOwnSkills(role) {
-  return role === 'team' || role === 'agent' || role === 'orchestrator';
+  return role === 'team' || role === 'agent';
 }
 
 /**
@@ -56,7 +60,6 @@ export function buildInitialForm(agent) {
 
   return {
     displayName: a.displayName || '',
-    briefingsPath: a.briefingsPath || '',
     // non-member roles: the agent's own skill grant
     skills: Array.isArray(a.skills) ? a.skills : [],
     // team-only field
@@ -88,9 +91,11 @@ export function buildInitialForm(agent) {
  */
 export function buildEditSubmit(agent, form) {
   const a = agent || {};
+  // `briefingsPath` is deliberately absent since #1964: the field is gone from
+  // the form and #1962 removed it from the config, so sending it would be this
+  // surface re-introducing a key nothing reads.
   const submit = {
     displayName: form.displayName,
-    briefingsPath: form.briefingsPath,
   };
   if (hasOwnSkills(a.role)) {
     submit.skills = form.skills;
@@ -151,7 +156,6 @@ export function isFormDirty(agent, form) {
   const base = buildInitialForm(agent);
   return (
     base.displayName !== form.displayName
-    || base.briefingsPath !== form.briefingsPath
     || !sameList(base.skills, form.skills)
     || base.systemPromptTemplate !== form.systemPromptTemplate
     || base.promptMode !== form.promptMode

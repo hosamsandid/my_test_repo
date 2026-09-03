@@ -109,7 +109,9 @@ function loadFilter() {
     const raw = localStorage.getItem(FILTER_KEY);
     if (!raw) return { kind: 'all' };
     const parsed = JSON.parse(raw);
-    if (parsed && ['all', 'team', 'orchestrator', 'agent'].includes(parsed.kind)) {
+    // A stored `orchestrator` filter from before #1964 falls through to the
+    // `{ kind: 'all' }` default rather than narrowing to a kind nothing builds.
+    if (parsed && ['all', 'team', 'agent'].includes(parsed.kind)) {
       return parsed;
     }
   } catch { /* ignore */ }
@@ -228,7 +230,7 @@ export default function AgentChat() {
     if (listFilter.kind === 'agent' && !agents.find(a => a.id === listFilter.id)) {
       setListFilter({ kind: 'all' });
     }
-    if (listFilter.kind === 'team' || listFilter.kind === 'orchestrator') {
+    if (listFilter.kind === 'team') {
       const { groups } = buildGroups(agents);
       const stillThere = groups.some(
         g => g.kind === listFilter.kind && g.id === listFilter.id,
@@ -851,26 +853,23 @@ function RailHeaderToggle({ on, onToggle }) {
 
 /**
  * Native <select> bound to the agent-list filter spec. Lists every visible
- * team (with member count), every orchestrator, then every agent that
- * belongs to neither ("Individual agents" — team/orchestrator members are
- * already reachable via their group entry), so the user can narrow down to
- * a whole team, an orchestrator, or a single standalone chat.
+ * team (with member count), then every agent that belongs to none
+ * ("Individual agents" — team members are already reachable via their group
+ * entry), so the user can narrow down to a whole team or a single standalone
+ * chat.
  */
 function FilterSelect({ agents, filter, onChange }) {
   const { groups, singles } = buildGroups(agents);
-  const teams         = groups.filter(g => g.kind === 'team');
-  const orchestrators = groups.filter(g => g.kind === 'orchestrator');
+  const teams = groups.filter(g => g.kind === 'team');
 
-  // "Individual agents" = agents with no team/orchestrator membership at
-  // all — `singles` already excludes anyone captured by a `groups` entry
-  // (see `buildGroups` in AgentList.jsx), so team/orchestrator members must
-  // not be re-added here.
+  // "Individual agents" = agents with no team membership at all — `singles`
+  // already excludes anyone captured by a `groups` entry (see `buildGroups` in
+  // agent-list-model.js), so team members must not be re-added here.
   const individualAgents = singles;
 
   const value =
-    filter.kind === 'team'         ? `team:${filter.id}`         :
-    filter.kind === 'orchestrator' ? `orchestrator:${filter.id}` :
-    filter.kind === 'agent'        ? `agent:${filter.id}`        :
+    filter.kind === 'team'  ? `team:${filter.id}`  :
+    filter.kind === 'agent' ? `agent:${filter.id}` :
     'all';
 
   function handleChange(e) {
@@ -878,7 +877,7 @@ function FilterSelect({ agents, filter, onChange }) {
     if (v === 'all') return onChange({ kind: 'all' });
     const [kind, ...rest] = v.split(':');
     const id = rest.join(':');
-    if (kind === 'team' || kind === 'orchestrator' || kind === 'agent') {
+    if (kind === 'team' || kind === 'agent') {
       return onChange({ kind, id });
     }
   }
@@ -909,16 +908,6 @@ function FilterSelect({ agents, filter, onChange }) {
           {teams.map(t => (
             <option key={t.id} value={`team:${t.id}`}>
               {t.displayName} ({t.children.length + (t.header ? 1 : 0)})
-            </option>
-          ))}
-        </optgroup>
-      )}
-
-      {orchestrators.length > 0 && (
-        <optgroup label="Orchestrators">
-          {orchestrators.map(o => (
-            <option key={o.id} value={`orchestrator:${o.id}`}>
-              {o.displayName} ({o.children.length + (o.header ? 1 : 0)})
             </option>
           ))}
         </optgroup>

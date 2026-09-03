@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
@@ -22,12 +22,12 @@ const EMPTY_BUSY = new Set();
 
 /**
  * Per-group collapse-state defaults — matches the Agents overview page so the
- * chat sidebar behaves consistently: teams default open, orchestrators
- * default closed.
+ * chat sidebar behaves consistently: teams default open. Teams are the only
+ * group kind since #1964; the map is kept so a future kind states its default
+ * here rather than inheriting one by accident.
  */
 const DEFAULT_COLLAPSED = {
   team: false,
-  orchestrator: true,
 };
 
 function loadCollapsed() {
@@ -72,7 +72,7 @@ function saveOrder(order) {
  * @param {string|null} selectedAgentId
  * @param {(id:string)=>void} onSelect
  * @param {Record<string,string>} statuses  Map agentId → activityState
- * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'orchestrator',id:string}|{kind:'agent',id:string}} filter
+ * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'agent',id:string}} filter
  * @param {boolean} showDisabled  Opt-in: also list disabled agents (#1928 AC6)
  * @param {Set<string>} busyIds   ids with a lifecycle mutation in flight, owned
  *   by `RailLifecycleHost` and passed down so a **Materialize** shows progress
@@ -124,7 +124,7 @@ export default function AgentList({
   // Member-within-group reorder, by contrast, is unambiguous under a single-team
   // filter too: that view shows the team's complete, ordered member set, and the
   // drag writes the same complete per-group order it would in the unfiltered view
-  // (#1725). Orchestrator (bp-instance ordering) / single-agent filters stay out.
+  // (#1725). The single-agent filter stays out.
   const canReorderMembers = filter.kind === 'all' || filter.kind === 'team';
 
   // Latest ordered lists behind a ref so the reorder/drag callbacks below stay
@@ -227,8 +227,8 @@ export default function AgentList({
     [dragHandlers, dragging, dropHint],
   );
 
-  // Persisted per-group collapse state. Keyed by `<kind>:<id>` so team and
-  // orchestrator ids can collide without clobbering each other.
+  // Persisted per-group collapse state. Keyed by `<kind>:<id>` — the namespace
+  // `groupKey` uses everywhere, so a stored key stays readable across kinds.
   const [collapsedMap, setCollapsedMap] = useState(loadCollapsed);
   useEffect(() => { saveCollapsed(collapsedMap); }, [collapsedMap]);
 
@@ -323,7 +323,7 @@ const GroupSection = React.memo(function GroupSection({
   busyIds,
   onRequestMenu,
 }) {
-  const Icon = group.kind === 'team' ? Users : Layers;
+  const Icon = Users;
   const stubs = group.stubs || [];
   // Stubs count towards the header's total (#1957): they are members of this
   // team, and a team whose members are *all* stubs would otherwise announce
@@ -332,9 +332,8 @@ const GroupSection = React.memo(function GroupSection({
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
-  // Team management (AC2) hangs off the group header. An orchestrator group gets
-  // no header menu: its lifecycle actions stay on the Agents page (epic D4).
-  const headerMenu = onRequestMenu && group.kind === 'team'
+  // Team management (AC2) hangs off the group header.
+  const headerMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'team', group }, anchor)
     : null;
   // The Working Environment shared by this group's rows is shown once, on the
@@ -623,8 +622,6 @@ function iconForRole(role) {
     case 'agent':         return Bot;
     case 'team':          return Users;
     case 'team-member':   return Bot;
-    case 'orchestrator':  return Layers;
-    case 'bp-instance':   return Bot;
     default:              return MessageCircle;
   }
 }

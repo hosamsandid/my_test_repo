@@ -3,12 +3,13 @@
 // `node --test` without a DOM / node_modules (the JSX itself is only
 // parse-checked in this repo).
 
-// Human-readable label for a queue entry kind.
+// Human-readable label for a queue entry kind. An unknown kind falls through to
+// the raw string, which is what a leftover `bp-event-batch` entry (#1964
+// removed its label; #1962 removed the producer) now renders as.
 const KIND_LABELS = {
   github: 'GitHub event',
   'github-digest': 'GitHub digest',
   'throttle-warning': 'Throttle warning',
-  'bp-event-batch': 'Briefing-pack event',
   'session-reset': 'Session reset',
   'session-set': 'Session resume',
   trigger: 'Trigger',
@@ -26,7 +27,6 @@ const KIND_TOOLTIPS = {
   github: 'A GitHub event waiting to be delivered to this agent — it drains within seconds unless maintenance mode is active.',
   'github-digest': 'A burst of GitHub events on one conversation, folded into a single lossless summary wake.',
   'throttle-warning': "A heads-up that this agent's per-conversation rate cap was hit and further events were dropped.",
-  'bp-event-batch': 'A Briefing-Pack change (revised / completed / input-changed) routed to this agent.',
   'session-reset': "A queued request to reset this room's Claude session.",
   'session-set': 'A queued request to resume a specific Claude session in this room.',
   trigger: 'A queued trigger invocation waiting to run.',

@@ -1744,8 +1744,11 @@ export default function SkillsRegistry() {
 
   // Only materialized, enabled agents can receive a skill in-place (a stub has
   // no workspace yet and would be re-seeded from its environment on enable).
+  // A `team` construct is excluded because it hosts no agent of its own — the
+  // grant belongs on it, but the files have nowhere to land. (The `orchestrator`
+  // exclusion beside it went with the role in #1964.)
   const installableAgents = (allAgents ?? [])
-    .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'orchestrator')
+    .filter(a => a.enabled !== false && a.token && a.role !== 'team')
     .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
 
   async function confirmRowDelete(cascade = false) {

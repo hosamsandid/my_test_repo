@@ -22,10 +22,14 @@ test('a complete single-agent form can submit', () => {
   assert.deepEqual(s.reasons, []);
 });
 
-test('orchestrator needs no system prompt', () => {
+test('#1964 — `orchestrator` is no longer a prompt-optional role', () => {
+  // The role card is gone from the create form, so this can only be reached by
+  // a hand-crafted body. The gate must treat it like any other agent rather
+  // than keep a hole that waves through a promptless create for a role the
+  // server (#1962) already refuses.
   const s = describeAgentSubmitState({ ...readyAgent, role: 'orchestrator', systemPrompt: '' });
-  assert.equal(s.canSubmit, true);
-  assert.deepEqual(s.reasons, []);
+  assert.equal(s.canSubmit, false);
+  assert.deepEqual(fieldsOf(s), ['systemPrompt']);
 });
 
 test('team role needs no system prompt (member prompts come later)', () => {

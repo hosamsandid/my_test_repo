@@ -30,7 +30,7 @@
  *   onCancel          omitted → no Cancel button (the chat rail has nothing to
  *                     close; it offers "Discard changes" only while dirty)
  */
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { useApi, apiCall } from '../../hooks/useApi';
 import {
   PROMPT_MODES,
@@ -46,7 +46,7 @@ import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { RoleDetailBanner, MissionDirectoryField, repoDirName } from './agent-form-fields.jsx';
+import { RoleDetailBanner } from './agent-form-fields.jsx';
 import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
@@ -375,17 +375,6 @@ export default function AgentEditForm({
   const { data: skillsData } = useApi(skillsUrl);
   const grantSkills = (skillsData || []).filter(s => s.source === 'pool' || s.source === 'team');
 
-  const { data: environments } = useApi('/api/environments');
-  const repoDirs = useMemo(() => {
-    const envs = environments || [];
-    const env = envs.find(e => e.id === agent.environmentId);
-    if (!env) return [];
-    const repos = Array.isArray(env.repositories)
-      ? env.repositories
-      : env.repository?.url ? [env.repository] : [];
-    return repos.map(r => repoDirName(r.url)).filter(Boolean);
-  }, [environments, agent.environmentId]);
-
   // For team-members: fetch the parent team's config to display its
   // current systemPromptTemplate as a preview when inheriting.
   const parentTeamUrl = agent.role === 'team-member' && agent.parentTeamId
@@ -445,14 +434,6 @@ export default function AgentEditForm({
 
       <PluginGrantSection agent={agent} parentTeam={parentTeam} />
 
-      {agent.role === 'orchestrator' && (
-        <MissionDirectoryField
-          value={form.briefingsPath}
-          onChange={val => update('briefingsPath', val)}
-          repoDirs={repoDirs}
-        />
-      )}
-
       {agent.role === 'team' && (
         <div>
           <label style={labelStyle}>
@@ -470,32 +451,6 @@ export default function AgentEditForm({
             Prompt changes take effect from each member's next session.
           </div>
         </div>
-      )}
-
-      {agent.role === 'bp-instance' && (
-        <>
-          <div>
-            <div style={labelStyle}>Parent Orchestrator (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.parentOrchestratorId || '—'}
-            </div>
-          </div>
-          <div>
-            <div style={labelStyle}>Mission ID (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.bpId || '—'}
-              {agent.bpSlug ? <span style={{ marginLeft: 8 }}>· slug: <code>{agent.bpSlug}</code></span> : null}
-            </div>
-          </div>
-          {agent.briefingsPath && (
-            <div>
-              <div style={labelStyle}>Mission Directory (inherited, read-only)</div>
-              <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-                {agent.briefingsPath}
-              </div>
-            </div>
-          )}
-        </>
       )}
 
       {agent.role === 'team-member' && (

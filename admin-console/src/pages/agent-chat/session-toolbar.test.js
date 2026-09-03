@@ -95,5 +95,15 @@ test('the rest of the toolbar is untouched (AC8)', () => {
   assert.match(CODE, /<SessionInfoPopover/);     // "About this chat"
   assert.match(CODE, /<LearningBadge/);          // learning badge
   assert.match(CODE, /contextIndicator/);        // context usage indicator
-  assert.match(CODE, /Hand-off/);                // bp-instance hand-off
+});
+
+test('#1964 AC3 — the hand-off button is gone and mounts nothing', () => {
+  // Epic #1961 decision R4: the dialog stays in the tree (annotated, see the
+  // header of HandoffDialog.jsx) but nothing renders it. The button was the
+  // only mount point, so the assertion is on the toolbar's source rather than
+  // on the dialog file — a re-added button is what would revive it.
+  assert.doesNotMatch(CODE, /Hand-off/);
+  assert.doesNotMatch(CODE, /HandoffDialog/);
+  assert.doesNotMatch(CODE, /showHandoff/);
+  assert.doesNotMatch(CODE, /bp-instance/);
 });

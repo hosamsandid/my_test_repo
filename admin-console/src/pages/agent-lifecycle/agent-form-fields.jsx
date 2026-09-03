@@ -4,22 +4,17 @@
  *
  * These lived in Agents.jsx while the edit form did too. #1929 moves the edit
  * form into `AgentEditForm.jsx` so the Agent Chat right rail can host it, which
- * would have split these three between the two files — so they moved here
- * instead and both forms import them. Nothing about them changed in the move.
+ * would have split these between the two files — so they moved here instead and
+ * both forms import them. Nothing about them changed in the move.
+ *
+ * #1964 removed the BriefingPack half: the `orchestrator` / `bp-instance` role
+ * cards and the Mission Directory field (with the `repoDirName` helper that only
+ * ever fed its picker) are gone, since neither role can be created or edited any
+ * more.
  */
-import React, { useEffect, useState } from 'react';
-import { User, Users, Workflow, FileText, Info } from 'lucide-react';
+import React from 'react';
+import { User, Users, Info } from 'lucide-react';
 import PageHelpButton from '../../components/PageHelpButton';
-import { labelStyle, inputStyle } from './form-kit.jsx';
-
-/**
- * Directory a repository URL is cloned into — the last path segment without
- * the `.git` suffix. Drives the Mission Directory picker's options.
- */
-export function repoDirName(url) {
-  if (!url) return '';
-  return url.replace(/\.git$/, '').split(/[/:]/g).filter(Boolean).pop() || '';
-}
 
 /* ── Role catalogue (single source of truth for labels + descriptions) ─
    The long per-role explanation lives in the page's help topic
@@ -39,23 +34,11 @@ export const ROLE_INFO = {
     short: 'A reusable template — spawn multiple team members from one prompt.',
     when: 'Use when you need several copies of the same kind of agent — e.g. a pool of three reviewer agents working in parallel.',
   },
-  'orchestrator': {
-    icon: Workflow,
-    title: 'Orchestrator',
-    short: 'Watches a folder of mission files and runs one agent per mission.',
-    when: 'Use when you have an ACE briefings repository whose missions you want to drive end-to-end through this console.',
-  },
   'team-member': {
     icon: User,
     title: 'Team Member',
     short: 'One agent spawned from an Agent Team — most fields inherit from the team.',
     when: 'You do not pick this role yourself — it is assigned when you add a member to a team.',
-  },
-  'bp-instance': {
-    icon: FileText,
-    title: 'Mission Agent (bp-instance)',
-    short: 'One agent per mission, managed by an Orchestrator from a BriefingPack.',
-    when: 'You do not pick this role yourself — the orchestrator assigns it per mission.',
   },
 };
 
@@ -80,77 +63,6 @@ export function RoleDetailBanner({ role }) {
       {/* The full role catalogue moved into the page help topic (#1875) — the
           "?" is how you reach it from inside the form. */}
       <PageHelpButton label="What the roles mean" size={14} style={{ padding: 0, flexShrink: 0 }} />
-    </div>
-  );
-}
-
-/* ── Mission Directory Field ─────────────────────────────────────────── */
-export function MissionDirectoryField({ value, onChange, repoDirs }) {
-  const [showCustom, setShowCustom] = useState(
-    () => value !== '' && !repoDirs.includes(value)
-  );
-
-  useEffect(() => {
-    setShowCustom(value !== '' && !repoDirs.includes(value));
-  }, [value, repoDirs]);
-
-  const helpText = (
-    <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-      Path inside the agent's workspace where the mission files live — usually a cloned ACE briefings repository.
-      The <code>artifacts/briefings/</code> subdirectory is appended automatically.
-      On creation, the orchestrator scans this path and registers one stub agent per mission it finds.
-    </div>
-  );
-
-  if (repoDirs.length === 0) {
-    return (
-      <div>
-        <div style={labelStyle}>Mission Directory</div>
-        <input
-          style={inputStyle}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          placeholder="e.g. my-repo"
-        />
-        {helpText}
-      </div>
-    );
-  }
-
-  const selectValue = showCustom ? '__custom__' : value;
-
-  return (
-    <div>
-      <div style={labelStyle}>Mission Directory</div>
-      <select
-        style={inputStyle}
-        value={selectValue}
-        onChange={e => {
-          if (e.target.value === '__custom__') {
-            setShowCustom(true);
-          } else {
-            setShowCustom(false);
-            onChange(e.target.value);
-          }
-        }}
-      >
-        {!selectValue && <option value="">— please select —</option>}
-        {repoDirs.map(dir => (
-          <option key={dir} value={dir}>{dir}</option>
-        ))}
-        <option disabled value="__sep__">──────────</option>
-        <option value="__custom__">Custom path…</option>
-      </select>
-      {showCustom && (
-        <input
-          style={{ ...inputStyle, marginTop: 'var(--eb-space-2)' }}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          placeholder="e.g. my-repo"
-          autoFocus
-        />
-      )}
-      {helpText}
     </div>
   );
 }

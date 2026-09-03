@@ -21,11 +21,19 @@ const member = {
 };
 
 test('skills live on the agent itself only for the non-member roles', () => {
-  for (const role of ['team', 'agent', 'orchestrator']) {
+  for (const role of ['team', 'agent']) {
     assert.equal(hasOwnSkills(role), true, `${role} carries its own skills`);
   }
-  for (const role of ['team-member', 'bp-instance', undefined]) {
+  for (const role of ['team-member', undefined]) {
     assert.equal(hasOwnSkills(role), false, `${role} does not`);
+  }
+});
+
+test('#1964 — the retired BriefingPack roles carry no own skill grant', () => {
+  // A leftover config on an upgraded installation must not open a skill picker
+  // whose grant nothing resolves: `orchestrator` left the set with the role.
+  for (const role of ['orchestrator', 'bp-instance']) {
+    assert.equal(hasOwnSkills(role), false, `${role} is retired`);
   }
 });
 
@@ -34,7 +42,6 @@ test('skills live on the agent itself only for the non-member roles', () => {
 test('a missing config field becomes an empty control, never undefined', () => {
   const form = buildInitialForm({ id: 'a1', role: 'agent' });
   assert.equal(form.displayName, '');
-  assert.equal(form.briefingsPath, '');
   assert.deepEqual(form.skills, []);
   assert.equal(form.systemPromptTemplate, '');
   assert.equal(form.promptOverride, '');
@@ -87,7 +94,7 @@ test('the legacy systemPrompt-presence inference still resolves a mode', () => {
 test('a role never sends a section it does not have', () => {
   const agent = { id: 'a1', role: 'agent', displayName: 'A' };
   const body = buildEditSubmit(agent, buildInitialForm(agent));
-  assert.deepEqual(Object.keys(body).sort(), ['briefingsPath', 'displayName', 'skills']);
+  assert.deepEqual(Object.keys(body).sort(), ['displayName', 'skills']);
   // Sending these as empty would CLEAR them server-side for a role that has
   // no such field — absence is the only safe encoding.
   assert.ok(!('systemPromptTemplate' in body));
@@ -144,10 +151,21 @@ test('the plugin grant and the context mounts are never part of the PUT', () => 
   assert.ok(!('contextMount' in body));
 });
 
+test('#1964 — briefingsPath is neither derived nor sent, even when the config has one', () => {
+  // The Mission Directory field is gone from the form and #1962 removed the key
+  // from the config; a leftover value must not be round-tripped back by a save.
+  const leftover = { id: 'a1', role: 'agent', displayName: 'A', briefingsPath: 'repo' };
+  const form = buildInitialForm(leftover);
+  assert.ok(!('briefingsPath' in form));
+  assert.ok(!('briefingsPath' in buildEditSubmit(leftover, form)));
+  // …and a form that never had the key is not therefore reported as unsaved.
+  assert.equal(isFormDirty(leftover, form), false);
+});
+
 test('a round trip through the form changes nothing (AC2)', () => {
   const rich = {
     ...member,
-    displayName: 'Dev', briefingsPath: 'repo',
+    displayName: 'Dev',
     promptMode: PROMPT_MODES.ADDITIONAL, systemPrompt: 'extra',
     skillsOverride: ['cobol'],
     mcpServersOverride: [{ serverId: 'wiki', credentialId: 'c1' }],
@@ -171,7 +189,6 @@ test('every batched field is watched — none can be edited unnoticed', () => {
   const base = buildInitialForm(member);
   const edits = {
     displayName: 'Renamed',
-    briefingsPath: 'other',
     skills: ['jcl'],
     systemPromptTemplate: 'x',
     promptMode: PROMPT_MODES.EXCLUSIVE,

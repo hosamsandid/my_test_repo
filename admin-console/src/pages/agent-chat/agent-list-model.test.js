@@ -19,9 +19,14 @@ const ALL = { kind: 'all' };
 
 const team       = (id, displayName) => ({ id, role: 'team', displayName });
 const member     = (id, parentTeamId, displayName) => ({ id, role: 'team-member', parentTeamId, displayName });
-const orch       = (id, displayName) => ({ id, role: 'orchestrator', displayName });
-const bp         = (id, parentOrchestratorId, displayName) => ({ id, role: 'bp-instance', parentOrchestratorId, displayName });
 const standalone = (id, displayName) => ({ id, role: 'agent', displayName });
+
+// Leftover BriefingPack configs (#1964). The epic's hard cut means the platform
+// can no longer create these roles, but an installation upgraded across the cut
+// still has the config.json files on disk, so the list endpoint can still ship
+// such a row. These fixtures keep the removal guards below non-vacuous.
+const orch = (id, displayName) => ({ id, role: 'orchestrator', displayName });
+const bp   = (id, parentOrchestratorId, displayName) => ({ id, role: 'bp-instance', parentOrchestratorId, displayName });
 
 // ── buildGroups ──────────────────────────────────────────────────────────
 
@@ -69,11 +74,23 @@ test('buildGroups routes a parentless member into singles', () => {
   assert.deepEqual(singles.map(s => s.id), ['lost']);
 });
 
-test('buildGroups groups orchestrators with their bp-instances', () => {
+test('#1964 — buildGroups forms no orchestrator group; leftover rows list as singles', () => {
+  // AC2: the grouping logic handles teams and standalone agents only. A
+  // leftover orchestrator / bp-instance config is still *listed* (dropping a row
+  // silently is the one outcome a user cannot tell from a missing agent) — it
+  // just no longer gets a section of its own.
   const agents = [orch('o1', 'Orch'), bp('bp-1', 'o1', 'BP One'), bp('bp-2', 'o1', 'BP Two')];
-  const { groups } = buildGroups(agents);
-  assert.equal(groups[0].kind, 'orchestrator');
-  assert.deepEqual(groups[0].children.map(c => c.id), ['bp-1', 'bp-2']);
+  const { groups, singles } = buildGroups(agents);
+  assert.deepEqual(groups, []);
+  assert.deepEqual(singles.map(s => s.id), ['bp-1', 'bp-2', 'o1']);
+});
+
+test('#1964 — every group buildGroups produces is a team', () => {
+  const { groups } = buildGroups([
+    team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev'),
+    orch('o1', 'Orch'), bp('bp-1', 'o1', 'BP One'),
+  ]);
+  assert.deepEqual(groups.map(g => g.kind), ['team']);
 });
 
 test('buildGroups sorts groups by display name', () => {
@@ -114,6 +131,17 @@ test('matchesFilter: team filter keeps header + its members only', () => {
   assert.equal(matchesFilter(member('t1-dev', 't1'), f), true);
   assert.equal(matchesFilter(member('t2-dev', 't2'), f), false);
   assert.equal(matchesFilter(standalone('solo'), f), false);
+});
+
+test('#1964 — there is no orchestrator filter branch left', () => {
+  // The filter spec is `all | team | agent` now. A stored `orchestrator` filter
+  // from before the cut is rejected by `loadFilter` in AgentChat.jsx; should one
+  // reach here anyway it degrades to the unknown-kind fallthrough (everyone
+  // visible) rather than to a branch that reads `parentOrchestratorId`.
+  const f = { kind: 'orchestrator', id: 'o1' };
+  assert.equal(matchesFilter(orch('o1', 'Orch'), f), true);
+  assert.equal(matchesFilter(standalone('solo'), f), true);
+  assert.equal(matchesFilter(bp('bp-1', 'other'), f), true);
 });
 
 test('matchesFilter: agent filter keeps exactly one id', () => {
@@ -189,9 +217,12 @@ test('buildAgentListModel composes the three layers end-to-end', () => {
   assert.equal(model.empty, false);
 });
 
-test('groupKey namespaces team and orchestrator ids so they cannot collide', () => {
+test('groupKey namespaces a group id with its kind', () => {
+  // Teams are the only kind since #1964, but the key stays namespaced: every
+  // persisted collapse / order / drag entry is written as `team:<id>`, and a
+  // bare id would both invalidate those and collide with a single agent's id.
   assert.equal(groupKey({ kind: 'team', id: 'x' }), 'team:x');
-  assert.equal(groupKey({ kind: 'orchestrator', id: 'x' }), 'orchestrator:x');
+  assert.notEqual(groupKey({ kind: 'team', id: 'x' }), 'x');
 });
 
 // ── disabled-agents filter (#1928, epic decision D2) ─────────────────────────
@@ -313,9 +344,16 @@ test('AC2 — a team with no stubs gets an empty section list, never a placehold
   assert.deepEqual(groups[0].stubs, []);
 });
 
-test('an orchestrator group always has an empty stub list (out of scope)', () => {
-  const { groups } = buildGroups([orch('o1', 'Orch'), bp('o1-a', 'o1', 'A')]);
+test('#1964 — a tokenless leftover bp-instance is never mistaken for a team stub', () => {
+  // `isStub` is role-agnostic (it reads `agentState`), so a disabled, never
+  // provisioned bp-instance answers true. It must still land in `singles` and
+  // never in some team's not-materialized section, which is keyed on
+  // `parentTeamId` and now has no other producer.
+  const leftover = { ...bp('o1-a', 'o1', 'A'), enabled: false };
+  assert.equal(isStub(leftover), true);
+  const { groups, singles } = buildGroups([team('t1', 'Alpha'), leftover]);
   assert.deepEqual(groups[0].stubs, []);
+  assert.deepEqual(singles.map(s => s.id), ['o1-a']);
 });
 
 test('edge case — a team whose members are ALL stubs still appears', () => {

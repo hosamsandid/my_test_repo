@@ -83,7 +83,6 @@ const Teams               = lazy(() => import('./pages/Teams'));
 const Users               = lazy(() => import('./pages/Users'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
-const OrchestratorWizard  = lazy(() => import('./pages/OrchestratorWizard'));
 const About = lazy(() => import('./pages/About'));
 
 // Keeps the browser tab title in step with the active route so tabs, history
@@ -191,7 +190,6 @@ export default function App() {
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />
-          <Route path="/orchestrator-wizard" element={<OrchestratorWizard />} />
           <Route path="/getting-started" element={<GettingStartedRedirect />} />
           <Route path="/about" element={<About />} />
         </Routes>

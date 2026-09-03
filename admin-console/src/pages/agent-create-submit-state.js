@@ -14,10 +14,11 @@
 
 const trimmed = v => String(v ?? '').trim();
 
-// Roles that do NOT need a default system prompt up front: an orchestrator
-// runs briefing-supplied missions, and a team stores an optional template that
-// each member can override later. Kept in sync with AgentCreateForm.
-const PROMPT_OPTIONAL_ROLES = new Set(['orchestrator', 'team']);
+// Roles that do NOT need a default system prompt up front: a team stores an
+// optional template that each member can override later. Kept in sync with
+// AgentCreateForm — `orchestrator` left the set with the role itself (#1964),
+// so a leftover orchestrator config can no longer make the prompt optional.
+const PROMPT_OPTIONAL_ROLES = new Set(['team']);
 
 /**
  * Derive whether the create-agent form can be submitted and, when it cannot,
@@ -28,7 +29,7 @@ const PROMPT_OPTIONAL_ROLES = new Set(['orchestrator', 'team']);
  * @param form.displayName    raw Display Name field
  * @param form.id             raw ID field (auto-derived from the name)
  * @param form.environmentId  selected Working Environment id
- * @param form.role           selected role ('agent' | 'team' | 'orchestrator' | …)
+ * @param form.role           selected role ('agent' | 'team')
  * @param form.systemPrompt   raw System Prompt field
  * @returns {{ canSubmit: boolean, reasons: Array<{field: string, message: string}> }}
  */

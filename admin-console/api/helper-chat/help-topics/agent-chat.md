@@ -81,9 +81,22 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
-  whole team, **Add member**, **Team settings…** (which opens the team's own
+  whole team, **Add member…**, **Team settings…** (which opens the team's own
   Settings tab here rather than jumping to another page), **Export team
   (ZIP)**, **Open in Flow Editor** and **Delete team**.
+- **Add member…** asks one question before it acts: **Materialize now**, which is
+  ticked by default. Leave it ticked and the member is created as it always was —
+  chat account, workspace, repository clone, running container. Untick it and
+  you get a **stub** instead: its configuration and triggers are written, but
+  nothing is cloned and nothing runs. The stub appears in this team's *Not
+  materialized yet* section, and **Materialize** there finishes it into an agent
+  that is indistinguishable from one you had built right away. Use the unticked
+  mode when you are assembling a team over several sittings; the prompt, the
+  label suffix and every substituted variable are identical either way, so
+  deferring costs you nothing later. Do **not** reach for *Disable* to achieve
+  this — a disabled member is one whose repository was already cloned and whose
+  container already ran, which is a different state that merely looks similar in
+  the list.
 - **What these actions do…** — the last entry opens this chapter. A menu cannot
   carry a "?" button, so the help is an entry like any other.
 
@@ -95,7 +108,8 @@ opens this menu instead — which is where *Enable* is.
 **Members that have not been started yet.** A team can be created with its
 members left as **stubs** — configuration and triggers only, with no chat
 account, no workspace and no cloned repositories — so a process with dozens of
-roles does not provision all of them on day one. Such members appear at the
+roles does not provision all of them on day one, and **Add member…** above adds
+one to a live team the same way. Such members appear at the
 bottom of their team group under a collapsed **Not materialized yet (N)**
 section; the count is on the header, so you can see how many are waiting without
 opening it. A stub row is marked **Not initialised** and cannot be opened as a

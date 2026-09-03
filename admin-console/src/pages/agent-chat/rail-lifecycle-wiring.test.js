@@ -253,3 +253,57 @@ test('materialize progress reaches the row it was started from (AC5)', () => {
   assert.match(agentChat.match(/<AgentList[\s\S]*?\/>/)[0], /busyIds=\{railBusyIds\}/);
   assert.match(agentList, /busy=\{busyIds\.has\(agent\.id\)\}/);
 });
+
+/* ── deferred materialization of a new member (#1958) ────────────────── */
+
+test('#1958 AC1 — Add member opens a dialog, never fires the request directly', () => {
+  // Same rule as the destructive actions above (AC4 of #1928): the menu only
+  // *opens* something. Before this ticket the case body was the POST itself.
+  assert.match(host, /case 'add-member':\s*openAddMember\(teamId\)/);
+  assert.doesNotMatch(host, /case 'add-member':\s*addMember\(/);
+  // And the dialog is really rendered, keyed on the team the menu was opened for.
+  assert.match(host, /open=\{!!addMemberTeamId\}/);
+  assert.match(host, /title=\{ADD_MEMBER_TITLE\}/);
+});
+
+test('#1958 — the checkbox is a controlled input at its documented default', () => {
+  assert.match(host, /useState\(MATERIALIZE_NOW_DEFAULT\)/);
+  assert.match(host, /checked=\{addMemberMaterialize\}/);
+  assert.match(host, /setAddMemberMaterialize\(e\.target\.checked\)/);
+  // Reset on every open, so one deferral does not stick to the next member.
+  assert.match(host, /setAddMemberMaterialize\(MATERIALIZE_NOW_DEFAULT\);[\s\S]{0,120}setAddMemberTeamId\(teamId\)/);
+});
+
+test('#1958 AC2 — the request body comes from the pure module, not an inline literal', () => {
+  // An inline `{ materialize: x }` here would be a second, untested definition
+  // of the wire shape — the reason the view module exists.
+  assert.match(host, /addMemberBody\(\{ materializeNow: addMemberMaterialize \}\)/);
+  assert.match(host, /apiCall\(\s*'POST',\s*`\/api\/agents\/\$\{encodeURIComponent\(teamId\)\}\/members`/);
+  assert.match(host, /confirmLabel=\{addMemberConfirmLabel\(/);
+  assert.match(host, /setNotice\(addMemberNotice\(result\)\)/);
+});
+
+test('#1958 AC4 — no create-then-disable workaround has crept back in', () => {
+  // #1959 removed it; this ticket is what makes the removal permanent, because
+  // the checkbox is now the supported way to defer. A PUT {enabled:false}
+  // straight after the member POST is the shape to keep out.
+  assert.doesNotMatch(host, /\/members`[\s\S]{0,400}?enabled: false/);
+  assert.doesNotMatch(host, /Enable it when you/);
+  // Anchored on the notice copy, not a bare `(disabled)`: this repo's dominant
+  // style-helper idiom is `const fooStyle = (disabled) => ({…})`, so the loose
+  // form would fail the day this file grows one — for a reason unrelated to
+  // #1958, leaving the next reader to reverse-engineer why.
+  assert.doesNotMatch(host, /Added .*\(disabled\)/);
+});
+
+test('#1958 — a failed Add member closes the dialog so its error is readable', () => {
+  // The dialog's overlay is position:fixed at zIndex 9999 and RailToast portals
+  // at 1200, with no stacking context between them — so a dialog left open on
+  // failure buries the toast under its own backdrop AND eats the click that
+  // would dismiss it (the click lands on the backdrop and cancels instead).
+  // Same resolution as the confirmDelete sibling in this file.
+  assert.match(
+    host,
+    /addMemberBody\([\s\S]{0,400}?catch \(e\) \{[\s\S]{0,200}?setAddMemberTeamId\(null\)/,
+  );
+});

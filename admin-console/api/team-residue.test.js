@@ -51,11 +51,27 @@ describe('classifyMemberResidue', () => {
 
   it('classes an unrelated agent squatting the id as a conflict', () => {
     const r = classifyMemberResidue([
-      { memberId: 'acme-dev', exists: true, config: { role: 'orchestrator' } },
+      { memberId: 'acme-dev', exists: true, config: { role: 'team' } },
     ], TEAM);
-    assert.deepEqual(r.conflictMembers, [{ memberId: 'acme-dev', role: 'orchestrator' }]);
+    assert.deepEqual(r.conflictMembers, [{ memberId: 'acme-dev', role: 'team' }]);
     assert.deepEqual(r.existingMembers, []);
     assert.deepEqual(r.orphanMembers, []);
+  });
+
+  // #1962 removed the BriefingPack roles but epic #1961's decision R2 leaves
+  // existing configs on disk untouched, so a leftover `orchestrator` /
+  // `bp-instance` can still be sitting on a member id an operator now wants for
+  // a team. It must read as a CONFLICT (hands the id back to the human) and
+  // never be mistaken for a reusable member of this team.
+  it('classes a leftover retired-role config squatting the id as a conflict', () => {
+    for (const role of ['orchestrator', 'bp-instance']) {
+      const r = classifyMemberResidue([
+        { memberId: 'acme-dev', exists: true, config: { role } },
+      ], TEAM);
+      assert.deepEqual(r.conflictMembers, [{ memberId: 'acme-dev', role }]);
+      assert.deepEqual(r.existingMembers, []);
+      assert.deepEqual(r.orphanMembers, []);
+    }
   });
 
   it('classes a team-member of ANOTHER team as a conflict', () => {

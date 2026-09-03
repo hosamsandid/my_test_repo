@@ -10,9 +10,8 @@
 //
 //   - team agents (`role: "team"`) carry `plugins[]` — the team's active set,
 //     inherited by every member without a `pluginsOverride`
-//   - standalone agents / orchestrators carry their own `plugins[]`
+//   - standalone agents carry their own `plugins[]`
 //   - team-members inherit the parent team's list unless `pluginsOverride` is set
-//   - bp-instances inherit the parent orchestrator's list the same way
 //
 // A grant is richer than a skill grant: it carries a per-grant scope
 // granularity (§4.4/§4.6). Each entry normalises to `{ id, scopeGranularity }`
@@ -64,15 +63,14 @@ function normalizeGrantList(list) {
 // Returns a normalised `{ id, scopeGranularity }[]`.
 function effectivePlugins(cfg, loadCfg = null) {
   if (!cfg) return [];
-  // An explicit override always wins (team-member / bp-instance semantics).
+  // An explicit override always wins (team-member semantics).
   if (Array.isArray(cfg.pluginsOverride)) return normalizeGrantList(cfg.pluginsOverride);
   // The construct's own grant.
   if (Array.isArray(cfg.plugins)) return normalizeGrantList(cfg.plugins);
-  // Inherit from the parent construct.
-  const parentId =
-    cfg.role === 'team-member' ? cfg.parentTeamId :
-    cfg.role === 'bp-instance' ? cfg.parentOrchestratorId :
-    null;
+  // Inherit from the parent construct. `team-member` is the only inheriting
+  // role — `bp-instance` (which inherited from its parent orchestrator) went
+  // with the BriefingPack model in #1962.
+  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId : null;
   if (parentId && typeof loadCfg === 'function') {
     const parent = loadCfg(parentId);
     if (parent && Array.isArray(parent.plugins)) return normalizeGrantList(parent.plugins);

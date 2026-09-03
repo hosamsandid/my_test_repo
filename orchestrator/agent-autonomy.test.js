@@ -6,9 +6,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { isAutonomousState, autonomyChanged } = require('./agent-autonomy');
 
-test('inherently-autonomous roles are autonomous regardless of triggers', () => {
-  assert.equal(isAutonomousState({ role: 'orchestrator', triggers: [] }), true);
-  assert.equal(isAutonomousState({ role: 'bp-instance', triggers: [] }), true);
+// Removal guard (#1962): `orchestrator`/`bp-instance` used to be inherently
+// autonomous by role alone. Both roles went with the BriefingPack model, so a
+// leftover config carrying one is now judged purely on sessionPolicy+triggers —
+// role must not resurrect as an autonomy signal.
+test('no role is inherently autonomous any more — autonomy is policy + triggers', () => {
+  assert.equal(isAutonomousState({ role: 'orchestrator', triggers: [] }), false);
+  assert.equal(isAutonomousState({ role: 'bp-instance', triggers: [] }), false);
+  // …and a leftover BP config that *does* carry a trigger is still autonomous,
+  // for the ordinary reason.
+  assert.equal(isAutonomousState({ role: 'bp-instance', triggers: [{ id: 't1' }] }), true);
 });
 
 test('a per-invocation session policy is autonomous even with no triggers', () => {

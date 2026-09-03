@@ -36,7 +36,7 @@ const { pluginCapabilitiesSection } = require('./plugin-prompt');
 //   * GIT_SECTION        — injected only when the agent's environment has at
 //     least one repository (a pure-DM agent with no repo never sees it).
 //   * TRIGGER_SECTION    — injected only for autonomous agents (per-invocation,
-//     orchestrator/bp-instance, or an agent that already has triggers).
+//     or an agent that already has triggers).
 // ------------------------------------------------------------
 
 const WORKSPACE_SECTION =

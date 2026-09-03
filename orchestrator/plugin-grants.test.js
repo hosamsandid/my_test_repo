@@ -67,12 +67,15 @@ test('team-member inherits the parent team grant unless it has an override', () 
   assert.deepEqual(effectivePlugins(clearedOverride, loadCfg), []);
 });
 
-test('bp-instance inherits the parent orchestrator grant', () => {
+// Removal guard (#1962): `bp-instance` used to inherit the parent
+// orchestrator's grant. Both roles went with the BriefingPack model, so
+// `team-member`/`parentTeamId` is the only inheritance path left.
+test('a leftover bp-instance no longer inherits through parentOrchestratorId', () => {
   const orch = { role: 'orchestrator', id: 'o1', plugins: ['p'] };
   const loadCfg = (id) => (id === 'o1' ? orch : null);
   assert.deepEqual(
     effectivePlugins({ role: 'bp-instance', parentOrchestratorId: 'o1' }, loadCfg),
-    [{ id: 'p', scopeGranularity: 'team' }],
+    [],
   );
 });
 

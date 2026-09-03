@@ -2,8 +2,9 @@
 
 // ─── resolve-handoffs (Unified Orchestration, #362 / #368) ───────────────────
 //
-// Pure generalization of orchestrator/bp-event-router.js `findAffectedBps` over
-// the unified edge model. Given a node that just reached a "producing" state
+// Pure generalization of `findAffectedBps` from the former
+// orchestrator/bp-event-router.js (deleted with the BriefingPack model in
+// #1962) over the unified edge model. Given a node that just reached a "producing" state
 // (emitted a label, wrote an artifact, or completed), it returns the downstream
 // hand-offs across ALL edge types — so an artifact production fans out the same
 // way a label does, and vice versa (epic decision 4). It subsumes the BP router:

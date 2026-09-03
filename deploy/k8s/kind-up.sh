@@ -9,7 +9,7 @@ set -euo pipefail
 # What it does (idempotent, safe to re-run):
 #   1. checks prerequisites (podman, kind, kubectl, jq, .env)
 #   2. creates a single-node kind cluster (Podman provider) if missing
-#   3. builds the 4 images with podman and loads them into the kind node
+#   3. builds the 3 images with podman and loads them into the kind node
 #      (no registry anywhere — mirrors the GCP no-Artifact-Registry reality)
 #   4. applies the kind overlay's core (namespace / RBAC / PVCs / conduwuit)
 #      — kustomize overlays under deploy/k8s/overlays/ (#1348)

@@ -83,14 +83,14 @@ jobs:
       - name: Install jq (setup.sh prerequisite)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Ensure ~/.gitconfig is a file (podman bind-mount guard)
-        # docker-compose.yml bind-mounts ~/.gitconfig into the orchestrator (:ro).
-        # On CI the file doesn't exist, so podman auto-creates the bind source as
-        # a DIRECTORY when the stack comes up (during the journey pass below).
-        # After that every `gh`/`git` invocation fails with "unable to access
-        # '/home/runner/.gitconfig': Is a directory" — which is what breaks the
-        # sticky-comment step. Pre-create it as a real file so podman mounts the
-        # file; the identity is harmless and matches the dev-mount intent.
+      - name: Ensure ~/.gitconfig is a file (leftover-directory guard)
+        # No compose service bind-mounts ~/.gitconfig any more — bp-explorer was its
+        # only mounter and went with the service in #1963 — so podman can no longer
+        # create the bind source as a DIRECTORY and make every later `gh`/`git` call
+        # fail with "unable to access '/home/runner/.gitconfig': Is a directory",
+        # which is what used to break the sticky-comment step. Kept as a cheap guard
+        # against a directory a previous run left behind; unlike tour-screenshots.yml
+        # this job never commits, so the identity here is belt-and-braces.
         run: |
           set -euo pipefail
           [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }

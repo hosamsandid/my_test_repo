@@ -82,6 +82,7 @@ steps:
     action:
       do: chat.send
       text: "Our SEPA transfer form accepts any text in the IBAN field and always reports success. It should validate the IBAN against a public service before the transfer can go through."
+    screenshot: describe-request
 
   # Hop 1 — BA → issue: the issue now exists on (fake) GitHub.
   - id: issue-filed
@@ -90,6 +91,7 @@ steps:
     assert:
       do: gh.expectIssueExists
       repo: e2e/fixture
+    screenshot: issue-filed
 
   # ── Slide 12: control point 1 — the human applies `ready-for-implementation` ─
   - id: human-approves
@@ -106,24 +108,34 @@ steps:
       repo: e2e/fixture
       label: ready-for-implementation
 
+  # Hop 2 — issues.labeled woke the Developer: the trigger.fired event lands on its
+  # own session SSE stream (the "trigger visible in its chat"). Asserted on its own
+  # step so the capture below can wait for the *finished* work instead.
+  - id: developer-triggered
+    action:
+      do: chat.open
+      agentId: iban-demo-developer
+    assert:
+      do: chat.expectTriggerFired
+      agentId: iban-demo-developer
+      # This hop crosses a GitHub-poll boundary (issues.labeled → poller → wake);
+      # give it more than the 60 s default so a slow poll tick isn't a flake.
+      timeoutMs: 120000
+
   # ── Slide 13: the Developer wakes and delivers ──────────────────────────────
   - id: developer-wakes
     voiceover: |
       The ready-for-implementation label fired a trigger, and the Developer woke up automatically — no one opened this chat to prompt it. It implemented the whole change on its own: a testable client, the validation states wired into the form, passing tests, a green build — then opened a pull request and labelled it ready-for-review. The Developer never reviews or merges its own work.
     narrative: |
       The `ready-for-implementation` label fired a GitHub trigger, and the Developer agent woke up automatically — the trigger event is visible right in its chat, delivered over the session stream. No one opened this chat to prompt it; the label alone set it in motion. The Developer then does the whole implementation on its own — a feature branch, the change, tests — opens a Pull Request and labels it `ready-for-review`. The hand-off is again just a label, and that label is what will wake the Code Reviewer. The Developer never reviews or merges its own work.
-    # Hop 2 — issues.labeled woke the Developer: assert the trigger.fired event on
-    # the Developer's own session SSE stream (the "trigger visible in its chat").
-    assert:
-      do: chat.expectTriggerFired
-      agentId: iban-demo-developer
-
-  # Hop 3 — Developer → PR: a PR exists carrying `ready-for-review`.
-  - id: pr-opened
+    # The Developer chat is already open (previous step). WAIT for its PR (Hop 3 —
+    # Developer → PR carrying `ready-for-review`); the chat fills in live over SSE
+    # during that wait, so the capture shows the finished implementation.
     assert:
       do: gh.expectPrExists
       repo: e2e/fixture
       hasLabel: ready-for-review
+    screenshot: developer-wakes
 
   # ── Slide 14: the Code Reviewer verifies ────────────────────────────────────
   - id: reviewer-verdict
@@ -132,10 +144,14 @@ steps:
     narrative: |
       Same pattern again: the `ready-for-review` label on the pull request fired a trigger, and the Code Reviewer wakes up on its own. It reviews the change against the issue's acceptance criteria, posts a structured review comment, and applies `ready-to-merge`. And here's the important line: a human performs the merge. The Code Reviewer recommends; it never merges.
     # Hop 4 — the reviewer posted its verdict comment on the PR.
+    action:
+      do: chat.open
+      agentId: iban-demo-code-reviewer
     assert:
       do: gh.expectComment
       repo: e2e/fixture
       bodyIncludes: "ready to merge"
+    screenshot: reviewer-verdict
 
   # Hop 5 — the reviewer's `ready-to-merge` hand-off label is on the PR.
   - id: ready-to-merge

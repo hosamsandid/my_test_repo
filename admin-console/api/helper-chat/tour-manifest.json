@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-02T08:26:15.963Z",
+  "generated": "2026-09-03T13:43:18.682Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -50,6 +50,26 @@
           "id": "agent-chat",
           "voiceover": "This is the Agent Chat, where a human talks directly to any agent. On the left is our team with its four members: Business Analyst, Code Reviewer, Developer and Reworker. In the middle is the conversation, and on the right a live view into the agent's own workspace.",
           "screenshotPath": "iban-story/agent-chat.png"
+        },
+        {
+          "id": "describe-request",
+          "voiceover": "I describe the request to the Business Analyst in plain language. Here's the first thing to appreciate: it doesn't just start writing a spec. It looks at the current form and pushes back with the six questions that genuinely need a human decision — when validation happens, what to do on an invalid IBAN, what if the service is down. I answer point by point, steering the outcome without writing a requirements document myself.",
+          "screenshotPath": "iban-story/describe-request.png"
+        },
+        {
+          "id": "issue-filed",
+          "voiceover": "With my decisions, the Business Analyst files the issue in GitHub. It's written in two layers: a plain-language human section any stakeholder can read, and a full agent section with the problem, scope, and numbered, testable acceptance criteria for the delivery team.",
+          "screenshotPath": "iban-story/issue-filed.png"
+        },
+        {
+          "id": "developer-wakes",
+          "voiceover": "The ready-for-implementation label fired a trigger, and the Developer woke up automatically — no one opened this chat to prompt it. It implemented the whole change on its own: a testable client, the validation states wired into the form, passing tests, a green build — then opened a pull request and labelled it ready-for-review. The Developer never reviews or merges its own work.",
+          "screenshotPath": "iban-story/developer-wakes.png"
+        },
+        {
+          "id": "reviewer-verdict",
+          "voiceover": "Same pattern again: the ready-for-review label woke the Code Reviewer. It checked out the branch, reviewed the full diff in context, and went through the acceptance criteria one by one. Its verdict: all met, tests pass, build green — and it applies ready-to-merge, noting that a human performs the merge.",
+          "screenshotPath": "iban-story/reviewer-verdict.png"
         }
       ]
     },

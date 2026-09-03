@@ -117,20 +117,34 @@ test('both streams pass identifying context so a report is traceable (AC5)', () 
   assert.match(stripComments(SESSION_LOG), /<EventErrorBoundary agentId=\{agentId\} sessionId=\{roomId\} eventId=\{ev\._key\}>/);
 });
 
-/* ─── AC7: the existing markdown boundaries are untouched ──────────── */
+/* ─── AC7: the innermost markdown layer degrades, never crashes ─────── */
 
-test('SafeMarkdown survives as the innermost markdown layer (AC7)', () => {
+// The markdown wrappers must degrade to a RENDER (GFM-only, then plain text),
+// not an error card — and the innermost fallback must be the infallible
+// `plainTextFallback`, so a body that throws in BOTH pipeline tiers can never
+// loop the boundary into React #185 (the whole reason the page kept crashing).
+// The primitive's own behaviour is covered by `markdown-safe.test.js`; this is
+// the #651 drift guard that the two surfaces actually WIRE it.
+
+test('SafeMarkdown nests the safe boundaries down to a plain-text floor (AC7)', () => {
   const src = stripComments(MESSAGE);
-  assert.match(src, /export class SafeMarkdown extends React\.Component/);
-  assert.match(src, /static getDerivedStateFromError\(\)/);
-  assert.match(src, /componentDidCatch\(err\)/);
-  // Its degrade-to-GFM behaviour, not an error card, must still be what it does.
+  assert.match(src, /import \{ MarkdownSafeBoundary, plainTextFallback \} from '\.\.\/\.\.\/components\/markdown-safe\.js'/);
+  assert.match(src, /export function SafeMarkdown/);
+  assert.match(src, /<MarkdownSafeBoundary/);
+  // GFM-only stays the middle tier, and plain text is the guaranteed floor.
   assert.match(src, /<MarkdownGfmOnly body=\{body\} \/>/);
+  assert.match(src, /plainTextFallback\(body\)/);
+  // The old sticky-fallback boundary (which could re-render its own throwing
+  // fallback forever) must be gone.
+  assert.doesNotMatch(src, /class SafeMarkdown extends React\.Component/);
 });
 
-test('SkillMarkdown keeps its own boundary (AC7)', () => {
+test('SkillMarkdown wires the same safe boundary + plain-text floor (AC7)', () => {
   const src = stripComments(SKILL_MD);
-  assert.match(src, /static getDerivedStateFromError\(\)\s*\{\s*return \{ fallback: true \}/);
+  assert.match(src, /import \{ MarkdownSafeBoundary, plainTextFallback \} from '\.\/markdown-safe\.js'/);
+  assert.match(src, /<MarkdownSafeBoundary/);
+  assert.match(src, /plainTextFallback\(/);
+  assert.doesNotMatch(src, /class SkillMarkdown extends React\.Component/);
 });
 
 /* ─── AC5: the client posts to the endpoint the server registers ───── */

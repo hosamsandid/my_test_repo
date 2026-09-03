@@ -14,7 +14,10 @@
  *      crash leaves the navigation usable and shows a recoverable card.
  *   2. `EventErrorBoundary` — wraps one chat/log row, so a single malformed
  *      event degrades to an inline placeholder and the rest keeps streaming.
- *   3. `SafeMarkdown` / `SkillMarkdown` (unchanged) stay the innermost layer.
+ *   3. `SafeMarkdown` / `SkillMarkdown` stay the innermost layer — now built on
+ *      `markdown-safe.js`, which degrades a throwing markdown pipeline to a
+ *      plain-text render that cannot itself throw (so a bad body degrades in
+ *      place instead of escaping to these boundaries as a #185 loop).
  *
  * WHY THIS FILE IS `.js` AND USES `React.createElement`: the CI job that runs
  * `node --test` over the src test glob cannot parse JSX, so a `.jsx` component

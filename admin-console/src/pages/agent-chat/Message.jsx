@@ -7,6 +7,7 @@ import { Bot, Zap } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
 import AskQuestionCard from './AskQuestionCard';
 import { normalizeAskQuestion } from './ask-question-view.js';
+import { MarkdownSafeBoundary, plainTextFallback } from '../../components/markdown-safe.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -51,38 +52,45 @@ const MarkdownGfmOnly = React.memo(function MarkdownGfmOnly({ body }) {
 });
 
 /**
- * Defensive markdown wrapper.
+ * Defensive markdown wrapper — un-crashable by construction (#1974 follow-up).
  *
- * Falls back to GFM-only rendering (with sanitize) if MarkdownFull throws for
- * any reason, surfacing a one-line notice in the dev console. The inner renders
- * are memoized (see above) so error-boundary re-rendering never re-runs the
- * markdown pipeline for unchanged text.
+ * Three tiers, richest first: full pipeline → GFM-only → plain text. Each tier
+ * is a `MarkdownSafeBoundary` (see `components/markdown-safe.js`) whose fallback
+ * is the NEXT tier, and the innermost fallback is `plainTextFallback`, which
+ * cannot throw. Because every boundary's fallback either can't throw or resolves
+ * (through the nested boundary) to plain text, no boundary ever re-renders a
+ * child it already saw throw.
+ *
+ * This is what the old `fallback:true` version got wrong: its GFM-only fallback
+ * shares the same remark/rehype parse path as the full pipeline, so a message
+ * whose parse throws (e.g. a `mdast-util-to-hast` "Cannot use 'in' operator …"
+ * on one body) threw in BOTH tiers — and the boundary re-rendered the same
+ * throwing fallback forever, hitting React error #185 (max update depth) and
+ * taking down the whole Agent Chat page past the per-row `EventErrorBoundary`.
+ * The plain-text floor makes that loop impossible for any content or dependency
+ * version.
+ *
+ * The inner renders stay memoized on `body` (see above) so this wrapping never
+ * re-runs the Shiki pipeline for unchanged text.
  */
-export class SafeMarkdown extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { fallback: false };
-  }
-  static getDerivedStateFromError() {
-    return { fallback: true };
-  }
-  componentDidCatch(err) {
-    // eslint-disable-next-line no-console
-    console.warn('[agent-chat] markdown render failed; falling back to GFM only:', err?.message || err);
-  }
-  render() {
-    const { body } = this.props;
-    if (this.state.fallback) {
-      return <MarkdownGfmOnly body={body} />;
-    }
-    try {
-      return <MarkdownFull body={body} />;
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[agent-chat] markdown threw synchronously; using GFM-only fallback:', err?.message || err);
-      return <MarkdownGfmOnly body={body} />;
-    }
-  }
+export function SafeMarkdown({ body }) {
+  return (
+    <MarkdownSafeBoundary
+      onError={(err) =>
+        // eslint-disable-next-line no-console
+        console.warn('[agent-chat] full markdown render failed; falling back to GFM only:', err?.message || err)}
+      primary={() => <MarkdownFull body={body} />}
+      fallback={() => (
+        <MarkdownSafeBoundary
+          onError={(err) =>
+            // eslint-disable-next-line no-console
+            console.warn('[agent-chat] GFM markdown render failed; falling back to plain text:', err?.message || err)}
+          primary={() => <MarkdownGfmOnly body={body} />}
+          fallback={() => plainTextFallback(body)}
+        />
+      )}
+    />
+  );
 }
 
 /**

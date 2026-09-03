@@ -193,12 +193,14 @@ test('railMenuItems routes each target kind to its own menu', () => {
   const solo = railMenuItems({ target: { kind: 'agent', agent: AGENTS[0] }, agents: AGENTS });
   assert.equal(solo.label, 'Actions for Solo');
   assert.deepEqual(solo.items.map(i => i.key), [
-    // The chat-only view action leads (#1938 D1), then the lifecycle group.
+    // The chat-only view action leads (#1938 D1), then the lifecycle group,
+    // then the chat-only help entry that closes the menu (#1972).
     'mark-unread',
     'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+    'help',
   ]);
-  // The lifecycle group is fenced off from the view action, and only there.
-  assert.deepEqual(solo.items.filter(i => i.separated).map(i => i.key), ['toggle-enabled']);
+  // Both chat-only entries are fenced off from the lifecycle group between them.
+  assert.deepEqual(solo.items.filter(i => i.separated).map(i => i.key), ['toggle-enabled', 'help']);
 
   const team = railMenuItems({
     target: { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
@@ -207,7 +209,29 @@ test('railMenuItems routes each target kind to its own menu', () => {
   assert.equal(team.label, 'Team actions for Zeta Team');
   assert.deepEqual(team.items.map(i => i.key), [
     'toggle-team', 'add-member', 'edit-team', 'export-team', 'open-flow-editor', 'delete-team',
+    'help',
   ]);
+});
+
+test('the help entry is on every row menu, always usable, and never mutates (#1972)', () => {
+  // The row menu is one of the surfaces the epic gives a "?", and a menu cannot
+  // host a button — so the affordance is an entry. It is the one entry that is
+  // never disabled by a lock, a busy run or a missing permission.
+  const targets = [
+    { kind: 'agent', agent: { ...AGENTS[0], canManage: false } },
+    { kind: 'agent', agent: AGENTS[3] }, // team-locked member
+    { kind: 'team', group: { id: 'zeta', displayName: 'Zeta Team', header: AGENTS[1] } },
+  ];
+  for (const target of targets) {
+    const { items } = railMenuItems({ target, agents: AGENTS, busyIds: new Set(['solo', 'zeta']) });
+    const help = items[items.length - 1];
+    assert.equal(help.key, 'help', 'the help entry is always last');
+    assert.equal(help.disabled, false);
+    assert.equal(help.separated, true);
+  }
+  // …and NOT on the rail-header create menu, which is not a row.
+  const create = railMenuItems({ target: { kind: 'create' }, agents: AGENTS });
+  assert.ok(!create.items.some(i => i.key === 'help'));
 });
 
 test('railMenuItems degrades to an empty menu rather than guessing a target', () => {

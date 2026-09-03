@@ -341,7 +341,7 @@ dialog" turns out to be two different things.
 
 | Surface | What it is | Verdict |
 |---|---|---|
-| **`AgentCreateForm`** — the **New Agent** side panel on `/agents` (`Agents.jsx:557`, rendered in a `SidePanel` at `:1965`) | The console's actual create-an-agent dialog. Fields: `id` (auto-derived from Display Name, **immutable after creation**), `displayName`, `role` (`agent` / `team` / `orchestrator`), `environmentId`, `systemPrompt`, `briefingsPath` (orchestrator only), `skills[]`. Submits `POST /api/agents`. | **The pilot target.** |
+| **`AgentCreateForm`** — the **New Agent** side panel on `/agents` (`Agents.jsx:556`, rendered in a `SidePanel` at `:1851`) | The console's actual create-an-agent dialog. Fields: `id` (auto-derived from Display Name, **immutable after creation**), `displayName`, `role` (`agent` / `team` / `orchestrator`), `environmentId`, `systemPrompt`, `briefingsPath` (orchestrator only), `skills[]`. Submits `POST /api/agents`. | **The pilot target.** |
 | **`/quickstart`** — the "just give me one assistant" fast lane | Creates *environment + agent + chat* in one move from a repository URL; reuses an existing environment and even an existing agent on that repo. A different operation with a different result. | Reachable as a **separate** registry action (`quickstart-agent`), not as this one. |
 
 Conflating them would be a quiet lie: a user who says "create an agent" and lands on
@@ -650,7 +650,7 @@ The ticket raises four. This concept takes a position on each; the reviewer deci
 | `admin-console/api/api.js` | `resolveAssistTarget` (≈`:11012`) and its `req.assistMeta` stamp; `POST /api/process/copilot`; `POST /api/teams` and `/api/teams/stream` |
 | `admin-console/api/maintenance-mode.js` | The state file, and the explicit note that this module enforces nothing — the basis of §11 |
 | `admin-console/src/context/MaintenanceModeContext.jsx` + `src/pages/agent-chat/composer-action.js` | How the cooperative maintenance lock actually reaches a control (`disabled`) — the pattern the action card copies |
-| `admin-console/src/pages/Agents.jsx` (`AgentCreateForm` `:557`, `SidePanel` `:1965`, `handleCreateAgent` `:1532`) | **The D2 pilot target** (§8): the fields, the routeless side panel, and the `closePanel(); refetch()` that `resultView.refresh` reproduces |
+| `admin-console/src/pages/Agents.jsx` (`AgentCreateForm` `:556`, `SidePanel` `:1851`, `handleCreateAgent` `:1457`) | **The D2 pilot target** (§8): the fields, the routeless side panel, and the `closePanel(); refetch()` that `resultView.refresh` reproduces |
 | `admin-console/src/pages/agent-create-submit-state.js` | `describeAgentSubmitState` — the validation that stays the final gate (§8.3) |
 | `admin-console/src/pages/QuickStart.jsx` + `src/pages/quickstart-view.js` | The *other* create lane (a separate registry action, not the pilot): environment+agent+chat in one, reuse semantics, and the post-create `navigate('/chats/…')` |
 | `admin-console/src/pages/create-launcher-view.js` | Which "create" lane is which, and the existing query-param page-intent precedent (`/flows?new=describe`) |

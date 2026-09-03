@@ -168,10 +168,8 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
  * @param {string}      o.teamId      the group's team id (always known)
  * @param {boolean}     o.canManage   server's `canManageAgent` for the team
  * @param {boolean}     o.busy        a team mutation is in flight
- * @param {string[]}    o.missingRoles ids/labels of loop-closing roles the team
- *                                    is missing — each becomes an entry
  */
-export function buildTeamMenu({ team, teamId, canManage = true, busy = false, missingRoles = [] } = {}) {
+export function buildTeamMenu({ team, teamId, canManage = true, busy = false } = {}) {
   if (!teamId) return [];
   const gate = (extraDisabled, extraTitle) => ({
     disabled: !canManage || busy || !!extraDisabled,
@@ -191,13 +189,9 @@ export function buildTeamMenu({ team, teamId, canManage = true, busy = false, mi
 
   items.push({ key: 'add-member', label: 'Add member', ...gate(false) });
 
-  for (const role of missingRoles) {
-    items.push({
-      key: `add-role:${role.id}`,
-      label: `Add ${role.displayName || role.id} role`,
-      ...gate(false),
-    });
-  }
+  // No `add-role:*` entries: the missing-role suggestion was retired in #1959
+  // (see docs/admin-console.md). Growing a team is **Add member** above, or the
+  // Flow editor — both explicit choices rather than an inferred one.
 
   // Phase 2 (#1929) replaced Phase 1's jump to the Agents page: the team's own
   // edit form now opens in the chat's Settings tab, which is where AC5 wants

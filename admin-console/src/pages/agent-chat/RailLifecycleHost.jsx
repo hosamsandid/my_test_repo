@@ -5,7 +5,6 @@ import { useNavigate } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
-import { inferMissingRoles } from '../missing-roles-view.js';
 import { summarizeTeamAction } from '../team-action-summary.js';
 import {
   ImportAgentForm, CloneAgentForm, ExtractTemplateForm,
@@ -20,7 +19,6 @@ import {
   deleteTargetFor,
   existingIds as existingIdsOf,
   mergeAgentConfigs,
-  parseMenuKey,
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
@@ -68,12 +66,10 @@ export default function RailLifecycleHost({
 
   // The scoped `GET /api/agents` configs, loaded lazily on the first menu and
   // re-read after every mutation. The chat payload is deliberately thin (no
-  // label registry, no member tree), and two decisions need the fuller record:
-  // which loop-closing roles a team is missing, and how many members a team
-  // delete has to name. Until it lands the menus still work — they just cannot
-  // offer the add-role entries yet.
+  // member tree), and one decision needs the fuller record: how many members a
+  // team delete has to name. Until it lands the menus still work — the delete
+  // dialog just cannot enumerate the members yet.
   const [configs, setConfigs] = useState(null);
-  const [templates, setTemplates] = useState([]);
 
   const [busyIds, setBusyIds] = useState(() => new Set());
   const [actionError, setActionError] = useState(null);
@@ -106,23 +102,12 @@ export default function RailLifecycleHost({
     } catch { /* menus degrade to the chat payload; the server still decides */ }
   }, []);
 
-  // Both lazy loads are triggered by opening a menu, not by mounting the chat:
-  // a user who never opens one pays for neither request.
+  // The lazy load is triggered by opening a menu, not by mounting the chat: a
+  // user who never opens one pays for no request.
   useEffect(() => {
     if (!request) return;
     if (configs === null) loadConfigs();
-    if (request.target?.kind === 'team' && templates.length === 0) {
-      (async () => {
-        try {
-          const { templates: list } = await apiCall('GET', '/api/process-templates');
-          const full = await Promise.all((Array.isArray(list) ? list : []).map(
-            t => apiCall('GET', `/api/process-templates/${encodeURIComponent(t.id)}`).catch(() => null),
-          ));
-          setTemplates(full.filter(Boolean));
-        } catch { /* no templates → no add-role entries, the rest of the menu stands */ }
-      })();
-    }
-  }, [request, configs, loadConfigs, templates.length]);
+  }, [request, configs, loadConfigs]);
 
   /** Re-read both the chat list and our configs after a mutation. */
   const refresh = useCallback(() => {
@@ -145,17 +130,6 @@ export default function RailLifecycleHost({
 
   // ---------------------------------------------------------------- menu model
 
-  const missingRoles = useMemo(() => {
-    if (request?.target?.kind !== 'team') return [];
-    const teamId = request.target.group?.id;
-    if (!teamId) return [];
-    const team = agents.find(a => a && a.id === teamId && a.role === 'team');
-    if (!team) return [];
-    const members = agents.filter(a => a && a.parentTeamId === teamId);
-    const inferred = inferMissingRoles(team, members, templates);
-    return inferred ? inferred.missing : [];
-  }, [request, agents, templates]);
-
   // The row's activity state, from the same poll the rail's dots read (#1938).
   // Taken from the *request's* agent rather than the merged config list: only
   // the chat's own status map knows a row is unread, and only the row the menu
@@ -165,8 +139,8 @@ export default function RailLifecycleHost({
     : 'idle';
 
   const menu = useMemo(
-    () => railMenuItems({ target: request?.target, agents, busyIds, missingRoles, activityState }),
-    [request, agents, busyIds, missingRoles, activityState],
+    () => railMenuItems({ target: request?.target, agents, busyIds, activityState }),
+    [request, agents, busyIds, activityState],
   );
 
   // --------------------------------------------------------------- per-agent
@@ -373,41 +347,10 @@ export default function RailLifecycleHost({
     }
   }
 
-  // Add a loop-closing role from the team's inferred source template (#1375),
-  // then disable the fresh member so nothing wakes until the operator says so.
-  async function addRole(teamId, roleId) {
-    const role = missingRoles.find(r => r.id === roleId) || { id: roleId };
-    const templateId = inferMissingRoles(
-      agents.find(a => a && a.id === teamId),
-      agents.filter(a => a && a.parentTeamId === teamId),
-      templates,
-    )?.templateId;
-    if (!templateId) { setActionError('No source process template could be inferred for this team.'); return; }
-    markBusy(teamId, true);
-    setActionError(null);
-    try {
-      const created = await apiCall('POST', `/api/agents/${encodeURIComponent(teamId)}/members`, {
-        processTemplateId: templateId,
-        roleId: role.id,
-      });
-      const memberId = (created && created.id) || `${teamId}-${role.id}`;
-      try {
-        await apiCall('PUT', `/api/agents/${encodeURIComponent(memberId)}`, { enabled: false });
-      } catch { /* role is added; leave the enable state to the operator */ }
-      setNotice(`Added ${role.displayName || role.id} (disabled). Enable it when you're ready to close the loop.`);
-      refresh();
-    } catch (e) {
-      setActionError(e.message);
-    } finally {
-      markBusy(teamId, false);
-    }
-  }
-
   // ------------------------------------------------------------------ dispatch
 
-  function choose(key) {
+  function choose(kind) {
     const target = request?.target;
-    const { kind, arg } = parseMenuKey(key);
     setActionError(null);
     setNotice(null);
 
@@ -446,7 +389,6 @@ export default function RailLifecycleHost({
       switch (kind) {
         case 'toggle-team':      if (team) toggleTeam(team); break;
         case 'add-member':       addMember(teamId); break;
-        case 'add-role':         if (arg) addRole(teamId, arg); break;
         // Phase 2 (#1929) answers open question 3 the other way round: the
         // team's own edit form now renders in the rail's Settings tab, so this
         // opens it there instead of leaving the chat for the Agents page.

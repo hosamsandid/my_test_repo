@@ -71,9 +71,20 @@ Three card actions do different things, from reversible to destructive:
 - The **Create** launcher is the front door for anything new.
 - For a whole team, prefer the **Agent Team Wizard** — it sets up the full team
   structure automatically instead of you assembling roles by hand.
-- **Add role** on an expanded Agent Team card fills in a role the team is
-  missing relative to its source template (added disabled, so nothing wakes
-  until you enable it).
+- **Add member** on an Agent Team grows it by one: a blank member that inherits
+  the team's prompt and skills, which you then configure in its **Settings**. To
+  add a role *from a role template*, or to wire it into the flow — which label
+  wakes it, what it emits — use the **Flow editor**.
+- **Where did the "Add `<role>` role" suggestion go?** It was **removed**. The
+  platform used to guess which loop-closing role a team was missing (by comparing
+  the team against the process templates) and offer a one-click add. The guess
+  rested on an inference — a team never records which template it came from — so
+  it stayed silent on many teams that really did have a gap, and where it did fire
+  it called a role "missing" that the team may have dropped on purpose. A
+  suggestion you cannot check is worse than none, so it is gone rather than
+  re-homed. Grow a team with **Add member**, and read the real gaps off the Flow
+  editor, where an unconsumed label or an idle gate is visible instead of inferred.
+  Roles added through the old button are unaffected and keep working.
 - **Import Agent** and **+ New Agent** stay available as the advanced, manual
   path.
 - **Save as template** on an agent or member snapshots a proven agent into a

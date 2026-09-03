@@ -313,7 +313,9 @@ promise were undocumented anywhere; the topic is now four chapters — what the 
 Processed events · Outcomes · Pending queue — with a "?" on the table toolbar, the outcome
 legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-surface reference
 with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
-`TIER_SIGNAL_HELP` attribution-tier explainer).
+`TIER_SIGNAL_HELP` attribution-tier explainer), and **E10 → #1993** (Credentials: a
+per-surface reference with a "?" on each of the three pages the one topic serves —
+`/ssh-keys`, `/github-tokens` and `/my-credentials`).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -332,6 +334,25 @@ generic, so there is no shared plumbing left to build. Two things every child in
    registration buys only the z-index lift. `/flows`' `EdgeDialogs` "?" (added by E2) has the
    same latent problem and is still unfixed.
 
+**A multi-route topic is the strongest case for chapters, not an exception to them.** The
+Credentials child (#1993) is the first where one topic file is claimed by *three* routes
+(`/ssh-keys`, `/github-tokens`, `/my-credentials`, since E10 #1884). Before chapters, every
+one of those pages' "?" opened the same shared explanation at the top — so two of the three
+pages always started their reader a third of a document away from their own subject. The
+pattern applies unchanged (one `credentials-help-sections.js`, one `section=` per page
+header, the two guards); what is new is that the per-page chapters and the *cross-page*
+chapters live in one file, which settles the "does every chapter need its own affordance?"
+question for the rest of the epic: **no.** The panel renders the whole topic and merely
+scrolls to the requested heading, so a chapter with no "?" is one scroll from wherever a deep
+link lands — never unreachable. A child should therefore give a "?" to a **surface**, and let
+the shared concept chapters be found by reading on. Two things a multi-route child must check
+that a single-route one need not: whether an **alias** in `CONTEXT_KEYS` renders the topic
+somewhere else (the SetupWizard's two credential steps alias `/ssh-keys` and `/github-tokens`
+and render the *whole body* inline via `SetupStepHelp`, so expanding the topic lengthens that
+collapsible too), and whether a page's "?" sits inside a permission branch (My Credentials'
+must stay outside its `canOwn` branch — the single-admin who cannot own personal credentials
+is exactly the reader who needs the chapter explaining why).
+
 **Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set: #1990's
 Skills topic alone fit under the old 300k ceiling (~297.9k), but #1956's unrelated
 `docs/admin-console.md` additions landing on main in the same window took the assembled prompt
@@ -341,11 +362,12 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time. The Token Usage child (#1994) added ~1.7k chars of prose; measured on the
-merge, with the GitHub Event Log child (#1995) already in, the assembled prompt is
-**312 290 of 340 000 — 91.8% used, 27 710 left**. At the ~9k a child has been costing, that
-is roughly three more children against about ten still open: the paragraph above is no longer
-predicting a trend, it is describing the next few tickets.
+a fourth time. **Running total, measured on each merge so the next child need not:** with the
+Skills (#1990), GitHub Event Log (#1995), Token Usage (#1994) and credentials (#1993) children
+in, the assembled prompt is **322 243 of 340 000 — 94.8% used, 17 757 left**. The last two
+children cost ~9 950 each, so roughly ONE more topic of that size fits, not two or three, and
+about nine children are still open. The paragraph above is no longer predicting a trend: the
+route-scoped-folding ticket is now the next step, not a later one.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

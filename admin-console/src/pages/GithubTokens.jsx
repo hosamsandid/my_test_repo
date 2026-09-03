@@ -22,6 +22,7 @@ import {
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
+import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
 
 const inputStyle = {
@@ -431,7 +432,11 @@ export default function GithubTokens() {
           note extracted in E10 (#1884) into the shared Credentials help topic
           (api/helper-chat/help-topics/credentials.md), which all three
           credential routes claim. The create dialog keeps GitHub's
-          shown-only-once warning, the scope checklist and the SAML-SSO step. */}
+          shown-only-once warning, the scope checklist and the SAML-SSO step.
+
+          #1993 (epic #1981) split that topic into chapters, so this page's "?"
+          lands on the GitHub-tokens chapter instead of the top of a shared
+          explanation that opens with SSH. */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -441,7 +446,12 @@ export default function GithubTokens() {
           Shared team and platform GitHub Personal Access Tokens — injected as <code>GH_TOKEN</code> /{' '}
           <code>GITHUB_TOKEN</code> into every agent of the Working Environment they are linked to.
         </span>
-        <PageHelpButton label="Why both a GitHub token and an SSH key?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="Why both a GitHub token and an SSH key?"
+          section={CREDENTIALS_HELP_SECTIONS.githubTokens}
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </p>
 
       {actionError && (

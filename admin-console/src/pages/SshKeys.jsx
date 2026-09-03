@@ -20,6 +20,7 @@ import {
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
+import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
 
 const inputStyle = {
@@ -588,7 +589,11 @@ export default function SshKeys() {
           credential routes. It carries the SSH-vs-PAT blast-radius rationale,
           the ownership tiers, the runtime resolution order and the rotation /
           deletion rules. The create dialogs keep their one-time-secret warning
-          and SAML-SSO steps at the point of decision. */}
+          and SAML-SSO steps at the point of decision.
+
+          #1993 (epic #1981) split that topic into chapters, so this page's "?"
+          now lands on the SSH-keys chapter rather than the top of a shared
+          explanation whose first third is about the token. */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -598,7 +603,12 @@ export default function SshKeys() {
           Shared team and platform SSH keys — the private keys that authenticate git transport
           for the repositories your Working Environments clone.
         </span>
-        <PageHelpButton label="Why both an SSH key and a GitHub token?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="Why both an SSH key and a GitHub token?"
+          section={CREDENTIALS_HELP_SECTIONS.sshKeys}
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </p>
 
       {actionError && (

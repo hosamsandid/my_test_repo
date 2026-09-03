@@ -20,6 +20,7 @@ import { useAuth } from '../auth/AuthContext';
 import {
   canOwnPersonalCredentials, personalOwnerId, personalCredentials, personalCreateBody,
 } from './my-credentials-view';
+import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 
 // Self-service surface for a human's OWN personal SSH keys & GitHub tokens
 // (#1568, epic #1558 Phase 2). Built on the Phase 1 (#1567) `personal`
@@ -562,7 +563,12 @@ export default function MyCredentials() {
           "why both" rationale moved into the shared Credentials help topic in
           E10 (#1884) — api/helper-chat/help-topics/credentials.md, claimed by
           /ssh-keys, /github-tokens and this route. The create/rotate panels keep
-          their one-time-secret warnings and SAML-SSO steps inline. */}
+          their one-time-secret warnings and SAML-SSO steps inline.
+
+          #1993 (epic #1981) split that topic into chapters and points this "?"
+          at the My-Credentials one. It stays wired outside the `canOwn` branch
+          below on purpose: the single-admin who CANNOT own personal credentials
+          is exactly the reader who needs the chapter explaining why. */}
       <div>
         <p style={{
           margin: 0,
@@ -573,7 +579,12 @@ export default function MyCredentials() {
             Your <strong>personal</strong> SSH key and GitHub token, private to you, so your agents can act
             under your own GitHub identity.
           </span>
-          <PageHelpButton label="Why both an SSH key and a GitHub token, and who can see mine?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+          <PageHelpButton
+            label="Why both an SSH key and a GitHub token, and who can see mine?"
+            section={CREDENTIALS_HELP_SECTIONS.myCredentials}
+            size={14}
+            style={{ padding: 0, flexShrink: 0 }}
+          />
         </p>
       </div>
 

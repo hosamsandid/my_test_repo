@@ -62,6 +62,7 @@ const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-cl
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
 const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
+const { readBriefingPacks, BriefingsError } = require('./briefings-fs');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
 const { membersOfTeam } = require('./agent-team-cascade');
 const skillManifest = require('./skill-manifest');
@@ -7202,36 +7203,19 @@ app.post('/api/knowledge/share-to-team', apiLimiter, async (req, res) => {
 });
 
 /* ─── Unified orchestration graph (Unified Orchestration #362 / #365) ───────
- * One graph over BOTH orchestration concepts, via the pure builder in
- * unified-graph.js. The `/flows` source switcher picks the source:
- *   - default (live):  live agents → process-style nodes (label/timer/review/
- *                      event edges). Optional ?team=<id> scope. Persisted emits
- *                      only (no silent derivation, unless ?derive=1).
- *   - ?workspace=<path>: BP source — fetch briefings from bp-explorer and map
- *                      via briefingsToUnified (dependency + artifact edges; BP
- *                      status dropped). Read-only projection over brief.md.
- * Both shapes are { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }. */
+ * One graph over the live orchestration concept, via the pure builder in
+ * unified-graph.js:
+ *   - live: live agents → process-style nodes (label/timer/review/event edges).
+ *     Optional ?team=<id> scope. Persisted emits only (no silent derivation,
+ *     unless ?derive=1).
+ * Shape is { unifiedFlowVersion, source, nodes, edges, gates, labels, lints }.
+ *
+ * The second source — `?workspace=<path>`, a read-only projection of a
+ * BriefingPack directory fetched from bp-explorer — was removed in #1965
+ * (epic #1961 Phase 4) along with the Flows page's BP listing that was its only
+ * caller. `?workspace=` is now simply an unknown query parameter: the live
+ * branch below runs, exactly as it does for any other unrecognised param. */
 app.get('/api/flows/graph', async (req, res) => {
-  // BP source — read-only projection of a briefings directory.
-  if (typeof req.query.workspace === 'string' && req.query.workspace.trim()) {
-    const workspace = req.query.workspace.trim();
-    try {
-      const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
-      const upstream = await fetch(url);
-      if (!upstream.ok) {
-        return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
-      }
-      const bps = await upstream.json();
-      const flow = briefingsToUnified(bps, { name: workspace });
-      return res.json({
-        unifiedFlowVersion: flow.unifiedFlowVersion, source: 'briefings', workspace,
-        ...buildUnifiedGraph(flow.nodes, flow.edges),
-      });
-    } catch (err) {
-      return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
-    }
-  }
-
   // Live source — agents as unified nodes (data-flow ports empty for now).
   const team = typeof req.query.team === 'string' && req.query.team.trim()
     ? req.query.team.trim() : null;
@@ -8479,42 +8463,88 @@ app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
-/* Import a BriefingPack hierarchy as a process draft (#377). Reads a briefings
- * directory from bp-explorer and maps it through briefingsToUnified →
+/* Import a BriefingPack hierarchy as a process draft (#377). Walks the mission
+ * directory on the shared workspace volume, parses each `brief.md`'s YAML front
+ * matter, and maps the result through briefingsToUnified →
  * unifiedToProcessTemplate, so the brief.md body becomes each role's prompt and
  * the parent-child hierarchy, depends_on, artifacts and stage are preserved.
- * The result is persisted as a new editable draft — BP-Flows and Process-Flows
- * now share one storage format. Read-only against the BP source (no brief.md
- * write-back). */
-app.post('/api/process/drafts/import-briefings', apiLimiter, async (req, res) => {
-  const workspace = typeof req.body?.workspace === 'string' && req.body.workspace.trim()
-    ? req.body.workspace.trim() : null;
-  if (!workspace) return res.status(400).json({ error: 'workspace (briefings path) is required' });
+ * The result is persisted as a new editable draft. Read-only against the BP
+ * source (no brief.md write-back).
+ *
+ * The BriefingPack model is being retired (epic #1961), and this route is the
+ * one piece of it that is deliberately kept: it is the migration path off the
+ * model, so it has to outlive it. #1965 (Phase 4) therefore re-implemented the
+ * read in Node (`briefings-fs.js`) instead of fetching from bp-explorer, which
+ * is what lets Phase 2 (#1963) delete that service.
+ *
+ * The request shape changed with that port, and had to: the old body took a
+ * bare absolute `workspace` path, which no containment barrier ever saw
+ * (bp-explorer did its own prefix check on the far side of an HTTP hop). It now
+ * takes `{ agentId, path }` and resolves through `safeAgentPath` — the same
+ * realpath-and-contain resolver every sibling workspace handler uses — so a
+ * pack tree outside the agent's workspace root is refused here rather than
+ * trusted. `path` is relative to the agent root and may be omitted for the root
+ * itself.
+ *
+ * One behavioural difference from the service, deliberately not ported: packs
+ * are read from the CHECKED-OUT tree only. bp-explorer additionally overlaid
+ * unmerged `agent/*` branches **and** local worktrees (`.worktrees/`,
+ * `.claude/worktrees/`), replacing two fields that both reach the draft — the
+ * `brief.md` **body** (status-gated; feeds each role's drafted prompt) and its
+ * **artifacts** (no status gate at all; feed the role's inputs/outputs). See
+ * the note in `briefings-fs.js` for the full account and why chasing copies the
+ * platform no longer writes is not worth a git spawn per request. */
+app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
+  const agentId = typeof req.body?.agentId === 'string' ? req.body.agentId.trim() : '';
+  if (!agentId) return res.status(400).json({ error: 'agentId is required' });
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  const relPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
 
-  let bps;
+  const missionDir = safeAgentPath(agentId, relPath);
+  if (!missionDir) {
+    // Covers all three refusals — unknown agent, traversal / absolute path, and
+    // an outward-pointing symlink — deliberately without saying which, so the
+    // response is not a probe for what exists outside the workspace root.
+    return res.status(400).json({ error: 'invalid mission directory for that agent' });
+  }
+
+  let packs;
+  let skipped;
   try {
-    const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
-    const upstream = await fetch(url);
-    if (!upstream.ok) return res.status(502).json({ error: `BP-Explorer returned ${upstream.status}` });
-    bps = await upstream.json();
+    ({ packs, skipped } = readBriefingPacks(missionDir));
   } catch (err) {
-    return res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
-  }
-  if (!Array.isArray(bps) || bps.length === 0) {
-    return res.status(422).json({ error: 'No briefing packs found at that workspace' });
+    // A missing / empty / unparseable pack tree is a user-fixable condition,
+    // so it must read as a sentence rather than a stack trace. Anything else is
+    // a real fault and keeps its 500.
+    if (err instanceof BriefingsError) return res.status(err.status).json({ error: err.message });
+    return res.status(500).json({ error: `Could not read the mission directory: ${err.message}` });
   }
 
+  const where = relPath ? `${agentId}/${relPath}` : agentId;
   const name = typeof req.body?.name === 'string' && req.body.name.trim()
-    ? req.body.name.trim() : `Imported: ${workspace}`;
-  const bundle = { ...unifiedToProcessTemplate(briefingsToUnified(bps, { name })), name };
+    ? req.body.name.trim() : `Imported: ${where}`;
+  const bundle = { ...unifiedToProcessTemplate(briefingsToUnified(packs, { name })), name };
 
   // Persist as a new draft (same id derivation as POST /api/process/drafts).
   const id = deriveUniqueDraftId(name, { exists: draftExists });
   const now = new Date().toISOString();
-  const draft = { ...bundle, id, sourceBriefings: workspace, createdAt: now, updatedAt: now };
+  const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
-  res.status(201).json(draft);
+  // `skipped` names the packs that carried no resolvable id and so contribute
+  // no role. It is an **API-level diagnostic and nothing more**: it rides the
+  // 201 so a caller — a script, or a future UI — can see that the draft has
+  // fewer roles than the tree had packs. It is NOT surfaced to the person doing
+  // the import: this dialog closes and navigates to the new draft on success,
+  // and the Flows page has no notice surface to render it in, so an honest
+  // claim stops here rather than at "the user is warned".
+  //
+  // Deliberately not written into the persisted draft: that is a
+  // process-template bundle, and a read-time diagnostic is not part of its
+  // shape. Omitted when nothing was skipped, so the normal response body is
+  // byte-identical to before this ticket (asserted in bp-removal-guard.test.js).
+  const partial = Array.isArray(skipped) && skipped.length > 0;
+  res.status(201).json(partial ? { ...draft, skipped } : draft);
 });
 
 /* ─── Skills ────────────────────────────────────────────────────────── */

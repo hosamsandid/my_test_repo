@@ -18,8 +18,9 @@
 //
 // Type tokens (per source, #411):
 //   agent:    'github-pr' | 'github-issue' | 'label' | 'artifact' | 'hierarchy'
-//             | 'dependency'  ('artifact' with no name/path degrades to a plain
-//             dependency; the BP view keeps 'dependency' as an explicit tile)
+//             ('artifact' with no name/path degrades to a plain dependency —
+//             the only view that offered 'dependency' as an explicit tile was
+//             the BriefingPack one, removed in #1965)
 //   github:   'event'  (one unified GitHub-trigger dialog: raw events AND
 //             label-based triggers incl. human-set labels / approval gates —
 //             the former @human source is folded into GitHub)
@@ -34,9 +35,12 @@
 // Modes:
 //   live      — a materialised team; ops write through to running agents
 //   draft     — a process-template bundle being authored
-//   bp        — a BriefingPack workspace (brief.md frontmatter editing)
 //   blueprint — the role-template catalog or an imported-bundle preview
-//   viewer    — any read-only projection (BP viewer without a workspace)
+//   viewer    — any read-only projection
+//
+// A fifth mode, `bp` (a BriefingPack workspace, whose ops wrote back into
+// brief.md front matter), was removed in #1965 together with the flow editor's
+// BriefingPack source.
 
 const PROCESS_CREATE_TYPES = {
   agent: ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy'],
@@ -76,15 +80,6 @@ const MODES = {
     readOnlyHint: null,
     createTypes: PROCESS_CREATE_TYPES,
   },
-  bp: {
-    mode: 'bp',
-    editable: true,
-    connectPort: true,
-    edgeClick: true,
-    actorSources: false, // BriefingPacks have no triggers — no external actors
-    readOnlyHint: null,
-    createTypes: { agent: ['dependency', 'artifact'] },
-  },
   blueprint: {
     mode: 'blueprint',
     editable: false,
@@ -119,11 +114,6 @@ export function processMode({ isDraft, imported, level }) {
   if (isDraft) return 'draft';
   if (imported || level === 'template') return 'blueprint';
   return 'live';
-}
-
-/** Resolve the FlowGraph (BP viewer) source to a mode. */
-export function bpMode({ workspace }) {
-  return workspace ? 'bp' : 'viewer';
 }
 
 /** The create-type tokens a given drag-source kind offers in this mode. */

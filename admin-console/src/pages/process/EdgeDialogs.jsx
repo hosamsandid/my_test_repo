@@ -842,7 +842,7 @@ function ArtifactEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, on
     try {
       // The engine writes both ports (or the plain dependency when no artifact
       // is given) — named artifacts are matched by name, a bare path is a
-      // path-keyed artifact (BriefingPack-style).
+      // path-keyed artifact.
       await wireArtifactFlow({ ops }, { from, to, name: nm, hint: h, description });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
@@ -917,9 +917,9 @@ function HierarchyEdgeForm({ from, to, fromName, toName, ops, onBack, onClose, o
  * Every clickable edge opens the same shell: type + endpoints + the type's
  * editable properties (where it has any) + delete. Actor edges (timer, event,
  * webhook, human-set label) are fully editable; edges whose ops the adapter
- * doesn't support (e.g. parent links in the BP view) and derived edges render
- * read-only with a pointer to their source of truth. Same surface in draft,
- * live and BP — the ops adapter differs underneath. */
+ * doesn't support (e.g. parent links) and derived edges render read-only with a
+ * pointer to their source of truth. Same surface in draft and live — the ops
+ * adapter differs underneath. */
 export function EditHandoffDialog(props) {
   const on = props.edge?.on;
   const ops = props.ops || liveOps;

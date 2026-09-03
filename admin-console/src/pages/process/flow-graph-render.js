@@ -1,11 +1,18 @@
 // flow-graph-render.js — ES Module (Unified Orchestration #362, UI rework Phase B)
 //
-// The rich, BP-Explorer-style graph renderer (originally bp-graph.js), now
-// generalized to consume the unified graph from /api/flows/graph instead of raw
-// BriefingPack objects. It keeps the look the operators preferred — expandable
-// node cards, parent-child hierarchy, the Content/prompt panel, and the data-flow
-// (input/output artifact) view — and additionally draws the process-linking edges
-// (label / review / manual) on top.
+// The rich graph renderer (originally bp-graph.js, ported from the BP-Explorer
+// viewer), generalized to consume the unified graph from /api/flows/graph. It
+// keeps the look the operators preferred — expandable node cards, parent-child
+// hierarchy, the Content/prompt panel, and the data-flow (input/output
+// artifact) view — and additionally draws the process-linking edges (label /
+// review / manual) on top.
+//
+// That provenance is why the `.bp-*` class names below read as they do: they
+// are the ORIGINAL viewer's, kept when the module was generalized, and they
+// have applied to every node in the flow editor ever since — not only to
+// BriefingPack ones. They are a naming legacy, deliberately left alone by the
+// BriefingPack removal (#1965); the e2e flow journeys select on them
+// (`e2e/steps/flows.js`), so a rename is a change to both files at once.
 //
 //   const g = initFlowGraph(viewportEl, { onSelectNode });
 //   g.setData(unifiedGraph);   // { nodes, edges, lints } from /api/flows/graph
@@ -74,10 +81,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
 
   // How far a single column may run along the CROSS axis before it wraps into
   // stacked sub-rows (see wrapColumns in flow-layout.js). One column is one
-  // layer of the flow, which for a hierarchy is every sibling of one parent — a
-  // BriefingPack pack with a wide root used to lay 270+ cards out in a single
-  // line, giving a canvas ~100 000px wide that "Fit to view" could not fit even
-  // at the 10% zoom floor. 6 000px is ~16 cards across: wide enough that every
+  // layer of the flow, which for a hierarchy is every sibling of one parent — the
+  // hierarchy that forced this (a BriefingPack pack with a 270-child root) laid
+  // 270 cards out in a single line, giving a canvas ~100 000px wide that "Fit to
+  // view" could not fit even at the 10% zoom floor. The budget is not specific to
+  // that source and outlives it. 6 000px is ~16 cards across: wide enough that every
   // hand-authored flow is unaffected, narrow enough that a wrapped block fits a
   // normal viewport at a readable zoom.
   const WRAP_MAX_CROSS = 6000;
@@ -409,7 +417,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // does NOT arrive as one event: a notched wheel delivers 10–20 and a
   // precision wheel or trackpad hundreds. Writing the transform per event asks
   // the compositor to re-tile and re-raster the whole canvas that many times in
-  // one gesture — on a real BriefingPack pack the canvas is tens of thousands of
+  // one gesture — on a large hierarchy the canvas is tens of thousands of
   // pixels wide, so the pipeline never catches up. The pointer maths stays
   // per-event (so the zoom lands exactly where today's does); only the DOM write
   // is coalesced to at most one per animation frame.

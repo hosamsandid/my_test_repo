@@ -317,53 +317,12 @@ export const liveOps = {
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const uid = () => `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
-// BP mode (#362 UI rework Phase D) — edits a BriefingPack's brief.md in the
-// orchestrator's workspace via bp-explorer's raw endpoints (GET → modify → PUT,
-// which writes + git-commits). v1 supports the body (the node's prompt/content);
-// frontmatter editing (depends_on / artifacts) lands in D2.
-export function makeBpOps(workspace) {
-  const base = '/api/bp-explorer';
-  const q = `?workspace=${encodeURIComponent(workspace)}`;
-
-  async function getRaw(bpId) {
-    const r = await apiCall('GET', `${base}/bp/${bpId}/raw${q}`);
-    return r && typeof r.content === 'string' ? r.content : '';
-  }
-  async function putRaw(bpId, content, message) {
-    return apiCall('PUT', `${base}/bp/${bpId}/raw${q}`, {
-      content,
-      commit_message: message || `refine(bp:${bpId.slice(0, 6)}): edit brief via Flows`,
-    });
-  }
-  // Split a brief.md into its leading YAML frontmatter block and the body that
-  // follows. The body is exactly what bp-explorer returns as `body` (= the
-  // node's content), so replacing it round-trips cleanly without touching YAML.
-  function splitFrontmatter(content) {
-    const m = content.match(/^(---\n[\s\S]*?\n---\n?)([\s\S]*)$/);
-    return m ? { fm: m[1], body: m[2] } : { fm: '', body: content };
-  }
-
-  const fmEdit = (bpId, op, value) =>
-    apiCall('POST', `${base}/bp/${bpId}/frontmatter-edit${q}`, { op, value });
-
-  return {
-    mode: 'bp',
-    setPrompt: async (bpId, text) => {
-      const { fm } = splitFrontmatter(await getRaw(bpId));
-      await putRaw(bpId, fm + (text || ''));
-    },
-    // Frontmatter edits (#362 D2) — structured ops applied server-side + commit.
-    // Same signatures as makeDraftOps so the on-type picker (CreateEdgeDialog)
-    // works unchanged. Dependency A→B = "B depends on A".
-    addDependency: (bpId, dependsOnId) => fmEdit(bpId, 'add-dependency', dependsOnId),
-    removeDependency: (bpId, dependsOnId) => fmEdit(bpId, 'remove-dependency', dependsOnId),
-    addArtifact: (bpId, { direction, path, description }) =>
-      fmEdit(bpId, 'add-artifact', { direction, path, description }),
-    removeArtifact: (bpId, { direction, path }) =>
-      fmEdit(bpId, 'remove-artifact', { direction, path }),
-    setStage: (bpId, stage) => fmEdit(bpId, 'set-stage', stage || ''),
-  };
-}
+// A third write-target adapter used to live here: it edited a `brief.md`'s body
+// and front matter in place through bp-explorer's raw endpoints. #1965 (epic
+// #1961 Phase 4) removed it with the flow editor's BriefingPack source — the
+// pack hierarchy is now only ever READ, as a one-way import into a draft
+// (`POST /api/process/drafts/import-briefings`), so nothing writes back to a
+// `brief.md` any more.
 
 function slugRole(name, taken) {
   let base = String(name || 'role').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';

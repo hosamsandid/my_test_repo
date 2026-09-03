@@ -321,12 +321,16 @@ generic, so there is no shared plumbing left to build. Two things every child in
    registration buys only the z-index lift. `/flows`' `EdgeDialogs` "?" (added by E2) has the
    same latent problem and is still unfixed.
 
-**Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set, and #1990
-alone brought the assembled prompt to ~297.9k of the 300k limit. The remaining twelve
-children cannot all be absorbed by raising the number a fourth time — **route-scoped folding**
-(fold the current route's topic plus its `seeAlso` neighbours, not all of them) is the
-structural fix this epic finally makes urgent, and it is still a separable ticket because it
-changes what the assistant can answer about *other* pages.
+**Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set: #1990's
+Skills topic alone fit under the old 300k ceiling (~297.9k), but #1956's unrelated
+`docs/admin-console.md` additions landing on main in the same window took the assembled prompt
+to ~301.7k, so #1990 raised `SYSTEM_PROMPT_CHAR_LIMIT` to **340,000** as a deliberate stop-gap
+sized for roughly the next handful of children. The remaining children cannot all be absorbed
+by raising the number again — **route-scoped folding** (fold the current route's topic plus its
+`seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
+it is still a separable ticket because it changes what the assistant can answer about *other*
+pages. The next child that hits the ceiling should open that ticket rather than raise the limit
+a fourth time.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

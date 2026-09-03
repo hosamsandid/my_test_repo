@@ -8488,10 +8488,12 @@ app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
  *
  * One behavioural difference from the service, deliberately not ported: packs
  * are read from the CHECKED-OUT tree only. bp-explorer additionally overlaid
- * unmerged `agent/*` branches and took the winning branch's `brief.md` body,
- * which fed each role's drafted prompt — see the note in `briefings-fs.js` for
- * why chasing refs the platform no longer writes (#1962 removed the claim
- * endpoint) is not worth a git spawn per request. */
+ * unmerged `agent/*` branches **and** local worktrees (`.worktrees/`,
+ * `.claude/worktrees/`), replacing two fields that both reach the draft — the
+ * `brief.md` **body** (status-gated; feeds each role's drafted prompt) and its
+ * **artifacts** (no status gate at all; feed the role's inputs/outputs). See
+ * the note in `briefings-fs.js` for the full account and why chasing copies the
+ * platform no longer writes is not worth a git spawn per request. */
 app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   const agentId = typeof req.body?.agentId === 'string' ? req.body.agentId.trim() : '';
   if (!agentId) return res.status(400).json({ error: 'agentId is required' });
@@ -8530,13 +8532,17 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
   // `skipped` names the packs that carried no resolvable id and so contribute
-  // no role. `readBriefingPacks` collects it precisely because a draft quietly
-  // missing a role is the failure a user cannot tell from a bug — reporting it
-  // is what makes that collection worth anything. Reported on the RESPONSE and
-  // deliberately not written into the persisted draft: the draft is a
-  // process-template bundle, and a read-time diagnostic is not part of that
+  // no role. It is an **API-level diagnostic and nothing more**: it rides the
+  // 201 so a caller — a script, or a future UI — can see that the draft has
+  // fewer roles than the tree had packs. It is NOT surfaced to the person doing
+  // the import: this dialog closes and navigates to the new draft on success,
+  // and the Flows page has no notice surface to render it in, so an honest
+  // claim stops here rather than at "the user is warned".
+  //
+  // Deliberately not written into the persisted draft: that is a
+  // process-template bundle, and a read-time diagnostic is not part of its
   // shape. Omitted when nothing was skipped, so the normal response body is
-  // byte-identical to before.
+  // byte-identical to before this ticket (asserted in bp-removal-guard.test.js).
   const partial = Array.isArray(skipped) && skipped.length > 0;
   res.status(201).json(partial ? { ...draft, skipped } : draft);
 });

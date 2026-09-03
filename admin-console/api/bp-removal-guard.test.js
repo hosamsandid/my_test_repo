@@ -128,6 +128,28 @@ test('#1965 AC3: the import reads the filesystem, not bp-explorer', () => {
   assert.match(route, /readBriefingPacks\(/, 'the import must read packs off disk');
 });
 
+test('#1965: the import reports its skipped packs, and omits the key when there are none', () => {
+  // `readBriefingPacks` collects `skipped` (packs with no resolvable id, which
+  // therefore contribute no role). The first cut of this route destructured
+  // only `packs`, so the list was collected, unit-tested and then discarded by
+  // its only caller. Two properties, both of which the route comment leans on:
+  const route = routeBody("app.post('/api/process/drafts/import-briefings'");
+  //   1. it is actually read off the helper…
+  assert.match(route, /\{\s*packs\s*,\s*skipped\s*\}\s*=\s*readBriefingPacks\(/,
+    'the route must destructure skipped, not just packs');
+  //   2. …and put on the response only when non-empty, so the normal 201 body
+  //      is byte-identical to before the diagnostic existed. Anchored on the
+  //      conditional spread rather than the bare word, because an
+  //      unconditional `{ ...draft, skipped }` would satisfy a bare match
+  //      while silently changing every response.
+  assert.match(route, /skipped\.length\s*>\s*0/, 'the emptiness check is gone');
+  assert.match(route, /res\.status\(201\)\.json\([^)]*\?[\s\S]{0,80}?skipped[\s\S]{0,40}?:\s*draft/,
+    'skipped must be added conditionally, never on every response');
+  // And never persisted: the draft on disk is a process-template bundle.
+  assert.doesNotMatch(route, /writeJsonAtomic\([^)]*\)[\s\S]{0,80}?skipped\s*[,}]/,
+    'skipped must not be written into the persisted draft');
+});
+
 test('#1965 AC3: the import resolves its path through the shared containment barrier', () => {
   const route = routeBody("app.post('/api/process/drafts/import-briefings'");
   // `safeAgentPath` is the resolver every sibling workspace handler uses: it

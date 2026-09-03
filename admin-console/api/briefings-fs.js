@@ -20,24 +20,51 @@
  * What IS ported is ported faithfully, including bp-explorer's quirks (see
  * `parseFrontmatter`), because AC2 asks for the same draft the service made.
  *
- * ONE deliberate behavioural difference, and it is not a `status`-only one.
- * bp-explorer's **agent-branch overlay** (`load_all_briefings`, server.py) also
- * scanned `refs/heads/agent/*` + `refs/remotes/origin/agent/*` and, when a
- * branch's status outranked main's, took that branch's `brief.md` wholesale —
- * `bp["body"] = branch_body`, not just the status field. `body` is load-bearing:
- * `briefingsToUnified` maps it to `content`, and `unifiedToProcessTemplate`
- * resolves a role's prompt as `systemPrompt || content`. So for a pack claimed
- * on an unmerged agent branch, the old importer drafted the role prompt from
- * that branch and this one drafts it from the checked-out tree.
+ * DELIBERATE BEHAVIOURAL DIFFERENCE: this reads the CHECKED-OUT TREE only.
+ * bp-explorer additionally ran an **overlay pass** that could replace a pack's
+ * content from somewhere else, and it did so in TWO fields and from TWO
+ * sources. Both are scoped out; neither is a `status`-only difference.
  *
- * That is scoped out rather than ported, on purpose: #1962 removed
+ * The two fields, because both are load-bearing into the draft:
+ *   - `body` — `briefingsToUnified` maps it to `content`, and
+ *     `unifiedToProcessTemplate` resolves a role's prompt as
+ *     `systemPrompt || content`. So the drafted ROLE PROMPT can differ.
+ *     Overridden only when the other copy's status **outranks** main's
+ *     (`_STATUS_ORDER`).
+ *   - `artifacts` — split into `inputs`/`outputs`, which are re-attached onto
+ *     the role and DO reach the persisted draft (verified, unlike
+ *     `children`/`is_parent`, which `unifiedToProcessTemplate` drops — so the
+ *     unported children inference really is absorbed). Overridden with **NO
+ *     status gate at all**: `if branch_artifacts:` alone, i.e. whenever the
+ *     other copy lists any. This is the strictly broader trigger of the two —
+ *     a pack whose other copy is at or *behind* main still had its artifacts
+ *     taken.
+ *
+ * The two sources, both in `load_all_briefings` (server.py):
+ *   - **agent branches** — `discover_agent_branches` over
+ *     `refs/heads/agent/*` + `refs/remotes/origin/agent/*`, read with
+ *     `git show`.
+ *   - **worktrees** — `discover_worktree_briefings` reading `.worktrees/`
+ *     (ACE) and `.claude/worktrees/` (**Claude Code's own**) straight off the
+ *     filesystem, so it also caught uncommitted edits. Its `body` gate is
+ *     wider still (status advanced OR a claim in progress), and it carries the
+ *     same unconditional `artifacts` overlay.
+ *
+ * Why scoped out rather than ported: #1962 removed
  * `POST /internal/agents/:id/claim`, so the platform no longer creates agent
- * branches, and porting `discover_agent_branches` + `git show` would mean
- * spawning git inside a request to chase refs nothing writes any more. The
- * consequence is stated plainly here, in the route comment and in
- * RELEASE_NOTES instead of being claimed away — if you are migrating a
- * repository whose packs still carry unmerged agent-branch edits, merge those
- * branches before importing and the drafts match.
+ * branches, and porting either discovery would mean spawning git inside a
+ * request (or walking worktree dirs) to chase copies nothing on this platform
+ * writes any more. Note the claim-endpoint removal covers the *agent-branch*
+ * source only — it says nothing about Claude Code worktrees, which is why the
+ * worktree pass is named here rather than folded into that justification.
+ *
+ * The operator consequence is stated here, in the route comment and in
+ * RELEASE_NOTES rather than claimed away. Merging an outstanding `agent/*`
+ * branch restores the `body` half, but merging cannot undo the artifacts half
+ * for a branch already at or behind main — so the honest advice is to merge
+ * **or delete** stale `agent/*` branches (and leave no stale worktree copy)
+ * before importing, after which the checked-out tree IS the whole truth and
+ * the drafts match.
  *
  * Layout convention, inherited from bp-explorer's `resolve_workspace`: packs
  * live at `<missionDir>/artifacts/briefings/**\/brief.md`, and directory

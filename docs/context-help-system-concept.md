@@ -284,6 +284,25 @@ Total: **2 (foundation) + 1 (Getting Started) + 15 (extraction) = 18 child ticke
    `localStorage`-tracked); routes with no topic do not auto-open (C2).
 4. **Overview reachability** — the "This page" face carries an explicit **Home/Overview**
    affordance to return to the overview from any page (C2/§4).
+5. **Chapter deep-linking** (#1972) — `openHelpFor(route, { section })` takes an optional
+   chapter slug and the "This page" face scrolls the topic to the matching heading, so a
+   page with several distinct surfaces can put a "?" on each one instead of a single
+   page-level button. A chapter is addressed by the **slug of its heading text**
+   (`sectionSlug` in `page-help-view.js`) rather than an authored anchor: the topics stay
+   plain markdown, the shared `SafeMarkdown` pipeline is untouched, and no `{#id}` syntax
+   leaks into the rendered prose. The trade-off is that a reworded heading breaks its link
+   *silently* (the face just renders from the top), so a topic whose chapters are
+   deep-link targets declares them in `help-topics-content.test.js` and its page-side
+   guard asserts every slug a call site names is a real heading. That degradation is also
+   the wanted behaviour for a surface the current agent does not have — a "?" is never
+   empty or broken, it merely opens the chapter's topic at the top.
+
+**Widened after the fact.** E15 deliberately scoped the Agent Chat topic to the three side
+panels plus the session model. #1972 reopened it: the page's remaining surfaces (the agent
+list, the header, the composer, the right rail) were left undocumented, so the topic became
+a full per-surface reference and every surface gained a chapter-linked "?". This is a
+product decision, not a regression of E15 — the extraction table above records what each
+ticket *lifted*, not a ceiling on what a topic may later cover.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

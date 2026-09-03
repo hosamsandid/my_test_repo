@@ -17,7 +17,7 @@ askPrompts:
   - "How far back does this log go?"
 ---
 
-## What this page shows
+## What the GitHub Event Log is
 
 This page is **purely observational**: it records what the platform saw on
 GitHub and what it decided to do with each event. Nothing here changes
@@ -34,15 +34,56 @@ agent wake up?**
 | **Pending queue** | The **actionable backlog**. Entries accepted for an agent but not yet delivered. Cancellable. | Future |
 
 An event normally appears in the Pending queue for a few seconds and then in
-Processed events. A *long* Pending queue is the interesting case — see below.
+Processed events. A *long* Pending queue is the interesting case — see the last
+chapter.
 
-## Where the events come from
+### How long it is kept, and how complete it is
+
+The history is written to daily files and kept for **7 days**, then deleted —
+this is an operational log, not an audit trail. (Config mutations are audited
+separately.) The time-range selector filters within that window, and a single
+read is capped, so a very busy repository can hit the cap before it hits the
+7-day edge.
+
+Writing the log is **best-effort**: it must never break delivery, so an event
+can in principle be delivered without a row appearing here. If a wake clearly
+happened but no row explains it, that is the explanation of last resort — check
+the agent's own session first.
+
+### Who can see it
+
+The page is **not team-scoped** — every signed-in user sees the events of every
+polled repository and every agent, and any signed-in user can cancel any
+agent's queued entry (the cancellation itself is recorded in the audit trail).
+Treat repository and agent names here as visible to all console users.
+
+## Processed events
+
+The **Processed events** tab is the history: one row per event that survived
+duplicate-detection, newest first, within the time range you select. Refresh
+re-reads it; nothing on this tab is editable.
+
+Each row reads left to right as *when · where · what · who · what happened*:
+
+| Column | What it holds |
+|---|---|
+| **Time** | When the platform saw the event, as a relative phrase — the exact local time is on hover. |
+| **Repository** | The short repository name; the full `owner/name` is on hover. |
+| **Type** | Whether the work item is a **PR** or an **Issue**, taken from the stored work item rather than guessed from the event name. A `—` means the event has no work item (a push, a branch create or delete) or predates this column. |
+| **Work item** | The `#number` of the PR or issue, linking to GitHub. A pull request that resolves issues also shows a linked `→ closes #<issue>`, so you can walk issue → PR → merge without leaving the page. |
+| **Title** | The title of that PR or issue. |
+| **Event** | The event in plain language rather than the raw API key. A push / create / delete row appends the branch or tag it touched; a row nobody was listening to appends the event's own label. |
+| **Actor** | The GitHub account that caused the event. |
+| **Outcomes** | One chip per subscriber whose event-type filter matched — the next chapter is entirely about these. |
+
+Older rows are never backfilled. A column that was added after a row was
+written simply shows `—` for it, rather than a value invented after the fact.
+
+### Where the events come from
 
 There is no webhook into this stack, so the orchestrator **polls** the GitHub
 Events API every ~30 s for every repository that appears in a Working
-Environment carrying a **GitHub token**. A repository with no token anywhere is
-never polled — its events simply never arrive, and nothing on this page will
-say so.
+Environment carrying a **GitHub token**.
 
 Two consequences that surprise people:
 
@@ -50,23 +91,32 @@ Two consequences that surprise people:
   notably there is no `pull_request.synchronize`, so "a new commit was pushed to
   the PR" is not an event you can subscribe to.
 - **An event is fresh if its id has not been seen before**, not if it is recent.
-  The poller keeps a per-repository set of seen ids, so a re-polled page costs
-  nothing and nothing is delivered twice. The very first poll after a restart
-  only establishes that baseline — it delivers nothing.
+  The poller keeps a per-repository set of **seen ids**, so a re-polled page
+  costs nothing and nothing is delivered twice. The very first poll after a
+  restart only establishes that baseline — it delivers nothing.
 
-The poller is not the only writer. Hand-offs on **internal channels**
-(`transport: 'internal'`, woken directly by a producer's `aee-emit` instead of
-via GitHub) and labels applied by a human through the **GitHub Issues plugin**
-are recorded here too, so this stays one honest timeline of every wake — even
-the ones that never travelled through the Events API. A label applied in the
-console is delivered immediately and the poller's later sighting of the same
-`*.labeled` event is dropped as a duplicate.
+### The poller is not the only writer
 
-## The outcomes
+Two other things write rows here, which is why this stays one honest timeline of
+every wake rather than a log of one delivery mechanism:
+
+- **Internal-channel hand-offs.** A hand-off on an internal channel
+  (`transport: 'internal'`) is woken directly by the producer's `aee-emit`
+  instead of travelling through the Events API, and is recorded here too.
+- **Labels applied in the console.** A label a human applies through the GitHub
+  Issues plugin is delivered immediately on that fast path, and the poller's
+  later sighting of the same `*.labeled` event is dropped as a duplicate.
+
+Each row carries a `source` marking which writer produced it — but **the table
+never renders it**, so two rows that reached an agent by different routes look
+identical here. The `dropped (internal-dedup)` chip described in the next
+chapter is the only visible trace of the fast path.
+
+## Outcomes
 
 One row per event; one chip per subscriber whose event-type filter matched. The
-same explanations are on the page as chip tooltips and a collapsible legend —
-this is the longer version.
+same explanations are on the page as chip tooltips and in the collapsible
+legend — this is the longer version.
 
 | Outcome | What happened | Should you worry? |
 |---|---|---|
@@ -97,17 +147,13 @@ trigger fires on either. The identity stamps `gh-as-agent` writes are for
 humans reading GitHub, not for delivery decisions — the only thing standing
 between two agents and an infinite ping-pong is the throttle above.
 
-## Reading a "my agent never woke up" case
+### Reading a "my agent never woke up" case
 
 Work down the row, in this order:
 
 1. **Is the event in the list at all?** No → most likely the repository is never
-   polled. A repository is polled only if some Working Environment carries a
-   **GitHub token** for it *and* at least one enabled agent has an enabled
-   `github-event` trigger on it. A repository nobody subscribes to, or one whose
-   only subscriber is a **disabled** agent, produces no rows at all — not even
-   *nobody's listening*. The other possibility is that the Events API simply
-   never emitted that action.
+   polled (see the next section), or the Events API simply never emitted that
+   action.
 2. **Does the row say *nobody's listening*?** → no trigger subscribes to that
    event type. A wiring problem, not a delivery problem.
 3. **Is there a chip for the agent you expected?** No chip means the agent's
@@ -116,20 +162,37 @@ Work down the row, in this order:
    horizon, label filter, or throttle.
 5. **Delivered but nothing happened?** Delivery is not execution. Open the
    session from the chip and read it there.
+6. **Delivered, but the agent has not started yet?** Look in the Pending queue —
+   the entry may still be waiting for the agent.
+
+### When a repository is polled, and when it is not
+
+A repository is polled only if **both** are true:
+
+- some Working Environment carries a **GitHub token** for it, and
+- at least one **enabled** agent has an **enabled** `github-event` trigger on it.
+
+A repository nobody subscribes to, or one whose only subscriber is a disabled
+agent, produces **no rows at all** — not even *nobody's listening*, which is
+reported only for a repository that *is* polled. Silence on this page is
+therefore ambiguous on its own: it can mean "nothing happened" or "we were never
+looking". Check the environment's token and the trigger's enabled state before
+concluding the event was lost.
 
 ## Pending queue
 
 Between "accepted for an agent" and "the agent actually runs" the entry sits in
-that agent's dispatch queue, which drains **every few seconds**. So an empty
-Pending queue is the normal state, and a backlog means something is holding
-delivery:
+that agent's dispatch queue, which drains **every few seconds**. The **Pending
+queue** tab is that backlog, grouped per agent. So an empty queue is the normal
+state, and a backlog means something is holding delivery:
 
 - **Maintenance Mode** — queued events keep arriving but are deliberately not
   drained until the window ends. Nothing is lost.
 - **The agent is busy** — an agent has one workspace and runs one thing at a
-  time, so work queues behind a long session or a running loop.
+  time, so work queues behind a long session.
 - **A loop is running** — a loop trigger holds the agent's workspace across all
-  its iterations, and the drain pauses until the loop ends.
+  its iterations, and the drain pauses until the whole loop ends, not between
+  iterations.
 - **The agent is disabled or not running** — nothing is draining its queue.
   Entries have **no expiry**: they wait indefinitely and drain in order whenever
   the agent comes back. (Nothing new accrues while it is disabled, because the
@@ -138,7 +201,7 @@ delivery:
 The queue holds more than GitHub events: a folded **GitHub digest**, a
 **throttle warning** (the heads-up DM sent the first time a cap is hit), a
 **Briefing-pack event**, and queued session operations all appear with their own
-kind badge.
+kind badge, explained on hover.
 
 **Cancel** removes a single entry before it is delivered — the one action on
 this page that changes anything. Use it to stop a wake you know is wrong (a
@@ -150,19 +213,3 @@ and clicking Cancel is reported as already gone, not as an error.
 An event that arrives while the stack is genuinely down is not re-delivered.
 That is why `github-event` triggers are preferred over `http` triggers for
 anything that must not be missed.
-
-## Retention and scope
-
-The history is written to daily files and kept for **7 days**, then deleted —
-this is an operational log, not an audit trail. (Config mutations are audited
-separately.) The time-range selector filters within that window, and a single
-read is capped, so a very busy repository can hit the cap before it hits the
-7-day edge.
-
-Writing the log is **best-effort**: it must never break delivery, so an event
-can in principle be delivered without a row appearing here.
-
-The page is **not team-scoped** — every signed-in user sees the events of every
-polled repository and every agent, and any signed-in user can cancel any agent's
-queued entry (the cancellation itself is recorded in the audit trail). Treat
-repository and agent names here as visible to all console users.

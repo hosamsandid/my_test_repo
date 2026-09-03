@@ -367,6 +367,18 @@ const TOPIC_CONTENT = [
     // the strongest-signal-wins rule, the shared / flow-mismatch flags, why the
     // unattributed remainder is always reported, and that records are filed
     // under the day the run happened.
+    //
+    // #1994 (epic #1981) widened it into a per-surface reference on the #1972
+    // template: the four areas below are each a chapter, and each is the landing
+    // target of a "?" on the matching surface (page header · Statistics tab ·
+    // Work items tab · the Signals/Tier attribution columns), so the headings
+    // are load-bearing rather than decorative.
+    chapters: [
+      'What the page shows',
+      'The Statistics tab',
+      'The Work items tab',
+      'How runs are attributed',
+    ],
     concepts: [
       'System Admin',
       'Team filter',

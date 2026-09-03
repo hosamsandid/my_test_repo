@@ -29,3 +29,14 @@ orchestrator/entrypoint.sh text eol=lf
 *.webp          binary
 *.pptx          binary
 *.ico           binary
+
+# The JVM toolchain (#1941) ships a tiny Maven sample project — Sample.java plus a
+# JUnit test — used ONLY by toolchains/_shared/base-contract-check.sh to smoke-test
+# that the JVM variant image can compile and run Java. It is a build FIXTURE, not
+# repository source. Mark it vendored so GitHub's linguist stops classifying this
+# (Node/Python) repo as a Java/Kotlin project: otherwise CodeQL *default setup*
+# auto-adds a `java-kotlin` analysis, which — with build-mode:none on a PR that
+# doesn't touch Java — extracts an empty database and fails with "no source code
+# seen during build". Excluding the fixture drops java-kotlin from default-setup's
+# auto-detected language list on the next default-branch scan.
+toolchains/jvm/sample/**   linguist-vendored

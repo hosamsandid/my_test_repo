@@ -157,6 +157,8 @@ const KNOWN_ROUTE_PATHS = new Set([...PAGE_ROUTES, ...ALLOWLIST]);
 const OVERLAY_KEYS = {
   'modal:settings': 'The Settings dialog (account menu → Settings).',
   'wizard:setup': 'The first-run setup wizard, rendered before the Shell exists.',
+  'modal:skill-detail': 'The skill detail side panel on the Skills page.',
+  'modal:skills-merge': 'The Merge skills dialog on the Skills page.',
 };
 
 const CONTEXT_KEYS = {
@@ -186,6 +188,13 @@ const CONTEXT_KEYS = {
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
   '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
   '/team-setup#review': { label: 'Agent Team Wizard · Review' },
+  // Skills page overlays (#1990). Registered without a topic of their own: the
+  // resolver falls through to `/skills`, whose chapters are what their "?"
+  // buttons deep-link into. What the registration buys is `panelZIndex` — the
+  // panel has to sit ABOVE a side panel (60/61) or the merge dialog (1000) to be
+  // visible next to the surface it is explaining.
+  'modal:skill-detail': { label: 'Skill detail' },
+  'modal:skills-merge': { label: 'Merge skills' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

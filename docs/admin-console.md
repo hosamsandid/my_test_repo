@@ -117,12 +117,14 @@ in Agent Chat. **That capability is gone as of #1959 — removed, not moved.**
   retired by requester decision rather than re-homed.
 - **What replaces it.** Growing a team is now always an explicit choice:
   **Add member** (same menu, same `POST /api/agents/:teamId/members` route — it
-  posts no body, so it takes the free-form branch and yields a blank
-  `<teamId>-<n>` member inheriting the team's prompt), or wiring the role in the
-  **Flow editor**, which is the surface that materialises a role *from a role
-  template* (the route's `templateId` branch) and where the flow's actual gaps are
-  visible as unconsumed labels and advisory lints rather than inferred. Both
-  branches of the route are unchanged.
+  takes the free-form branch and yields a blank `<teamId>-<n>` member inheriting
+  the team's prompt), or wiring the role in the **Flow editor**, which is the
+  surface that materialises a role *from a role template* (the route's
+  `templateId` branch) and where the flow's actual gaps are visible as unconsumed
+  labels and advisory lints rather than inferred. Both branches of the route
+  survive; since #1958 they additionally accept a `materialize` preference (see
+  *Adding a member without materializing it* below), so the Agent-Chat rail no
+  longer posts an empty body.
 - **What went with it.** The pure inference module (`src/pages/missing-roles-view.js`),
   the team-card warning block, the `add-role:*` menu entries, and the
   `{ processTemplateId, roleId }` shape of `POST /api/agents/:teamId/members`.
@@ -172,6 +174,26 @@ Each row shows the agent's Working Environment name below its display name. Insi
 Reorder the list by dragging the grip handle (⠿, visible on hover) to relocate an item in one gesture; keyboard users can reorder the focused item with `Alt+↑`/`Alt+↓`. Groups, standalone agents, and members within a group each reorder independently; a drag cannot move an item out of its own list. Order persists in `localStorage` (`agentChat.sidebarOrder`) and survives reload. Group and standalone-agent reorder require the **All agents** filter (the other groups/singles are hidden under a filter, so a move would be ambiguous); member-within-a-group reorder is additionally available under a **single-team** filter, since that view shows the team's complete ordered member set and writes the same order it would unfiltered (#1725).
 
 Manage agents in place without a trip to `/agents` (#1928). Open a row's context menu — the kebab revealed on hover, a right-click, or `Menu`/`Shift+F10` from the keyboard — for **Enable/Disable**, **Settings**, **Clone**, **Export (ZIP)**, **Save as template** and the confirmation-guarded **Reset to stub** / **Delete**; a team group header offers the team-wide **Enable/Disable** fan-out (with a partial-failure report), **Add member**, **Team settings**, **Export team**, **Open in Flow Editor** and **Delete team** (the **Add `<role>` role** entries are gone — see *the missing-role suggestion was removed* above). The list-level **Import Agent** / **New Agent** actions sit in the Shell's page-action header like every other page's (#1956) — the rail **+** menu they replaced is gone, so neither is reachable from two places; **New Agent** hands over to the `/create` launcher, **Import Agent** opens the ZIP picker in one click and completes through the same import dialog, and the imported agent joins the list without a page reload (if the rail filter would hide it, the confirmation says so). Both are disabled with an honest reason for a caller who may not create agents, rather than hidden. The rail header row itself stays — it carries the filter, the disabled-agents opt-in and the list's "?" — and its empty state is now a text pointer at the header button instead of a competing call to action. Every action runs the *same* dialog, confirmation and request as its Agents-page counterpart, and an action you may not perform is shown inert with a reason rather than failing at the server. A **show disabled agents** toggle (off by default, remembered per user) additionally lists paused agents so they can be re-enabled from here; a disabled agent is marked as such and cannot be opened as a chat until it is enabled — its **Settings** entry still opens its configuration in the right rail, so it can be reconfigured while paused (#1929). The same menu also leads with a chat-only **Mark as unread** entry — it flips the row back to its unread indicator and, unlike the management actions below it, never depends on your permissions; it is greyed out rather than hidden when it does not apply (the row is already unread, or is disabled/offline and has no chat to open). It replaces the mail icon that used to appear on row hover, so the drag grip no longer shifts sideways when you hover a row (#1938). The menu closes with a **What these actions do…** entry that opens the Help panel at the agent-list chapter of the Agent Chat topic — a menu cannot host the shared "?" button, so the affordance is an entry; it is always enabled, since it changes nothing (#1972). A team created with **deferred materialization** (`materializeMembers: false`, #1955) no longer reads as empty here: each team group ends with a collapsed **Not materialized yet (N)** section listing its **stub** members — configuration and triggers only, no chat account, no workspace, no clone — with the count visible without expanding, and no section at all for a team that has none (#1957). A stub row is badged *Not initialised* (the Agents page's own word) with its own muted status dot, so it is never mistaken for a *paused* agent, and it cannot be opened as a chat because there is no chat account to open. Its menu offers **Materialize** in place of *Enable* — the same request the Agents page's **Activate** button sends, so the resulting agent is indistinguishable from one materialized at team-create time; the row shows it working (a role with repositories clones them now) and moves up into the active members on success, without a reload. *Stub* and *paused* are different states: the show-disabled opt-in has no effect on this section. A stub whose team is disabled gets an inert **Materialize** with *enable the team first*, as does a caller who may not manage it.
+
+**Adding a member without materializing it (#1958).** **Add member** on a team
+group header opens a dialog carrying a **Materialize now** checkbox — the same
+choice the Agent Team Wizard's launch step offers, at the granularity of one
+member. Ticked (the default, because a member you add on purpose is usually one
+you want working) the behaviour is exactly what it was: Matrix user, workspace,
+clone, container. Unticked, the member is created as a **stub** — configuration
+and `triggers.json` only, `enabled: false`, no clone and no container — and lands
+in that team's *Not materialized yet* section, where **Materialize** finishes the
+job and yields an agent indistinguishable from one materialized at add time. The
+label suffix and every `{{var}}` are resolved identically in both modes, so
+deferring changes *when* the expensive part happens and nothing else. The
+confirm button names the mode it will run in (*Add member* vs *Add member
+(stub)*) and the notice afterwards reports the mode the **server** ran in rather
+than the one that was asked for. This replaces the old workaround of creating a
+member and immediately disabling it, which produced a *paused* agent — the clone
+and the container had already happened — rather than a stub; that workaround was
+removed in #1959 and this checkbox is what it was standing in for. The
+equivalent button on the `/agents` page is unchanged and still materializes
+immediately.
 
 ### Middle panel — Chat
 

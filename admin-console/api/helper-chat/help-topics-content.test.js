@@ -632,6 +632,14 @@ const TOPIC_CONTENT = [
       'Not initialised',
       'Materialize',
       'never provisioned at all',
+      // #1958 — the other half of the same state: how a stub gets CREATED from
+      // the rail. The checkbox default and the do-not-use-Disable warning are
+      // the load-bearing parts (a disabled member is the state this ticket
+      // exists to stop people reaching for), so they are pinned individually.
+      'Materialize now',
+      'ticked by default',
+      'assembling a team over several sittings',
+      'already cloned',
     ],
   },
   {

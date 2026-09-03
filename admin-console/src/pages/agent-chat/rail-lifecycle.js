@@ -239,6 +239,28 @@ export function helpMenuItem() {
 }
 
 /**
+ * Add the "a dialog follows" ellipsis to the chat's own add-member entry (#1958).
+ *
+ * This codebase spells that promise with a trailing `…` ('Disable team…',
+ * 'Delete team…', 'Reset to stub…'). In the rail, Add member now opens a dialog
+ * because the "Materialize now" choice cannot be inferred; on the Agents page it
+ * is still a bare materializing POST. So the relabel happens HERE and not in the
+ * shared `buildTeamMenu` descriptor — moving it there would make the Agents page
+ * promise a dialog it does not have. Same one-key/two-wordings technique #1957
+ * used for `toggle-enabled` ('Materialize' vs 'Enable').
+ *
+ * Idempotent, and keyed on `key` rather than on the label text so a future
+ * rewording of the descriptor cannot silently opt out.
+ */
+export function withChatDialogLabels(items) {
+  return (items || []).map((item) => {
+    if (!item || item.key !== 'add-member') return item;
+    const label = String(item.label || '');
+    return label.endsWith('…') ? item : { ...item, label: `${label}…` };
+  });
+}
+
+/**
  * Resolve a menu request from the rail into the items to render and the menu's
  * accessible name — the one place that decides *which* menu a click gets, so
  * the host component stays a renderer.
@@ -292,12 +314,12 @@ export function railMenuItems({
     return {
       label: `Team actions for ${group.displayName || group.id}`,
       items: [
-        ...buildTeamMenu({
+        ...withChatDialogLabels(buildTeamMenu({
           team,
           teamId: group.id,
           canManage: team ? team.canManage !== false : true,
           busy: busyIds.has(group.id),
-        }),
+        })),
         helpMenuItem(),
       ],
     };

@@ -417,6 +417,16 @@ const TOPIC_CONTENT = [
     // each outcome means beyond the chip tooltips, plus the delivery mechanics
     // no on-page copy ever stated (polling + its lossiness, the seen-id cursor,
     // the non-poller writers, why a queue backs up, retention, no team scoping).
+    //
+    // #1995 (epic #1981) widened it into a per-surface reference: the four areas
+    // below are each a chapter, and each is the landing target of a "?" on the
+    // matching surface, so the headings are load-bearing rather than decorative.
+    chapters: [
+      'What the GitHub Event Log is',
+      'Processed events',
+      'Outcomes',
+      'Pending queue',
+    ],
     concepts: [
       'observational',
       'Processed events',
@@ -438,6 +448,14 @@ const TOPIC_CONTENT = [
       '7 days',
       'best-effort',
       'not team-scoped',
+      // #1995 additions: the table's own columns, the `source` the UI never
+      // renders, the polled-vs-never-polled rule and the queue's no-expiry
+      // promise are only documented here — no on-page copy states any of them.
+      'Work item',
+      'Actor',
+      'never renders it',
+      'When a repository is polled',
+      'no expiry',
     ],
   },
   {
@@ -644,6 +662,14 @@ const TOPIC_CONTENT = [
       'Not initialised',
       'Materialize',
       'never provisioned at all',
+      // #1958 — the other half of the same state: how a stub gets CREATED from
+      // the rail. The checkbox default and the do-not-use-Disable warning are
+      // the load-bearing parts (a disabled member is the state this ticket
+      // exists to stop people reaching for), so they are pinned individually.
+      'Materialize now',
+      'ticked by default',
+      'assembling a team over several sittings',
+      'already cloned',
     ],
   },
   {

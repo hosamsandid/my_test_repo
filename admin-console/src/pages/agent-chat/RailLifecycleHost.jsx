@@ -27,6 +27,10 @@ import {
   teamOptions,
 } from './rail-lifecycle.js';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
+import {
+  ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
+  addMemberBody, addMemberConfirmLabel, addMemberNotice,
+} from './add-member-view.js';
 
 /**
  * RailLifecycleHost — the Agent Chat left rail's lifecycle quick actions
@@ -129,6 +133,13 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateWarning, setDeactivateWarning] = useState(null);
   const [disableWarning, setDisableWarning] = useState(null);
+
+  // Add member (#1958): the team id whose add-member dialog is open, plus the
+  // "Materialize now" checkbox state. A dialog rather than the old bare POST
+  // because the choice between "clone the repo and start it now" and "config
+  // only" cannot be inferred, and getting it wrong costs a clone either way.
+  const [addMemberTeamId, setAddMemberTeamId] = useState(null);
+  const [addMemberMaterialize, setAddMemberMaterialize] = useState(MATERIALIZE_NOW_DEFAULT);
 
   const [teamActionPrompt, setTeamActionPrompt] = useState(null);
   const [teamActionBusy, setTeamActionBusy] = useState(false);
@@ -384,13 +395,38 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     }
   }
 
-  async function addMember(teamId) {
+  // Opens the dialog. The checkbox resets to its default on every open, so a
+  // deliberate deferral last time cannot silently defer the next member too.
+  function openAddMember(teamId) {
+    if (!teamId) return;
+    setActionError(null);
+    setAddMemberMaterialize(MATERIALIZE_NOW_DEFAULT);
+    setAddMemberTeamId(teamId);
+  }
+
+  async function addMemberConfirmed() {
+    const teamId = addMemberTeamId;
+    if (!teamId) return;
     markBusy(teamId, true);
     try {
-      await apiCall('POST', `/api/agents/${encodeURIComponent(teamId)}/members`);
+      const result = await apiCall(
+        'POST',
+        `/api/agents/${encodeURIComponent(teamId)}/members`,
+        addMemberBody({ materializeNow: addMemberMaterialize }),
+      );
+      setAddMemberTeamId(null);
       refresh();
+      // Both modes now say what happened: a stub create looks like a no-op in
+      // the rail otherwise (the row appears in a collapsed section, #1957).
+      setNotice(addMemberNotice(result));
     } catch (e) {
+      // Close the dialog on failure too, exactly as confirmDelete does: the
+      // error goes to a RailToast, which portals at zIndex 1200 while this
+      // dialog's overlay is fixed at 9999 — left open, the dialog would bury
+      // its own error message under the backdrop and swallow the click that
+      // dismisses it.
       setActionError(e.message);
+      setAddMemberTeamId(null);
     } finally {
       markBusy(teamId, false);
     }
@@ -440,7 +476,10 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       const team = agents.find(a => a && a.id === teamId && a.role === 'team') || null;
       switch (kind) {
         case 'toggle-team':      if (team) toggleTeam(team); break;
-        case 'add-member':       addMember(teamId); break;
+        // Never straight to the request (#1958): the dialog carries the
+        // materialize-now choice, so this opens it like every other entry
+        // whose label ends in an ellipsis.
+        case 'add-member':       openAddMember(teamId); break;
         // Phase 2 (#1929) answers open question 3 the other way round: the
         // team's own edit form now renders in the rail's Settings tab, so this
         // opens it there instead of leaving the chat for the Agents page.
@@ -567,6 +606,40 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         onCancel={() => setDeactivateWarning(null)}
       />
 
+      {/* Add member (#1958). Reuses the generic ConfirmDialog — its `message`
+          takes a ReactNode, so the checkbox row lives in the body rather than
+          needing a bespoke dialog component for one control. */}
+      <ConfirmDialog
+        open={!!addMemberTeamId}
+        title={ADD_MEMBER_TITLE}
+        variant="info"
+        busy={busyIds.has(addMemberTeamId)}
+        confirmLabel={addMemberConfirmLabel({
+          busy: busyIds.has(addMemberTeamId),
+          materializeNow: addMemberMaterialize,
+        })}
+        message={(
+          <>
+            <p style={{ margin: '0 0 var(--eb-space-3)' }}>
+              Adds a member to <strong>{addMemberTeamId}</strong>.
+            </p>
+            <label style={addMemberCheckboxRow}>
+              <input
+                type="checkbox"
+                checked={addMemberMaterialize}
+                onChange={e => setAddMemberMaterialize(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                <strong>{MATERIALIZE_NOW_LABEL}</strong> — {MATERIALIZE_NOW_HINT}
+              </span>
+            </label>
+          </>
+        )}
+        onConfirm={addMemberConfirmed}
+        onCancel={() => setAddMemberTeamId(null)}
+      />
+
       <TeamEnableDialog
         open={!!teamActionPrompt && teamActionPrompt.action === 'enable'}
         team={teamActionPrompt?.team}
@@ -600,6 +673,18 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 });
 
 export default RailLifecycleHost;
+
+// The wrapping variant of the team-create wizard's `checkboxRow`
+// (`process/LaunchStep.jsx`) — same tokens, same `flex-start` + `marginTop: 3`
+// pairing on the input, so the two "Materialize now" checkboxes look alike.
+const addMemberCheckboxRow = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 8,
+  fontSize: 'var(--eb-text-sm)',
+  color: 'var(--eb-text-secondary)',
+  lineHeight: 1.5,
+};
 
 /**
  * A quick action's outcome, reported where the rail can see it.

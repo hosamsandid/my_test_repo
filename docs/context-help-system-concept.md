@@ -304,6 +304,17 @@ a full per-surface reference and every surface gained a chapter-linked "?". This
 product decision, not a regression of E15 — the extraction table above records what each
 ticket *lifted*, not a ceiling on what a topic may later cover.
 
+The epic's children widen their own E-ticket the same way, and record it here rather than
+leaving the next reader to read the growth as scope creep. So far: **E4 → #1990** (Skills:
+six chapters, "?" on every action surface) and **E12 → #1995** (GitHub Event Log: E12 lifted
+only the intro and the two tab leads, so the *columns* of the Processed-events table, the
+`source` the UI never renders, the polled-vs-never-polled rule and the queue's no-expiry
+promise were undocumented anywhere; the topic is now four chapters — what the log is ·
+Processed events · Outcomes · Pending queue — with a "?" on the table toolbar, the outcome
+legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-surface reference
+with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
+`TIER_SIGNAL_HELP` attribution-tier explainer).
+
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
 densest pages first), each ticket adding only prose, a `<page>-help-sections.js` slug
@@ -330,7 +341,11 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time. The Token Usage child (#1994) added ~1.7k chars of prose and took the assembled prompt to **~306.5k** — still comfortable, but the trend is what the paragraph above predicts.
+a fourth time. The Token Usage child (#1994) added ~1.7k chars of prose; measured on the
+merge, with the GitHub Event Log child (#1995) already in, the assembled prompt is
+**312 290 of 340 000 — 91.8% used, 27 710 left**. At the ~9k a child has been costing, that
+is roughly three more children against about ten still open: the paragraph above is no longer
+predicting a trend, it is describing the next few tickets.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

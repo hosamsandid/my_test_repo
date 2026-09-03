@@ -71,9 +71,10 @@ Three card actions do different things, from reversible to destructive:
 - The **Create** launcher is the front door for anything new.
 - For a whole team, prefer the **Agent Team Wizard** — it sets up the full team
   structure automatically instead of you assembling roles by hand.
-- **Add member** on an Agent Team grows it by one role, from a role template or
-  from scratch. To wire that role into the flow — which label wakes it, what it
-  emits — use the **Flow editor**.
+- **Add member** on an Agent Team grows it by one: a blank member that inherits
+  the team's prompt and skills, which you then configure in its **Settings**. To
+  add a role *from a role template*, or to wire it into the flow — which label
+  wakes it, what it emits — use the **Flow editor**.
 - **Where did the "Add `<role>` role" suggestion go?** It was **removed**. The
   platform used to guess which loop-closing role a team was missing (by comparing
   the team against the process templates) and offer a one-click add. The guess

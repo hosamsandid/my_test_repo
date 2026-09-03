@@ -116,10 +116,13 @@ in Agent Chat. **That capability is gone as of #1959 — removed, not moved.**
   A suggestion an operator cannot check is worse than no suggestion, and it was
   retired by requester decision rather than re-homed.
 - **What replaces it.** Growing a team is now always an explicit choice:
-  **Add member** (same menu, same `POST /api/agents/:teamId/members` route, the
-  `templateId` / free-form branches — unchanged), or wiring the role in the
-  **Flow editor**, where the flow's actual gaps are visible as unconsumed labels
-  and advisory lints rather than inferred.
+  **Add member** (same menu, same `POST /api/agents/:teamId/members` route — it
+  posts no body, so it takes the free-form branch and yields a blank
+  `<teamId>-<n>` member inheriting the team's prompt), or wiring the role in the
+  **Flow editor**, which is the surface that materialises a role *from a role
+  template* (the route's `templateId` branch) and where the flow's actual gaps are
+  visible as unconsumed labels and advisory lints rather than inferred. Both
+  branches of the route are unchanged.
 - **What went with it.** The pure inference module (`src/pages/missing-roles-view.js`),
   the team-card warning block, the `add-role:*` menu entries, and the
   `{ processTemplateId, roleId }` shape of `POST /api/agents/:teamId/members`.

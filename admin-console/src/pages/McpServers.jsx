@@ -12,6 +12,9 @@ import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_MCP_SERVER, OVERLAY_MCP_CREDENTIAL } from '../context/page-help-view.js';
+import { MCP_HELP_SECTIONS } from './mcp-help-sections.js';
 import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
 
 const inputStyle = {
@@ -28,6 +31,16 @@ const inputStyle = {
 };
 
 const monoStyle = { fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' };
+
+// Lead row at the top of each create panel (#1989): one line naming what the
+// form configures, plus the "?" that opens this page's topic AT that form's
+// chapter. The per-field hints further down are point-of-decision copy and are
+// deliberately untouched — this is an extra entry point into the reference, not
+// a replacement for them.
+const panelLeadStyle = {
+  display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-1)',
+  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+};
 
 // When a Save button is disabled (and not merely mid-save), spell out exactly
 // which required field is still empty so a user new to the console isn't left
@@ -51,6 +64,12 @@ function SubmitBlockers({ label, reasons }) {
 }
 
 function CreateServerForm({ onSave, onCancel, saving, error }) {
+  // Rendered only while the panel is slid out, so the subject needs no `active`
+  // flag. Registering it is what lifts the help panel above this SidePanel
+  // (z-index 60/61) — without it the "?" below would open help *behind* the
+  // form it explains (#1989, same reason as the Skills/Knowledge panels).
+  useHelpSubject({ overlay: OVERLAY_MCP_SERVER });
+
   const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -88,6 +107,16 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <div style={panelLeadStyle}>
+        <span>How agents reach one backend: a transport, the command or URL behind it, and a template that marks where the secret goes.</span>
+        <PageHelpButton
+          label="How the server registry and its transports work"
+          size={14}
+          section={MCP_HELP_SECTIONS.servers}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
+      </div>
+
       {error && (
         <div role="alert" style={{
           color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',
@@ -200,6 +229,10 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
 }
 
 function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
+  // Same as CreateServerForm: mounted only while slid out, published so the
+  // help panel opens in front of this SidePanel rather than behind it (#1989).
+  useHelpSubject({ overlay: OVERLAY_MCP_CREDENTIAL });
+
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [serverId, setServerId] = useState('');
@@ -214,6 +247,18 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <div style={panelLeadStyle}>
+        <span>
+          One secret, stored under its own id and never read back. Mark where it goes with <code style={monoStyle}>{'${credential}'}</code> in a server&apos;s template, then pair the two in a Working Environment.
+        </span>
+        <PageHelpButton
+          label="How the credential store and ${credential} substitution work"
+          size={14}
+          section={MCP_HELP_SECTIONS.credentials}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
+      </div>
+
       {error && (
         <div role="alert" style={{
           color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',
@@ -351,10 +396,22 @@ export default function McpServers() {
     { key: 'requiresCredential', label: (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
         Credential
+        {/* The column is sortable, so both affordances keep the
+            stopPropagation wrapper — asking where "required" comes from must
+            not also re-sort the table. The InfoTip states the rule; the "?"
+            opens the chapter that explains what to do about it (#1989). */}
         <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
           <InfoTip
             title="Where does “required” come from?"
             text={<>Derived from the template: <strong>required</strong> when it references <code>{'${credential}'}</code>.</>}
+          />
+        </span>
+        <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+          <PageHelpButton
+            label="How the credential store and ${credential} substitution work"
+            size={13}
+            section={MCP_HELP_SECTIONS.credentials}
+            style={{ padding: 0 }}
           />
         </span>
       </span>
@@ -392,7 +449,13 @@ export default function McpServers() {
           pairing), the ${credential} placeholder, where the *required* status
           comes from and what the orchestrator does at seed time now live in that
           topic (api/helper-chat/help-topics/mcp.md, #1883). Per-field help
-          inside the create forms stays where the decision is made. */}
+          inside the create forms stays where the decision is made.
+
+          #1989 split that topic into five chapters and pointed each surface at
+          its own: this button opens chapter 1 (the three-part model), the
+          server panel chapter 2, the credential panel and the *required* column
+          marker chapter 3. The slugs live in mcp-help-sections.js — never
+          inline — so mcp-help-extraction.test.js can see them. */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -402,7 +465,12 @@ export default function McpServers() {
           Runtime knowledge sources and tools agents can query through the Model Context Protocol — a
           catalog of servers, a separate store for their secrets, and a Working Environment that pairs the two.
         </span>
-        <PageHelpButton label="How MCP servers and credentials fit together" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="How MCP servers and credentials fit together"
+          size={14}
+          section={MCP_HELP_SECTIONS.model}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </p>
 
       {actionError && (

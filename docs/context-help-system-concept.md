@@ -323,7 +323,13 @@ with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE`
 per-surface reference with a "?" on each of the three pages the one topic serves —
 `/ssh-keys`, `/github-tokens` and `/my-credentials`), and **E3 → #1985** (Knowledge: a
 per-surface reference with a deep-linked "?" on each surface, written deliberately leaner
-than its siblings — ~4.7k rather than ~12k — because the grounding budget was nearly spent).
+than its siblings — ~4.7k rather than ~12k — because the grounding budget was nearly spent),
+and **E9 → #1989** (MCP Servers: E9 lifted the intro box and the *required* `InfoTip`, which
+left the two **create forms** — the page's only real decision surfaces — reaching that
+explanation from the top; the topic is now five chapters — the three-part model · the server
+registry and its transports · the credential store and `${credential}` substitution ·
+environment pairing and the seed-time merge · deleting — with a "?" on the page header, each
+create panel and the *required* column marker).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -370,6 +376,13 @@ over every context a topic claims *and* the no-route fallback, and asserted by `
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is `/flows` (seven
 neighbours, including the two largest topics) at **229,272 — 67.4% used, 110,728 left**, where the
 all-topics fold it replaced stood at 322,243 (94.8%).
+
+Measured again on the MCP Servers child (#1989), which grew its topic from 6 946 to 9 327 chars:
+the worst context is **still `/flows` at 229,272**, unmoved, because nothing in that
+neighbourhood links to `/mcp`; `/mcp`'s own context sits at **207,122 — 60.9% used**. That is the
+first child measured after #2006 landed, and it is what consequence 2 below looks like in
+practice: the growth is paid for by the expanded page's own neighbourhood, not by every page at
+once.
 
 Three consequences a remaining #1981 child should know:
 

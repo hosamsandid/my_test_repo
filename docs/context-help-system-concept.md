@@ -311,7 +311,9 @@ only the intro and the two tab leads, so the *columns* of the Processed-events t
 `source` the UI never renders, the polled-vs-never-polled rule and the queue's no-expiry
 promise were undocumented anywhere; the topic is now four chapters — what the log is ·
 Processed events · Outcomes · Pending queue — with a "?" on the table toolbar, the outcome
-legend and the Pending-queue tab).
+legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-surface reference
+with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
+`TIER_SIGNAL_HELP` attribution-tier explainer).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -339,7 +341,11 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time.
+a fourth time. The Token Usage child (#1994) added ~1.7k chars of prose; measured on the
+merge, with the GitHub Event Log child (#1995) already in, the assembled prompt is
+**312 290 of 340 000 — 91.8% used, 27 710 left**. At the ~9k a child has been costing, that
+is roughly three more children against about ten still open: the paragraph above is no longer
+predicting a trend, it is describing the next few tickets.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

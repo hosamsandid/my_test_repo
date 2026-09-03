@@ -5,6 +5,7 @@ import { useAuth } from '../../auth/AuthContext';
 import LogEvent from './LogEvent';
 import PinnedTodoPanel from './PinnedTodoPanel';
 import VirtualList from '../../components/VirtualList.jsx';
+import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
 import { sumContextTokens, resolveContextTokensForResult } from './context-window';
 import { mergeThinkingTokens } from './system-event.js';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
@@ -550,7 +551,12 @@ export default function SessionLogPanel({
             // In single-session (scoped) mode every row is the same session, so
             // the per-correlation colour adds no information — drop the border.
             const accentColor = (!scopeCids && cid) ? colorForCorrelation(cid) : 'transparent';
+            // Per-event containment (#1974): an unexpected tool-result shape
+            // degrades this one row to a placeholder instead of unmounting the
+            // whole console. The boundary is outermost so the hover/accent
+            // wrapper cannot itself throw past it.
             return (
+              <EventErrorBoundary agentId={agentId} sessionId={roomId} eventId={ev._key}>
               <div
                 data-cid={cid || ''}
                 onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
@@ -562,6 +568,7 @@ export default function SessionLogPanel({
               >
                 <LogEvent event={ev} />
               </div>
+              </EventErrorBoundary>
             );
           }}
         />

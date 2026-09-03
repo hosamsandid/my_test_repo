@@ -14,7 +14,6 @@ test('entryKind classifies every queue entry shape', () => {
   assert.equal(entryKind({ github: { event: 'push' } }), 'github');
   assert.equal(entryKind({ kind: 'github-digest', events: [] }), 'github-digest');
   assert.equal(entryKind({ kind: 'throttle-warning' }), 'throttle-warning');
-  assert.equal(entryKind({ kind: 'bp-event-batch' }), 'bp-event-batch');
   assert.equal(entryKind({ kind: 'session-reset', roomId: '!r:x' }), 'session-reset');
   assert.equal(entryKind({ kind: 'session-set', roomId: '!r:x' }), 'session-set');
   assert.equal(entryKind({ triggerId: 'hook-1' }), 'trigger');

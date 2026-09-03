@@ -7,9 +7,6 @@ const {
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const bpEventRouter = require("./bp-event-router");
-const { findEnclosingGitRepo } = require("./git-workspace");
-const { bpsToBriefingsMap } = require("./briefings-graph");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
@@ -121,6 +118,7 @@ const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
+const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
 const skillManifest = require("./skill-manifest");
@@ -186,7 +184,6 @@ async function runContextWriteExec(id, argv) {
 const HOMESERVER = process.env.MATRIX_HOMESERVER;
 const CONDUWUIT_ADMIN_TOKEN = process.env.CONDUWUIT_ADMIN_TOKEN;
 const CONDUWUIT_ADMIN_ROOM = process.env.CONDUWUIT_ADMIN_ROOM;
-const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765";
 // This stack's instance identity. Agent containers are stamped with it
 // (`aee.instance` label, see spawn-container.js) so eviction & reconcile scope
 // to THIS stack when multiple instances share one Podman store. Configured via
@@ -498,7 +495,7 @@ function startAgentProcess(config) {
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave
   // the inherited ANTHROPIC_* values from `.env` in place — that keeps
-  // pre-registry environments and the bp-explorer integration working.
+  // pre-registry environments working.
   const env = environmentId ? loadEnvironment(environmentId) : null;
   const llm = resolveLlmBindingForAgent(config, env);
   if (llm) {
@@ -749,10 +746,23 @@ async function startAllEnabledAgents() {
   await evictStaleAgentContainers();
   for (const id of listAgentIds()) {
     const config = loadAgentConfig(id);
-    // Skip pure-config orchestrators (created via POST /internal/agents/create
-    // without a Matrix user). Blueprint-instance orchestrators DO carry a token
-    // and need to be respawned on container restart just like agents.
-    if (config && config.enabled !== false && config.token) {
+    if (!config) continue;
+    // A config naming a role the platform no longer supports is skipped rather
+    // than spawned (#1962, epic AC3). This is also what implements the
+    // "still-running mission container" decision: evictStaleAgentContainers()
+    // above already force-removed EVERY agent container regardless of role, so
+    // not respawning here means a leftover orchestrator / bp-instance container
+    // is stopped at upgrade and never comes back — while its configuration is
+    // left on disk untouched, per epic decision R2. The note is logged once per
+    // config for the whole process lifetime (this loop runs at boot only).
+    if (!isSupportedAgentRole(config.role)) {
+      const note = unsupportedRoleNote(id, config.role);
+      if (note) console.log(note);
+      continue;
+    }
+    // Skip stubs (config without a Matrix user) — enableAgent() materializes
+    // those on first activation.
+    if (config.enabled !== false && config.token) {
       startAgentProcess(config);
     }
   }
@@ -889,9 +899,8 @@ function migrateLegacyAgentConfigs() {
 }
 
 // One-time migration (team-owned skills): copy each environment's legacy
-// `skills[]` grant onto every team / standalone / orchestrator agent config
-// that doesn't carry a `skills` field yet. Team-members keep the
-// inherit/override model; bp-instances inherit from their parent orchestrator.
+// `skills[]` grant onto every team / standalone agent config that doesn't
+// carry a `skills` field yet. Team-members keep the inherit/override model.
 // After this the Working Environment no longer contributes skills — it is a
 // pure infrastructure template (docs/knowledge-skill-activation-concept.md).
 // Idempotent — an existing `skills` field always wins; safe on every start.
@@ -901,6 +910,12 @@ function migrateSkillGrantsToAgents() {
   for (const id of listAgentIds()) {
     const cfg = loadAgentConfig(id);
     if (!cfg) continue;
+    // R2 (#1962): a leftover config naming a retired role is not touched — not
+    // rewritten and not counted below. This loop has no other role gate, and it
+    // runs from main() BEFORE the Orchestrator (and therefore before the
+    // startAllEnabledAgents role gate) exists, so it would otherwise be the one
+    // path that writes to a config the removal promises to leave alone.
+    if (!isSupportedAgentRole(cfg.role)) continue;
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     const next = migrateSkillGrant(cfg, env);
     if (next) {
@@ -1135,13 +1150,16 @@ function resolveOwnerTeamId(teamId) {
 
 // Is this agent driven by anything other than interactive DM? Gates the
 // injection of the trigger-management docs and the unattended-run framing into
-// its CLAUDE.md. Autonomous = a reactive session policy, an inherently
-// autonomous role, or an already-configured trigger. Best-effort: at
-// create-time config.json is written before this is read (so sessionPolicy is
-// visible) but triggers.json may not exist yet — reactive roles set
-// sessionPolicy=per-invocation, which is the signal we rely on there.
+// its CLAUDE.md. Autonomous = a reactive session policy or an already-configured
+// trigger. Best-effort: at create-time config.json is written before this is
+// read (so sessionPolicy is visible) but triggers.json may not exist yet —
+// reactive roles set sessionPolicy=per-invocation, which is the signal we rely
+// on there.
+//
+// `role` is still threaded through to the pure predicate for its signature,
+// but no role is inherently autonomous since #1962 removed the two that were
+// (`orchestrator`/`bp-instance`).
 function agentIsAutonomous(id, role) {
-  if (role === "orchestrator" || role === "bp-instance") return true;
   let sessionPolicy;
   try {
     sessionPolicy = loadAgentConfig(id)?.sessionPolicy;
@@ -2919,38 +2937,6 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
   return { repoName, skipped: false, fromCache: false };
 }
 
-// Force-copy the ACE engineering skill into an agent's workspace, regardless
-// of whether its Working Environment lists it. Required for bp-instance
-// agents to actually execute Briefing Packs. No-op if the skill is already
-// in the workspace; logs a warning if the pool is missing it (run `make
-// seed-skills` to fix).
-function ensureEngineeringSkill(agentId) {
-  const dst = path.join(agentDir(agentId), "skills", "engineering");
-  if (fs.existsSync(dst)) return { copied: false };
-  const src = path.join(TEMPLATE_WORKSPACE, "skills", "engineering");
-  if (!fs.existsSync(src)) {
-    console.warn(
-      `[Orchestrator] Engineering skill missing from skill pool — bp-instance ${agentId} ` +
-      `cannot execute Briefing Packs. Run \`make seed-skills\` to install it.`
-    );
-    return { copied: false, missing: true };
-  }
-  try {
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.cpSync(src, dst, { recursive: true });
-    // Keep the seeded-skills manifest truthful for this out-of-band copy.
-    try {
-      const manifest = readSeededSkills(agentId);
-      manifest.engineering = { tier: "global", seededAt: new Date().toISOString() };
-      writeSeededSkills(agentId, manifest);
-    } catch { /* best effort */ }
-    return { copied: true };
-  } catch (err) {
-    console.error(`[Orchestrator] Failed to copy engineering skill into ${agentId}: ${err.message}`);
-    return { copied: false, error: err.message };
-  }
-}
-
 function patchSeededPaths(dir) {
   const memoryDir = path.join(dir, "memory");
   if (!fs.existsSync(memoryDir)) return;
@@ -3303,28 +3289,6 @@ async function setDisplayName(token, userId, displayName) {
 // Git helpers (pull + commit + push from the orchestrator workspace)
 // ============================================================
 
-// Throttle the per-orchestrator workspace pull to at most once per
-// _PULL_THROTTLE_MS, so the 30s claim-tick can call it cheaply on every
-// iteration without hammering the remote. The forced variant (`{ force: true }`)
-// is for callers that need a fresh local index *now* (e.g. BP-event routing
-// against .index.json) but still coalesces same-orchestrator bursts within
-// _PULL_FORCE_THROTTLE_MS so a flurry of signals can't multiply pulls.
-const _pullThrottles = new Map(); // orchestratorId -> last pull timestamp ms
-const _PULL_THROTTLE_MS = 60_000;
-const _PULL_FORCE_THROTTLE_MS = 5_000;
-
-// Throttle the "workspace not a git repo" warning so a broken orchestrator
-// in the 30s claim-loop emits the diagnostic once every few minutes rather
-// than 120 times an hour. Resets when the workspace is fixed (entry deleted).
-const _missingWorkspaceWarns = new Map(); // orchestratorId -> last warn ms
-const _MISSING_WORKSPACE_WARN_MS = 5 * 60_000;
-function shouldWarnMissingWorkspace(orchestratorId) {
-  const last = _missingWorkspaceWarns.get(orchestratorId) || 0;
-  if (Date.now() - last < _MISSING_WORKSPACE_WARN_MS) return false;
-  _missingWorkspaceWarns.set(orchestratorId, Date.now());
-  return true;
-}
-
 // Where the agent's persistent Claude home is mounted *inside the orchestrator*
 // (the whole claude-home volume) vs. *inside the agent* (only its homes/<id>
 // SubPath). Files the orchestrator writes under <ORCH>/homes/<id>/X surface to
@@ -3413,55 +3377,6 @@ function buildGitSshCommand(env) {
   if (!fs.existsSync(keyPath)) return null;
   try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
   return `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8`;
-}
-
-// Best-effort `git fetch && git pull --ff-only` in the orchestrator's
-// briefings workspace clone. Throttled per orchestrator. Failures are
-// logged but never throw — a stale local main is preferable to a broken
-// claim tick.
-function pullOrchestratorWorkspace(orchestratorId, briefingsPath, env, { force = false } = {}) {
-  const rel = (briefingsPath || "").replace(/^\/+|\/+$/g, "");
-  const agentRoot = path.join(AGENTS_DIR, orchestratorId);
-  const workspace = path.join(agentRoot, rel);
-  // The briefings dir may sit at the repo root (classic case) or in a
-  // sub-directory of a cloned repo (multiple BP collections per repo). Walk
-  // upward until we find an enclosing `.git`, capped at the agent root so a
-  // bad config can never escape the agent's own workspace.
-  const repoRoot = findEnclosingGitRepo(workspace, agentRoot);
-  if (!repoRoot) {
-    // Log the skip so a misconfigured briefings clone isn't invisible — but
-    // throttle so the 30s claim-loop doesn't carpet the orchestrator log
-    // with the same line. `force: true` (operator-triggered sync) always
-    // logs so the user sees feedback from their explicit action.
-    if (force || shouldWarnMissingWorkspace(orchestratorId)) {
-      console.warn(
-        `[Orchestrator] Pull skipped for ${orchestratorId}: no enclosing git checkout found below ${agentRoot} for briefings workspace ${workspace}`
-      );
-    }
-    return { skipped: "not-a-git-repo", path: workspace };
-  }
-  const last = _pullThrottles.get(orchestratorId) || 0;
-  const throttleMs = force ? _PULL_FORCE_THROTTLE_MS : _PULL_THROTTLE_MS;
-  if (Date.now() - last < throttleMs) return { skipped: "throttled" };
-  _pullThrottles.set(orchestratorId, Date.now());
-
-  const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  const sshCmd = buildGitSshCommand(env);
-  if (sshCmd) gitEnv.GIT_SSH_COMMAND = sshCmd;
-
-  try {
-    execFileSync("git", ["fetch", "origin"], {
-      cwd: repoRoot, env: gitEnv, stdio: "pipe", timeout: 30_000,
-    });
-    execFileSync("git", ["pull", "--ff-only"], {
-      cwd: repoRoot, env: gitEnv, stdio: "pipe", timeout: 30_000,
-    });
-    return { pulled: true, repoRoot };
-  } catch (err) {
-    const detail = (err.stderr || err.stdout || err.message || "").toString().trim().slice(0, 200);
-    console.warn(`[Orchestrator] Pull failed for ${orchestratorId}: ${detail}`);
-    return { failed: true, detail, repoRoot };
-  }
 }
 
 // ── Orchestrator-side git push / PR on behalf of an agent ────────────────────
@@ -3992,8 +3907,8 @@ async function agentKnowledgePush(id) {
 
 // ── Canonical KB clone + live feed (Shared Agent Learning, Phase 2) ──────────
 // The orchestrator keeps ONE authoritative clone per team at
-// /workspace/knowledge/<teamId>/ on the agent-knowledge branch (mirrors the
-// briefings clone the BP-event router force-pulls). The admin-console reads its
+// /workspace/knowledge/<teamId>/ on the agent-knowledge branch. The
+// admin-console reads its
 // JSONL shards off the shared volume — no git in the admin-console. It also
 // appends a lean event per harvest to a feed file the admin-console tails.
 
@@ -7138,31 +7053,8 @@ function inspectAgentRepoStatuses(agentId, env) {
   return results;
 }
 
-// Update or insert a top-level YAML key in a frontmatter block. Quotes the
-// value if it contains characters that would break unquoted YAML.
-function upsertYamlField(yaml, key, value) {
-  const v = /[:\s#"\\]/.test(value)
-    ? `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
-    : value;
-  const re = new RegExp(`^${key}\\s*:.*$`, "m");
-  if (re.test(yaml)) return yaml.replace(re, `${key}: ${v}`);
-  return yaml.replace(/\s*$/, `\n${key}: ${v}\n`);
-}
-
-// Patch a brief.md frontmatter to record the claim. Throws if no frontmatter
-// is present (we don't auto-create one — that's a brief we don't understand).
-function patchBriefForClaim(content, stubId) {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!fmMatch) throw new Error("brief.md has no YAML frontmatter");
-  let fm = fmMatch[1];
-  fm = upsertYamlField(fm, "status", "claimed");
-  fm = upsertYamlField(fm, "agent-id", stubId);
-  fm = upsertYamlField(fm, "claimed", new Date().toISOString());
-  return content.replace(fmMatch[0], `---\n${fm.replace(/\n+$/, "")}\n---`);
-}
-
 // Pending-triggers queue (#185 Phase 2). The orchestrator owns this queue: all
-// writers (hook server, bp-event router, github-poller, admin handover) funnel
+// writers (hook server, github-poller, admin handover) funnel
 // through enqueuePending, and the agent drains it (locally when on the shared
 // volume; over HTTP via /pending-drain when isolated). Because every writer and
 // the drain run in this single Node event loop, the read-modify-write needs no
@@ -7370,210 +7262,6 @@ function drainPendingOne(agentId) {
   return head;
 }
 
-// Append a bp-event-batch entry to an agent's pending queue. The agent drain
-// loop picks it up by `kind` (no triggers.json entry required — the routing
-// decision was already made centrally).
-function enqueueBpEventBatch(agentId, payload) {
-  enqueuePending(agentId, { kind: "bp-event-batch", ...payload });
-}
-
-// Persistent notified-set per orchestrator. Tracks bpIds we've already
-// surfaced to the user so the claim loop doesn't re-suggest every tick.
-function claimStateFile(orchestratorId) {
-  return path.join(agentDir(orchestratorId), ".claim-state.json");
-}
-function loadClaimState(orchestratorId) {
-  try {
-    return JSON.parse(fs.readFileSync(claimStateFile(orchestratorId), "utf8"));
-  } catch {
-    return { notified: [] };
-  }
-}
-function saveClaimState(orchestratorId, state) {
-  try {
-    fs.writeFileSync(claimStateFile(orchestratorId), JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.error(`[Orchestrator] Could not save claim-state for ${orchestratorId}: ${err.message}`);
-  }
-}
-
-// ============================================================
-// BriefingPack helpers
-// ============================================================
-
-// Fetch the list of Briefing Packs from bp-explorer for a given orchestrator
-// agent. The workspace path passed to bp-explorer is the absolute path inside
-// the shared agent-pool-workspace volume; bp-explorer expects exactly that
-// shape and looks for `<path>/artifacts/briefings/`.
-async function fetchBriefingPacks(orchestratorId, briefingsPath) {
-  const rel = briefingsPath ? briefingsPath.replace(/^\/+|\/+$/g, "") : "";
-  const workspace = path.join("/workspace/agents", orchestratorId, rel);
-  const url = `${BP_EXPLORER_URL}/api/briefings?workspace=${encodeURIComponent(workspace)}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    if (res.status === 404) {
-      // artifacts/briefings/ not yet present in the cloned workspace — the
-      // repo may need a pull to pick up the latest commit. Return empty so
-      // the sync tick can complete cleanly; the next pull will surface BPs.
-      console.warn(
-        `[Orchestrator] No briefings directory found for ${orchestratorId} at ${workspace}` +
-        ` — will retry after next git pull`
-      );
-      return [];
-    }
-    const detail = await res.text().catch(() => "");
-    throw new Error(`bp-explorer ${res.status}: ${detail.slice(0, 200)}`);
-  }
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
-}
-
-// Build the briefings dependency graph from bp-explorer's parsed frontmatter,
-// returning the same map shape `bpEventRouter.findAffectedBps()` expects.
-// This replaces the previous `.index.json` file read — bp-explorer already
-// parses every brief.md and exposes the data via /api/briefings, so the
-// orchestrator can derive the graph at request time without depending on an
-// ACE-plugin script (scripts/build-index.py) being present in the repo.
-//
-// Transformation is in ./briefings-graph (pure, unit-tested separately).
-async function loadBriefingsGraphFromExplorer(orchestratorId, briefingsPath) {
-  const bps = await fetchBriefingPacks(orchestratorId, briefingsPath);
-  return bpsToBriefingsMap(bps);
-}
-
-// Build the agent id for a BP-instance stub. Schema: `<slug>-<8-hex>` if a
-// slug is available, else `bp-<8-hex>`. The hash prefix disambiguates BPs
-// that share a slug.
-function bpInstanceAgentId(bp) {
-  const hash = (bp.id || "").replace(/[^0-9a-f]/gi, "").slice(0, 8) || "unknown0";
-  const slug = (bp.slug || "").trim().toLowerCase();
-  return slug ? `${slug}-${hash}` : `bp-${hash}`;
-}
-
-// Pick the best displayName for a stub: BP title, falling back to a humanized
-// slug, then to the agent id. Matters because the user sees this in the UI.
-function bpInstanceDisplayName(bp, agentId) {
-  const title = (bp.title || "").trim();
-  if (title) return title;
-  const slug = (bp.slug || "").trim();
-  if (slug) {
-    return slug
-      .split(/[-_]+/)
-      .filter(Boolean)
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
-  }
-  return agentId;
-}
-
-// Compute the path to a bp-instance's brief.md, relative to the orchestrator's
-// briefingsPath root (i.e. the project root that bp-explorer scans). Prefers
-// the authoritative `bpRelPath` recorded by bp-explorer — which preserves
-// parent/child hierarchy — and falls back to the flat
-// `artifacts/briefings/<id>-<slug>/brief.md` shape for legacy stubs that
-// pre-date hierarchical support.
-function bpInstanceBriefRelPath(cfg) {
-  if (cfg.bpRelPath) return cfg.bpRelPath.replace(/^\/+/, "");
-  const bpDirName = cfg.bpSlug ? `${cfg.bpId}-${cfg.bpSlug}` : cfg.bpId;
-  return path.join("artifacts", "briefings", bpDirName, "brief.md");
-}
-
-// Build the system prompt for a bp-instance agent. Pins down the exact
-// filesystem path of the brief.md (we know it because the orchestrator records
-// the bp-explorer-reported relative path on the stub) and points at the
-// engineering skill that defines how to actually execute a Briefing Pack.
-function bpInstanceSystemPrompt(cfg) {
-  const briefingsRoot = (cfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
-  const briefRel = bpInstanceBriefRelPath(cfg);
-  const briefPath = briefingsRoot
-    ? `./${briefingsRoot}/${briefRel}`
-    : `./${briefRel}`;
-  const slugDisplay = cfg.bpSlug ? ` (\`${cfg.bpSlug}\`)` : "";
-
-  return [
-    `You are the agent instance for Briefing Pack \`${cfg.bpId}\`${slugDisplay}.`,
-    ``,
-    `**Your brief:** \`${briefPath}\``,
-    `**Execution skill:** \`./skills/engineering/SKILL.md\` (ACE engineering — required reading)`,
-    ``,
-    `Your brief tells you which artifacts you owe and which upstream BPs feed them. The engineering skill defines the LoopScript phases, artifact conventions, and the CRP / MRP / VCR escalation flow. Read both before doing serious work.`,
-    ``,
-    `## How to behave`,
-    ``,
-    `You operate in one of two modes — pick the one that fits the situation.`,
-    ``,
-    `### Structured execution`,
-    ``,
-    `Use this mode when running autonomously (cron / trigger), or when the human explicitly asks you to "execute the brief" / "run your LoopScript". Then:`,
-    ``,
-    `1. Read the engineering skill and your \`brief.md\`.`,
-    `2. Execute the LoopScript phase by phase. Write artifacts into the BP's own directory.`,
-    `3. Submit an MRP when complete; wait for a VCR.`,
-    `4. Escalate via a CRP only for genuine ambiguity in the brief itself.`,
-    ``,
-    `### Dynamic collaboration (default for human DMs)`,
-    ``,
-    `When a human chats with you for ad-hoc help — brainstorming, partial work, drafts, "help me prepare X" — **do not block on missing inputs and do not reflexively suggest a CRP**. Your job is to be useful right now.`,
-    ``,
-    `1. Briefly mention what your brief expects (artifacts you owe, upstream inputs) so the human sees what an "ideal" run would look like.`,
-    `2. Ask what they actually want and what context they can share informally — treat the human as the upstream BP.`,
-    `3. Produce the requested output (or a usable draft of one of your artifacts) from what's available. Label assumptions inline. Mark sections that would normally come from a missing upstream BP.`,
-    `4. Save artifacts into the BP directory as usual, but stamp them with \`status: dynamic-draft\` at the top so a later structured run knows to refine them.`,
-    `5. Reserve CRP escalation for ambiguity inside the brief itself. "Upstream BP X hasn't run yet" is **not** an escalation trigger — collaborate with the human to fill that gap instead.`,
-    ``,
-    `The brief is your map, not your cage. For coordination across multiple BPs, point the human at the orchestrator agent.`,
-    ``,
-    `## Closing the loop — explicit hand-off`,
-    ``,
-    `When your work on this BP is done (or far enough along that downstream BPs should pick up), tell the user explicitly and ask them to use the **Hand-off** button in this chat. The button lets the user pick which downstream agents should be activated and attaches a free-text note that arrives as a normal chat message in each downstream agent's room.`,
-    ``,
-    `Do **not** edit \`brief.md\` frontmatter (\`status\`, \`revision\`, \`agent-id\`, \`completed\`) yourself, and do **not** try to run lifecycle scripts — the hand-off flow is deliberately manual and decoupled from any ACE Python tooling in this environment.`,
-  ].join("\n");
-}
-
-// Default system prompt used when creating an agent without an explicit
-// systemPrompt — currently only meaningful for the orchestrator role.
-function defaultSystemPromptFor(role, extra = {}) {
-  if (role === "orchestrator") {
-    const briefingsPath = extra.briefingsPath || "(unset)";
-    return [
-      `You are an orchestrator agent.`,
-      ``,
-      `You manage the Briefing Packs in the directory \`${briefingsPath}\`. ` +
-        `Each Briefing Pack in this directory may become a standalone agent instance ` +
-        `under your supervision.`,
-      ``,
-      `When a human asks you questions, help them understand the state of the Briefing Packs, ` +
-        `explain status transitions, and reason about individual instances.`,
-      ``,
-      `## Claiming Briefing Packs`,
-      ``,
-      `A background loop watches the briefings directory. Whenever a BP transitions to ` +
-        `\`status: dispatched\` (typically by a human or a teammate flipping the YAML ` +
-        `frontmatter and pushing), you'll receive a SYSTEM NOTICE message in this chat ` +
-        `listing the newly-dispatched BP(s) along with a \`curl\` command per BP.`,
-      ``,
-      `Your job when a SYSTEM NOTICE arrives is to **ask the user whether to claim**. ` +
-        `Don't claim on your own. Wait for the user's reply.`,
-      ``,
-      `- If the user agrees, run the \`curl\` command for the relevant BP(s). ` +
-        `Each call writes \`status: claimed\` plus your stub agent's id into the BP's ` +
-        `\`brief.md\`, commits, and pushes — making the claim visible to teammates ` +
-        `immediately. The corresponding BP-instance agent is then materialised and ` +
-        `starts work.`,
-      `- If the user declines, just acknowledge. The notice won't repeat unless the ` +
-        `BP gets re-dispatched.`,
-      `- The user may also ask you to claim a specific BP at any time (e.g. *"claim the ` +
-        `customer-migration one"*). You can run the same \`curl\` directly — the ` +
-        `endpoint is \`http://localhost:4002/internal/agents/<stub-agent-id>/claim\`.`,
-      ``,
-      `If a \`curl\` returns an HTTP 409 / "Push failed", a teammate claimed first. ` +
-        `Tell the user, then move on.`,
-    ].join("\n");
-  }
-  return "";
-}
-
 // ============================================================
 // Orchestrator (backend service — no Matrix routing identity)
 //
@@ -7616,20 +7304,6 @@ class Orchestrator {
       if (config) this.agentConfigs.set(id, { config });
     }
 
-    // Migrate orchestrator agents created before the role gained a Matrix
-    // identity. Errors are logged and swallowed so a Matrix outage doesn't
-    // prevent the rest of the orchestrator from starting — failed migrations
-    // retry on the next container restart.
-    for (const [id, { config }] of this.agentConfigs) {
-      if (config.role !== "orchestrator") continue;
-      if (config.token) continue;
-      try {
-        await this.materializeOrchestrator(id);
-      } catch (err) {
-        console.error(`[Orchestrator] Migration failed for ${id}: ${err.message}`);
-      }
-    }
-
     // Start all enabled agent containers
     await startAllEnabledAgents();
 
@@ -7637,7 +7311,14 @@ class Orchestrator {
     console.log(`[Orchestrator] Agents loaded: ${this.agentConfigs.size}`);
     for (const [id, { config }] of this.agentConfigs) {
       const schedInfo = config.schedule ? ` [${config.schedule}]` : "";
-      console.log(`  ${id}: ${config.displayName} (${config.role})${schedInfo}`);
+      // A config naming a retired/unknown role is still listed (it exists on
+      // disk and the operator should see it) but marked, so the boot summary
+      // doesn't read as if it were running. startAllEnabledAgents() already
+      // logged the one explanatory line; this is a one-word tag, not a repeat.
+      const roleInfo = isSupportedAgentRole(config.role)
+        ? `(${config.role})`
+        : `(${config.role} — unsupported, skipped)`;
+      console.log(`  ${id}: ${config.displayName} ${roleInfo}${schedInfo}`);
     }
   }
 
@@ -7748,28 +7429,7 @@ class Orchestrator {
     // the explicitly granted skills (team-owned grant).
     const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId, skills: grantedSkills });
 
-    // For orchestrators the briefings repo is load-bearing: without the clone
-    // the BP discovery pipeline silently returns zero stubs and the user sees
-    // an orchestrator that "works" but never finds anything. Treat the clone
-    // failure as fatal (mirrors the team-setup wizard's gate), roll back the
-    // half-built Matrix user, and surface the cause to the API caller.
-    if (role === "orchestrator" && extra.briefingsPath) {
-      const cloneWarning = (seedResult.warnings || []).find(w => /^git clone /.test(w));
-      if (cloneWarning) {
-        deleteAgentFiles(id);
-        if (PER_AGENT_VOLUME) await removePerAgentVolume(id).catch(e =>
-          console.warn(`[Orchestrator] volume teardown ${id}: ${e.message}`));
-        await this.deactivateMatrixUser(id).catch(() => { /* best effort */ });
-        throw new Error(
-          `Cannot create orchestrator '${id}': briefings clone failed — ${cloneWarning}`
-        );
-      }
-    }
-
-    const effectivePrompt =
-      systemPrompt && systemPrompt.trim()
-        ? systemPrompt
-        : defaultSystemPromptFor(role, extra);
+    const effectivePrompt = systemPrompt && systemPrompt.trim() ? systemPrompt : "";
 
     const config = {
       id,
@@ -7782,7 +7442,6 @@ class Orchestrator {
       // The agent's own skill grant (team-owned skills; standalone agents
       // carry their list directly).
       skills: grantedSkills,
-      ...(role === "orchestrator" && extra.briefingsPath && { briefingsPath: extra.briefingsPath }),
       // Optional fields written by the Team-Setup wizard. `team` ties the
       // agent to its sibling team-mates (used by the Layer-2 `from: team`
       // filter and by the Admin Console's team grouping). `sessionPolicy:
@@ -7816,25 +7475,12 @@ class Orchestrator {
     this.agentConfigs.set(id, { config });
     startAgentProcess(config);
 
-    // For orchestrator agents: scan the briefings directory and create a
-    // disabled stub for each BP. Errors are non-fatal — the orchestrator
-    // itself is already up; the user can retry the sync from the UI.
-    let bpStubs = [];
-    if (role === "orchestrator" && extra.briefingsPath) {
-      try {
-        bpStubs = await this.syncBpStubs(id);
-      } catch (err) {
-        console.error(`[Orchestrator] Stub sync failed for ${id}: ${err.message}`);
-      }
-    }
-
     return {
       id,
       userId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
       clones: seedResult.clones || [],
-      ...(role === "orchestrator" && { bpStubs: bpStubs.length }),
     };
   }
 
@@ -7897,9 +7543,9 @@ class Orchestrator {
     const ownerTeamId = teamCfg.teamId || DEFAULT_TEAM_ID;
 
     // Deferred materialization: create the member as a STUB — config + triggers
-    // only, no Matrix user, no workspace seed/clone, no process. Mirrors how an
-    // orchestrator writes bp-instance stubs; enableAgent() does the full
-    // provisioning (Matrix + clone + spawn) on first activation. Lets a large
+    // only, no Matrix user, no workspace seed/clone, no process. enableAgent()
+    // does the full provisioning (Matrix + clone + spawn) on first
+    // activation. Lets a large
     // process (dozens of members) be laid out without dozens of clones up front.
     if (opts.materialize === false) {
       const stubConfig = {
@@ -8447,8 +8093,8 @@ class Orchestrator {
     return { skillName, teamId, agentId, resynced, skipped, refused, total: members.length, members };
   }
 
-  // (De)activate a skill on a single agent (standalone / orchestrator /
-  // bp-instance / team-member): idempotent grant edit + file sync, one
+  // (De)activate a skill on a single agent (standalone / team-member):
+  // idempotent grant edit + file sync, one
   // workspace. A team-member writes its own `skillsOverride` (a per-member
   // grant) rather than the team set, so the install reaches only that member.
   async setAgentSkillActive(id, skillName, { active = true } = {}) {
@@ -8776,492 +8422,31 @@ class Orchestrator {
     return out;
   }
 
-  // Scan an orchestrator agent's briefings directory and ensure a disabled
-  // stub config exists for each BP. Returns the list of stub agent IDs that
-  // are now present (both newly created and already existing).
+  // ─── STILLED: BP-instance hand-off — decision pending in #1968 ─────────────
   //
-  // Stubs carry no Matrix identity, no token, and no seeded workspace —
-  // those are materialized on first activation via enableAgent().
+  // Retained deliberately by epic #1961 decision R4 and phase #1962: the
+  // hand-off mechanism (this candidate resolution plus the `handoverToTargets`
+  // fan-out below) stays in the tree so it can be revived, but it is now
+  // UNREACHABLE — it requires `role === "bp-instance"`, and #1962 removed both
+  // BriefingPack roles, so no config the platform can create ever satisfies the
+  // gate below. #1968 decides its future (revive against the Flow/Team model,
+  // or delete); #1528 is where the idea lives on conceptually.
   //
-  // Pulls the orchestrator's workspace clone first so the BP listing
-  // reflects current `origin/main`. Without this, a stale local working
-  // copy makes the user-initiated "Sync" button a no-op even when remote
-  // has new BPs. Pass `{ force: true }` to bypass the per-orchestrator
-  // pull throttle (used for explicit user actions).
-  async syncBpStubs(orchestratorId, { force = false } = {}) {
-    const orchCfg = loadAgentConfig(orchestratorId);
-    if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
-    if (orchCfg.role !== "orchestrator") {
-      throw new Error(`Agent '${orchestratorId}' is not an orchestrator`);
-    }
-    if (!orchCfg.briefingsPath) {
-      throw new Error(`Orchestrator '${orchestratorId}' has no briefingsPath configured`);
-    }
-
-    const env = loadEnvironment(orchCfg.environmentId);
-    if (env) {
-      pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env, { force });
-    }
-
-    // Pre-flight: the rest of the chain (pull + bp-explorer) silently
-    // returns empty when the workspace clone is missing, which produces an
-    // orchestrator with zero BP-instance stubs and no surfaced error. Fail
-    // loudly here instead so the caller — create-agent, sync button, claim
-    // tick — gets a clear message naming the missing path. The briefings
-    // dir may be the repo root or a sub-directory of a cloned repo; we
-    // accept either as long as some ancestor (up to the agent root) is a
-    // git checkout.
-    const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
-    const agentRoot = path.join(AGENTS_DIR, orchestratorId);
-    const workspace = path.join(agentRoot, rel);
-    if (!fs.existsSync(workspace) || !findEnclosingGitRepo(workspace, agentRoot)) {
-      const err = new Error(
-        `No enclosing git checkout found below ${agentRoot} for briefings workspace ${workspace} ` +
-        `(briefingsPath='${orchCfg.briefingsPath}'). Likely cause: the env's ` +
-        `repository clone failed during agent seeding — check the orchestrator ` +
-        `log for 'Seed warning' entries.`
-      );
-      err.code = "WORKSPACE_NO_GIT";
-      throw err;
-    }
-
-    const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
-    const present = [];
-    let created = 0;
-
-    for (const bp of bps) {
-      if (!bp || !bp.id) continue;
-      const stubId = bpInstanceAgentId(bp);
-      present.push(stubId);
-      const existing = loadAgentConfig(stubId);
-      if (existing) {
-        // Backfill bpRelPath onto legacy stubs that pre-date hierarchical
-        // support so the prompt and claim flow find the brief.md correctly.
-        if (bp._rel_path && existing.bpRelPath !== bp._rel_path) {
-          const updated = { ...existing, bpRelPath: bp._rel_path };
-          saveAgentConfig(stubId, updated);
-          this.agentConfigs.set(stubId, { config: updated });
-        }
-        continue;
-      }
-
-      const stubConfig = {
-        id: stubId,
-        displayName: bpInstanceDisplayName(bp, stubId),
-        role: "bp-instance",
-        parentOrchestratorId: orchestratorId,
-        bpId: bp.id,
-        ...(bp.slug && { bpSlug: bp.slug }),
-        ...(bp._rel_path && { bpRelPath: bp._rel_path }),
-        // Inherited from the orchestrator so the bp-instance prompt can
-        // construct an exact filesystem path to its brief.md.
-        briefingsPath: orchCfg.briefingsPath,
-        environmentId: orchCfg.environmentId,
-        teamId: orchCfg.teamId || DEFAULT_TEAM_ID,
-        enabled: false,
-      };
-      saveAgentConfig(stubId, stubConfig);
-      this.agentConfigs.set(stubId, { config: stubConfig });
-      created += 1;
-    }
-
-    if (created > 0) {
-      console.log(
-        `[Orchestrator] BP stubs synced for ${orchestratorId}: ${created} new, ${present.length} total`
-      );
-    }
-    return present;
-  }
-
-  // One iteration of the claim loop. Pulls main (60s throttled), re-syncs
-  // BP stubs for any new BPs, and detects which dispatched BPs are
-  // newly-actionable since the last tick. Returns the deltas — actually
-  // posting the suggestion DM and performing the claim happen elsewhere
-  // (the agent-runner reads the response and drives a Claude invocation
-  // per newly-dispatched BP).
+  // One thing DID change rather than being frozen: `suggested` used to be
+  // derived from the briefings dependency graph (bp-explorer's parsed brief.md
+  // frontmatter → `briefings-graph.js` → `bp-event-router.findAffectedBps`),
+  // and all three of those went with #1962. That enrichment is gone; the
+  // shape is unchanged and `suggested` is now always empty, which is exactly
+  // the behaviour the old code already degraded to whenever bp-explorer was
+  // unreachable. `siblings` (which needs no graph) is untouched.
   //
-  // Called periodically by the orchestrator's own agent-runner process via
-  // POST /internal/orchestrators/:id/claim-tick. Manual UI activations
-  // (Activate / Deactivate) and direct user-driven claims via the chat
-  // bypass this loop.
-  async runClaimTick(orchestratorId) {
-    const orchCfg = loadAgentConfig(orchestratorId);
-    if (!orchCfg) throw new Error(`Orchestrator '${orchestratorId}' not found`);
-    if (orchCfg.role !== "orchestrator") {
-      throw new Error(`Agent '${orchestratorId}' is not an orchestrator`);
-    }
-    if (!orchCfg.token) return { skipped: "orchestrator-not-materialized" };
-    if (!orchCfg.briefingsPath) return { skipped: "no-briefings-path" };
-
-    // Pull main from origin (throttled). Failures are logged but never throw.
-    const env = loadEnvironment(orchCfg.environmentId);
-    if (env) pullOrchestratorWorkspace(orchestratorId, orchCfg.briefingsPath, env);
-
-    // Mirrors the pre-flight in syncBpStubs: without a workspace clone there
-    // is nothing for bp-explorer to scan. The 30s claim loop hits this path
-    // repeatedly, so log once and return a structured skip rather than
-    // pretending the orchestrator is healthy (zero BPs, no error). Any
-    // ancestor up to the agent root is acceptable — the briefings dir may
-    // sit beneath the repo root.
-    const rel = orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "");
-    const agentRoot = path.join(AGENTS_DIR, orchestratorId);
-    const workspace = path.join(agentRoot, rel);
-    if (!fs.existsSync(workspace) || !findEnclosingGitRepo(workspace, agentRoot)) {
-      // `pullOrchestratorWorkspace` already logged this above (throttled).
-      // Just return the structured skip so callers can see the cause.
-      return { skipped: "workspace-not-cloned", path: workspace };
-    }
-
-    const bps = await fetchBriefingPacks(orchestratorId, orchCfg.briefingsPath);
-
-    // Lazy-create stubs for any BPs we haven't seen before, and backfill
-    // bpRelPath onto legacy stubs that pre-date hierarchical support.
-    let newStubs = 0;
-    for (const bp of bps) {
-      if (!bp || !bp.id) continue;
-      const stubId = bpInstanceAgentId(bp);
-      const existing = loadAgentConfig(stubId);
-      if (existing) {
-        if (bp._rel_path && existing.bpRelPath !== bp._rel_path) {
-          const updated = { ...existing, bpRelPath: bp._rel_path };
-          saveAgentConfig(stubId, updated);
-          this.agentConfigs.set(stubId, { config: updated });
-        }
-        continue;
-      }
-      const stubConfig = {
-        id: stubId,
-        displayName: bpInstanceDisplayName(bp, stubId),
-        role: "bp-instance",
-        parentOrchestratorId: orchestratorId,
-        bpId: bp.id,
-        ...(bp.slug && { bpSlug: bp.slug }),
-        ...(bp._rel_path && { bpRelPath: bp._rel_path }),
-        briefingsPath: orchCfg.briefingsPath,
-        environmentId: orchCfg.environmentId,
-        teamId: orchCfg.teamId || DEFAULT_TEAM_ID,
-        enabled: false,
-      };
-      saveAgentConfig(stubId, stubConfig);
-      this.agentConfigs.set(stubId, { config: stubConfig });
-      newStubs += 1;
-    }
-
-    // Detect newly-dispatched BPs by diffing against the persistent
-    // notified-set. A BP only enters the suggestion stream once per
-    // dispatch; if its status flips away from 'dispatched' it gets
-    // removed from the set and a future re-dispatch will re-trigger.
-    const state = loadClaimState(orchestratorId);
-    const previouslyNotified = new Set(state.notified || []);
-    const dispatchedNow = new Set();
-    const newlyDispatched = [];
-
-    for (const bp of bps) {
-      if (!bp || !bp.id) continue;
-      if (bp.status !== "dispatched") continue;
-      dispatchedNow.add(bp.id);
-
-      const stubId = bpInstanceAgentId(bp);
-      const stubCfg = loadAgentConfig(stubId);
-      // If the stub is already materialised (token present), it has already
-      // been claimed (manually or otherwise) — don't re-suggest.
-      if (stubCfg && stubCfg.token) continue;
-      if (previouslyNotified.has(bp.id)) continue;
-
-      newlyDispatched.push({
-        bpId: bp.id,
-        bpSlug: bp.slug || "",
-        bpTitle: bp.title || bp.slug || bp.id,
-        stubId,
-      });
-    }
-
-    // Notified-set update: keep only currently-dispatched BPs (auto-cleanup
-    // when status flips back), plus the new ones we just surfaced.
-    const updatedNotified = new Set(
-      [...previouslyNotified].filter((id) => dispatchedNow.has(id))
-    );
-    for (const item of newlyDispatched) updatedNotified.add(item.bpId);
-    if (
-      updatedNotified.size !== previouslyNotified.size ||
-      [...updatedNotified].some((id) => !previouslyNotified.has(id))
-    ) {
-      saveClaimState(orchestratorId, { notified: [...updatedNotified] });
-    }
-
-    if (newStubs || newlyDispatched.length) {
-      console.log(
-        `[Orchestrator] Claim tick for ${orchestratorId}: ` +
-        `${newStubs} new stub${newStubs === 1 ? "" : "s"}, ` +
-        `${newlyDispatched.length} newly dispatched`
-      );
-    }
-    return { newStubs, newlyDispatched };
-  }
-
-  // Route a batch of BP events to the affected bp-instance stubs and the
-  // hosting orchestrator. The signaling agent does NOT do reverse-dep
-  // lookups itself — it just announces "I changed BP X". This method:
-  //
-  //   1. Finds which orchestrator hosts each event's BP (via the
-  //      bp-instance stub's parentOrchestratorId).
-  //   2. Reads that orchestrator's .index.json for graph + artifact data.
-  //   3. Computes affected BPs (depends-on dependents + input-artifact
-  //      dependents).
-  //   4. For each affected BP, locates the bp-instance stub.
-  //   5. Applies the agent's bp-trigger-policy:
-  //        - off                 → skip
-  //        - notify-only         → enqueue only if process is running
-  //        - notify-on-activate  → enable (materialize stub) + enqueue
-  //   6. Notifies the hosting orchestrator separately for awareness.
-  //
-  // Inputs:  { source: "<id>", events: [{ type, bp, details? }, ...] }
-  // Returns: { ok, routed: [...], skipped: [...] }
-  async routeBpEvents(payload) {
-    const { source: rawSource, events } = payload || {};
-    if (!Array.isArray(events) || events.length === 0) {
-      return { ok: true, routed: [], skipped: [], message: "no events" };
-    }
-
-    // The source field flows verbatim into a Claude prompt downstream.
-    // /internal/bp-events is container-internal but we still strip to a
-    // narrow charset + length so a malformed/hostile signaler can't inject
-    // newlines or control characters into the agent's prompt context.
-    const source = typeof rawSource === "string"
-      ? rawSource.slice(0, 200).replace(/[^\w@./:+-]/g, "")
-      : "";
-
-    // Sanitize and deduplicate events on (type, bp)
-    const seen = new Set();
-    const cleanEvents = [];
-    for (const e of events) {
-      if (!e || typeof e.type !== "string" || typeof e.bp !== "string") continue;
-      if (!/^[0-9a-f]{12}$/.test(e.bp)) continue;
-      const key = `${e.type}|${e.bp}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      cleanEvents.push({ type: e.type, bp: e.bp, details: e.details || {} });
-    }
-    if (cleanEvents.length === 0) {
-      return { ok: true, routed: [], skipped: [], message: "no valid events" };
-    }
-
-    // Build a one-shot reverse index: bpId → owning orchestrator + stub id.
-    // listAgentIds() can be in the hundreds; doing this once per call beats
-    // doing it once per event.
-    const bpHashToStub = new Map();
-    for (const id of listAgentIds()) {
-      const cfg = loadAgentConfig(id);
-      if (cfg?.role === "bp-instance" && typeof cfg.bpId === "string") {
-        bpHashToStub.set(cfg.bpId, { stubId: id, parentOrchestratorId: cfg.parentOrchestratorId });
-      }
-    }
-
-    // Group events by hosting orchestrator. Skip events whose BP we don't know.
-    const byOrchestrator = new Map(); // orchId → { events, orchCfg }
-    const skipped = [];
-
-    for (const ev of cleanEvents) {
-      const stubInfo = bpHashToStub.get(ev.bp);
-      if (!stubInfo) {
-        skipped.push({ event: ev, reason: "unknown-bp" });
-        continue;
-      }
-      const orchId = stubInfo.parentOrchestratorId;
-      if (!orchId) {
-        skipped.push({ event: ev, reason: "stub-has-no-parent-orchestrator" });
-        continue;
-      }
-      let bucket = byOrchestrator.get(orchId);
-      if (!bucket) {
-        const orchCfg = loadAgentConfig(orchId);
-        bucket = { events: [], orchCfg };
-        byOrchestrator.set(orchId, bucket);
-      }
-      bucket.events.push(ev);
-    }
-
-    const routed = [];
-
-    for (const [orchId, { events: orchEvents, orchCfg }] of byOrchestrator) {
-      if (!orchCfg) {
-        for (const ev of orchEvents) skipped.push({ event: ev, reason: "orchestrator-not-found" });
-        continue;
-      }
-
-      // Force-pull the orchestrator's briefings clone first so a signal from
-      // a just-pushed agent isn't routed against a stale local copy. Pull
-      // failures are non-fatal — we fall back to whatever is currently on
-      // disk. Forced pulls still coalesce within _PULL_FORCE_THROTTLE_MS so a
-      // burst of bp-events from several agents in quick succession doesn't
-      // multiply git operations. bp-explorer reads from the same clone, so
-      // the freshly-pulled brief.md files are what feed the graph below.
-      const briefingsPath = (orchCfg.briefingsPath || "").replace(/^\/+|\/+$/g, "");
-      const env = loadEnvironment(orchCfg.environmentId);
-      if (env) {
-        pullOrchestratorWorkspace(orchId, briefingsPath, env, { force: true });
-      }
-
-      let briefings;
-      try {
-        briefings = await loadBriefingsGraphFromExplorer(orchId, briefingsPath);
-      } catch (err) {
-        console.warn(`[Orchestrator] BP-events: cannot load briefings graph for ${orchId}: ${err.message}`);
-        for (const ev of orchEvents) {
-          skipped.push({ event: ev, reason: "index-unavailable", detail: err.message });
-        }
-        continue;
-      }
-
-      const { perAffectedBp, unknownSources } = bpEventRouter.batchEventsByAffected(
-        orchEvents,
-        (bpHash) => bpEventRouter.findAffectedBps(briefings, bpHash),
-      );
-      for (const src of unknownSources) {
-        skipped.push({ event: { bp: src }, reason: "source-not-in-index" });
-      }
-
-      // Build fan-out targets: every affected bp-instance, plus the
-      // orchestrator itself for awareness (only when we routed something).
-      // For each affected leaf, classify the situation so the receiving
-      // agent can pick the right prompt:
-      //   - "kickoff"       — affected BP is `ready` and all its depends-on
-      //                       are now `completed`/`reviewed` (first run)
-      //   - "cascade-stale" — affected BP was already `completed`/`reviewed`/
-      //                       `stale` and is now potentially invalidated
-      //   - "other"         — fallback (e.g. `dispatched`/`claimed` already)
-      const classifySituation = (bpHash) => {
-        const entry = briefings[bpHash] || {};
-        const status = entry.status || "unknown";
-        const deps = Array.isArray(entry["depends-on"]) ? entry["depends-on"] : [];
-        const allDepsMet = deps.every((d) => {
-          const e = briefings[d];
-          return e && (e.status === "completed" || e.status === "reviewed");
-        });
-        if (status === "ready" && allDepsMet) return { situation: "kickoff", status };
-        if (["completed", "reviewed", "stale"].includes(status)) {
-          return { situation: "cascade-stale", status };
-        }
-        return { situation: "other", status };
-      };
-      const targets = [];
-      for (const [affectedBp, reasons] of perAffectedBp) {
-        const dst = bpHashToStub.get(affectedBp);
-        if (!dst) {
-          skipped.push({ bp: affectedBp, reason: "no-stub-for-affected-bp" });
-          continue;
-        }
-        const { situation, status: affectedBpStatus } = classifySituation(affectedBp);
-        targets.push({
-          agentId: dst.stubId,
-          role: "bp-instance",
-          affectedBp,
-          affectedBpStatus,
-          situation,
-          reasons,
-        });
-      }
-      if (perAffectedBp.size > 0) {
-        targets.push({
-          agentId: orchId,
-          role: "orchestrator",
-          affectedBp: null,
-          reasons: [...perAffectedBp.entries()].map(([bp, rs]) => {
-            const { situation } = classifySituation(bp);
-            return { kind: "downstream-affected", bp, situation, reasons: rs };
-          }),
-        });
-      }
-
-      // Apply policy + execute in parallel. Promise.allSettled so one bad
-      // target doesn't sink the rest.
-      const results = await Promise.allSettled(
-        targets.map((t) => this._applyBpTriggerPolicy(t, source))
-      );
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        if (r.status === "fulfilled") routed.push(r.value);
-        else routed.push({
-          agentId: targets[i].agentId,
-          action: "error",
-          error: r.reason?.message || String(r.reason),
-        });
-      }
-    }
-
-    return { ok: true, source: source || null, routed, skipped };
-  }
-
-  // Apply a single agent's bp-trigger-policy to a fan-out target. Decides
-  // whether to enable+enqueue, enqueue-only, or skip. Always idempotent —
-  // multiple events for the same agent just append to pending-triggers.
-  async _applyBpTriggerPolicy(target, source) {
-    const cfg = loadAgentConfig(target.agentId);
-    if (!cfg) {
-      return { agentId: target.agentId, action: "skipped", reason: "agent-not-found" };
-    }
-    const policy = cfg["bp-trigger-policy"] || {};
-    const mode = policy.mode || "notify-on-activate";
-    // Default true: a manually-disabled agent should not be auto-respawned by
-    // BP events. Operators who want the old "always respawn" behaviour can set
-    // "respect-manual-disable": false explicitly in the agent's config.json.
-    const respectManualDisable = policy["respect-manual-disable"] !== false;
-
-    if (mode === "off") {
-      return { agentId: target.agentId, action: "skipped", reason: "policy-off" };
-    }
-
-    const isStub = !cfg.token;
-    const wasManuallyDisabled = !isStub && cfg.enabled === false;
-
-    if (mode === "notify-only") {
-      const proc = agentProcesses.get(target.agentId);
-      if (!proc || proc.exitCode != null || proc.killed) {
-        return { agentId: target.agentId, action: "skipped", reason: "notify-only-and-not-running" };
-      }
-    } else {
-      // notify-on-activate (default): materialize stubs + respawn disabled
-      if (wasManuallyDisabled && respectManualDisable) {
-        return { agentId: target.agentId, action: "skipped", reason: "manually-disabled" };
-      }
-      try {
-        await this.enableAgent(target.agentId);
-      } catch (err) {
-        return { agentId: target.agentId, action: "enable-failed", error: err.message };
-      }
-    }
-
-    enqueueBpEventBatch(target.agentId, {
-      source: source || "unknown",
-      role: target.role,
-      affectedBp: target.affectedBp,
-      affectedBpStatus: target.affectedBpStatus,
-      situation: target.situation,
-      reasons: target.reasons,
-    });
-
-    return {
-      agentId: target.agentId,
-      action: "enqueued",
-      role: target.role,
-      affectedBp: target.affectedBp,
-      situation: target.situation,
-      materialized: isStub && mode !== "notify-only",
-    };
-  }
-
   // Compute hand-off candidates for a bp-instance source agent.
   // Returns:
   //   {
   //     source: { agentId, bpId, displayName, parentOrchestratorId, briefingsPath },
-  //     suggested: [{ agentId, displayName, role, materialized, reason, paths? }, ...],
+  //     suggested: [],                                                   // always empty since #1962 — see above
   //     siblings:  [{ agentId, displayName, role, materialized }, ...]   // all bp-instance siblings under the same parent orchestrator (excluding source)
   //   }
-  // `suggested` derives from the briefings graph that bp-explorer parses out
-  // of each brief.md frontmatter — same depends-on / input-artifact edges the
-  // legacy bp-event router used. `siblings` lets the user pick targets the
-  // graph doesn't know about. The two lists may overlap (every suggested
-  // entry also appears in siblings).
   async handoverCandidates(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
@@ -9281,8 +8466,7 @@ class Orchestrator {
       briefingsPath: orchCfg.briefingsPath || null,
     };
 
-    // Reverse index: bpId → stubInfo, restricted to stubs sharing the same parent.
-    const bpHashToStub = new Map();
+    // Siblings: every bp-instance stub sharing this source's parent.
     const siblings = [];
     for (const otherId of listAgentIds()) {
       if (otherId === id) continue;
@@ -9297,47 +8481,15 @@ class Orchestrator {
         materialized: Boolean(otherCfg.token),
         bpId: otherCfg.bpId || null,
       });
-      if (otherCfg.bpId) bpHashToStub.set(otherCfg.bpId, otherId);
     }
 
-    let suggested = [];
-    if (cfg.bpId) {
-      try {
-        const briefings = await loadBriefingsGraphFromExplorer(parentId, orchCfg.briefingsPath);
-        const affected = bpEventRouter.findAffectedBps(briefings, cfg.bpId);
-        for (const depBp of affected.dependsOn) {
-          const targetId = bpHashToStub.get(depBp);
-          if (!targetId) continue;
-          const sibling = siblings.find((s) => s.agentId === targetId);
-          suggested.push({
-            agentId: targetId,
-            displayName: sibling?.displayName || targetId,
-            role: "bp-instance",
-            materialized: Boolean(sibling?.materialized),
-            reason: "depends-on",
-          });
-        }
-        for (const ia of affected.inputArtifact) {
-          const targetId = bpHashToStub.get(ia.bp);
-          if (!targetId) continue;
-          // If already covered by depends-on, skip — depends-on is a stronger signal.
-          if (suggested.some((s) => s.agentId === targetId)) continue;
-          const sibling = siblings.find((s) => s.agentId === targetId);
-          suggested.push({
-            agentId: targetId,
-            displayName: sibling?.displayName || targetId,
-            role: "bp-instance",
-            materialized: Boolean(sibling?.materialized),
-            reason: "input-artifact",
-            paths: ia.paths,
-          });
-        }
-      } catch (err) {
-        // bp-explorer unavailable or briefings unreadable — degrade to
-        // "siblings only" so the user can still pick a target manually.
-        console.warn(`[Orchestrator] handoverCandidates: cannot load briefings graph for ${parentId}: ${err.message}`);
-      }
-    }
+    // `suggested` was the briefings-graph enrichment (depends-on /
+    // input-artifact edges). Its whole supply chain — bp-explorer, the
+    // briefings graph and the BP event router — went with #1962, so the list is
+    // now always empty. Kept in the response shape because it is what the
+    // stilled UI reads, and because "siblings only" was already the documented
+    // degradation whenever bp-explorer was unreachable.
+    const suggested = [];
 
     return { source, suggested, siblings };
   }
@@ -9368,9 +8520,16 @@ class Orchestrator {
     }
   }
 
-  // Materialize a stub bp-instance agent (or re-enable a previously-active
+  // Materialize a stub team-member agent (or re-enable a previously-active
   // one). Idempotent: a stub gets full provisioning on the first call;
   // subsequent calls just (re)spawn the agent-runner process.
+  //
+  // This is the deferred-team-materialization path (#1955/#1957/#1958): a
+  // member created with `materialize: false` is config + triggers.json only,
+  // and this method does the Matrix user, the workspace seed, the clone and
+  // the container on first activation. It used to serve `bp-instance` stubs
+  // too; #1962 removed that arm with the rest of the BriefingPack model and
+  // deliberately left the `team-member` arm untouched.
   async enableAgent(id) {
     const cfg = loadAgentConfig(id);
     if (!cfg) throw new Error(`Agent '${id}' not found`);
@@ -9398,8 +8557,10 @@ class Orchestrator {
       return { id, materialized: false, enabled: true };
     }
 
-    // Stub: full materialization.
-    if (cfg.role !== "bp-instance" && cfg.role !== "team-member") {
+    // Stub: full materialization. `team-member` is the only stub-bearing role
+    // (#1962 removed the `bp-instance` arm — a leftover BP stub on an upgraded
+    // stack now lands in this throw, which is the intended hard cut).
+    if (cfg.role !== "team-member") {
       throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
     }
     const env = loadEnvironment(cfg.environmentId);
@@ -9415,15 +8576,10 @@ class Orchestrator {
     const seedResult = seedAgentWorkspace(id, env, {
       teamId: cfg.teamId || DEFAULT_TEAM_ID,
       // Resolved team-owned grant: member override wins, else the parent
-      // construct's (team / orchestrator) skills[], else the stub's own list.
+      // team's skills[], else the stub's own list.
       skills: effectiveSkills(cfg, loadAgentConfig),
       mcpServersOverride: Array.isArray(cfg.mcpServersOverride) ? cfg.mcpServersOverride : undefined,
     });
-
-    // bp-instance agents always need the ACE engineering skill — the env's
-    // skills array is overridden here so the agent can actually execute the
-    // BP regardless of how the user configured the Working Environment.
-    if (cfg.role === "bp-instance") ensureEngineeringSkill(id);
 
     const updated = {
       ...cfg,
@@ -9433,28 +8589,20 @@ class Orchestrator {
     };
     saveAgentConfig(id, updated);
 
-    if (cfg.role === "bp-instance") {
-      // Always (re)write the BP-instance prompt — the path / skill reference
-      // depends on cfg fields (bpId, bpSlug, briefingsPath) that are stable
-      // for this stub, and we want a consistent prompt across reactivations.
-      saveAgentPrompt(id, bpInstanceSystemPrompt(updated), "bp-instance", env);
-      console.log(`[Orchestrator] Materialized bp-instance ${id} (parent=${cfg.parentOrchestratorId}, bp=${cfg.bpId})`);
-    } else {
-      // team-member: prefer the member's own systemPrompt override (recorded on
-      // a deferred-materialization stub, or any inherit/override member). Only
-      // fall back to the parent team template when the member has no override —
-      // this is the inherit signal.
-      let prompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) ? cfg.systemPrompt : '';
-      if (!prompt) {
-        const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
-        if (!teamCfg) {
-          console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
-        }
-        prompt = teamCfg?.systemPromptTemplate || "";
+    // team-member: prefer the member's own systemPrompt override (recorded on
+    // a deferred-materialization stub, or any inherit/override member). Only
+    // fall back to the parent team template when the member has no override —
+    // this is the inherit signal.
+    let prompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0) ? cfg.systemPrompt : '';
+    if (!prompt) {
+      const teamCfg = cfg.parentTeamId ? loadAgentConfig(cfg.parentTeamId) : null;
+      if (!teamCfg) {
+        console.warn(`[Orchestrator] team-member ${id}: parent team '${cfg.parentTeamId}' not found — reactivating with empty system prompt`);
       }
-      saveAgentPrompt(id, prompt, "team-member", env);
-      console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);
+      prompt = teamCfg?.systemPromptTemplate || "";
     }
+    saveAgentPrompt(id, prompt, "team-member", env);
+    console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);
 
     this.agentConfigs.set(id, { config: updated });
     startAgentProcess(updated);
@@ -9936,19 +9084,16 @@ class Orchestrator {
     }
 
     // Strip runtime identity. Keep id, displayName, role, environmentId, and
-    // role-specific metadata (briefingsPath / parentOrchestratorId / bpId /
-    // bpSlug). Drop token, userId. Mark disabled.
+    // role-specific metadata (parentTeamId / blueprintId). Drop token, userId.
+    // Mark disabled. The BriefingPack keys this list used to preserve
+    // (briefingsPath / parentOrchestratorId / bpId / bpSlug / bpRelPath) went
+    // with #1962 — nothing writes them any more.
     const stripped = {
       id: cfg.id,
       displayName: cfg.displayName,
       role: cfg.role,
       environmentId: cfg.environmentId,
-      ...(cfg.briefingsPath && { briefingsPath: cfg.briefingsPath }),
-      ...(cfg.parentOrchestratorId && { parentOrchestratorId: cfg.parentOrchestratorId }),
       ...(cfg.parentTeamId && { parentTeamId: cfg.parentTeamId }),
-      ...(cfg.bpId && { bpId: cfg.bpId }),
-      ...(cfg.bpSlug && { bpSlug: cfg.bpSlug }),
-      ...(cfg.bpRelPath && { bpRelPath: cfg.bpRelPath }),
       ...(cfg.blueprintId && { blueprintId: cfg.blueprintId }),
       enabled: false,
     };
@@ -9957,155 +9102,6 @@ class Orchestrator {
 
     console.log(`[Orchestrator] Reset ${id} to stub state`);
     return { id, reset: true };
-  }
-
-  // Claim a bp-instance: write status='claimed' + agent-id + timestamp to
-  // the BP's brief.md (in the parent orchestrator's workspace clone),
-  // commit, push to origin, then materialise the stub via enableAgent.
-  //
-  // On push failure (typically non-fast-forward — a teammate claimed first)
-  // the local commit is rolled back and the call throws. The stub stays
-  // unmaterialised so the user sees the failure, can pull, and retry.
-  async claimAgent(stubId) {
-    const cfg = loadAgentConfig(stubId);
-    if (!cfg) throw new Error(`Agent '${stubId}' not found`);
-    if (cfg.role !== "bp-instance") {
-      throw new Error(`Agent '${stubId}' is not a bp-instance (role=${cfg.role})`);
-    }
-    if (cfg.token) {
-      // Already claimed and materialised. Idempotent — return current state
-      // rather than re-running the git operations.
-      return { id: stubId, alreadyClaimed: true };
-    }
-
-    const orchId = cfg.parentOrchestratorId;
-    if (!orchId) throw new Error(`Agent '${stubId}' has no parent orchestrator`);
-    const orchCfg = loadAgentConfig(orchId);
-    if (!orchCfg) throw new Error(`Parent orchestrator '${orchId}' not found`);
-    const env = loadEnvironment(orchCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${orchCfg.environmentId}' not found`);
-    if (!orchCfg.briefingsPath) {
-      throw new Error(`Parent orchestrator '${orchId}' has no briefingsPath`);
-    }
-
-    const orchWorkspace = path.join(
-      "/workspace/agents",
-      orchId,
-      orchCfg.briefingsPath.replace(/^\/+|\/+$/g, "")
-    );
-    const briefRel = bpInstanceBriefRelPath(cfg);
-    const briefAbs = path.join(orchWorkspace, briefRel);
-
-    if (!fs.existsSync(briefAbs)) {
-      throw new Error(`brief.md not found at ${briefAbs}`);
-    }
-
-    const original = fs.readFileSync(briefAbs, "utf8");
-    const patched = patchBriefForClaim(original, stubId);
-    if (patched !== original) {
-      fs.writeFileSync(briefAbs, patched);
-    }
-
-    // git add + commit + push, with rollback on push failure
-    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-    const sshCmd = buildGitSshCommand(env);
-    if (sshCmd) gitEnv.GIT_SSH_COMMAND = sshCmd;
-
-    const runGit = (args, timeoutMs = 15_000) =>
-      execFileSync("git", args, {
-        cwd: orchWorkspace, env: gitEnv, stdio: "pipe", timeout: timeoutMs,
-      });
-
-    let didCommit = false;
-    try {
-      runGit(["add", briefRel]);
-      // Skip commit if nothing actually changed (e.g. brief was already in claim shape)
-      let hasChanges = true;
-      try {
-        runGit(["diff", "--cached", "--quiet"]);
-        hasChanges = false;
-      } catch { hasChanges = true; }
-
-      if (hasChanges) {
-        runGit([
-          "-c", "user.name=Orchestrator",
-          "-c", "user.email=orchestrator@agent-studio.local",
-          "commit",
-          "-m", `[claim] BP ${cfg.bpSlug || cfg.bpId} by ${stubId}`,
-        ]);
-        didCommit = true;
-        try {
-          runGit(["push", "origin", "HEAD"], 30_000);
-        } catch (pushErr) {
-          // Push failed — most likely non-fast-forward. Roll back our local
-          // commit so the workspace is clean for the next pull/retry, and
-          // surface a friendly error.
-          try { runGit(["reset", "--hard", "HEAD~1"]); } catch { /* best effort */ }
-          const detail = (pushErr.stderr || pushErr.stdout || pushErr.message || "")
-            .toString().trim().slice(0, 200);
-          throw new Error(
-            `Push failed (a teammate may have claimed this BP first): ${detail}`
-          );
-        }
-      }
-    } catch (err) {
-      if (didCommit && /Push failed/.test(err.message)) throw err;
-      // Pre-commit failures: restore brief.md so we don't leave it dirty
-      try { fs.writeFileSync(briefAbs, original); } catch { /* best effort */ }
-      const detail = (err.stderr || err.message || "").toString().trim().slice(0, 200);
-      throw new Error(`Git operation failed: ${detail}`);
-    }
-
-    // Brief is now committed + pushed. Materialise the stub.
-    const enableResult = await this.enableAgent(stubId);
-
-    // Drop this BP from the notified-set so a future re-dispatch (if it ever
-    // happens) gets surfaced again.
-    const state = loadClaimState(orchId);
-    const notified = new Set(state.notified || []);
-    if (notified.delete(cfg.bpId)) {
-      saveClaimState(orchId, { notified: [...notified] });
-    }
-
-    console.log(`[Orchestrator] Claimed ${stubId} (bp=${cfg.bpId})`);
-    return { id: stubId, claimed: true, ...enableResult };
-  }
-
-  // Materialize an existing config-only orchestrator agent (created before
-  // the orchestrator role gained Matrix identity). Idempotent — if the
-  // config already has a token, this is a no-op. Errors are thrown so the
-  // caller can decide whether to abort or continue.
-  async materializeOrchestrator(id) {
-    const cfg = loadAgentConfig(id);
-    if (!cfg) throw new Error(`Agent '${id}' not found`);
-    if (cfg.role !== "orchestrator") throw new Error(`Agent '${id}' is not an orchestrator`);
-    if (cfg.token) return cfg; // already materialized
-
-    const env = loadEnvironment(cfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${cfg.environmentId}' not found`);
-
-    const password = `agent-${id}-${Date.now()}`;
-    const userId = `@${id}:local`;
-
-    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
-    const token = await loginMatrixUser(id, password, this.adminClient);
-    await setDisplayName(token, userId, cfg.displayName);
-
-    // Workspace was already seeded at config-create time; no second seed.
-    const updated = { ...cfg, userId, token, enabled: true };
-    saveAgentConfig(id, updated);
-
-    // If AGENT-PROMPT.md is missing (config-only created without it), write a default.
-    const promptPath = path.join(agentDir(id), "AGENT-PROMPT.md");
-    if (!fs.existsSync(promptPath)) {
-      saveAgentPrompt(id, defaultSystemPromptFor("orchestrator", { briefingsPath: cfg.briefingsPath }), "orchestrator", env);
-    }
-
-    this.agentConfigs.set(id, { config: updated });
-    startAgentProcess(updated);
-
-    console.log(`[Orchestrator] Materialized orchestrator agent ${id}`);
-    return updated;
   }
 
   // ===========================================================
@@ -10144,7 +9140,6 @@ class Orchestrator {
       // Preserve the owning Team of the stub being activated (#299); fall back
       // to the default team for a fresh instance.
       teamId: (loadAgentConfig(instanceId)?.teamId) || DEFAULT_TEAM_ID,
-      ...(blueprint.briefingsPath && { briefingsPath: blueprint.briefingsPath }),
       enabled: true,
     };
     saveAgentConfig(instanceId, config);
@@ -10278,8 +9273,13 @@ class Orchestrator {
       parentTeamId = opts.parentTeamId;
       environmentId = teamCfg.environmentId;
     } else {
-      // Standalone import — never resurrect a dangling team-member/bp-instance
-      // shape (it would render as an orphan with a missing parent).
+      // Standalone import — never resurrect a dangling team-member shape (it
+      // would render as an orphan with a missing parent). This forced role is
+      // also why the BriefingPack linkage fields no longer need stripping
+      // (#1962): an imported pre-BP-removal archive can still carry
+      // parentOrchestratorId / bpId / bpSlug / briefingsPath, but nothing in
+      // the platform reads them any more and the role they belonged to cannot
+      // be assigned here.
       role = "agent";
       environmentId = sourceCfg.environmentId;
     }
@@ -10313,11 +9313,6 @@ class Orchestrator {
       enabled: true,
     };
     delete newConfig._provisioning;
-    // Drop linkage that doesn't apply to the import target.
-    delete newConfig.parentOrchestratorId;
-    delete newConfig.bpId;
-    delete newConfig.bpSlug;
-    delete newConfig.briefingsPath;
 
     if (role === "team-member") {
       newConfig.parentTeamId = parentTeamId;
@@ -10938,7 +9933,7 @@ async function main() {
       req.on('data', d => body += d);
       req.on('end', () => {
         try {
-          const { id, displayName, role, systemPrompt, environmentId, briefingsPath } = JSON.parse(body);
+          const { id, displayName, role, systemPrompt, environmentId } = JSON.parse(body);
           if (!id || !displayName || !role || !environmentId) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
@@ -10946,9 +9941,9 @@ async function main() {
           }
           // Teams may be created without a default prompt — members can carry
           // their own per-role prompts, and the team stores an empty template.
-          if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
+          if (!systemPrompt && role !== 'team') {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'systemPrompt is required for non-orchestrator agents' }));
+            res.end(JSON.stringify({ error: 'systemPrompt is required for every role except team' }));
             return;
           }
           if (loadBlueprint(id)) {
@@ -10961,7 +9956,7 @@ async function main() {
             res.end(JSON.stringify({ error: `Working Environment '${environmentId}' not found` }));
             return;
           }
-          const blueprint = { id, displayName, role, systemPrompt, environmentId, ...(briefingsPath && { briefingsPath }), createdAt: new Date().toISOString() };
+          const blueprint = { id, displayName, role, systemPrompt, environmentId, createdAt: new Date().toISOString() };
           saveBlueprint(id, blueprint);
           seedBlueprintMemory(id);
           res.writeHead(201, { 'Content-Type': 'application/json' });
@@ -11278,12 +10273,12 @@ async function main() {
           }
 
           // Cascade to children before deleting the parent. Without this,
-          // deleting an orchestrator (or team) leaves its bp-instance
-          // (or team-member) stubs orphaned: they keep the now-dangling
-          // parentOrchestratorId / parentTeamId, the UI can't render them
-          // under any parent, and a future orchestrator that scans the same
-          // BP slug can't claim the deterministic agentId because the orphan
-          // already occupies it.
+          // deleting a team leaves its team-member stubs orphaned: they keep
+          // the now-dangling parentTeamId, the UI can't render them under any
+          // parent, and a re-created team can't reuse the deterministic member
+          // ids because the orphans still occupy them. (#1962 removed the
+          // orchestrator → bp-instance arm of this cascade with the rest of the
+          // BriefingPack model; `team` is the only parent construct left.)
           parentCfg = loadAgentConfig(id);
           const cascaded = [];
 
@@ -11308,9 +10303,14 @@ async function main() {
 
           // Fast-phase teardown for one agent: stop → plugin reap → delete
           // config → drop in-memory config. Records the agent for background
-          // reaping. `graceful` keeps the SIGTERM→commit→autoremove window only
-          // for a bp-instance (its entrypoint commits partial work on
-          // shutdown); every other role is force-removed (#1791, Change 2).
+          // reaping. `graceful` (isGracefulDeleteRole, #1791 Change 2) keeps the
+          // SIGTERM→commit→autoremove window only for a role that flushes work
+          // on shutdown — since #1962 that is no role, so every agent is
+          // force-removed. The flag stays as the seam for the next one.
+          //
+          // NOTE for #1962 reviewers: this is deliberately still routed through
+          // isGracefulDeleteRole rather than hard-coded false, so "which roles
+          // flush on shutdown" keeps its one named, unit-tested home.
           const fastTeardown = async (targetId, cfg, deactivateMatrix) => {
             stopAgentProcess(targetId);
             if (cfg) {
@@ -11332,9 +10332,7 @@ async function main() {
           };
 
           if (parentCfg) {
-            const childField = parentCfg.role === 'orchestrator' ? 'parentOrchestratorId'
-                            :  parentCfg.role === 'team' ? 'parentTeamId'
-                            :  null;
+            const childField = parentCfg.role === 'team' ? 'parentTeamId' : null;
             if (childField) {
               for (const childId of listAgentIds()) {
                 if (childId === id) continue;
@@ -11358,7 +10356,7 @@ async function main() {
               }
               if (cascaded.length > 0) {
                 console.log(
-                  `[Orchestrator] Cascade-deleted ${cascaded.length} ${parentCfg.role === 'orchestrator' ? 'bp-instance' : 'team-member'} children of '${id}': ${cascaded.join(', ')}`
+                  `[Orchestrator] Cascade-deleted ${cascaded.length} team-member children of '${id}': ${cascaded.join(', ')}`
                 );
               }
             }
@@ -12569,28 +11567,6 @@ async function main() {
       return;
     }
 
-    // ── BP-event router (disabled) ───────────────────────────────────────
-    // The automatic Python-driven fan-out path (bp-transition.py → POST
-    // /internal/bp-events → routeBpEvents) is intentionally retired in this
-    // environment: Python isn't installed in the orchestrator/agent images,
-    // so the script-based closing-loop is unreliable. Hand-off is now an
-    // explicit user action via the bp-instance chat's Hand-off button
-    // (see /internal/agents/:id/handover below). We still answer this URL
-    // so a stray ACE script gets a clean 410 instead of a confusing 404 or
-    // a half-routed event.
-    if (req.method === 'POST' && req.url === '/internal/bp-events') {
-      // Drain the body so the client doesn't see a connection reset.
-      req.on('data', () => {});
-      req.on('end', () => {
-        res.writeHead(410, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          ok: false,
-          error: 'bp-events ingestion is disabled — use the Hand-off button in the bp-instance chat',
-        }));
-      });
-      return;
-    }
-
     // ── Enable / Disable an agent (with stub materialization) ────────────
     const enableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/enable$/);
     if (enableMatch) {
@@ -12830,15 +11806,13 @@ async function main() {
       return;
     }
 
-    // ── Hand-off candidates for a bp-instance ────────────────────────────
-    // Returns the bp-instance stubs that should be considered as hand-off
-    // targets when the named source agent finishes its work. Suggested via
-    // the briefings graph (depends-on + input-artifact, sourced from
-    // bp-explorer); unknown source or unreachable graph yield empty
-    // `suggested`. The full list of sibling bp-instance agents under the
-    // same parent orchestrator is also returned so the user can hand off to
-    // siblings the graph doesn't know about (e.g. ad-hoc dynamic-mode
-    // coordination).
+    // ── STILLED: hand-off candidates for a bp-instance — see #1968 ───────
+    // Retained by epic #1961 decision R4 / phase #1962, and now UNREACHABLE:
+    // it requires `role === "bp-instance"`, a role the platform can no longer
+    // create, so every call answers 409. Returns the sibling bp-instance stubs
+    // under the same parent orchestrator; `suggested` (the bp-explorer
+    // briefings-graph enrichment) is always empty since #1962 removed that
+    // supply chain — see orchestrator.handoverCandidates.
     const handoverCandMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/?]+)\/handover-candidates(?:\?.*)?$/);
     if (handoverCandMatch) {
       const id = decodeURIComponent(handoverCandMatch[1]);
@@ -13682,25 +12656,6 @@ async function main() {
       return;
     }
 
-    const claimMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/claim$/);
-    if (claimMatch) {
-      const id = decodeURIComponent(claimMatch[1]);
-      (async () => {
-        try {
-          const result = await orchestrator.claimAgent(id);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          console.error(`[Orchestrator] claimAgent error for ${id}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 :
-                         /push failed/i.test(err.message) ? 409 : 500;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      })();
-      return;
-    }
-
     const deactivateMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/deactivate$/);
     if (deactivateMatch) {
       const id = decodeURIComponent(deactivateMatch[1]);
@@ -13724,58 +12679,6 @@ async function main() {
           }
         })();
       });
-      return;
-    }
-
-    // ── Re-scan briefings directory for an orchestrator ──────────────────
-    // Accepts `?force=1` to bypass the per-orchestrator pull throttle —
-    // user-initiated Sync clicks should always reach origin.
-    const syncBpsMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/sync-bps(?:\?.*)?$/);
-    if (syncBpsMatch) {
-      const orchId = decodeURIComponent(syncBpsMatch[1]);
-      const force = /[?&]force=1\b/.test(req.url);
-      (async () => {
-        try {
-          const stubs = await orchestrator.syncBpStubs(orchId, { force });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ orchestratorId: orchId, stubs, total: stubs.length }));
-        } catch (err) {
-          console.error(`[Orchestrator] sync-bps error for ${orchId}: ${err.message}`);
-          // 400 for caller-fixable misconfigurations (no briefingsPath, no
-          // workspace clone). The workspace-missing case is by far the most
-          // common diagnostic the user can act on, so it must not look like
-          // a 500 server bug.
-          let status = 500;
-          if (/not found/i.test(err.message)) status = 404;
-          else if (
-            err.code === "WORKSPACE_NO_GIT" ||
-            /no enclosing git checkout/i.test(err.message) ||
-            /not a git checkout/i.test(err.message) ||
-            /briefingsPath/i.test(err.message)
-          ) status = 400;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      })();
-      return;
-    }
-
-    // ── One iteration of the auto-claim loop ─────────────────────────────
-    const claimTickMatch = req.method === 'POST' && req.url.match(/^\/internal\/orchestrators\/([^/]+)\/claim-tick$/);
-    if (claimTickMatch) {
-      const orchId = decodeURIComponent(claimTickMatch[1]);
-      (async () => {
-        try {
-          const result = await orchestrator.runClaimTick(orchId);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ orchestratorId: orchId, ...result }));
-        } catch (err) {
-          console.error(`[Orchestrator] claim-tick error for ${orchId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404 : 500;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      })();
       return;
     }
 
@@ -14667,7 +13570,7 @@ async function main() {
       try {
         const {
           id, displayName, role, systemPrompt, environmentId,
-          schedule, taskPrompt, briefingsPath,
+          schedule, taskPrompt,
           // Team-Setup wizard fields (all optional, additive):
           team, sessionPolicy, triggers,
           // Owning (human) Team — the tenant this construct belongs to (#299).
@@ -14701,16 +13604,19 @@ async function main() {
           res.end(JSON.stringify({ error: 'id, displayName, role, environmentId required' }));
           return;
         }
-        if (!['agent', 'orchestrator', 'team'].includes(role)) {
+        // `orchestrator` was removed from this whitelist by #1962 — it is the
+        // authoritative gate (the console API validates only presence), so
+        // dropping it here is what makes the role uncreatable platform-wide.
+        if (!['agent', 'team'].includes(role)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: agent, orchestrator, team` }));
+          res.end(JSON.stringify({ error: `Invalid role: ${role}. Must be one of: agent, team` }));
           return;
         }
         // Teams may be created without a default prompt — members can carry
         // their own per-role prompts, and the team stores an empty template.
-        if (role !== 'orchestrator' && role !== 'team' && !systemPrompt) {
+        if (role !== 'team' && !systemPrompt) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'systemPrompt required for non-orchestrator roles' }));
+          res.end(JSON.stringify({ error: 'systemPrompt required for role: agent' }));
           return;
         }
         if (loadAgentConfig(id) || agentTeardownRegistry.has(id)) {
@@ -14719,9 +13625,7 @@ async function main() {
           return;
         }
 
-        const extra =
-          role === 'orchestrator' ? { briefingsPath: briefingsPath || null } :
-          { schedule, taskPrompt };
+        const extra = { schedule, taskPrompt };
         // Wizard-side extras layered on top of the legacy fields.
         if (team) extra.team = team;
         if (sessionPolicy) extra.sessionPolicy = sessionPolicy;

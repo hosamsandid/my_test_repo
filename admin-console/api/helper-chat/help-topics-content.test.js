@@ -93,6 +93,18 @@ const TOPIC_CONTENT = [
     // autonomy / review / promotion-gate copy out of KnowledgeLearningConfig —
     // which the wizard's Knowledge step renders too, so this is now the only
     // place that explains what a level or a gate does.
+    //
+    // #1985 (epic #1981) widened it into a per-surface reference: the six areas
+    // below are each a chapter, and each is the landing target of a "?" on the
+    // matching surface, so the headings are load-bearing rather than decorative.
+    chapters: [
+      'Memory vs Knowledge vs Skills',
+      'How learning works, in three steps',
+      'The per-agent digest, and what stays searchable',
+      'Autonomy, Review and the promotion gates',
+      'Power tools: domains, consolidate and distill',
+      'Configuration: forgetting, assist model and storage',
+    ],
     concepts: [
       'Memory',
       'Knowledge',
@@ -118,6 +130,18 @@ const TOPIC_CONTENT = [
       'Team skill → all teams',
       'Forgetting',
       'un-retired',
+      // #1985 additions. The first two are a CORRECTION, guarded here because
+      // the ticket assumed the opposite: the Knowledge page has no client-side
+      // admin gate at all, and the API routes behind the Configure panel check
+      // `knowledgeTeamVisible` — team *visibility*, not `canManageTeam`. So any
+      // member who can see the team can change its autonomy level, and a reword
+      // must not quietly restore the "Team-Admin-gated" reading.
+      'not restricted to team admins',
+      'anyone who can see a team',
+      // The two configuration subjects the topic never covered — the page's own
+      // blurbs stay (point-of-decision copy), the rationale is here.
+      'Assist model',
+      'Storage',
     ],
   },
   {

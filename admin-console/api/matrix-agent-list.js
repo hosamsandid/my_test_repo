@@ -22,12 +22,15 @@
  *
  * Deliberately narrower than the shared client-side `agentState() === 'stub'`:
  * that predicate answers "never provisioned" for *any* role, while the chat
- * list only ever shows stubs that have a team group to sit in. A stub
- * bp-instance (an orchestrator writes one per Briefing Pack, so there can be
- * dozens) and a parentless stub have no such home, so they stay out — matching
- * the ticket's scope, and keeping the invariant the rail's grouping relies on:
- * **every stub in this payload carries a `parentTeamId`**, so none can ever
- * fall through to the orphan/"Single agents" bucket.
+ * list only ever shows stubs that have a team group to sit in. A stub of any
+ * other role, and a parentless stub, have no such home — so they stay out,
+ * which keeps the invariant the rail's grouping relies on: **every stub in
+ * this payload carries a `parentTeamId`**, so none can ever fall through to
+ * the orphan/"Single agents" bucket.
+ *
+ * That also covers the leftover BriefingPack configs #1962 deliberately does
+ * not delete (epic #1961 decision R2): a `bp-instance` stub still on disk
+ * after the upgrade fails the role check and never surfaces in the chat.
  */
 function isStubMember(cfg) {
   return !!cfg

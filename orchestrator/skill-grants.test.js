@@ -45,13 +45,18 @@ test("team-member with a missing parent resolves to empty, no throw", () => {
   assert.deepEqual(effectiveSkills({ role: "team-member", parentTeamId: "gone" }), []);
 });
 
-test("bp-instance inherits from its parent orchestrator", () => {
+// Removal guard (#1962): `bp-instance` used to inherit from its parent
+// orchestrator via `parentOrchestratorId`. Both roles went with the
+// BriefingPack model, so `team-member`/`parentTeamId` is the only inheritance
+// path left — a leftover BP config on an upgraded stack must NOT reach through
+// `parentOrchestratorId` any more.
+test("a leftover bp-instance no longer inherits through parentOrchestratorId", () => {
   const load = (id) => (id === "orch" ? { role: "orchestrator", skills: ["ace-engineering"] } : null);
   assert.deepEqual(
     effectiveSkills({ role: "bp-instance", parentOrchestratorId: "orch" }, load),
-    ["ace-engineering"],
+    [],
   );
-  // Its own recorded grant wins over inheritance.
+  // Its own recorded grant is still read — that path is role-agnostic.
   assert.deepEqual(
     effectiveSkills({ role: "bp-instance", parentOrchestratorId: "orch", skills: ["own"] }, load),
     ["own"],
@@ -83,9 +88,35 @@ test("migration is idempotent — an existing skills field always wins", () => {
   assert.equal(migrateSkillGrant({ role: "team", skills: ["kept"] }, { skills: ["x"] }), null);
 });
 
-test("migration skips team-members and bp-instances (they inherit)", () => {
+test("migration skips team-members (they inherit)", () => {
   assert.equal(migrateSkillGrant({ role: "team-member" }, { skills: ["x"] }), null);
+});
+
+// Removal guard (#1962, epic #1961 decision R2 + AC8): the hard cut leaves
+// retired-role configs on disk, and this migration is the one startup path that
+// would otherwise WRITE to them — it runs from main() before the
+// startAllEnabledAgents role gate exists, and its loop has no role gate of its
+// own. A leftover bp-instance stub carries `environmentId` but no `skills`, so
+// it clears every other early return. `orchestrator` is here too: it was never
+// skipped, not even before this removal, so the shared predicate closes that
+// hole as well.
+test("migration leaves a retired-role config untouched — R2 keeps it on disk", () => {
   assert.equal(migrateSkillGrant({ role: "bp-instance" }, { skills: ["x"] }), null);
+  assert.equal(migrateSkillGrant({ role: "orchestrator" }, { skills: ["x"] }), null);
+  // The real leftover shape syncBpStubs wrote: environmentId present, no skills.
+  assert.equal(
+    migrateSkillGrant(
+      { role: "bp-instance", environmentId: "env1", parentOrchestratorId: "orch" },
+      { skills: ["engineering", "research"] },
+    ),
+    null,
+  );
+  // An unknown/absent role is equally untouched — the predicate fails closed.
+  assert.equal(migrateSkillGrant({ role: "who-knows" }, { skills: ["x"] }), null);
+  assert.equal(migrateSkillGrant({}, { skills: ["x"] }), null);
+  // ...while every supported role still migrates, so this is not a blanket off-switch.
+  assert.deepEqual(migrateSkillGrant({ role: "agent" }, { skills: ["x"] }).skills, ["x"]);
+  assert.deepEqual(migrateSkillGrant({ role: "team" }, { skills: ["x"] }).skills, ["x"]);
 });
 
 test("migration with no env / no env.skills writes an empty grant", () => {

@@ -6,6 +6,9 @@ import {
   STRUCTURAL_ACTIONS,
   PROPOSAL_PENDING_REASON,
   NO_ROLES_REASON,
+  IMPORTED_PREVIEW_REASON,
+  STATUS_TITLES,
+  PAGE_ACTION_TITLES,
 } from './process-toolbar-hints.js';
 
 test('enabled actions show their normal descriptive title', () => {
@@ -49,4 +52,52 @@ test('roleCount is read defensively (missing / non-number → treated as empty)'
 test('unknown actions return an empty string rather than throwing', () => {
   assert.equal(toolbarTitle('nope', { hasProposal: true }), '');
   assert.equal(toolbarTitle(undefined), '');
+});
+
+// ─── #1999: the copy for the whole Flow-Editor toolbar lives here ──────────
+
+test('every header-row action button has a tooltip', () => {
+  // The AC is "no button is left unexplained"; this is that as an assertion.
+  const headerRowActions = [
+    'addAgent', 'addHuman', 'stages', 'labels', 'materialize',
+    'copilot', 'export', 'editAsDraft', 'anomalies', 'improvements',
+  ];
+  for (const action of headerRowActions) {
+    const title = toolbarTitle(action);
+    assert.equal(typeof title, 'string');
+    assert.ok(title.length > 0, `${action} needs tooltip copy`);
+  }
+});
+
+test('the status controls and the page-action bar have copy too', () => {
+  for (const key of ['modeLive', 'modeDraft', 'renameDraft']) {
+    assert.ok(STATUS_TITLES[key]?.length > 0, `${key} needs copy`);
+  }
+  for (const key of ['import', 'importBusy', 'describe', 'newFlow']) {
+    assert.ok(PAGE_ACTION_TITLES[key]?.length > 0, `${key} needs copy`);
+  }
+});
+
+test('Export explains both of the states that grey it out', () => {
+  assert.equal(toolbarTitle('export', {}), TOOLBAR_TITLES.export);
+  assert.equal(toolbarTitle('export', { imported: true }), IMPORTED_PREVIEW_REASON);
+  assert.equal(toolbarTitle('export', { hasProposal: true }), PROPOSAL_PENDING_REASON);
+  // A proposal is the more recent thing the user did, so it wins.
+  assert.equal(
+    toolbarTitle('export', { hasProposal: true, imported: true }),
+    PROPOSAL_PENDING_REASON,
+  );
+});
+
+test('the empty-design hint never leaks onto Export', () => {
+  // Export is preview-blocked, not structural: roleCount is none of its business.
+  assert.equal(toolbarTitle('export', { roleCount: 0 }), TOOLBAR_TITLES.export);
+});
+
+test('the non-blockable actions ignore the blocking state entirely', () => {
+  const blocked = { hasProposal: true, imported: true, roleCount: 0 };
+  assert.equal(toolbarTitle('copilot', blocked), TOOLBAR_TITLES.copilot);
+  assert.equal(toolbarTitle('anomalies', blocked), TOOLBAR_TITLES.anomalies);
+  assert.equal(toolbarTitle('improvements', blocked), TOOLBAR_TITLES.improvements);
+  assert.equal(toolbarTitle('editAsDraft', blocked), TOOLBAR_TITLES.editAsDraft);
 });

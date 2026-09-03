@@ -20,7 +20,9 @@ import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
-import { toolbarTitle } from './process-toolbar-hints';
+import { toolbarTitle, STATUS_TITLES } from './process-toolbar-hints';
+import Tooltip from '../components/Tooltip';
+import { shouldWrapTooltip } from '../components/tooltip-wrap';
 
 // Display names for the actor pseudo-nodes (#411) — the graph carries them as
 // nodes when they have edges, but a drag can also start from a placeholder.
@@ -70,22 +72,28 @@ function EditableDraftTitle({ name, onRename }) {
     );
   }
 
+  // The visible text is the flow's NAME, so dropping the native title="Rename
+  // draft" (#1999) would leave a screen reader announcing only the name — the
+  // verb would be gone. `aria-label` carries both; the tooltip stays the short
+  // presentational hint.
   return (
-    <button
-      onClick={() => setEditing(true)}
-      title="Rename draft"
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: 360,
-        background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer',
-        fontFamily: 'inherit', color: 'var(--eb-text-primary)',
-        fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
-      }}
-    >
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {name || 'Untitled flow'}
-      </span>
-      <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
-    </button>
+    <Tooltip label={STATUS_TITLES.renameDraft}>
+      <button
+        onClick={() => setEditing(true)}
+        aria-label={`Rename flow: ${name || 'Untitled flow'}`}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: 360,
+          background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer',
+          fontFamily: 'inherit', color: 'var(--eb-text-primary)',
+          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name || 'Untitled flow'}
+        </span>
+        <Pencil size={13} style={{ flexShrink: 0, color: 'var(--eb-text-muted)' }} />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -93,23 +101,30 @@ function EditableDraftTitle({ name, onRename }) {
 // yet a live edit re-derives triggers on running agents at once. This badge
 // makes the current mode unmistakable in the toolbar. `live` = amber (edits hit
 // production), `draft` = blue (safe sandbox).
+// `children` is the pill's short visible text ('Live team' / 'Draft'); `title`
+// is the sentence explaining what that mode means. #1999 moved the sentence
+// from a native title= to the shared dark tooltip, so it is composed into
+// aria-label as well — a screen reader would otherwise hear only 'Draft' and
+// lose the consequence, which is the whole point of the badge.
 function ModePill({ tone, icon: Icon, title, children }) {
   const live = tone === 'live';
   return (
-    <span
-      title={title}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'help',
-        padding: '2px 8px', borderRadius: 'var(--eb-radius-full)',
-        fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)',
-        background: live ? 'var(--eb-status-warning-bg)' : 'var(--eb-status-info-bg)',
-        color: live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)',
-        border: `1px solid ${live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)'}`,
-      }}
-    >
-      {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
-      {children}
-    </span>
+    <Tooltip label={title} wrap={shouldWrapTooltip(title)}>
+      <span
+        aria-label={`${children}: ${title}`}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'help',
+          padding: '2px 8px', borderRadius: 'var(--eb-radius-full)',
+          fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)',
+          background: live ? 'var(--eb-status-warning-bg)' : 'var(--eb-status-info-bg)',
+          color: live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)',
+          border: `1px solid ${live ? 'var(--eb-status-warning)' : 'var(--eb-status-info)'}`,
+        }}
+      >
+        {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
+        {children}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -617,10 +632,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             immediately. Badge the mode explicitly. Imported/Copilot previews
             carry their own banners below, so suppress the pill for them. */}
         {!imported && !proposal && isTeamScope && (
-          <ModePill tone="live" icon={Activity} title="You are editing a live team — changes apply to running agents immediately.">Live team</ModePill>
+          <ModePill tone="live" icon={Activity} title={STATUS_TITLES.modeLive}>Live team</ModePill>
         )}
         {!imported && !proposal && isDraft && (
-          <ModePill tone="draft" icon={Pencil} title="You are editing a draft copy — nothing is applied until you materialize it.">Draft</ModePill>
+          <ModePill tone="draft" icon={Pencil} title={STATUS_TITLES.modeDraft}>Draft</ModePill>
         )}
         {isDraft && draftBundle && (
           <EditableDraftTitle name={draftBundle.name} onRename={(n) => draftOps.renameDraft(n)} />
@@ -638,7 +653,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               title={toolbarTitle('stages', { hasProposal: !!proposal })}>Stages</ToolbarButton>
             <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag} disabled={!!proposal}
               title={toolbarTitle('labels', { hasProposal: !!proposal })}>Labels</ToolbarButton>
-            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
+            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
+              title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
             <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
               title={toolbarTitle('materialize', { hasProposal: !!proposal, roleCount: draftBundle?.roles?.length || 0 })}
               disabled={!!proposal || !draftBundle?.roles?.length}>Materialize…</ToolbarButton>
@@ -646,24 +662,31 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         )}
         {isTeamScope && !imported && (
           <>
-            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}>Add agent</ToolbarButton>
-            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}>Add human</ToolbarButton>
-            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}>Stages</ToolbarButton>
-            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}>Labels</ToolbarButton>
+            <ToolbarButton onClick={() => setAddRoleOpen(true)} icon={Plus}
+              title={toolbarTitle('addAgent')}>Add agent</ToolbarButton>
+            <ToolbarButton onClick={() => setHumansOpen(true)} icon={User}
+              title={toolbarTitle('addHuman')}>Add human</ToolbarButton>
+            <ToolbarButton onClick={() => setStagesOpen(true)} icon={Layers}
+              title={toolbarTitle('stages')}>Stages</ToolbarButton>
+            <ToolbarButton onClick={() => setLabelsOpen(true)} icon={Tag}
+              title={toolbarTitle('labels')}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setAnomaliesOpen(true)} icon={Activity}
+              title={toolbarTitle('anomalies')}
               badge={Object.keys(anomalyCounts).length ? Object.values(anomalyCounts).reduce((a, b) => a + b, 0) : null}>
               Anomalies
             </ToolbarButton>
             <ToolbarButton onClick={() => setImprovementsOpen(true)} icon={TrendingUp}
-              title="Deterministic run metrics for this team over the measurement window">
+              title={toolbarTitle('improvements')}>
               Improvements
             </ToolbarButton>
-            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}>Copilot</ToolbarButton>
+            <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
+              title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}
-              title="Make an editable copy of this team you can revise before applying — the live team is untouched until you materialize it">Edit as draft</ToolbarButton>
+              title={toolbarTitle('editAsDraft')}>Edit as draft</ToolbarButton>
           </>
         )}
-        <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}>Export</ToolbarButton>
+        <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}
+          title={toolbarTitle('export', { hasProposal: !!proposal, imported: !!imported })}>Export</ToolbarButton>
         </div>
       </div>
 
@@ -1305,24 +1328,31 @@ function AddRoleDialog({ onClose, onCreate }) {
   );
 }
 
+// Every button in the flow header row renders through here, which is why the
+// `title` → shared dark `Tooltip` migration (#1999) is a one-place change: the
+// native `title=` attribute is gone, so no header button shows the slow grey
+// browser tooltip any more. The button keeps its visible text as its accessible
+// name — the tooltip is purely presentational and never the only label.
 function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title }) {
   return (
-    <button onClick={onClick} disabled={disabled} title={title} style={{
-      display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
-      background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
-      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-      padding: 'var(--eb-space-1) var(--eb-space-3)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-      cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
-    }}>
-      <Icon size={14} /> {children}
-      {badge != null && badge > 0 && (
-        <span style={{
-          marginLeft: 2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999,
-          background: 'var(--eb-status-warning, #d97706)', color: '#fff', fontSize: 10,
-          fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        }}>{badge}</span>
-      )}
-    </button>
+    <Tooltip label={title} wrap={shouldWrapTooltip(title)}>
+      <button onClick={onClick} disabled={disabled} style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
+        background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-1) var(--eb-space-3)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+      }}>
+        <Icon size={14} /> {children}
+        {badge != null && badge > 0 && (
+          <span style={{
+            marginLeft: 2, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 999,
+            background: 'var(--eb-status-warning, #d97706)', color: '#fff', fontSize: 10,
+            fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>{badge}</span>
+        )}
+      </button>
+    </Tooltip>
   );
 }
 

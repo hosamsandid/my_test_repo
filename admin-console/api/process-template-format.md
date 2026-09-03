@@ -19,7 +19,7 @@ that still carry `emits` are lifted transparently on read.)
 |---|---|---|
 | Export | Process Canvas → **Export** | `GET /api/process/template?team=<id>` or `?templates=1` |
 | Preview (render) | Process Canvas → **Import** | `POST /api/process/graph` `{ processTemplate }` |
-| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix? }` |
+| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix?, materializeMembers? }` |
 
 `POST /api/teams` accepts the bundle under `processTemplate` (or the equivalent
 `customRoles` pseudo-template array). Inline roles are materialised by the same
@@ -27,6 +27,8 @@ env → team → members pipeline (with rollback) the Team-Setup wizard uses; ea
 role's `{{vars}}` and the target repositories are applied per member.
 
 **`labelSuffix` (optional, 1–8 chars of `[a-z0-9]` with single inner hyphens — `k3f9`, `team-1`, `pre-prod`; a leading/trailing/doubled hyphen is rejected because it would yield `ready--x` / `ready-x-`).** When two or more teams share one GitHub repository, their label-based hand-offs would collide. Pass a short suffix (e.g. `"abc1"`) to stamp every label token — trigger `labelFilter`, channel `label`, `setLabel` outcome actions, bundle label registry, and prompt text — before any agents are created. `GET /api/teams/suggest-suffix` returns a random 4-char suggestion. In extend mode the suffix must match the stored one (400 on mismatch). Warnings are returned for any label mention in prompt text that could not be stamped automatically (`suffixWarnings` in the stream response). Omit when the team is the sole tenant on its repository.
+
+**`materializeMembers` (optional, default `true`).** How far each new member is taken. `true` (or omitted) provisions every member immediately — Matrix user, workspace seed, repository clone, running container — and pre-creates its DM room. `false` creates each member as a **stub** instead: its config and `triggers.json` are written, but there is no Matrix user, no workspace and no clone, so it appears as *Not initialised* and is fully provisioned when it is enabled. Only the members are affected; the shared environment and the team agent are created either way, and label-suffix stamping plus custom-role resolution happen before the member loop, so they apply to stubs identically. In `mode: "extend"` the flag applies to the newly created members only. Read as `!== false`, so any other value means materialize-now. The same field is accepted by `POST /api/teams/stream`, which is the endpoint both launch surfaces actually submit to, and both echo the mode they ran in back as `materialized`.
 
 ## Schema (`processTemplateVersion: 1`)
 

@@ -70,7 +70,13 @@ report() { # stdin: "verdict|text" lines from an in-container check
 # NOTE the deliberate use of `command -v` rather than `test -x /usr/local/bin/x`:
 # the contract is that the name RESOLVES for the agent, which is what a shadowed
 # CLI would break, and a path check would not notice.
-IN_CONTAINER=$(cat <<'CHECKS'
+# NOTE: `read -r -d ''` rather than `$(cat <<'CHECKS' … )`. macOS ships bash 3.2,
+# whose parser mishandles a here-document inside `$(…)` command substitution
+# whenever the body contains `case`/`;;` (fixed in bash 4.0) — a developer running
+# `make toolchain-images` locally would hit a syntax error the Linux CI never sees.
+# `read -d ''` reads to EOF (returns non-zero at EOF, hence `|| true`) and parses
+# cleanly on both bash 3.2 and modern bash.
+IFS= read -r -d '' IN_CONTAINER <<'CHECKS' || true
 set -u
 status=0
 say() { echo "$1|$2"; }
@@ -108,7 +114,6 @@ if [ -n "${AEE_EXPECT_CLAUDE_VERSION:-}" ]; then
 fi
 exit $status
 CHECKS
-)
 
 $CLI run --rm --entrypoint /bin/sh \
   -e "AEE_EXPECT_CLAUDE_VERSION=${CLAUDE_PIN}" \
@@ -120,7 +125,8 @@ $CLI run --rm --entrypoint /bin/sh \
 # on PATH for a non-interactive, non-login shell — which is the ONLY kind the
 # Claude CLI ever spawns — and it must be able to report its own resolution.
 if [ -n "$TOOLCHAIN_ID" ]; then
-  VARIANT_CHECKS=$(cat <<'CHECKS'
+  # `read -r -d ''` not `$(cat <<'CHECKS' … )` — bash 3.2 parser bug, see above.
+  IFS= read -r -d '' VARIANT_CHECKS <<'CHECKS' || true
 set -u
 status=0
 say() { echo "$1|$2"; }
@@ -138,7 +144,6 @@ else
 fi
 exit $status
 CHECKS
-)
   $CLI run --rm --entrypoint /bin/sh "$IMAGE" -c "$VARIANT_CHECKS" 2>&1 | report
   [ "${PIPESTATUS[0]}" -eq 0 ] || FAILED=1
 fi

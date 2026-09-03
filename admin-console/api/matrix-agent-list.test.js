@@ -17,10 +17,17 @@ test('isStubMember: a provisioned-but-paused member is not a stub', () => {
   assert.equal(isStubMember(PAUSED), false);
 });
 
-test('isStubMember: only team members qualify — a stub bp-instance stays out', () => {
-  assert.equal(isStubMember({ role: 'bp-instance', parentOrchestratorId: 'o', enabled: false }), false);
+test('isStubMember: only team members qualify', () => {
   assert.equal(isStubMember({ role: 'agent', enabled: false }), false);
   assert.equal(isStubMember({ role: 'team', enabled: false }), false);
+});
+
+// #1962 removed the BriefingPack roles, but epic #1961's decision R2 leaves
+// existing configs on disk untouched — so a `bp-instance` stub can still be
+// present after an upgrade and must stay out of the chat list (it has no team
+// group to sit in, which is the invariant the rail's grouping relies on).
+test('isStubMember: a leftover bp-instance stub stays out', () => {
+  assert.equal(isStubMember({ role: 'bp-instance', parentOrchestratorId: 'o', enabled: false }), false);
 });
 
 test('isStubMember: a parentless member has no group to sit in', () => {
@@ -61,7 +68,8 @@ test('admitsToChatList: the two opt-ins are independent', () => {
   assert.equal(admitsToChatList(STUB, both), true);
 });
 
-test('admitsToChatList: a stub bp-instance is not admitted by either opt-in', () => {
+test('admitsToChatList: a leftover bp-instance stub is not admitted by either opt-in', () => {
+  // Same #1962 / R2 leftover as above: neither opt-in may surface it.
   const bpStub = { role: 'bp-instance', parentOrchestratorId: 'o', enabled: false };
   assert.equal(admitsToChatList(bpStub, { includeStubs: true }), false);
   // It is a disabled tokenless agent, so includeDisabled does not reach it either.

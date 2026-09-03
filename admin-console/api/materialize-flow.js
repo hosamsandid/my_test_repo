@@ -2,21 +2,31 @@
 
 // ─── materialize-flow (Unified Orchestration, #362 / #368) ───────────────────
 //
-// Materialization adapter seam. A unified flow can hold nodes of two
-// provenances, each with its own runtime lifecycle today:
+// Materialization adapter seam. A unified flow used to hold nodes of two
+// provenances, each with its own runtime lifecycle:
 //
 //   • team/process nodes → materialised via POST /api/teams (templateToCustomRoles)
 //   • BP nodes (role 'bp-instance' / 'orchestrator') → the orchestrator claim
 //     loop (git-commit-to-claim + manual hand-off semantics)
 //
-// This module is the ONE interface over both. It does not change either runtime —
-// the adapters are injected, so today they delegate to the existing paths. The
-// north-star (epic decision 3) is convergence onto /api/teams; this seam makes
-// that possible later without rebuilding the BP claim/git path under risk now.
+// #1962 removed the BriefingPack model, so **the second provenance no longer
+// exists**: both roles are gone, nothing creates them, and the claim loop they
+// dispatched to has been deleted. `classifyNodeProvenance` therefore answers
+// 'team' for every node, and the BP adapter slot is gone rather than left
+// permanently unreachable.
+//
+// The seam itself is kept, deliberately unchanged in shape, because the
+// north-star it was built for (epic decision 3 of #362: convergence onto
+// /api/teams) is unaffected — this module has always been injected-adapter
+// only and changes neither runtime. Worth knowing for whoever picks up epic
+// #1961's Phase 4 (the Flows page): with one provenance left, nothing in the
+// repository imports this module any more, so Phase 4 should decide whether it
+// still earns its place or should go with the rest of the BP flow surface.
 
 function classifyNodeProvenance(node) {
-  const role = node && node.role;
-  if (role === 'bp-instance' || role === 'orchestrator') return 'bp';
+  void node;
+  // One provenance since #1962 — see the header. Kept as a named function so
+  // the seam's vocabulary survives if a second runtime is ever added back.
   return 'team';
 }
 
@@ -24,18 +34,16 @@ function classifyNodeProvenance(node) {
 function planMaterialization(flow) {
   const nodes = Array.isArray(flow && flow.nodes) ? flow.nodes : [];
   const team = [];
-  const bp = [];
   for (const n of nodes) {
-    (classifyNodeProvenance(n) === 'bp' ? bp : team).push(n);
+    team.push(n);
   }
-  return { team, bp };
+  return { team };
 }
 
 /**
  * Build a materialiser that dispatches each provenance group to its adapter.
  * @param {{
  *   team?: (nodes, flow) => Promise<any>,  // e.g. wraps POST /api/teams
- *   bp?:   (nodes, flow) => Promise<any>,  // e.g. wraps the orchestrator claim loop
  * }} adapters
  */
 function createMaterializer(adapters = {}) {
@@ -43,7 +51,6 @@ function createMaterializer(adapters = {}) {
     const plan = planMaterialization(flow);
     const results = {};
     if (plan.team.length && adapters.team) results.team = await adapters.team(plan.team, flow);
-    if (plan.bp.length && adapters.bp) results.bp = await adapters.bp(plan.bp, flow);
     return { plan, results };
   };
 }

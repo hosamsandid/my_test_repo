@@ -1990,7 +1990,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, briefingsPath, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -2166,11 +2166,10 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const fresh = readJsonFile(cfgPath, cfg);
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
-  if (briefingsPath !== undefined) fresh.briefingsPath = briefingsPath;
   // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
   // `skills` lives on the construct itself: a team agent carries the team's
   // ACTIVE skill set (inherited by every member without a skillsOverride), a
-  // standalone/orchestrator agent its own list. The Working Environment no
+  // standalone agent its own list. The Working Environment no
   // longer carries skills. Propagation to already-materialized workspaces is
   // lazy (next re-seed/enable) — the Knowledge activation flow adds the eager
   // sync in a later phase. Members use skillsOverride below instead.
@@ -2573,14 +2572,30 @@ app.post('/api/agents/:id/deactivate', apiLimiter, async (req, res) => {
   }
 });
 
-/* ─── BP-instance hand-off (FreeFlow) ───────────────────────────────────
+/* ─── STILLED: BP-instance hand-off — decision pending in #1968 ─────────
  *
- * Replaces the legacy bp-transition.py / /internal/bp-events propagation.
- * Entry point: a button in the bp-instance chat.
+ * These four routes are RETAINED but UNREACHABLE. Epic #1961 (remove the
+ * BriefingPack model) decided in R4 that the hand-off mechanism keeps its code
+ * in the tree with the user interface disconnected, so it can be revived
+ * rather than rebuilt; phase #1962 removed the two BriefingPack agent roles,
+ * and every route below requires `role === 'bp-instance'`, which the platform
+ * can no longer assign. So they answer 409 for any agent that exists.
+ *
+ *   • #1968 is the ticket that decides their future (revive against the
+ *     Flow/Team model, or delete).
+ *   • #1528 (direct agent-to-agent messaging) is where the idea lives on
+ *     conceptually.
+ *   • Do NOT "fix" the bp-instance guards to accept a live role — that is a
+ *     product decision #1968 owns, not a code cleanup.
+ *
+ * One behaviour did change rather than freeze: `candidates.suggested` used to
+ * be derived from the bp-explorer briefings dependency graph, which #1962
+ * removed; the orchestrator now always returns an empty `suggested` and only
+ * `siblings` is populated. See `handoverCandidates` in orchestrator.js.
  *
  * Routes:
  *   GET  /api/agents/:id/handover/candidates  → orchestrator computes
- *        suggested + sibling targets from .index.json. Proxy only.
+ *        sibling targets (`suggested` always empty since #1962). Proxy only.
  *   GET  /api/agents/:id/handover/git-status  → per-repo commit/push state
  *        of the source agent's workspace, used by the dialog's pre-flight.
  *        Proxy only.
@@ -3087,24 +3102,6 @@ app.post('/api/agents/:id/handover', handoverLimiter, async (req, res) => {
   });
 });
 
-/* ─── BP stub sync ──────────────────────────────────────────────────── */
-
-app.post('/api/agents/:id/sync-bps', heavyLimiter, async (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(`${orchestratorUrl}/internal/orchestrators/${encodeURIComponent(id)}/sync-bps?force=1`, {
-      method: 'POST',
-    });
-    const data = await resp.json();
-    if (!resp.ok) return res.status(resp.status).json(data);
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
-  }
-});
-
 // Resolve the `{{var}}` substitution set for a LIVE team from its team agent
 // config + bound Working Environment, mirroring the wizard's POST /api/teams
 // vars (#586, AC-5). The team-level label choices (ready/dispatch/maxParallel)
@@ -3247,7 +3244,7 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
 });
 
 app.post('/api/agents', heavyLimiter, async (req, res) => {
-  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath, teamId } = req.body;
+  const { id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId } = req.body;
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
@@ -3258,8 +3255,8 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   }
   // Teams may be created without a default prompt — members can carry their
   // own per-role prompts, and the orchestrator stores an empty template.
-  if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
-    return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
+  if (!systemPrompt && role !== 'team') {
+    return res.status(400).json({ error: 'systemPrompt is required for every role except team' });
   }
   if (!loadEnvironment(environmentId)) {
     return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
@@ -3269,7 +3266,7 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, briefingsPath, teamId }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -3400,9 +3397,10 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
 // Snapshot a proven live agent — a standalone chat agent OR an individual team
 // member — into a reusable, team-neutral USER-tier Agent Template (the inverse
 // of team materialisation). One-shot: no ongoing link to the source agent, and
-// the source is left completely unchanged (AC-10). Whole team / orchestrator /
-// bp-instance agents are rejected defensively (AC-1) — the action is only
-// offered on standalone / team-member cards in the UI.
+// the source is left completely unchanged (AC-10). A whole team agent — and
+// any leftover config naming a role the platform no longer supports — is
+// rejected defensively (AC-1); the action is only offered on standalone /
+// team-member cards in the UI.
 //
 // Field mapping lives in the pure extract-template.js module; here we resolve
 // the impure inputs off disk: the EFFECTIVE prompt (rendered AGENT-PROMPT.md,
@@ -6494,10 +6492,9 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   // copies of pool skills, not agent-authored knowledge, so they are not
   // "private" and must not surface as lift candidates. The grant is team-owned
   // (orchestrator/skill-grants.js): member override wins, else the construct's
-  // own skills[], else the parent construct's (team / orchestrator) list.
-  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
-    : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
-    : null;
+  // own skills[], else the parent team's list. `team-member` is the only
+  // inheriting role — `bp-instance` went with the BriefingPack model (#1962).
+  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId : null;
   // parentId originates from the agent's own config rather than the request,
   // but contain it the same way before reading so no unvalidated value ever
   // reaches fs (keeps CodeQL's taint tracker satisfied here too).
@@ -9479,10 +9476,10 @@ app.post('/api/skills/install', async (req, res) => {
   // an existing workspace dir OR a grant already listing the name both count.
   // Resolve the grant inline the same way as elsewhere (team-owned, orchestrator/
   // skill-grants.js): member override wins, else own skills[], else the parent
-  // construct's list. The admin-console does not cross-require orchestrator code.
-  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId
-    : cfg.role === 'bp-instance' ? cfg.parentOrchestratorId
-    : null;
+  // team's list. `team-member` is the only inheriting role — `bp-instance` went
+  // with the BriefingPack model (#1962). The admin-console does not
+  // cross-require orchestrator code.
+  const parentId = cfg.role === 'team-member' ? cfg.parentTeamId : null;
   const parentCfg = parentId ? readJsonFile(path.join(AGENTS_DIR, parentId, 'config.json'), null) : null;
   const granted = Array.isArray(cfg.skillsOverride) ? cfg.skillsOverride
     : Array.isArray(cfg.skills) ? cfg.skills
@@ -12914,8 +12911,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     : null;
   // Deferred materialization: when false, members are created as stubs (config
   // + triggers only, no Matrix user / clone / process), shown in the UI and
-  // materialized on demand via enable — same model as an orchestrator's
-  // bp-instance stubs. Avoids dozens of clones up front for a large process.
+  // materialized on demand via enable. Avoids dozens of clones up front for a
+  // large process.
   // Default true preserves the existing immediate-materialization behaviour.
   const materializeMembers = body.materializeMembers !== false;
   const readyLabel = (typeof body.readyLabel === 'string' && body.readyLabel.trim())
@@ -13161,8 +13158,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Invalid teamId path' });
   }
   // Inspect the existing agent (if any) so we can distinguish "an actual
-  // team blocks this id" from "some unrelated agent (orchestrator,
-  // bp-instance, plain agent) blocks this id". The first case is a real
+  // team blocks this id" from "some unrelated agent (a plain agent, or a
+  // leftover config naming a retired role) blocks this id". The first is a real
   // collision the user can resolve via extend; the second is an id
   // conflict and `mode: extend` would be a lie.
   const existingTeamCfg = fs.existsSync(teamAgentDir)
@@ -14168,21 +14165,21 @@ app.get('/api/blueprints', apiLimiter, async (req, res) => {
 });
 
 app.post('/api/blueprints', heavyLimiter, async (req, res) => {
-  const { id, displayName, role, systemPrompt, environmentId, briefingsPath } = req.body || {};
+  const { id, displayName, role, systemPrompt, environmentId } = req.body || {};
   if (!id || !displayName || !role || !environmentId) {
     return res.status(400).json({ error: 'id, displayName, role, environmentId required' });
   }
   // Teams may be created without a default prompt — members can carry their
   // own per-role prompts, and the orchestrator stores an empty template.
-  if (!systemPrompt && role !== 'orchestrator' && role !== 'team') {
-    return res.status(400).json({ error: 'systemPrompt is required for non-orchestrator agents' });
+  if (!systemPrompt && role !== 'team') {
+    return res.status(400).json({ error: 'systemPrompt is required for every role except team' });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/blueprints`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, briefingsPath }),
+      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId }),
     });
     const data = await resp.json();
     res.status(resp.status).json(data);
@@ -17490,26 +17487,6 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
     if (dirWatcher) { try { dirWatcher.close(); } catch { /* noop */ } dirWatcher = null; }
     try { res.end(); } catch { /* noop */ }
   });
-});
-
-/* ─── BP-Explorer Proxy ────────────────────────────────────────────── */
-// Forwards /api/bp-explorer/* → http://bp-explorer:8765/api/*
-app.all('/api/bp-explorer/*', async (req, res) => {
-  const upstreamPath = req.path.replace(/^\/api\/bp-explorer/, '/api');
-  const qs = new URLSearchParams(req.query).toString();
-  const url = `${BP_EXPLORER_URL}${upstreamPath}${qs ? '?' + qs : ''}`;
-  const opts = { method: req.method };
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-    opts.headers = { 'Content-Type': 'application/json' };
-    opts.body = JSON.stringify(req.body);
-  }
-  try {
-    const upstream = await fetch(url, opts);
-    const data = await upstream.json();
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
-  }
 });
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */

@@ -367,7 +367,8 @@ function buildUnifiedGraph(nodes, edges, options) {
 
   // 3) Artifact edges: a producer's output path is a consumer's input path.
   //    Grouped per (producer → consumer) so co-flowing paths share one edge —
-  //    mirrors orchestrator/bp-event-router.js input-artifact matching.
+  //    mirrors the input-artifact matching of the former
+  //    orchestrator/bp-event-router.js (deleted in #1962).
   const producersByPath = new Map(); // path -> [nodeId]
   for (const n of list) {
     for (const p of outputPaths(n)) {

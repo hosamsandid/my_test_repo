@@ -41,7 +41,6 @@ export const ROUTE_TITLES = {
   '/quickstart': 'One assistant',
   '/team-setup': 'Agent Team Wizard',
   '/wizard/team': 'Agent Team Wizard',
-  '/orchestrator-wizard': 'Orchestrator Wizard',
   '/about': 'About',
 };
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2, ArrowRight } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2 } from 'lucide-react';
 import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
@@ -8,7 +8,6 @@ import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import { useTranscriptionSession } from '../../context/TranscriptionSessionContext.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
-import HandoffDialog from './HandoffDialog';
 import Message from './Message';
 import MessageInput from './MessageInput';
 import ChatModelSelector from './ChatModelSelector.jsx';
@@ -121,7 +120,6 @@ export default function ChatPanel({
   const [resuming, setResuming]       = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [showHandoff, setShowHandoff] = useState(false);
 
   // Chat-launched loops (#1020): a loop is started from the composer, runs as
   // a launched run visible here, and can be stopped. `activeLoop` is the
@@ -1197,22 +1195,6 @@ export default function ChatPanel({
             },
           ]}
         />
-        {agent?.role === 'bp-instance' && (
-          <button
-            type="button"
-            onClick={() => setShowHandoff(true)}
-            disabled={disabled}
-            title="Hand work off to downstream bp-instance agents — they receive your note as a chat message and start working"
-            style={{
-              ...sessionBtnStyle(disabled),
-              color: disabled ? undefined : 'var(--eb-accent-primary)',
-              borderColor: disabled ? undefined : 'var(--eb-accent-primary)',
-            }}
-          >
-            <ArrowRight size={11} />
-            Hand-off
-          </button>
-        )}
         <ChatModelSelector
           options={modelOptions}
           disabled={disabled}
@@ -1526,12 +1508,6 @@ export default function ChatPanel({
         confirmLabel="Delete All Messages"
         onConfirm={() => { setShowClearConfirm(false); handleClearHistory(); }}
         onCancel={() => setShowClearConfirm(false)}
-      />
-
-      <HandoffDialog
-        open={showHandoff}
-        agent={agent}
-        onClose={() => setShowHandoff(false)}
       />
 
       {/* Loop launcher (#1020): reuse the shared loop configuration form,

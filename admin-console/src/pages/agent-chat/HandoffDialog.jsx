@@ -2,7 +2,26 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Loader2, Send, X, ArrowRight, RefreshCw, GitCommit, AlertTriangle, CheckCircle2, AlertCircle, ChevronRight, ChevronLeft } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 
-/**
+/* ─── STILLED: BP-instance hand-off UI — decision pending in #1968 ──────
+ *
+ * This component is RETAINED but RENDERED BY NOTHING. Epic #1961 (remove the
+ * BriefingPack model) decided in R4 that the hand-off mechanism keeps its code
+ * in the tree with the user interface disconnected, so it can be revived rather
+ * than rebuilt. Phase #1962 stilled its four backend routes (see the matching
+ * header in `admin-console/api/api.js`), and phase #1964 removed the only thing
+ * that mounted this dialog: the `role === 'bp-instance'` Hand-off button in the
+ * chat session toolbar (`ChatPanel.jsx`). No import of this file remains.
+ *
+ *   • #1968 is the ticket that decides its future (revive against the
+ *     Flow/Team model, or delete).
+ *   • #1528 (direct agent-to-agent messaging) is where the idea lives on
+ *     conceptually.
+ *   • Do NOT re-mount it against a live role, and do NOT "fix" its API calls —
+ *     the routes it drives answer 409 for every agent that can exist. Reviving
+ *     the feature is a product decision #1968 owns, not a code cleanup.
+ *
+ * Everything below is unchanged from when it was reachable.
+ *
  * HandoffDialog — Guided wizard for the FreeFlow hand-off action on a bp-instance.
  *
  * Three steps:

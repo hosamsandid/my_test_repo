@@ -450,7 +450,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
 
     if (target?.kind === 'agent') {
       // Act on the fullest record we have — the merged config carries the
-      // `children` a team/orchestrator delete has to name.
+      // `children` a team delete has to name.
       const agent = agents.find(a => a && a.id === target.agent.id) || target.agent;
       switch (kind) {
         // A local view action, not a mutation (#1938): it flips the row's

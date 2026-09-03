@@ -24,8 +24,10 @@ function byLabel(a, b) {
 //   - `agentTeams` is `[{ team, members }]` — one entry per `role: "team"`
 //     agent, `members` being its `team-member` agents (sorted). This is the
 //     unit of assignment: the whole group moves together.
-//   - `standaloneAgents` is every other agent — `role` agent/orchestrator/
-//     bp-instance with no parent, still assignable individually.
+//   - `standaloneAgents` is every other agent — a `role: "agent"` with no
+//     parent, still assignable individually. The grouping is role-agnostic
+//     rather than an allow-list, so a leftover config from a retired role
+//     (#1964) lands here and stays assignable instead of vanishing.
 //
 // Edge cases:
 //   - E1: a team with no members yields `members: []` (still assignable).

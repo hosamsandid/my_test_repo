@@ -29,7 +29,6 @@ export const BREADCRUMBS = {
   '/plugins':      'Plugins',
   '/teams':        'Access',
   '/users':        'Users',
-  '/orchestrator-wizard': 'Orchestrator Wizard',
   '/maintenance-mode': 'Maintenance Mode',
   '/about':        'About',
 };

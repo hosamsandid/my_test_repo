@@ -94,9 +94,9 @@ const PAGE_ROUTES = new Set([
   '/about',
 ]);
 
-// Structural routes with no page help of their own (redirects, dynamic children,
-// the orchestrator-wizard stub). Kept explicit so the coverage test
-// forces every new route to be classified as page-or-structural on purpose.
+// Structural routes with no page help of their own (redirects, dynamic
+// children). Kept explicit so the coverage test forces every new route to be
+// classified as page-or-structural on purpose.
 const ALLOWLIST = new Set([
   '/',
   '/blueprints',
@@ -106,7 +106,6 @@ const ALLOWLIST = new Set([
   '/process/:teamId',
   '/chats/:agentId',
   '/plugins/:id/view',
-  '/orchestrator-wizard',
 ]);
 
 // ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────

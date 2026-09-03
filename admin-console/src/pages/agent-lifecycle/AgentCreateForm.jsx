@@ -16,7 +16,7 @@
  * POSTs it to `/api/agents`; `saving` / `error` render the busy and failure
  * states. The form itself never calls the API.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router';
 import { Info } from 'lucide-react';
 import { useApi } from '../../hooks/useApi';
@@ -29,9 +29,7 @@ import { describeAgentSubmitState } from '../agent-create-submit-state.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import {
-  ROLE_INFO, RoleDetailBanner, MissionDirectoryField, repoDirName,
-} from './agent-form-fields.jsx';
+import { ROLE_INFO, RoleDetailBanner } from './agent-form-fields.jsx';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -102,7 +100,7 @@ function RoleCard({ value, current, onSelect }) {
 export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
-    briefingsPath: '', skills: [],
+    skills: [],
   });
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
@@ -118,27 +116,11 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
   const { data: skillsData } = useApi('/api/skills');
   const poolSkills = (skillsData || []).filter(s => s.source === 'pool');
 
-  const repoDirs = useMemo(() => {
-    const env = envs.find(e => e.id === form.environmentId);
-    if (!env) return [];
-    const repos = Array.isArray(env.repositories)
-      ? env.repositories
-      : env.repository?.url ? [env.repository] : [];
-    return repos.map(r => repoDirName(r.url)).filter(Boolean);
-  }, [envs, form.environmentId]);
-
-  useEffect(() => {
-    if (form.role !== 'orchestrator') return;
-    if (repoDirs.length !== 1) return;
-    if (!form.briefingsPath) update('briefingsPath', repoDirs[0]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.role, form.environmentId, repoDirs]);
-
-  // System prompt is optional for teams and orchestrators: members can be given
-  // their own per-role prompts later, so a team can be created without a
-  // default. The pure helper derives the gate AND the ordered list of unmet
-  // requirements from one place, so the disabled button and the "why" hint
-  // below can never disagree.
+  // System prompt is optional for a team: members can be given their own
+  // per-role prompts later, so a team can be created without a default. The
+  // pure helper derives the gate AND the ordered list of unmet requirements
+  // from one place, so the disabled button and the "why" hint below can never
+  // disagree.
   const { canSubmit, reasons: submitBlockers } = describeAgentSubmitState(form);
 
   return (
@@ -215,9 +197,8 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
         <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-          <RoleCard value="agent"         current={form.role} onSelect={v => update('role', v)} />
-          <RoleCard value="team"          current={form.role} onSelect={v => update('role', v)} />
-          <RoleCard value="orchestrator"  current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="agent" current={form.role} onSelect={v => update('role', v)} />
+          <RoleCard value="team"  current={form.role} onSelect={v => update('role', v)} />
         </div>
         <RoleDetailBanner role={form.role} />
         {(form.role === 'team' || form.role === 'team-member') && (
@@ -243,14 +224,6 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
         )}
       </div>
 
-      {form.role === 'orchestrator' && (
-        <MissionDirectoryField
-          value={form.briefingsPath}
-          onChange={val => update('briefingsPath', val)}
-          repoDirs={repoDirs}
-        />
-      )}
-
       <div>
         <div style={labelStyle}>Skills</div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
@@ -265,7 +238,6 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
         />
       </div>
 
-      {form.role !== 'orchestrator' && (
       <div>
         <div style={labelStyle}>
           {form.role === 'team' ? 'System Prompt Template' : 'System Prompt'}
@@ -286,7 +258,6 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
           style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}
         />
       </div>
-      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         {/* When the button is disabled (and not merely saving), spell out

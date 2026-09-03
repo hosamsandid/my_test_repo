@@ -313,23 +313,26 @@ export function TeamActionResultDialog({ result, onClose }) {
 export function renderDeleteMessage(target) {
   if (!target) return '';
 
-  if (target.role === 'team' || target.role === 'orchestrator') {
+  // A team is the only cascading parent since #1964 — the orchestrator arm of
+  // this branch went with the role, so the cascade wording can no longer be
+  // reached by something that fans out to nothing.
+  if (target.role === 'team') {
     const children = Array.isArray(target.children) ? target.children : [];
-    const childNoun = target.role === 'team' ? 'member' : 'mission';
-    const childNounPlural = target.role === 'team' ? 'members' : 'missions';
-    const parentNoun = target.role === 'team' ? 'team' : 'orchestrator';
+    const childNoun = 'member';
+    const childNounPlural = 'members';
+    const parentNoun = 'team';
 
     // Deleting a team purges its locally cached / curated knowledge on this
     // stack (#532) — the honest counterpart to actually purging the data on the
     // backend. Knowledge shared via the team's repository is NOT touched (that
     // is the sanctioned sharing channel), so the note must say so explicitly.
-    const knowledgeNote = target.role === 'team' ? (
+    const knowledgeNote = (
       <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-primary)' }}>
         <strong>This team's locally cached and curated knowledge will be permanently removed</strong> —
         its local Knowledge Base copy, promotion suggestions, archive, review decisions and team skill pool.
         Knowledge shared via the team's repository is <strong>not affected</strong>.
       </p>
-    ) : null;
+    );
 
     if (children.length === 0) {
       return (

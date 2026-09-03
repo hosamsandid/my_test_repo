@@ -52,37 +52,34 @@ export function stubSectionLabel(count) {
  * grouping logic.
  *
  * Returns `{ groups: [{ kind, id, displayName, header?, children[], stubs[] }], singles: [] }`.
- *  - `kind` is either `'team'` or `'orchestrator'`.
- *  - `header` is the matching parent agent row when one is visible — absent
- *    when the parent is only referenced by orphaned children (e.g. a team
- *    has no Matrix presence, or an orchestrator stub is disabled).
+ *  - `kind` is always `'team'` since #1964 removed the orchestrator grouping;
+ *    it is kept on the shape because `groupKey` namespaces the stored order /
+ *    drag / collapse maps with it, and dropping it would invalidate every
+ *    persisted `team:<id>` key.
+ *  - `header` is the matching team agent row when one is visible — absent when
+ *    the team is only referenced by orphaned members (e.g. a team that has no
+ *    Matrix presence).
  *  - `stubs` are the team's not-yet-materialized members (#1957), split out of
  *    `children` rather than mixed in: they render in their own collapsed
  *    section, are not chat-openable and are not drag-reorderable, so keeping
  *    them out of `children` means every existing consumer of that array (the
  *    stored member order, the member drag scope, the group's own count) keeps
- *    describing exactly the rows it used to. An orchestrator group is always
- *    `stubs: []` — a stub bp-instance is out of scope and the endpoint never
- *    ships one.
+ *    describing exactly the rows it used to.
  */
 export function buildGroups(agents) {
   const byName = (a, b) =>
     (a.displayName || a.id).localeCompare(b.displayName || b.id);
 
-  const teamRows         = agents.filter(a => a.role === 'team');
-  const memberRows       = agents.filter(a => a.role === 'team-member' && !isStub(a));
-  const stubRows         = agents.filter(a => a.role === 'team-member' && isStub(a));
-  const orchestratorRows = agents.filter(a => a.role === 'orchestrator');
-  const bpInstanceRows   = agents.filter(a => a.role === 'bp-instance');
+  const teamRows   = agents.filter(a => a.role === 'team');
+  const memberRows = agents.filter(a => a.role === 'team-member' && !isStub(a));
+  const stubRows   = agents.filter(a => a.role === 'team-member' && isStub(a));
   const others = agents.filter(a =>
     a.role !== 'team' &&
-    a.role !== 'team-member' &&
-    a.role !== 'orchestrator' &&
-    a.role !== 'bp-instance',
+    a.role !== 'team-member',
   );
 
-  // Union of team / orchestrator ids that should appear as a section: real
-  // parent rows, plus any parent id referenced by a visible child.
+  // Union of team ids that should appear as a section: real team rows, plus any
+  // team id referenced by a visible member.
   // A stub member counts towards its team's existence too — a team created with
   // deferred materialization may have *nothing but* stubs, and it has to appear
   // (AC1, and the all-stubs edge case) rather than look like an empty list.
@@ -91,12 +88,8 @@ export function buildGroups(agents) {
     ...memberRows.map(m => m.parentTeamId).filter(Boolean),
     ...stubRows.map(m => m.parentTeamId).filter(Boolean),
   ]);
-  const orchestratorIds = new Set([
-    ...orchestratorRows.map(o => o.id),
-    ...bpInstanceRows.map(b => b.parentOrchestratorId).filter(Boolean),
-  ]);
 
-  const teamGroups = [...teamIds].map(id => {
+  const groups = [...teamIds].map(id => {
     const header   = teamRows.find(t => t.id === id) || null;
     const children = memberRows.filter(m => m.parentTeamId === id).sort(byName);
     const stubs    = stubRows.filter(m => m.parentTeamId === id).sort(byName);
@@ -108,36 +101,16 @@ export function buildGroups(agents) {
       children,
       stubs,
     };
-  });
+  }).sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-  const orchestratorGroups = [...orchestratorIds].map(id => {
-    const header   = orchestratorRows.find(o => o.id === id) || null;
-    const children = bpInstanceRows.filter(b => b.parentOrchestratorId === id).sort(byName);
-    return {
-      kind: 'orchestrator',
-      id,
-      displayName: header?.displayName || id,
-      header,
-      children,
-      // Always empty — kept so every group has the same shape and the renderer
-      // needs no per-kind branch.
-      stubs: [],
-    };
-  });
-
-  const groups = [...teamGroups, ...orchestratorGroups].sort(
-    (a, b) => a.displayName.localeCompare(b.displayName),
-  );
-
-  // Orphans: children whose parent is not in the visible set. A stub is only
-  // ever orphaned by having no `parentTeamId` at all (its team id is in
-  // `teamIds` by construction above) — the endpoint never ships such a row, but
-  // listing it beats dropping it silently, which is the one outcome the user
-  // could not tell from a missing agent.
+  // Orphans: members whose team is not in the visible set. A stub is only ever
+  // orphaned by having no `parentTeamId` at all (its team id is in `teamIds` by
+  // construction above) — the endpoint never ships such a row, but listing it
+  // beats dropping it silently, which is the one outcome the user could not
+  // tell from a missing agent.
   const orphans = [
     ...memberRows.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
     ...stubRows.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
-    ...bpInstanceRows.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
   ];
 
   const singles = [...others, ...orphans].sort(byName);
@@ -180,7 +153,6 @@ export function orderModel(rawGroups, rawSingles, sidebarOrder) {
  * Decide whether an agent passes the current filter spec.
  *  - { kind: 'all' }                       → everyone
  *  - { kind: 'team', id }                  → the team header (if visible) + its members
- *  - { kind: 'orchestrator', id }          → the orchestrator header (if visible) + its bp-instances
  *  - { kind: 'agent', id }                 → only the agent with this id
  */
 export function matchesFilter(agent, filter) {
@@ -188,11 +160,6 @@ export function matchesFilter(agent, filter) {
   if (filter.kind === 'team') {
     if (agent.role === 'team'        && agent.id === filter.id) return true;
     if (agent.role === 'team-member' && agent.parentTeamId === filter.id) return true;
-    return false;
-  }
-  if (filter.kind === 'orchestrator') {
-    if (agent.role === 'orchestrator' && agent.id === filter.id) return true;
-    if (agent.role === 'bp-instance'  && agent.parentOrchestratorId === filter.id) return true;
     return false;
   }
   if (filter.kind === 'agent') return agent.id === filter.id;

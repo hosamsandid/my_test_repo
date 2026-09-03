@@ -7,6 +7,7 @@ import {
   buildAgentMenu,
   buildTeamMenu,
   isChatOpenable,
+  deleteDialogCopy,
   NO_RIGHTS_HINT,
   TEAM_LOCKED_HINT,
 } from './agent-lifecycle-menu.js';
@@ -82,14 +83,17 @@ test('reset-to-stub carries the wipe warning, not a bare label', () => {
   assert.match(reset.title, /wipes the workspace/);
 });
 
-test('a bp-instance gets no clone / save-as-template entry (edge case)', () => {
-  const items = buildAgentMenu({ agent: { role: 'bp-instance', hasToken: true, enabled: true } });
-  assert.deepEqual(keys(items), ['toggle-enabled', 'settings', 'reset-to-stub', 'delete']);
-});
-
-test('an orchestrator may be exported but not cloned or templated', () => {
-  const items = buildAgentMenu({ agent: { role: 'orchestrator', hasToken: true, enabled: true } });
-  assert.deepEqual(keys(items), ['toggle-enabled', 'settings', 'export', 'reset-to-stub', 'delete']);
+test('#1964 — a leftover BriefingPack config keeps only the role-free entries', () => {
+  // Neither role can be created any more, but an upgraded installation may
+  // still list one. It gets the entries that need no role support — toggle,
+  // settings, reset, delete — and none of the three that do: clone and
+  // save-as-template were never offered, and `export` left with the role
+  // because the import that would consume its bundle now refuses it (#1962).
+  const expected = ['toggle-enabled', 'settings', 'reset-to-stub', 'delete'];
+  for (const role of ['bp-instance', 'orchestrator']) {
+    const items = buildAgentMenu({ agent: { role, hasToken: true, enabled: true } });
+    assert.deepEqual(keys(items), expected, `${role} menu`);
+  }
 });
 
 test('a stub is not exportable and its clone/template/reset entries are inert', () => {
@@ -249,4 +253,22 @@ test('#1957 AC7 — without management rights Materialize is inert', () => {
 
 test('#1957 AC3 — a stub is never chat-openable', () => {
   assert.equal(isChatOpenable({ hasToken: false, enabled: false }), false);
+});
+
+test('#1964 — a team is the only cascading delete confirm', () => {
+  const team = deleteDialogCopy({
+    role: 'team', id: 't1', displayName: 'Alpha',
+    children: [{ id: 'a' }, { id: 'b' }],
+  });
+  assert.equal(team.title, 'Delete team "Alpha"?');
+  assert.equal(team.confirmLabel, 'Delete team and 2 members');
+
+  // A leftover orchestrator config gets the plain single-agent confirm: since
+  // `deleteTargetFor` stopped collecting bp-instances, a cascade warning would
+  // promise a fan-out that no longer happens.
+  const orch = deleteDialogCopy({
+    role: 'orchestrator', id: 'o1', displayName: 'Orch', children: [{ id: 'bp1' }],
+  });
+  assert.deepEqual(orch, { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 });
+  assert.doesNotMatch(orch.confirmLabel, /mission/i);
 });

@@ -126,15 +126,14 @@ export function existingIds(agents) {
 
 /**
  * The shape `renderDeleteMessage` / the delete confirm expect: the agent plus
- * its `children` (a team's members, an orchestrator's bp-instances), so deleting
- * a team says how many members go with it.
+ * its `children` (a team's members), so deleting a team says how many members
+ * go with it.
  */
 export function deleteTargetFor(agent, agents) {
   if (!agent) return null;
   const list = agents || [];
-  const children =
-    agent.role === 'team'         ? list.filter(a => a.parentTeamId === agent.id)
-    : agent.role === 'orchestrator' ? list.filter(a => a.parentOrchestratorId === agent.id)
+  const children = agent.role === 'team'
+    ? list.filter(a => a.parentTeamId === agent.id)
     : [];
   return { ...agent, children };
 }
@@ -176,9 +175,7 @@ export function importedAgentFilterNote(filter, agentId, parentTeamId) {
   // Names the option verbatim as the filter's <select> renders it.
   const HIDDEN = ' The list filter is hiding it — switch it to "All agents" to see it.';
   if (kind === 'agent') return filter.id === agentId ? null : HIDDEN;
-  if (kind === 'team' || kind === 'orchestrator') {
-    return filter.id === parentTeamId ? null : HIDDEN;
-  }
+  if (kind === 'team') return filter.id === parentTeamId ? null : HIDDEN;
   return null;
 }
 

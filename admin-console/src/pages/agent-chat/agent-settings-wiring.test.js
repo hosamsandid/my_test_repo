@@ -71,7 +71,10 @@ test('the shared field controls are imported back, not re-typed', () => {
   // invariant is unchanged (one definition, imported by whoever renders it),
   // only its address is.
   assert.match(createForm, /from '\.\/agent-form-fields\.jsx'/);
-  for (const symbol of ['ROLE_INFO', 'RoleDetailBanner', 'MissionDirectoryField', 'repoDirName']) {
+  // `MissionDirectoryField` / `repoDirName` left this list with the field
+  // itself (#1964) — see the removal guard in `bp-removal-ui.test.js`, which
+  // asserts neither is re-typed anywhere rather than merely not duplicated here.
+  for (const symbol of ['ROLE_INFO', 'RoleDetailBanner']) {
     for (const [name, src] of [['the Agents page', agentsPage], ['the create form', createForm]]) {
       assert.doesNotMatch(
         src, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),

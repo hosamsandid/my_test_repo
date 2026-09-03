@@ -5,9 +5,16 @@ import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-que
 test('kindLabel maps known kinds and falls back gracefully', () => {
   assert.equal(kindLabel('github'), 'GitHub event');
   assert.equal(kindLabel('session-set'), 'Session resume');
-  assert.equal(kindLabel('bp-event-batch'), 'Briefing-pack event');
   assert.equal(kindLabel('weird'), 'weird');
   assert.equal(kindLabel(undefined), 'Unknown');
+});
+
+test('#1964 — the retired bp-event-batch kind falls through to the raw string', () => {
+  // Its producer went in #1962 and its label here in #1964; a leftover entry in
+  // a pending queue written before the cut still renders identifiably rather
+  // than as 'Unknown', because the fallback is the kind itself.
+  assert.equal(kindLabel('bp-event-batch'), 'bp-event-batch');
+  assert.equal(kindTooltip('bp-event-batch'), kindTooltip('unknown'));
 });
 
 test('kindTooltip explains known kinds and falls back to the unknown copy', () => {

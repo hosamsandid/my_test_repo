@@ -62,7 +62,10 @@ export const RESET_TO_STUB_HINT =
  * team-member only, and a `team` row gets the *team* menu instead of this one.
  */
 const CLONEABLE_ROLES = new Set(['agent', 'team-member']);
-const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team', 'orchestrator']);
+// `orchestrator` left this set with the role (#1964): the export it enabled
+// produced a bundle whose only consumer — an import that re-creates the role —
+// the platform refuses since #1962.
+const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
 
 /**
  * Per-agent context-menu items for one chat row / agent card.
@@ -236,25 +239,27 @@ export function isChatOpenable(agent) {
  * "and 6 members" in one surface and just "Delete" in the other would be the
  * same irreversible action wearing two different warnings — so the decision
  * moves next to the message it belongs to.
+ *
+ * A team is the only cascading parent since #1964; a leftover orchestrator
+ * config gets the plain single-agent confirm, which is honest — `deleteTargetFor`
+ * no longer collects bp-instances, so nothing else would go with it here.
  */
 export function deleteDialogCopy(target) {
-  const role = target?.role;
-  const parent = role === 'team' ? 'team' : role === 'orchestrator' ? 'orchestrator' : null;
-  const count = parent ? (target?.children?.length ?? 0) : 0;
+  const isTeam = target?.role === 'team';
+  const count = isTeam ? (target?.children?.length ?? 0) : 0;
 
-  if (!parent) {
+  if (!isTeam) {
     return { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 };
   }
 
-  const title = `Delete ${parent} "${target.displayName ?? target.id}"?`;
+  const title = `Delete team "${target.displayName ?? target.id}"?`;
   if (count === 0) {
     return { title, confirmLabel: 'Delete', maxWidth: 440 };
   }
 
-  const noun = parent === 'team' ? 'member' : 'mission';
   return {
     title,
-    confirmLabel: `Delete ${parent} and ${count} ${noun}${count !== 1 ? 's' : ''}`,
+    confirmLabel: `Delete team and ${count} member${count !== 1 ? 's' : ''}`,
     maxWidth: 560,
   };
 }

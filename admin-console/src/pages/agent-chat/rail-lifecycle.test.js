@@ -141,6 +141,8 @@ const AGENTS = [
   { id: 'alpha-dev', role: 'team-member', parentTeamId: 'alpha', displayName: 'Dev' },
   { id: 'alpha-qa', role: 'team-member', parentTeamId: 'alpha', displayName: 'QA' },
   { id: 'zeta-dev', role: 'team-member', parentTeamId: 'zeta', displayName: 'Z Dev' },
+  // Leftover BriefingPack configs (#1964): no longer creatable, but still on
+  // disk on an upgraded installation — they keep the removal guards honest.
   { id: 'orch', role: 'orchestrator', displayName: 'Orch' },
   { id: 'bp1', role: 'bp-instance', parentOrchestratorId: 'orch', displayName: 'BP 1' },
 ];
@@ -160,12 +162,14 @@ test('existingIds collects every id in the list', () => {
   assert.equal(ids.size, AGENTS.length);
 });
 
-test('deleteTargetFor attaches a team\'s members and an orchestrator\'s missions', () => {
+test('deleteTargetFor attaches a team\'s members', () => {
   const team = deleteTargetFor(AGENTS[2], AGENTS);
   assert.deepEqual(team.children.map(c => c.id), ['alpha-dev', 'alpha-qa']);
 
-  const orch = deleteTargetFor(AGENTS[6], AGENTS);
-  assert.deepEqual(orch.children.map(c => c.id), ['bp1']);
+  // #1964: a leftover orchestrator config collects no children any more, so its
+  // confirm is the plain single-agent one — the cascade wording it used to get
+  // named a fan-out the console can no longer perform.
+  assert.deepEqual(deleteTargetFor(AGENTS[6], AGENTS).children, []);
 
   // A leaf agent carries no children, so the confirm shows the plain message.
   assert.deepEqual(deleteTargetFor(AGENTS[0], AGENTS).children, []);
@@ -200,10 +204,11 @@ test('importedAgentFilterNote stays silent when the new agent is visible (AC4)',
   assert.equal(importedAgentFilterNote({ kind: 'agent', id: 'zeta' }, 'zeta', undefined), null);
   // Filtered to the team it was imported into.
   assert.equal(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'alpha'), null);
-  assert.equal(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'omega'), null);
   // An unknown filter kind is reported visible — a wrong "hidden" note next to
-  // an agent the user can see would be worse than no note.
+  // an agent the user can see would be worse than no note. Since #1964 the
+  // retired `orchestrator` kind is exactly such an unknown.
   assert.equal(importedAgentFilterNote({ kind: 'something-new' }, 'zeta', undefined), null);
+  assert.equal(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'alpha'), null);
 });
 
 test('importedAgentFilterNote reports an import the filter swallows (AC4)', () => {
@@ -211,7 +216,6 @@ test('importedAgentFilterNote reports an import the filter swallows (AC4)', () =
   assert.ok(other && /filter/i.test(other), 'names the filter as the reason');
   assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', undefined));
   assert.ok(importedAgentFilterNote({ kind: 'team', id: 'alpha' }, 'zeta', 'beta'));
-  assert.ok(importedAgentFilterNote({ kind: 'orchestrator', id: 'omega' }, 'zeta', 'alpha'));
 });
 
 test('railMenuItems routes each target kind to its own menu', () => {

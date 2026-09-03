@@ -146,3 +146,72 @@ test('the context menu can fence a group off without a pseudo-item (AC2)', () =>
   assert.match(menu, /item\.separated/);
   assert.doesNotMatch(menu, /item\.kind === 'separator'/);
 });
+
+// --------------------------------------------------------------------- #1956
+
+test('the chat portals its two list actions into the Shell page-action slot (AC1)', () => {
+  // `/chats` was the one Shell route with an empty page-action slot, which is
+  // why these two had to be invented locally as a rail "+" menu. Using the slot
+  // is what makes them look and sit like every other page's create actions.
+  assert.match(agentChat, /usePageActions\(/);
+  const slot = agentChat.match(/const headerActions = usePageActions\([\s\S]*?\n  \);/);
+  assert.ok(slot, 'the header content is built in one place');
+  assert.match(slot[0], /Import Agent/);
+  assert.match(slot[0], /New Agent/);
+  // Primary rightmost, secondary to its left (the house convention).
+  assert.ok(
+    slot[0].indexOf('Import Agent') < slot[0].indexOf('New Agent'),
+    'Import Agent sits left of the primary New Agent',
+  );
+  // A portal that is built but never included in the tree renders nothing.
+  assert.match(agentChat, /\{headerActions\}/);
+});
+
+test('the rail "+" control and its menu are gone, not merely unrendered (AC2)', () => {
+  // AC2 is about there being ONE interactive way to create or import. A left
+  // behind button component or a `kind: 'create'` menu request is how the
+  // second one grows back.
+  assert.doesNotMatch(agentChat, /RailHeaderButton/);
+  assert.doesNotMatch(agentChat, /kind: 'create'/);
+  assert.doesNotMatch(host, /kind === 'create'/);
+  assert.doesNotMatch(host, /'new-agent'/);
+  assert.doesNotMatch(host, /'import-agent'/);
+  // The rail header row itself stays — it still carries the filter.
+  assert.match(agentChat, /<FilterSelect/);
+});
+
+test('New Agent hands over to the launcher; Import opens the picker in one click (AC3/AC4)', () => {
+  assert.match(agentChat, /navigate\(CREATE_ROUTE\)/);
+  // One click: the button opens the file picker directly. The id/team dialog
+  // follows a chosen file, exactly as the removed menu entry behaved.
+  assert.match(agentChat, /railHostRef\.current\?\.openImportPicker\(\)/);
+  assert.match(host, /openImportPicker\(\)\s*\{[\s\S]*?importInputRef\.current\?\.click\(\)/);
+  assert.match(host, /useImperativeHandle\(ref,/);
+  assert.match(agentChat.match(/<RailLifecycleHost[\s\S]*?\/>/)[0], /ref=\{railHostRef\}/);
+  // The import round-trip itself is unchanged and still refreshes the list
+  // rather than reloading the page (AC4, and #1928 AC3 before it).
+  assert.match(host, /\/api\/agents\/import/);
+});
+
+test('both header buttons are disabled with a reason, never hidden (AC6)', () => {
+  assert.match(agentChat, /describeAgentCreateAccess\(user\)/);
+  const slot = agentChat.match(/const headerActions = usePageActions\([\s\S]*?\n  \);/)[0];
+  // Two buttons, two gates: an ungated Import would still fail at the server.
+  assert.equal((slot.match(/disabled=\{!createAccess\.allowed\}/g) || []).length, 2);
+  assert.equal((slot.match(/title=\{createAccess\.hint \|\| undefined\}/g) || []).length, 2);
+  // Hiding them would answer "where did New Agent go?" with silence.
+  assert.doesNotMatch(slot, /createAccess\.allowed && </);
+});
+
+test('the import success message can tell the user the filter is hiding it (AC4)', () => {
+  assert.match(agentChat.match(/<RailLifecycleHost[\s\S]*?\/>/)[0], /listFilter=\{listFilter\}/);
+  assert.match(host, /importedAgentFilterNote\(listFilter, data\.agentId, data\.parentTeamId\)/);
+});
+
+test('the rail empty state points at the header button instead of competing (AC7)', () => {
+  assert.match(agentChat, /emptyStatePointer\(\)/);
+  assert.doesNotMatch(agentChat, /emptyStateCta/);
+  // A <Link to={...}> in the empty state would be the second call to action the
+  // house pattern forbids.
+  assert.doesNotMatch(agentChat, /<Link/);
+});

@@ -144,16 +144,33 @@ export function isTeamLocked(agent, agents) {
 }
 
 /**
- * The rail-header "+" menu (AC3). Both entries reuse an existing surface rather
- * than growing a second create form in the chat: **New agent** hands over to the
- * Create launcher, **Import agent** opens the Agents page's own import dialog
- * inline (it is the shared `ImportAgentForm`, so the chat cannot drift from it).
+ * Would a freshly imported agent be visible in the rail right now? (#1956 AC4 /
+ * the filtered-import edge case.)
+ *
+ * Import is reachable from the page header, which is *outside* the rail and so
+ * knows nothing about the rail's filter. With a narrowed filter the imported
+ * agent lands in the list and is immediately filtered back out — success, and
+ * nothing appears. Rather than silently widening the filter (the user set it on
+ * purpose) the success notice says so.
+ *
+ * Conservative on purpose: it answers "is this agent inside the current filter"
+ * only for the cases the filter spec makes decidable from the import response
+ * (`agentId` + `parentTeamId`), and reports *visible* whenever it cannot tell —
+ * a wrong "hidden" note next to an agent the user can plainly see is worse than
+ * no note.
+ *
+ * @returns {string|null} the note to append to the success message, or null
  */
-export function buildCreateMenu() {
-  return [
-    { key: 'new-agent', label: 'New agent…', disabled: false },
-    { key: 'import-agent', label: 'Import agent…', disabled: false },
-  ];
+export function importedAgentFilterNote(filter, agentId, parentTeamId) {
+  const kind = filter && filter.kind;
+  if (!kind || kind === 'all') return null;
+  // Names the option verbatim as the filter's <select> renders it.
+  const HIDDEN = ' The list filter is hiding it — switch it to "All agents" to see it.';
+  if (kind === 'agent') return filter.id === agentId ? null : HIDDEN;
+  if (kind === 'team' || kind === 'orchestrator') {
+    return filter.id === parentTeamId ? null : HIDDEN;
+  }
+  return null;
 }
 
 /**
@@ -223,7 +240,7 @@ export function helpMenuItem() {
  * re-enforces, so a not-yet-loaded list degrades to "offered, then refused"
  * rather than to a wrong action.
  *
- * @param {{kind:'agent'|'team'|'create', agent?:object, group?:object}} o.target
+ * @param {{kind:'agent'|'team', agent?:object, group?:object}} o.target
  * @param {object[]} o.agents
  * @param {Set<string>} o.busyIds     ids with a mutation in flight
  * @param {string} o.activityState    the row's activity state (agent menu only,
@@ -234,10 +251,6 @@ export function railMenuItems({
   target, agents = [], busyIds = new Set(), activityState = 'idle',
 } = {}) {
   if (!target) return { items: [], label: '' };
-
-  if (target.kind === 'create') {
-    return { items: buildCreateMenu(), label: 'Add an agent' };
-  }
 
   if (target.kind === 'agent') {
     const agent = target.agent;

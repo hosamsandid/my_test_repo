@@ -108,7 +108,8 @@ opens this menu instead — which is where *Enable* is.
 **Members that have not been started yet.** A team can be created with its
 members left as **stubs** — configuration and triggers only, with no chat
 account, no workspace and no cloned repositories — so a process with dozens of
-roles does not provision all of them on day one. Such members appear at the
+roles does not provision all of them on day one, and **Add member…** above adds
+one to a live team the same way. Such members appear at the
 bottom of their team group under a collapsed **Not materialized yet (N)**
 section; the count is on the header, so you can see how many are waiting without
 opening it. A stub row is marked **Not initialised** and cannot be opened as a

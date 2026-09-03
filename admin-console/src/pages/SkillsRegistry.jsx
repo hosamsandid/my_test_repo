@@ -7,8 +7,12 @@ import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
 import { usePageActions } from '../context/PageActionsContext';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_SKILL_DETAIL, OVERLAY_SKILLS_MERGE } from '../context/page-help-view.js';
+import { SKILLS_HELP_SECTIONS } from './skills-help-sections.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -871,6 +875,18 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             to lift it into a team pool, then use Promote to global on the resulting team skill. Both steps write provenance and skill.json lineage.
           </span>
         )}
+        {/* The action panel's own "?" — opens the Skills topic at the chapter
+            that explains promote / move / distill / merge / import-export
+            (#1990). Hidden while editing a file, where none of those buttons
+            are on screen. */}
+        {!editing && (
+          <PageHelpButton
+            label="What these skill actions do"
+            size={14}
+            style={{ padding: 0, marginLeft: 'auto' }}
+            section={SKILLS_HELP_SECTIONS.actions}
+          />
+        )}
       </div>
 
       {error && (
@@ -887,8 +903,14 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
           border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
         }}>
-          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
             Adopt as team skill
+            <PageHelpButton
+              label="Adopt, move and the other transfer actions"
+              size={13}
+              style={{ padding: 0 }}
+              section={SKILLS_HELP_SECTIONS.actions}
+            />
           </span>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
             <select
@@ -936,8 +958,17 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
           padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
           border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
         }}>
-          <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-secondary)' }}>
             Install into agent
+            {/* Installing is the verb people confuse with granting, so this "?"
+                lands on the grant / activation / install chapter rather than the
+                action table (#1990). */}
+            <PageHelpButton
+              label="Granting, activation and installing into an agent"
+              size={13}
+              style={{ padding: 0 }}
+              section={SKILLS_HELP_SECTIONS.grants}
+            />
           </span>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
             <select
@@ -1205,6 +1236,12 @@ function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
   const [error, setError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
 
+  // The dialog renders at z-index 1000; the help panel's own is 50, so without a
+  // published overlay subject its own "?" would open the panel BEHIND the dialog
+  // (#1892's panelZIndex is what lifts it). The key claims no topic — help still
+  // resolves to the /skills topic underneath (#1990).
+  useHelpSubject({ overlay: OVERLAY_SKILLS_MERGE });
+
   const nameValid = SKILL_NAME_RE.test(name);
   const targetReady = nameValid && (targetTier === 'global' || !!targetTeamId);
 
@@ -1294,8 +1331,17 @@ function MergeSkillsDialog({ sources, teams = [], onClose, onMerged }) {
         }}
       >
         <div>
-          <h2 style={{ fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
+          <h2 style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-lg)', fontWeight: 'var(--eb-font-semibold)', margin: 0 }}>
             Merge {sources.length} skills
+            {/* Deep-links to the overwrite-and-merge chapter — what merging does
+                to provenance, extra files and grants (#1878 moved the prose off
+                this dialog, #1990 gives it a way back to it). */}
+            <PageHelpButton
+              label="What merging does to provenance and grants"
+              size={14}
+              style={{ padding: 0 }}
+              section={SKILLS_HELP_SECTIONS.overwrite}
+            />
           </h2>
           {/* One line here; what merging does to provenance, extra files and
               grants is explained in the Skills help topic (#1878). */}
@@ -1584,6 +1630,12 @@ export default function SkillsRegistry() {
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeSuccess, setMergeSuccess] = useState(null);
 
+  // The skill detail SidePanel (backdrop z-index 60) hosts the action-panel "?"
+  // buttons, so the help panel has to be lifted above it while it is open —
+  // same reason as the merge dialog below. Retracted automatically when the
+  // panel closes, which hands help back to the page (#1990).
+  useHelpSubject({ overlay: OVERLAY_SKILL_DETAIL, active: !!selectedSkill });
+
   const filteredSkills = (allSkills ?? []).filter(s => {
     if (filter === 'Global') return s.source === 'pool';
     if (filter === 'Team') return s.source === 'team';
@@ -1788,6 +1840,16 @@ export default function SkillsRegistry() {
           <button onClick={() => setShowNewForm(f => !f)} style={primaryBtnStyle(false)}>
             {showNewForm ? 'Cancel' : '+ New Skill'}
           </button>
+          {/* The page's own "?" (#1990). The #1847 header unification left this
+              slot as the page's only header, so this is also where the
+              page-level affordance E4 added went when the on-page <h1> was
+              removed; it deep-links to the action chapter, which is what
+              documents Import / Export. */}
+          <PageHelpButton
+            label="How importing and exporting skills works"
+            size={16}
+            section={SKILLS_HELP_SECTIONS.actions}
+          />
         </div>
   );
 
@@ -1844,6 +1906,14 @@ export default function SkillsRegistry() {
             {opt}
           </button>
         ))}
+        {/* The filter strip IS the tier vocabulary, so its "?" explains the three
+            tiers and the own-team-pool-first resolution order (#1990). */}
+        <PageHelpButton
+          label="What Global, Team and Agent mean"
+          size={14}
+          style={{ padding: 0, marginLeft: 'var(--eb-space-1)' }}
+          section={SKILLS_HELP_SECTIONS.tiers}
+        />
       </div>
 
       {/* Merge success feedback */}

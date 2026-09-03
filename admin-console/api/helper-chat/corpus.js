@@ -85,12 +85,31 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // it DELETED the standalone /plugin-system page that used to carry it. Trimming
 // a topic to fit would degrade the panel too — the topic files are the single
 // source both the panel and this prompt read — so the budget, not the content,
-// is what gives. #1889 is the epic's LAST topic, so this fold stops growing
-// here; the structural fix, when the corpus does grow again, is to fold only the
-// current route's topic plus its `seeAlso` neighbours instead of all of them
-// (route-scoped folding — a separable ticket, since it changes what the assistant
-// can answer about *other* pages, not just the size of the prompt).
-const SYSTEM_PROMPT_CHAR_LIMIT = 300_000;
+// is what gives.
+//
+// Raised a THIRD time, 300 000 → 340 000 in #1990 (epic #1981).
+//
+// **The "it stops growing here" note that used to end this comment was wrong.**
+// #1889 was the last topic of epic #1870, but epic #1981 re-opened every one of
+// them: each of its 13 children expands one page's topic into a per-surface
+// reference, so the fold grows once per child ticket. And it is not only the
+// topics — the docs/** corpus grows on its own: #1990's Skills topic alone fit
+// under 300 000 (297 864), and it was #1956's unrelated docs/admin-console.md
+// additions landing on main in the same window that took the assembled prompt to
+// 301 679. Two independent growth sources against one ceiling.
+//
+// Do NOT answer that by trimming a topic: the topic files are the single source
+// both the panel and this prompt read, so a trim degrades the panel too. The
+// structural fix is to fold only the current route's topic plus its `seeAlso`
+// neighbours instead of all of them (route-scoped folding — a separable ticket,
+// since it changes what the assistant can answer about *other* pages, not just
+// the size of the prompt).
+//
+// 340 000 is a STOP-GAP sized for roughly the next handful of #1981 children, not
+// for all twelve. If you are the child ticket that hits it again, the right move
+// is to open the route-scoped-folding ticket rather than to raise this a fourth
+// time.
+const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
 function measureSystemPrompt() {
   return buildSystemPrompt(null).length;

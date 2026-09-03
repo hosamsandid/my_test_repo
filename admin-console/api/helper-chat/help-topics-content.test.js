@@ -128,6 +128,18 @@ const TOPIC_CONTENT = [
     // grant vs seeding/activation vs one-off install, the tier-moving verbs, and
     // Skills vs Knowledge vs Memory) plus the merge dialog's rationale about
     // provenance, carried-over files and migrated grants.
+    //
+    // #1990 (epic #1981) widened it into a per-surface reference: the six areas
+    // below are each a chapter, and each is the landing target of a "?" on the
+    // matching surface, so the headings are load-bearing rather than decorative.
+    chapters: [
+      'What a skill is',
+      'The three tiers, and which one an agent gets',
+      'Grant, activation and Install into agent',
+      'The actions: promote, move, adopt, distill, merge, import and export',
+      'Overwrite and merge: what each one replaces',
+      'Skills vs Knowledge vs Memory',
+    ],
     concepts: [
       'SKILL.md',
       'Global',
@@ -145,7 +157,11 @@ const TOPIC_CONTENT = [
       'Move to team',
       'Distill',
       'Merge',
-      'Import / Export',
+      // #1990 renamed this row to the two button labels it actually documents
+      // (the page has an "Export ZIP" and an "Import skill" control, never one
+      // combined "Import / Export" verb) — the concept is unchanged.
+      'Export ZIP',
+      'Import skill',
       'replaces the entire',
       'provenance',
       'migrated to the target',
@@ -153,6 +169,12 @@ const TOPIC_CONTENT = [
       'Memory',
       'Knowledge',
       'distilled from the best knowledge',
+      // #1990 correction, guarded here because it is the opposite of what this
+      // topic said before: POST /api/skills/install delegates to the
+      // orchestrator's skill-activation path, which WRITES THE GRANT (an agent's
+      // own `skills[]` / a member's `skillsOverride`) — so an install is not a
+      // one-off copy that the next re-seed loses.
+      'writes the grant',
     ],
   },
   {

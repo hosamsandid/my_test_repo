@@ -215,3 +215,41 @@ test('the rail empty state points at the header button instead of competing (AC7
   // house pattern forbids.
   assert.doesNotMatch(agentChat, /<Link/);
 });
+
+// --------------------------------------------------------------------- #1957
+
+test('the rail renders the stub section from the model, never its own split', () => {
+  // The split lives in `buildGroups`. A `filter(isStub)` inside the JSX would be
+  // a second, untestable definition of what a stub is.
+  assert.match(agentList, /<StubSection/);
+  assert.match(agentList, /stubSectionLabel\(stubs\.length\)/);
+  assert.doesNotMatch(agentList, /\.filter\([^)]*isStub/);
+});
+
+test('the stub section is collapsed by default and its rows are not draggable (AC2/AC8)', () => {
+  const section = agentList.match(/function StubSection\([\s\S]*?\n\}/)[0];
+  assert.match(section, /useState\(true\)/);
+  // No drag props: a stub is not part of the persisted member order.
+  assert.doesNotMatch(section, /dragScope=/);
+  assert.doesNotMatch(section, /drag=\{/);
+});
+
+test('a stub row is marked as such rather than reusing the Disabled badge (AC3)', () => {
+  // The row's state comes from the shared `agentState`, so the rail and the
+  // lifecycle menu cannot disagree about what a stub is.
+  assert.match(agentList, /agentState\(agent\) === 'stub'/);
+  assert.match(agentList, /'Not initialised'/);
+  // Chat-openability is still the one gate on opening a room, so no stub row can
+  // request one (AC3).
+  assert.match(agentList, /const openable = isChatOpenable\(agent\)/);
+});
+
+test('materialize progress reaches the row it was started from (AC5)', () => {
+  // The requests live in the host, so the busy set is reported up and passed
+  // back down — the rail never owns lifecycle state.
+  assert.match(host, /onBusyIdsChange\(busyIds\)/);
+  const mount = agentChat.match(/<RailLifecycleHost[\s\S]*?\/>/)[0];
+  assert.match(mount, /onBusyIdsChange=\{handleBusyIdsChange\}/);
+  assert.match(agentChat.match(/<AgentList[\s\S]*?\/>/)[0], /busyIds=\{railBusyIds\}/);
+  assert.match(agentList, /busy=\{busyIds\.has\(agent\.id\)\}/);
+});

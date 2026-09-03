@@ -81,6 +81,7 @@ const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = requ
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
+const { admitsToChatList } = require('./matrix-agent-list');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 // Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
@@ -14993,7 +14994,7 @@ jobs:
  * from MATRIX_ACCESS_TOKEN; per-agent tokens come from /workspace/agents/<id>/config.json.
  *
  * Routes:
- *   GET    /api/matrix/agents[?includeDisabled=1]     List agents with Matrix identities (enabled-only by default)
+ *   GET    /api/matrix/agents[?includeDisabled=1][?includeStubs=1]  List agents with Matrix identities (enabled-only by default)
  *   POST   /api/matrix/agents/:agentId/dm              Idempotent create/get DM room
  *   GET    /api/matrix/rooms/:roomId/messages          Paginated history (proxy)
  *   POST   /api/matrix/rooms/:roomId/messages          Send m.text as admin
@@ -15006,19 +15007,24 @@ jobs:
 // Enabled-only by default — that is what the chat has always shown. `?includeDisabled=1`
 // additionally lists disabled (paused) agents so the chat's opt-in "show disabled
 // agents" filter can offer Enable on them without a trip to the Agents page
-// (#1928, epic #1925 decision D2). Stubs stay out either way: an agent with no
-// token has no chat identity to list. Visibility scoping (#302) is unchanged, so
-// the opt-in can only ever widen the list within what this caller may already see.
+// (#1928, epic #1925 decision D2). `?includeStubs=1` additionally lists **stub
+// team members** — configuration only, never provisioned — so the rail can show
+// a deferred-materialization team's members and materialize them from there
+// (#1957); before that they were dropped unconditionally, which is why a team
+// created with `materializeMembers: false` looked empty in the chat. Neither
+// opt-in changes the default response (AC8), and the admission rule itself is
+// the pure `matrix-agent-list.js`. Visibility scoping (#302) is unchanged, so an
+// opt-in can only ever widen the list within what this caller may already see.
 app.get('/api/matrix/agents', (req, res) => {
   const scope = getScope(req);
   const includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
+  const includeStubs = req.query.includeStubs === '1' || req.query.includeStubs === 'true';
   const ids = listAgentDirs();
   const out = [];
   for (const id of ids) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg) continue;
-    if (cfg.enabled === false && !includeDisabled) continue;
-    if (!cfg.token) continue;
+    if (!admitsToChatList(cfg, { includeDisabled, includeStubs })) continue;
     if (!visibleAgent(scope, cfg)) continue; // team + visibility scoping (#302)
     const dm = matrix.getAgentDmRoom(id);
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
@@ -15029,8 +15035,9 @@ app.get('/api/matrix/agents', (req, res) => {
       userId: cfg.userId || `@${id}:local`,
       enabled: cfg.enabled !== false,
       // Whether the agent has ever been provisioned — never the token itself.
-      // Always true here (a tokenless agent is skipped above); shipped so the
-      // shared `agentState()` can tell "paused" from "stub" on this payload too.
+      // Shipped so the shared `agentState()` can tell "paused" from "stub" on
+      // this payload too; since #1957 it is the field that *identifies* the stub
+      // rows `?includeStubs=1` admits (it was always true before that).
       hasToken: !!cfg.token,
       // Whether THIS caller may run management actions on the agent — the same
       // boundary the mutating routes enforce (#989), so the chat's lifecycle

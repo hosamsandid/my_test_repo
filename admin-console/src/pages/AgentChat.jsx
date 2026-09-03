@@ -101,6 +101,9 @@ const LAST_AGENT_KEY = 'agentChat.lastAgentId';
 const LAST_VIEWED_KEY = 'agentChat.lastViewed';
 const FILTER_KEY = 'agentChat.listFilter';
 
+/** Stable empty set, so the idle rail never hands its memoized rows a new one. */
+const EMPTY_BUSY_IDS = new Set();
+
 function loadFilter() {
   try {
     const raw = localStorage.getItem(FILTER_KEY);
@@ -142,9 +145,10 @@ export default function AgentChat() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   // Per-user opt-in to also listing disabled agents (#1928 AC6/AC7). It widens
-  // the list URL, so it is read before the fetch — with the opt-in off the URL
-  // is byte-for-byte the pre-#1928 one and the chat shows exactly what it always
-  // showed.
+  // the list URL, so it is read before the fetch — with the opt-in off no paused
+  // agent is asked for and the chat shows exactly what it always showed. (Since
+  // #1957 the URL also carries an unconditional `includeStubs=1`, which is not a
+  // preference — see `matrixAgentsUrl`.)
   const [showDisabled, setShowDisabled] = useState(loadShowDisabled);
   useEffect(() => { saveShowDisabled(showDisabled); }, [showDisabled]);
   const { data: agents, loading, error, refetch } = useApi(matrixAgentsUrl(showDisabled));
@@ -159,6 +163,18 @@ export default function AgentChat() {
     [],
   );
   const closeMenu = useCallback(() => setMenuRequest(null), []);
+
+  // Which rows have a lifecycle mutation in flight (#1957 AC5). The requests all
+  // live in `RailLifecycleHost`, so it reports the set up here and the rail
+  // renders it — a materialize clones the role's repositories and can take a
+  // while, and the row it was started from must not sit there looking untouched.
+  const [railBusyIds, setRailBusyIds] = useState(EMPTY_BUSY_IDS);
+  // Empty→empty keeps the previous Set, so the host's initial report (and any
+  // later one that changes nothing) does not hand the memoized rows a new
+  // identity and re-render the whole list for no reason.
+  const handleBusyIdsChange = useCallback((ids) => {
+    setRailBusyIds(prev => (prev.size === 0 && ids.size === 0 ? prev : ids));
+  }, []);
 
   // The list-level create/import actions live in the Shell's page-action header
   // like every other page's (#1956) — Agent Chat used to be the one route with
@@ -676,6 +692,7 @@ export default function AgentChat() {
               statuses={agentStatuses}
               filter={listFilter}
               showDisabled={showDisabled}
+              busyIds={railBusyIds}
               onRequestMenu={handleRequestMenu}
             />
           )}
@@ -788,6 +805,7 @@ export default function AgentChat() {
         onMarkAsUnread={handleMarkAsUnread}
         statuses={agentStatuses}
         listFilter={listFilter}
+        onBusyIdsChange={handleBusyIdsChange}
       />
     </div>
     </>

@@ -55,6 +55,17 @@ test('the enable/disable label follows the current state', () => {
   assert.equal(byKey(off, 'toggle-enabled').label, 'Enable');
 });
 
+test('#1957 AC4 — a stub says Materialize, on the same key as Enable', () => {
+  const items = buildAgentMenu({
+    agent: { role: 'team-member', hasToken: false, enabled: false, parentTeamId: 't1' },
+  });
+  const toggle = byKey(items, 'toggle-enabled');
+  // Same key, so it is the same `PUT { enabled: true }` the Agents page's
+  // Activate button sends — one operation, worded for what it actually does.
+  assert.equal(toggle.label, 'Materialize');
+  assert.equal(toggle.disabled, false);
+});
+
 test('destructive actions are flagged danger, reversible ones are not', () => {
   const items = buildAgentMenu({ agent: { role: 'agent', hasToken: true, enabled: true } });
   assert.equal(byKey(items, 'reset-to-stub').danger, true);
@@ -213,4 +224,29 @@ test('AC6 — a disabled agent is not chat-openable', () => {
   assert.equal(isChatOpenable({}), true);         // absent flag = enabled
   assert.equal(isChatOpenable({ enabled: false }), false);
   assert.equal(isChatOpenable(null), false);
+});
+
+test('#1957 AC6 — a stub in a disabled team gets an inert Materialize and the reason', () => {
+  const items = buildAgentMenu({
+    agent: { role: 'team-member', hasToken: false, enabled: false, parentTeamId: 't1' },
+    locked: true,
+  });
+  const toggle = byKey(items, 'toggle-enabled');
+  assert.equal(toggle.label, 'Materialize');
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.title, TEAM_LOCKED_HINT);
+});
+
+test('#1957 AC7 — without management rights Materialize is inert', () => {
+  const items = buildAgentMenu({
+    agent: { role: 'team-member', hasToken: false, enabled: false, parentTeamId: 't1' },
+    canManage: false,
+  });
+  const toggle = byKey(items, 'toggle-enabled');
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.title, NO_RIGHTS_HINT);
+});
+
+test('#1957 AC3 — a stub is never chat-openable', () => {
+  assert.equal(isChatOpenable({ hasToken: false, enabled: false }), false);
 });

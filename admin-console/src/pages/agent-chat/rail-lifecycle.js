@@ -38,14 +38,23 @@ export function saveShowDisabled(value, storage) {
 }
 
 /**
- * The chat's list endpoint, widened only when the opt-in is on. Kept here rather
- * than inline in the page so the one place that turns the preference into a URL
- * is the same place that reads the preference — and so the default really is the
- * pre-#1928 URL, byte for byte (AC6: with the filter off the chat shows exactly
- * what it shows today).
+ * The chat's list endpoint. Kept here rather than inline in the page so the one
+ * place that turns the preference into a URL is the same place that reads the
+ * preference.
+ *
+ * Two widenings, and only one of them is a preference. `includeDisabled` is the
+ * user's own opt-in (#1928 AC6). `includeStubs` is **always on** (#1957): a
+ * not-yet-materialized member is not a paused agent the user chose to hide, it
+ * is a member of their team that simply has not been switched on yet, and a
+ * team created with deferred materialization would otherwise read as empty —
+ * the very bug this fixes. It costs nothing on an installation that has no
+ * stubs (the endpoint returns the same list), and the rail keeps them out of
+ * the way in a collapsed section rather than in the member list.
  */
 export function matrixAgentsUrl(showDisabled) {
-  return showDisabled ? '/api/matrix/agents?includeDisabled=1' : '/api/matrix/agents';
+  return showDisabled
+    ? '/api/matrix/agents?includeDisabled=1&includeStubs=1'
+    : '/api/matrix/agents?includeStubs=1';
 }
 
 /**

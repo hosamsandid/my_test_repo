@@ -91,11 +91,20 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
 
   const items = [];
 
-  // Enable / Disable. The team lock only ever blocks *enabling* a member on
-  // the Agents page (the toggle is disabled outright); mirror that here.
+  // Enable / Disable / Materialize. The team lock only ever blocks *enabling* a
+  // member on the Agents page (the toggle is disabled outright); mirror that
+  // here.
+  //
+  // For a stub the entry is labelled **Materialize** (#1957): the operation is
+  // the same `PUT { enabled: true }` the Agents page's *Activate* button sends —
+  // deliberately the same key, so there is one code path — but "Enable" reads
+  // as flipping a switch on something that exists, and what actually happens
+  // is a Matrix user, a workspace seed and the repo clones. The Agents page
+  // already says *Activate* for this state; the menu should not be the one
+  // surface that understates it.
   items.push({
     key: 'toggle-enabled',
-    label: enabled ? 'Disable' : 'Enable',
+    label: isStub ? 'Materialize' : enabled ? 'Disable' : 'Enable',
     ...gate(locked, locked ? TEAM_LOCKED_HINT : undefined),
   });
 

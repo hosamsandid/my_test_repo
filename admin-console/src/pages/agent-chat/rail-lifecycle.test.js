@@ -53,13 +53,24 @@ test('showDisabled survives a throwing storage (privacy mode)', () => {
   assert.doesNotThrow(() => saveShowDisabled(true, boom));
 });
 
-// AC6: with the opt-in off the chat must show exactly what it shows today, so
-// the default URL has to be the pre-#1928 one byte for byte — not merely an
-// equivalent one carrying `includeDisabled=0`.
+// #1928 AC6: the opt-in is the *only* thing that lets a paused agent into the
+// list, so `includeDisabled` must be absent when it is off — not present and
+// set to `0`. (#1957 added a second widening that is not a preference; the
+// stub-specific test below pins the two apart.)
 test('matrixAgentsUrl widens the list only when the opt-in is on', () => {
-  assert.equal(matrixAgentsUrl(false), '/api/matrix/agents');
-  assert.equal(matrixAgentsUrl(undefined), '/api/matrix/agents');
-  assert.equal(matrixAgentsUrl(true), '/api/matrix/agents?includeDisabled=1');
+  assert.equal(matrixAgentsUrl(false), '/api/matrix/agents?includeStubs=1');
+  assert.equal(matrixAgentsUrl(undefined), '/api/matrix/agents?includeStubs=1');
+  assert.equal(matrixAgentsUrl(true), '/api/matrix/agents?includeDisabled=1&includeStubs=1');
+});
+
+test('#1957 — stubs are always requested, the disabled opt-in stays a choice', () => {
+  // A not-yet-materialized member is not a paused agent someone chose to hide:
+  // without this the chat cannot show a deferred-materialization team at all,
+  // which is the bug. `includeDisabled` remains driven purely by the preference.
+  for (const on of [false, true]) {
+    assert.ok(matrixAgentsUrl(on).includes('includeStubs=1'));
+    assert.equal(matrixAgentsUrl(on).includes('includeDisabled=1'), on);
+  }
 });
 
 test('mergeAgentConfigs prefers the fuller config but keeps the chat verdict', () => {
@@ -371,4 +382,58 @@ test('#1959 — the rail team menu appends no add-role entry', () => {
   assert.ok(!keys.some(k => k.startsWith('add-role')));
   assert.ok(!keys.some(k => k.includes(':')), 'no menu key carries an argument');
   assert.ok(keys.includes('add-member'));
+});
+
+/* ── not-materialized members (#1957) ────────────────────────────────── */
+
+const STUB_MEMBER = {
+  id: 'zeta-arch', role: 'team-member', parentTeamId: 'zeta',
+  displayName: 'Architect', enabled: false, hasToken: false,
+};
+
+test('#1957 — a stub row offers Materialize, and no chat-only view action', () => {
+  const { items, label } = railMenuItems({
+    target: { kind: 'agent', agent: STUB_MEMBER },
+    agents: [...AGENTS, STUB_MEMBER],
+  });
+  const toggle = items.find(i => i.key === 'toggle-enabled');
+  assert.equal(toggle.label, 'Materialize');
+  assert.equal(toggle.disabled, false);
+  assert.equal(label, 'Actions for Architect');
+  // A stub has no chat to mark as read, so the view action is present-but-inert
+  // exactly as it is for any other unopenable row.
+  assert.equal(items.find(i => i.key === 'mark-unread').disabled, true);
+});
+
+test('#1957 AC6 — a stub in a disabled team gets the enable-the-team-first state', () => {
+  // `alpha` is the disabled team in the fixture; the lock is derived from the
+  // list, so it is the same one a paused member of that team gets.
+  const stub = { ...STUB_MEMBER, id: 'alpha-arch', parentTeamId: 'alpha' };
+  const { items } = railMenuItems({
+    target: { kind: 'agent', agent: stub },
+    agents: [...AGENTS, stub],
+  });
+  const toggle = items.find(i => i.key === 'toggle-enabled');
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.title, TEAM_LOCKED_HINT);
+});
+
+test('#1957 AC5 — a materialize in flight makes the row\'s own entry inert', () => {
+  const { items } = railMenuItems({
+    target: { kind: 'agent', agent: STUB_MEMBER },
+    agents: [...AGENTS, STUB_MEMBER],
+    busyIds: new Set([STUB_MEMBER.id]),
+  });
+  assert.equal(items.find(i => i.key === 'toggle-enabled').disabled, true);
+});
+
+test('#1957 AC7 — a caller who may not manage the stub gets no working Materialize', () => {
+  const stub = { ...STUB_MEMBER, canManage: false };
+  const { items } = railMenuItems({
+    target: { kind: 'agent', agent: stub },
+    agents: [stub],
+  });
+  const toggle = items.find(i => i.key === 'toggle-enabled');
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.title, NO_RIGHTS_HINT);
 });

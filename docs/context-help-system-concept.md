@@ -112,6 +112,12 @@ The `help-topics/` directory is the **single source**. It is read by:
    system prompt at the existing `[corpus is appended here at runtime]` marker
    (`admin-console/api/helper-chat/corpus.js:44–58`), and the handler's existing
    `currentRoute`/`currentRouteLabel` is used to point the model at the current page's topic.
+   **Since #2006 that fold is route-scoped** (`foldTopicsForContext` in `help-registry.js`): the
+   request's context resolves to *one* topic through the very same `resolveHelpContext` the panel
+   uses — overlay → step → route → canonical route, alias-aware — and the prompt carries that
+   topic plus the topics its `seeAlso` links point at, not all of them. The narrowing is stated
+   in the prompt so the assistant says "open that page and ask again" instead of inventing an
+   answer about a page whose topic it was not given. See §9 for why and what it costs.
 
 Because both consumers read the *same* files, there is **no vendoring and no parity test** to
 maintain (unlike the repo-root `docs/**` copies in the corpus, which stay as they are). The
@@ -353,7 +359,34 @@ collapsible too), and whether a page's "?" sits inside a permission branch (My C
 must stay outside its `canOwn` branch — the single-admin who cannot own personal credentials
 is exactly the reader who needs the chapter explaining why).
 
-**Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set: #1990's
+**Grounding-budget consequence — settled by #2006, not by a fourth raise.** The paragraph below
+is kept as the history that made the case; what it predicted has now happened. `corpus.js` folds
+only the **current context's** topic plus its `seeAlso` neighbours (§3.2), so the ceiling no longer
+absorbs the growth of every page's help at once. What the number means changed with it: it is now
+"docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
+over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
+`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is `/flows` (seven
+neighbours, including the two largest topics) at **229,272 — 67.4% used, 110,728 left**, where the
+all-topics fold it replaced stood at 322,243 (94.8%).
+
+Three consequences a remaining #1981 child should know:
+
+1. **A new page's topic costs the worst case nothing** — it adds a *candidate* context of its own
+   size, and only enlarges an existing one if some topic links to it.
+2. **Expanding an existing topic still costs**, but against the largest single neighbourhood
+   rather than the sum of thirteen: it grows the contexts of its own page and of the pages whose
+   `seeAlso` names it. `help-registry.test.js` asserts exactly that, so the limit is documented as
+   a test rather than as a promise.
+3. **The no-route fallback is the Overview topic plus its neighbours**, deliberately *not* every
+   topic — an all-topics fallback would leave the worst case exactly where it was and make every
+   new topic move it by its full size again. It is also what the panel does when no route
+   resolves, so the two consumers narrow identically.
+
+The docs `CORPUS_FILES` half is untouched and still counts in full on every request (~162,800
+chars); if this ever gets tight again, route-scoping *that* is the next structural step — not a
+fourth raise, and never trimming a topic.
+
+**The original case (kept for the record).** Each child grows `corpus.js`'s folded topic set: #1990's
 Skills topic alone fit under the old 300k ceiling (~297.9k), but #1956's unrelated
 `docs/admin-console.md` additions landing on main in the same window took the assembled prompt
 to ~301.7k, so #1990 raised `SYSTEM_PROMPT_CHAR_LIMIT` to **340,000** as a deliberate stop-gap

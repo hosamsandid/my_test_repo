@@ -12,6 +12,10 @@ const {
   parseTopic,
   buildRegistry,
   foldTopics,
+  contextTopics,
+  foldTopicsForContext,
+  groundingContexts,
+  worstCaseFold,
   routeGroundingPointer,
   baselineTopic,
   baselineProblems,
@@ -160,6 +164,122 @@ test('foldTopics concatenates titles, summaries and bodies', () => {
   assert.match(folded, /body a/);
   assert.match(folded, /## B\n/);
   assert.match(folded, /body b/);
+});
+
+// ── route-scoped grounding fold (#2006) ───────────────────────────────────────
+
+// A fixture set with real seeAlso wiring: `a` links to `b` (a topic) and to
+// `/nowhere` (a route no topic claims — the "skip it, do not fail" edge case).
+function scopedRegistry() {
+  return buildRegistry([
+    { id: OVERVIEW_ID, routes: [], title: 'Overview', summary: '', seeAlso: [{ label: 'A', to: '/a' }], askPrompts: ['hi'], body: 'overview body' },
+    { id: 'a', routes: ['/a'], title: 'A', summary: '', body: 'body a', askPrompts: ['q'], seeAlso: [{ label: 'B', to: '/b' }, { label: 'Nope', to: '/nowhere' }] },
+    { id: 'b', routes: ['/b'], title: 'B', summary: '', body: 'body b', askPrompts: ['q'], seeAlso: [] },
+    { id: 'c', routes: ['/c'], title: 'C', summary: '', body: 'body c', askPrompts: ['q'], seeAlso: [] },
+    // Two routes, one topic (credentials.md's shape) + an aliased context key.
+    { id: 'creds', routes: ['/ssh-keys', '/github-tokens'], title: 'Creds', summary: '', body: 'body creds', askPrompts: ['q'], seeAlso: [{ label: 'C', to: '/c' }] },
+  ]);
+}
+
+test('contextTopics returns the route topic plus its seeAlso neighbours', () => {
+  const reg = scopedRegistry();
+  assert.deepEqual(contextTopics(reg, '/a').map((t) => t.id), ['a', 'b']);
+  // The unrelated topic is not in the set — that is the whole point.
+  assert.ok(!contextTopics(reg, '/a').some((t) => t.id === 'c'));
+});
+
+test('a seeAlso pointing at a route with no topic is skipped, not an error', () => {
+  const reg = scopedRegistry();
+  // `/nowhere` is claimed by nobody; the fold still contains `a` and `b`.
+  const folded = foldTopicsForContext(reg, '/a');
+  assert.match(folded, /body a/);
+  assert.match(folded, /body b/);
+  assert.doesNotMatch(folded, /body c/);
+});
+
+test('an unresolvable context falls back to the Overview topic and its neighbours', () => {
+  const reg = scopedRegistry();
+  for (const ctx of [null, undefined, '', '/not-a-route', { route: '/not-a-route' }]) {
+    assert.deepEqual(contextTopics(reg, ctx).map((t) => t.id), [OVERVIEW_ID, 'a'],
+      `unresolvable context ${JSON.stringify(ctx)} must take the Overview fallback`);
+  }
+});
+
+test('a registry with no topics at all folds to an empty block', () => {
+  // Fail-soft: a missing help-topics dir must leave the docs corpus unchanged.
+  assert.deepEqual(contextTopics(buildRegistry([]), '/a'), []);
+  assert.equal(foldTopicsForContext(buildRegistry([]), '/a'), '');
+});
+
+test('every route of a multi-route topic grounds on the same topic set', () => {
+  // credentials.md is claimed by three routes; a reader arriving from any of them
+  // must get the grounding the panel would show, not a route-order accident.
+  const reg = scopedRegistry();
+  assert.equal(foldTopicsForContext(reg, '/ssh-keys'), foldTopicsForContext(reg, '/github-tokens'));
+  assert.deepEqual(contextTopics(reg, '/ssh-keys').map((t) => t.id), ['creds', 'c']);
+});
+
+test('a dynamic child route and a redirect source ground like their canonical route', () => {
+  const reg = buildRegistry([
+    { id: OVERVIEW_ID, routes: [], title: 'Overview', summary: '', seeAlso: [], askPrompts: ['hi'], body: 'overview body' },
+    { id: 'chat', routes: ['/chats'], title: 'Chat', summary: '', body: 'chat body', askPrompts: ['q'], seeAlso: [] },
+  ]);
+  assert.deepEqual(contextTopics(reg, '/chats/agent-42').map((t) => t.id), ['chat']);
+  assert.deepEqual(contextTopics(reg, '/').map((t) => t.id), ['chat']); // / → /chats
+});
+
+test('an overlay context resolves through its CONTEXT_KEYS alias', () => {
+  // The first-run wizard's steps carry no topic of their own; each aliases the
+  // page whose topic answers it, so the grounding must match that page's set.
+  const reg = scopedRegistry();
+  const viaAlias = contextTopics(reg, { overlay: 'wizard:setup', step: 'ssh-key' });
+  assert.deepEqual(viaAlias.map((t) => t.id), contextTopics(reg, '/ssh-keys').map((t) => t.id));
+  assert.deepEqual(viaAlias.map((t) => t.id), ['creds', 'c']);
+});
+
+test('an overlay with no topic and no alias falls through to the page underneath', () => {
+  // `modal:skill-detail` is registered for the z-index lift only (#1990), so a
+  // question asked with it open is grounded on the page's topic.
+  const reg = scopedRegistry();
+  assert.deepEqual(
+    contextTopics(reg, { route: '/a', overlay: 'modal:skill-detail' }).map((t) => t.id),
+    ['a', 'b'],
+  );
+});
+
+test('groundingContexts covers the fallback plus every claimed key', () => {
+  const contexts = groundingContexts(scopedRegistry());
+  assert.equal(contexts[0], null, 'the no-route fallback is a measured context');
+  for (const key of ['/a', '/b', '/c', '/ssh-keys', '/github-tokens']) {
+    assert.ok(contexts.includes(key), `${key} must be measured`);
+  }
+});
+
+test('worstCaseFold names the largest context; an unlinked new topic does not enlarge it', () => {
+  // Sized like the real set (one dense page plus its neighbour, small others) so
+  // the new topic's own context cannot itself be the largest — in the shipped
+  // registry the worst neighbourhood is ~66 000 chars, far above one page.
+  const topics = [
+    { id: OVERVIEW_ID, routes: [], title: 'Overview', summary: '', seeAlso: [], askPrompts: ['hi'], body: 'overview body' },
+    { id: 'a', routes: ['/a'], title: 'A', summary: '', askPrompts: ['q'], seeAlso: [{ label: 'B', to: '/b' }], body: 'x'.repeat(40_000) },
+    { id: 'b', routes: ['/b'], title: 'B', summary: '', askPrompts: ['q'], seeAlso: [], body: 'body b' },
+    { id: 'c', routes: ['/c'], title: 'C', summary: '', askPrompts: ['q'], seeAlso: [], body: 'body c' },
+  ];
+  const before = worstCaseFold(buildRegistry(topics));
+  assert.equal(before.context, '/a', 'the densest neighbourhood is the worst case');
+
+  // A new page nobody links to: its own context is a new candidate, but a small
+  // one — the worst case does not move at all.
+  const added = { id: 'new', routes: ['/new'], title: 'New', summary: '', body: 'x'.repeat(10_000), askPrompts: ['q'], seeAlso: [] };
+  assert.equal(worstCaseFold(buildRegistry([...topics, added])).length, before.length);
+
+  // The honest limit of the mechanism, stated as a test rather than left to be
+  // discovered: EXPANDING a topic the worst context links to does enlarge it — by
+  // that topic's growth, not by the sum of every topic's.
+  const grown = topics.map((t) => (t.id === 'b' ? { ...t, body: 'x'.repeat(10_000) } : t));
+  const after = worstCaseFold(buildRegistry(grown));
+  assert.equal(after.context, '/a');
+  assert.equal(after.length - before.length, 10_000 - 'body b'.length);
 });
 
 test('routeGroundingPointer points at the resolved topic, empty otherwise', () => {

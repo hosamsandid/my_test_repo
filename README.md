@@ -91,14 +91,13 @@ You can start from a curated **process template**, compose one stage-by-stage, o
 
 ## How it works
 
-Agent Studio runs as a single Podman compose stack with four services:
+Agent Studio runs as a single Podman compose stack. Its core services:
 
 | Service | Role |
 |---|---|
 | **Conduwuit** (Matrix homeserver) | The communication backbone. Humans and agents meet in private 1:1 chat rooms hosted entirely on your network — no external messaging service. |
 | **Orchestrator** | The engine. Manages agent lifecycles, spawns **one isolated container per agent**, runs the trigger scheduler, polls GitHub, routes process events, and serves the internal API. It has no chat identity of its own. |
 | **Admin Console** | The control plane on `:4000`. A browser UI for creating agents, managing credentials and environments, designing Flows, watching live sessions, and chatting with any agent directly. |
-| **bp-explorer** | A read-only viewer for Briefing-Pack metadata (used by the orchestrator agent role). |
 
 Each agent runs in its **own container** with an isolated network and filesystem, carries a label so the orchestrator can reconcile live state, and drives the Claude Code CLI. Everything an agent does — messages, tool calls, results, trigger runs — is streamed to an append-only session log you can watch live in the console.
 
@@ -174,11 +173,6 @@ The steps above work on Windows with these additions:
 1. **Install `jq`** (required by `setup.sh`): `winget install --id jqlang.jq`. Restart your shell so it's on `PATH`.
 2. **Pre-set credentials in `.env`** — `setup.sh` uses an interactive password prompt that is unreliable in Git Bash. Add `ADMIN_USER=admin` and `ADMIN_PASS=yourpassword` before running it.
 3. **Run the script via bash explicitly:** `bash orchestrator/setup.sh`.
-4. **Create `~/.gitconfig` before `make up`** — `bp-explorer` bind-mounts it and fails to start if it's missing:
-   ```bash
-   git config --global user.name "Your Name"
-   git config --global user.email "you@example.com"
-   ```
 
 ---
 
@@ -190,7 +184,6 @@ The steps above work on Windows with these additions:
 | `orchestrator/` | The control-plane service: agent lifecycle, container spawning, trigger scheduler, GitHub poller, internal API |
 | `admin-console/` | The web UI on `:4000` — `src/` is the React app, `api/` the Express backend it talks to |
 | `agent-image/` | The per-agent container image. `scripts/agent-entrypoint.py` is the live agent runtime |
-| `bp-explorer/` | Read-only viewer for Briefing-Pack metadata |
 | `mcp-servers/` | Reference MCP server implementations, seeded into the pool |
 | `e2e/` | Playwright end-to-end suite, journey specs, and the doc/deck/video generators |
 | `docker-compose.yml` · `Makefile` · `.env.example` | How the stack is built, started and configured |

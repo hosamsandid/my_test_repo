@@ -40,8 +40,8 @@ set -euo pipefail
 #   3. bootstraps the Matrix admin into the env file (own homeserver DB ⇒ own
 #      token; seeded from .env.k8s or .env on first run)
 #   4. renders the env file into the agent-studio-env Secret
-#   5. applies the overlay's app (orchestrator / admin-console / bp-explorer
-#      / ingress) and waits for rollout
+#   5. applies the overlay's app (orchestrator / admin-console / ingress) and
+#      waits for rollout
 #   6. seeds the skill pool into the workspace PVC
 #
 # Afterwards:
@@ -266,14 +266,20 @@ KC -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
   --from-env-file="$SECRET_ENV" --dry-run=client -o yaml | KC apply -f -
 
 # --- the rest of the stack -----------------------------------------------------
-# app = orchestrator / admin-console / bp-explorer / ingress (test + preprod
-# overlays include the env's Ingress + ManagedCertificate + IAP BackendConfig,
-# so ingress changes no longer need a manual out-of-band apply).
+# app = orchestrator / admin-console / ingress (test + preprod overlays
+# include the env's Ingress + ManagedCertificate + IAP BackendConfig, so
+# ingress changes no longer need a manual out-of-band apply).
 KC apply -k "${OVERLAY}/app"
+# bp-explorer was removed from the stack (#1963). `apply -k` does not prune, so
+# an environment first deployed before the removal would keep the old
+# Deployment and Service running against the workspace PVC indefinitely. Reap
+# them here instead of orphaning them; a no-op where it never existed.
+KC -n "$NAMESPACE" delete deploy/bp-explorer svc/bp-explorer --ignore-not-found >/dev/null \
+  || log "note: could not remove the legacy bp-explorer workload — remove it by hand"
 # CI's tag-pinned apply rolls pods only when the tag changes; this script also
 # restarts so a re-run picks up Secret-only changes (e.g. rotated credentials).
-KC -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer >/dev/null
-for d in orchestrator admin-console bp-explorer; do
+KC -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console >/dev/null
+for d in orchestrator admin-console; do
   log "waiting for ${d} ..."
   KC -n "$NAMESPACE" rollout status "deploy/${d}" --timeout=300s
 done

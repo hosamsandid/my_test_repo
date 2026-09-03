@@ -12,6 +12,7 @@ set -euo pipefail
 #                    simulated set-images.sh pin — zero `:latest` anywhere
 #   preprod          namespace fully rewritten (Namespace object, RoleBinding
 #                    subjects, no stray agent-studio), distinct AEE_INSTANCE_ID
+#   every overlay    no trace of the deleted bp-explorer service (#1963)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AR_PATH="europe-west3-docker.pkg.dev/acn-projectroots/agent-studio"
@@ -47,6 +48,20 @@ for d in base/core base/app base/e2e \
   fi
 done
 
+# #1963 deleted the bp-explorer service. Swept over EVERY rendered overlay
+# rather than one, because a base resource entry, an overlay `images:` entry and
+# a patch target can each reintroduce it independently — and a leftover
+# Deployment in a base would otherwise only surface as a rollout wait.
+echo "== bp-explorer removed from the stack (#1963)"
+for f in "$TMP"/*.yaml; do
+  expect_absent "$f" 'bp-explorer' "$(basename "$f" .yaml): no bp-explorer"
+done
+# ...and the app base still carries the two services that remain. Without this,
+# the sweep above would also pass for a render that silently produced nothing.
+for c in orchestrator admin-console; do
+  expect_grep "$TMP/base-app.yaml" "app\\.kubernetes\\.io/component: $c" "base/app: $c still present"
+done
+
 echo "== kind overlay (local dev)"
 KIND_APP="$TMP/overlays-kind-app.yaml"
 expect_grep   "$KIND_APP" 'imagePullPolicy: Never'          "kind: side-loaded images use Never"
@@ -79,7 +94,7 @@ expect_absent "$E2E_APP" 'pkg\.dev'        "kind-e2e: no registry paths"
 
 echo "== test overlay (unpinned placeholder render)"
 TEST_APP="$TMP/overlays-test-app.yaml"
-for img in orchestrator admin-console bp-explorer; do
+for img in orchestrator admin-console; do
   expect_grep "$TEST_APP" "image: $AR_PATH/agent-studio-$img:" "test: $img from Artifact Registry"
 done
 expect_grep   "$TEST_APP" 'imagePullPolicy: Always'                          "test: pull policy Always"
@@ -135,10 +150,10 @@ for env in test preprod; do
   render "$TMP/k8s-sim/overlays/$env/app" > "$SIM"
   expect_absent "$SIM" ':latest' "$env pinned: zero :latest"
   n="$(grep -c ":$CHECK_TAG" "$SIM")" || n=0
-  if [ "$n" -eq 4 ]; then # 3 pod images + AGENT_IMAGE
-    note "$env pinned: all 4 image refs carry :$CHECK_TAG"
+  if [ "$n" -eq 3 ]; then # 2 pod images + AGENT_IMAGE (bp-explorer went in #1963)
+    note "$env pinned: all 3 image refs carry :$CHECK_TAG"
   else
-    fail "$env pinned: expected 4 refs with :$CHECK_TAG, found $n"
+    fail "$env pinned: expected 3 refs with :$CHECK_TAG, found $n"
   fi
   # #1941 AC11, the load-bearing half: a variant image is named by a toolchain
   # manifest at RUNTIME, so it is never a pod `image:` field and the four refs

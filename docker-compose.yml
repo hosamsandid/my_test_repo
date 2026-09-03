@@ -107,27 +107,6 @@ services:
       conduwuit:
         condition: service_started
 
-  bp-explorer:
-    build:
-      context: ./bp-explorer
-    container_name: ${COMPOSE_PROJECT_NAME}-bp-explorer
-    restart: unless-stopped
-    expose:
-      - "8765"
-    volumes:
-      - agent-pool-workspace:/workspace
-      - ~/.gitconfig:/root/.gitconfig:ro
-    environment:
-      AEE_ENABLED: "true"
-      AEE_ORCHESTRATOR_URL: http://orchestrator:4002
-      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL}"
-      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN}"
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "${ANTHROPIC_DEFAULT_SONNET_MODEL}"
-      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "${CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:-1}"
-    depends_on:
-      orchestrator:
-        condition: service_started
-
   admin-console:
     build:
       context: ./admin-console

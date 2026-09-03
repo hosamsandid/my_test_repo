@@ -41,11 +41,13 @@ jobs:
       - name: Install jq (setup.sh prerequisite)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Ensure ~/.gitconfig is a file (podman bind-mount guard)
-        # docker-compose.yml bind-mounts ~/.gitconfig into the orchestrator (:ro).
-        # On CI the file doesn't exist, so podman auto-creates the bind source as a
-        # DIRECTORY when the stack comes up, breaking later git/gh calls. Pre-create
-        # it as a real file (identical to ui-screenshots.yml).
+      - name: Ensure ~/.gitconfig is a file (git identity for the commit step)
+        # No compose service bind-mounts ~/.gitconfig any more — bp-explorer was its
+        # only mounter and went with the service in #1963, so podman can no longer
+        # turn the missing file into a DIRECTORY. The step stays for its other half:
+        # the `git commit` further down needs a committer identity, and the rmdir is
+        # now only a cheap guard against a directory a previous run left behind
+        # (identical to ui-screenshots.yml).
         run: |
           set -euo pipefail
           [ -d "$HOME/.gitconfig" ] && { rmdir "$HOME/.gitconfig" 2>/dev/null || rm -rf "$HOME/.gitconfig"; }

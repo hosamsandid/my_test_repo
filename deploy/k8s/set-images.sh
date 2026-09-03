@@ -9,7 +9,7 @@ set -euo pipefail
 # Rewrites, in the WORKING TREE only (never commit a pinned tag — the
 # checked-in placeholder stays `latest` so a plain `kubectl kustomize`
 # always renders):
-#   overlays/<env>/app/kustomization.yaml     every `newTag:` (3 pod images)
+#   overlays/<env>/app/kustomization.yaml     every `newTag:` (2 pod images)
 #   overlays/<env>/app/patch-agent-image.yaml the as-agent tag (env var on the
 #                                             orchestrator — invisible to the
 #                                             kustomize images: transformer)

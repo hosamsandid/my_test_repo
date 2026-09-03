@@ -96,10 +96,12 @@ winget install --id jqlang.jq
 > **`jq` is not optional.** `orchestrator/setup.sh` aborts with `ERROR: jq is required` if
 > it is missing. Restart your shell afterwards so it is on `PATH`.
 
-### 9. A global git identity
+### 9. A global git identity (no longer required by the stack)
 
-`bp-explorer` bind-mounts `~/.gitconfig` read-only and **fails to start if the file does
-not exist** — which is the default on a fresh machine. From Git Bash:
+This used to be a hard prerequisite: `bp-explorer` bind-mounted `~/.gitconfig` read-only
+and refused to start without it. That service was removed in #1963 and no compose service
+mounts the file any more. Still worth setting if you intend to commit from this checkout —
+from Git Bash:
 
 ```bash
 git config --global user.name "Your Name"
@@ -299,7 +301,7 @@ Log in at <http://localhost:4000> with the credentials from your `.env` (`ADMIN_
 | `make agent-image` | Rebuild the per-agent container image (`as-agent:latest`) |
 | `make update` | `git pull --ff-only` + down + up in one step. Fails (rather than merging) if you have local commits or a dirty tree |
 | `make ps` | Show container status for `conduwuit`, `orchestrator`, `admin-console` |
-| `make logs` | Follow logs of those three. **`bp-explorer` is not included** — use `podman logs -f <project>-bp-explorer` for it |
+| `make logs` | Follow logs of those three |
 | `make seed-pool` | Seed skills, memory, agent role templates, process templates and reference MCP servers into the shared pool volume |
 
 ---
@@ -365,6 +367,5 @@ You do not need to repeat the full setup. Next time:
 | Orchestrator cannot spawn agent containers | Verify `PODMAN_HOST_SOCKET` in `.env` points to the correct socket path. Run `podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'` to find it. |
 | `setup.sh` hangs at the password prompt | Set `ADMIN_PASS=<yourpassword>` in `.env` before running it — the interactive prompt is unreliable in Git Bash. Run it as `bash orchestrator/setup.sh`. |
 | `ERROR: jq is required` | Install it: `winget install --id jqlang.jq`, then restart your shell. |
-| `bp-explorer` will not start | `~/.gitconfig` is missing. Create it with `git config --global user.name …` and restart. |
 | Team-Setup wizard shows no processes or roles | You skipped `make seed-pool`, or it seeded a different volume — see Step 6. |
 | Agent creation fails with an image-not-found error | The `as-agent:latest` image was never built. Run `make agent-image`, or `podman build -t as-agent:latest -f agent-image/Dockerfile agent-image/`. |

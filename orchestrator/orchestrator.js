@@ -910,6 +910,12 @@ function migrateSkillGrantsToAgents() {
   for (const id of listAgentIds()) {
     const cfg = loadAgentConfig(id);
     if (!cfg) continue;
+    // R2 (#1962): a leftover config naming a retired role is not touched — not
+    // rewritten and not counted below. This loop has no other role gate, and it
+    // runs from main() BEFORE the Orchestrator (and therefore before the
+    // startAllEnabledAgents role gate) exists, so it would otherwise be the one
+    // path that writes to a config the removal promises to leave alone.
+    if (!isSupportedAgentRole(cfg.role)) continue;
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     const next = migrateSkillGrant(cfg, env);
     if (next) {

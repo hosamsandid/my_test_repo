@@ -34,6 +34,14 @@ const path = require('node:path');
 
 const SRC = fs.readFileSync(path.join(__dirname, 'orchestrator.js'), 'utf8');
 
+// Escape every regex metacharacter — INCLUDING the backslash — before feeding a
+// plain string to `new RegExp`. The backslash has to come first in the class or
+// the escape character itself passes through unescaped, which is both a wrong
+// pattern and what `js/incomplete-sanitization` flags. A route like
+// `/internal/bp-events` needs no `/` escaping inside a RegExp *constructor*
+// (only a literal would), so escaping the metacharacters is the whole job.
+const escapeRe = (s) => String(s).replace(/[\\.*+?^${}()|[\]]/g, '\\$&');
+
 /**
  * Comments name the very feature under test — strip them before asserting.
  *
@@ -162,7 +170,7 @@ test('AC2/AC6: no BriefingPack scanning, claim or event-routing helper survives'
     'bpInstanceSystemPrompt',
     'defaultSystemPromptFor',
   ]) {
-    assert.doesNotMatch(CODE, new RegExp(gone), `${gone} should be gone from orchestrator.js`);
+    assert.doesNotMatch(CODE, new RegExp(escapeRe(gone)), `${gone} should be gone from orchestrator.js`);
   }
   // …and neither of the two deleted modules is required any more.
   assert.doesNotMatch(CODE, /require\("\.\/bp-event-router"\)/);
@@ -174,7 +182,7 @@ test('AC2/AC6: no BriefingPack scanning, claim or event-routing helper survives'
 
 test('AC1: the BriefingPack routes are gone', () => {
   for (const route of ['sync-bps', 'claim-tick', '/internal/bp-events']) {
-    assert.doesNotMatch(CODE, new RegExp(route.replace(/\//g, '\\/')), `route ${route} should be gone`);
+    assert.doesNotMatch(CODE, new RegExp(escapeRe(route)), `route ${route} should be gone`);
   }
   // The BP claim endpoint. Anchored on the route matcher rather than on the
   // bare word "claim", which legitimately appears in the label-claim machinery.

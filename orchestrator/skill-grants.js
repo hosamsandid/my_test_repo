@@ -1,3 +1,7 @@
+'use strict';
+
+const { isSupportedAgentRole } = require("./agent-role-support");
+
 // Team-owned skill grants (docs/knowledge-skill-activation-concept.md).
 //
 // The skill GRANT (which skill names are active for an agent) lives on the
@@ -50,6 +54,14 @@ function hasSkillGrant(skills) {
 function migrateSkillGrant(cfg, env) {
   if (!cfg) return null;
   if (cfg.role === "team-member") return null;
+  // A config naming a RETIRED role is left byte-identical on disk (#1962, epic
+  // #1961 decision R2 — a hard cut, not a migration). A leftover bp-instance
+  // stub has no `skills` key but does carry `environmentId`, so without this it
+  // passes both other early returns and gets rewritten by the startup
+  // migration — contradicting the promise this removal publishes. Keyed on the
+  // shared predicate rather than a role list, so it also covers `orchestrator`
+  // and cannot drift from the startup gate.
+  if (!isSupportedAgentRole(cfg.role)) return null;
   if (Array.isArray(cfg.skills)) return null;
   const inherited = env && Array.isArray(env.skills) ? [...env.skills] : [];
   return { ...cfg, skills: inherited };

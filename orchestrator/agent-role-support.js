@@ -32,7 +32,14 @@
 // Legacy `expert` / `expert-group` / `expert-instance` names are NOT listed:
 // `normalizeAgentConfig` maps them onto the modern trio before any consumer
 // sees them, so by the time a role reaches this predicate it is already
-// normalized. `ephemeral` IS listed — the ephemeral-agent route creates one.
+// normalized.
+//
+// `ephemeral` is listed **defensively, not because anything writes it**: the
+// ephemeral-agent route persists `role: 'agent'` with a separate
+// `ephemeral: true` flag, and no code path in the tree writes
+// `role: 'ephemeral'`. It stays in the list so a hand-written or externally
+// produced config using it as a role is admitted rather than skipped at boot —
+// dropping it would turn a harmless list entry into a refusal.
 
 const SUPPORTED_AGENT_ROLES = Object.freeze([
   'agent',

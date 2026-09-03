@@ -48,8 +48,11 @@ After creation an agent appears below as a card:
 
 - **Active** — running and ready to chat.
 - **Paused** — the workspace is kept, the process is stopped.
-- **Not initialised** — a stub (e.g. an orchestrator's mission agents). One
-  click on **Activate** brings it to life.
+- **Not initialised** — a stub: it has its configuration and triggers, but no
+  workspace, no cloned repository and no running process. Either an
+  orchestrator's mission agents, or the members of a team materialized with
+  **Materialize agents now** left off. One click on **Activate** brings it to
+  life.
 
 ## Disable vs Reset to stub vs Delete
 

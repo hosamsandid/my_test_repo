@@ -6,6 +6,7 @@ import {
   validateLaunch,
   buildLaunchBody,
   launchSubmitLabel,
+  launchResultMessage,
   runLaunchStream,
   slugify,
   sanitizeTeamIdInput,
@@ -334,9 +335,7 @@ export default function LaunchStep({
             <CheckCircle size={18} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />
             <div>
               <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
-                {result.message
-                  ? `Team ${result.teamName}: ${result.message}`
-                  : `Team ${result.teamName} ready — ${result.created?.length || 0} agent(s) created.`}
+                {launchResultMessage(result)}
               </div>
             </div>
           </div>

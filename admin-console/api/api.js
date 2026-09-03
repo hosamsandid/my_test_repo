@@ -13552,6 +13552,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const labelSuffix = (typeof body.labelSuffix === 'string' && body.labelSuffix.trim())
     ? body.labelSuffix.trim()
     : '';
+  // Deferred materialization (#1955) — see the non-streaming handler above for
+  // the full rationale. BOTH launch surfaces (the Team-Setup wizard and the Flow
+  // Editor's Materialize dialog) submit here, so the flag has to be honoured on
+  // this path as well; reading it anywhere else left the checkbox inert. Default
+  // true, so a caller that omits it (or the wizard, which sends an explicit
+  // true) keeps the immediate-materialization behaviour byte-for-byte.
+  const materializeMembers = body.materializeMembers !== false;
 
   // ── 1. Validate input ─────────────────────────────────────────────
   if (!READY_LABEL_RE.test(readyLabel)) {
@@ -13861,10 +13868,20 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
   if (!teamExists) plan.push({ id: 'team', label: `Create team agent (${teamAgentId})` });
   for (const p of toCreate) {
-    plan.push({ id: `member:${p.memberId}`, label: `Create member: ${p.template.displayName}` });
+    // Say which mode the step runs in (#1955 AC4) — a stub create writes config
+    // + triggers only, so labelling it the same as a full materialization would
+    // claim a Matrix user, a clone and a container that never happen.
+    plan.push({
+      id: `member:${p.memberId}`,
+      label: materializeMembers
+        ? `Create member: ${p.template.displayName}`
+        : `Create member (stub): ${p.template.displayName}`,
+    });
   }
   if (knowledgeConfigPatch) plan.push({ id: 'knowledge', label: 'Apply knowledge-learning settings' });
-  if (toCreate.length > 0) plan.push({ id: 'dms', label: 'Prepare agent conversations' });
+  // No DM phase for stub members — they have no Matrix user yet (#1955), so the
+  // step is neither planned nor run rather than announced and silently skipped.
+  if (toCreate.length > 0 && materializeMembers) plan.push({ id: 'dms', label: 'Prepare agent conversations' });
   emit({ type: 'plan', steps: plan });
 
   // ── 5. Atomic create with rollback ────────────────────────────────
@@ -14008,10 +14025,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         ? `${p.template.displayName} ${p.instanceIndex}`
         : p.template.displayName;
       // Same member-create body as the non-streaming endpoint + the Flow Editor
-      // add-role-from-template (#586). `materialize` is left to the orchestrator
-      // default here (the streaming wizard always materializes its members).
+      // add-role-from-template (#586). `materialize` is threaded exactly as the
+      // non-streaming handler does (#1955) — this is the request path both UI
+      // surfaces use, so leaving it to the orchestrator default is what made the
+      // Materialize dialog's checkbox inert.
       const memberBody = buildMemberFromTemplate(p.template, {
         teamId, memberId: p.memberId, memberDisplayName, vars: memberVars,
+        materialize: materializeMembers,
       });
       const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(teamAgentId)}/members`, {
         method: 'POST',
@@ -14030,7 +14050,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       // without its repo is a mute box. Treat any clone warning as fatal
       // so the user gets a real error in the progress card and the
       // half-baked team gets rolled back, instead of a green "ready" with
-      // empty workspaces.
+      // empty workspaces. Inert in stub mode — a stub create never seeds a
+      // workspace, so it returns no warnings; the clone happens at enable.
       const cloneWarning = (data.warnings || []).find(w => /^git clone /.test(w));
       if (cloneWarning) {
         emit({ type: 'step', id: stepId, status: 'error', error: cloneWarning });
@@ -14061,7 +14082,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       emit({ type: 'step', id: 'knowledge', status: 'done' });
     }
 
-    if (toCreate.length > 0) {
+    // DM rooms (best-effort). Skipped entirely for deferred (stub) members —
+    // they have no Matrix user yet, so the room is created when the stub is
+    // materialized and a chat is opened (#1955; mirrors the non-streaming path).
+    if (toCreate.length > 0 && materializeMembers) {
       emit({ type: 'step', id: 'dms', status: 'running' });
       for (const p of toCreate) {
         try {
@@ -14094,6 +14118,9 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         env: envId,
         team: teamAgentId,
         created: created.members,
+        // Which mode actually ran (#1955 AC4) — same key the non-streaming
+        // handler echoes, so a caller reads it identically on both paths.
+        materialized: materializeMembers,
         skipped: planned
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),

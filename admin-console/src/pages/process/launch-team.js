@@ -169,6 +169,24 @@ export function launchSubmitLabel({ saving, extend, materializeNow } = {}) {
   return materializeNow !== false ? 'Create team' : 'Create team (stubs)';
 }
 
+// Headline for the result card of a completed launch. A stub launch
+// (`materialized: false`, the mode the streaming endpoint now honours — #1955)
+// has to read differently: no repository was cloned and no agent is running yet,
+// so calling the team "ready" would repeat exactly the lie the ignored checkbox
+// used to tell. The server reports the mode it actually ran in; a payload from
+// before #1955 carries no `materialized` key, and an absent flag is read as the
+// backend default (materialize-now) rather than guessed as a stub.
+export function launchResultMessage(result) {
+  const r = result || {};
+  const name = r.teamName;
+  if (r.message) return `Team ${name}: ${r.message}`;
+  const n = r.created?.length || 0;
+  if (r.materialized === false) {
+    return `Team ${name} created — ${n} agent(s) as stubs. Enable a member to materialize it.`;
+  }
+  return `Team ${name} ready — ${n} agent(s) created.`;
+}
+
 // Split a decoded NDJSON buffer into complete parsed events + the trailing
 // partial line. Blank lines are skipped; unparseable lines are collected in
 // `errors` (callers log-and-continue). Pure so the stream handling both surfaces

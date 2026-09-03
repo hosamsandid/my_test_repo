@@ -330,7 +330,7 @@ by raising the number again — **route-scoped folding** (fold the current route
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
 pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time.
+a fourth time. The Token Usage child (#1994) added ~1.7k chars of prose and took the assembled prompt to **~306.5k** — still comfortable, but the trend is what the paragraph above predicts.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

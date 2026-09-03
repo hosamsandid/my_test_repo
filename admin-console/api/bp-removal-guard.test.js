@@ -25,6 +25,11 @@
 //   - the retained import no longer READS through bp-explorer. It walks the
 //     mission directory in Node (`briefings-fs.js`) behind `safeAgentPath`,
 //     which is what lets Phase 2 (#1963) delete the service.
+//
+// #1963 (Phase 2) then deleted it, which inverted the last test in this file:
+// `BP_EXPLORER_URL` was a documented FLOOR ("the definition plus its one
+// remaining consumer") and is now an absence. The service's deployment wiring
+// is a different claim and has its own guard, `bp-explorer-removal.test.js`.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -161,13 +166,23 @@ test('#1965 AC3: the import resolves its path through the shared containment bar
   assert.doesNotMatch(route, /req\.body\?\.workspace/, 'the unguarded workspace body field is back');
 });
 
-test('#1965: bp-explorer is no longer reachable from either BP flow path', () => {
-  // BP_EXPLORER_URL is still legitimately defined and used — by the workspace
-  // directory picker, which #1965 does not touch (it is Phase 2's to remove
-  // with the service). So this is anchored on the two routes that DID stop
-  // using it rather than on the constant, which would fail for the wrong
-  // reason. The definition plus that one consumer is the expected floor.
-  const uses = (CODE.match(/BP_EXPLORER_URL/g) || []).length;
-  assert.ok(uses >= 2, `expected the definition plus >=1 consumer, saw ${uses}`);
-  assert.doesNotMatch(CODE, /BP_EXPLORER_URL[^\n]*api\/briefings/, 'the /api/briefings fetch is back');
+test('#1963: the console holds no address for bp-explorer at all', () => {
+  // #1965 left this as a FLOOR assertion (`uses >= 2`): the constant and its
+  // one remaining consumer, the workspace directory picker, were explicitly
+  // Phase 2's to remove with the service. #1963 removed both, so the floor
+  // inverts into an absence — the constant, its env override, and the
+  // `/api/workspace/tree` proxy that was its last caller.
+  assert.doesNotMatch(CODE, /BP_EXPLORER_URL/, 'the bp-explorer base URL is back');
+  assert.doesNotMatch(CODE, /bp-explorer:8765/, 'the bp-explorer service address is back');
+  assert.doesNotMatch(CODE, /workspace\/dirs/, 'the directory-picker proxy route is back');
+  assert.doesNotMatch(CODE, /api\/workspace\/tree/, 'the upstream tree fetch is back');
+  // The sibling workspace handlers the picker route sat between are untouched —
+  // without this, the four assertions above would also pass for a file the
+  // comment strip had hollowed out.
+  for (const kept of [
+    "app.get('/api/agents/:agentId/workspace/tree'",
+    "app.get('/api/agents/:agentId/workspace/file'",
+  ]) {
+    assert.ok(CODE.includes(kept), `${kept} must survive`);
+  }
 });

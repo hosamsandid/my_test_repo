@@ -17,8 +17,8 @@ set -euo pipefail
 #      (k8s equivalent of orchestrator/setup.sh: temporarily patches the
 #      conduwuit Deployment with `--execute "users create-user …"`)
 #   6. renders .env into the agent-studio-env Secret
-#   7. applies the overlay's app (orchestrator / admin-console / bp-explorer,
-#      plus the fakes in --e2e mode) and waits for rollout
+#   7. applies the overlay's app (orchestrator / admin-console, plus the fakes
+#      in --e2e mode) and waits for rollout
 #
 # Afterwards (4100, NOT 4000 — the compose stack owns :4000 locally):
 #   kubectl -n agent-studio port-forward svc/admin-console 4100:4000
@@ -130,7 +130,6 @@ build_and_load() {
 build_and_load agent-studio-orchestrator  "${REPO_ROOT}/orchestrator"
 build_and_load agent-studio-admin-console "${REPO_ROOT}/admin-console" \
   --build-arg "GIT_COMMIT=${GIT_COMMIT}" --build-arg "GIT_DIRTY="
-build_and_load agent-studio-bp-explorer   "${REPO_ROOT}/bp-explorer"
 build_and_load as-agent "${REPO_ROOT}/agent-image" -f "${REPO_ROOT}/agent-image/Dockerfile"
 
 if [ "$E2E_MODE" = "1" ]; then
@@ -301,9 +300,15 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
 # --- 7. the rest of the stack ------------------------------------------------
 # The kind-e2e overlay's app/ already includes the fakes (base/e2e).
 kubectl apply -k "${OVERLAY}/app"
+# bp-explorer was removed from the stack (#1963). `apply -k` does not prune, so
+# a cluster first brought up before the removal would keep the old Deployment
+# and Service running against the workspace PVC indefinitely. Reap them here
+# instead of orphaning them; a no-op on every cluster that never had it.
+kubectl -n "$NAMESPACE" delete deploy/bp-explorer svc/bp-explorer --ignore-not-found >/dev/null \
+  || log "note: could not remove the legacy bp-explorer workload — remove it by hand"
 # Pick up changed images/secret even when the manifests are unchanged.
-kubectl -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console deploy/bp-explorer >/dev/null
-for d in orchestrator admin-console bp-explorer; do
+kubectl -n "$NAMESPACE" rollout restart deploy/orchestrator deploy/admin-console >/dev/null
+for d in orchestrator admin-console; do
   log "waiting for ${d} ..."
   kubectl -n "$NAMESPACE" rollout status "deploy/${d}" --timeout=180s
 done

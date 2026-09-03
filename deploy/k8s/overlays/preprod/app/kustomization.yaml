@@ -21,9 +21,6 @@ images:
   - name: agent-studio-admin-console
     newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-admin-console
     newTag: latest
-  - name: agent-studio-bp-explorer
-    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-bp-explorer
-    newTag: latest
 patches:
   - path: patch-pull-policy.yaml
     target:

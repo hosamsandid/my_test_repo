@@ -70,11 +70,12 @@ npm install -g @anthropic-ai/claude-code
 git --version && node -v && gh --version && jq --version && make --version && podman --version && claude --version
 ```
 
-### A global git identity is required
+### A global git identity (no longer required by the stack)
 
-`bp-explorer` bind-mounts `~/.gitconfig` read-only and **fails to start if the file does
-not exist** — which is the default on a fresh machine. Create it before your first
-`make up`:
+This used to be a hard prerequisite: `bp-explorer` bind-mounted `~/.gitconfig` read-only
+and refused to start without it. That service was removed in #1963 and no compose service
+mounts the file any more, so `make up` no longer cares. Still worth setting if you intend
+to commit from this checkout:
 
 ```bash
 git config --global user.name "Your Name"
@@ -241,7 +242,7 @@ source ~/.zshrc
 | `make agent-image` | Rebuild the per-agent container image (`as-agent:latest`) |
 | `make update` | `git pull --ff-only` + down + up in one step. Fails (rather than merging) if you have local commits or a dirty tree |
 | `make ps` | Show container status for `conduwuit`, `orchestrator`, `admin-console` |
-| `make logs` | Follow logs of those three. **`bp-explorer` is not included** — use `podman logs -f <project>-bp-explorer` for it |
+| `make logs` | Follow logs of those three |
 | `make seed-pool` | Seed skills, memory, agent role templates, process templates and reference MCP servers into the shared pool volume |
 
 ---
@@ -271,7 +272,6 @@ make up
 | `make` not found | Xcode Command Line Tools missing. Run `xcode-select --install`. |
 | Admin Console not loading at :4000 | Check `podman ps` — ensure `admin-console` container is running. Rebuild with `make build` if needed. |
 | Orchestrator cannot spawn agent containers | Verify `PODMAN_HOST_SOCKET` in `.env` points to the correct socket path. Run `podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'` to find it. Note that on a `--rootful` machine the in-VM socket is `/run/podman/podman.sock`, not the rootless `/run/user/<uid>/…` path. |
-| `bp-explorer` will not start | `~/.gitconfig` is missing. Create it with `git config --global user.name …` (see prerequisites) and restart. |
 | Team-Setup wizard shows no processes or roles | You skipped `make seed-pool`, or it seeded a different volume — see Step 4. |
 | Agent creation fails with an image-not-found error | The `as-agent:latest` image was never built. Run `make agent-image` (`make up` does this for you; a plain `podman compose up` does **not**). |
 | Git operations from agents fail with an SSH error | The orchestrator bind-mounts a fixed key path, `~/.ssh/id_accenturecodefoundry` (see `docker-compose.yml`). If your key has a different name, either create that file or adjust the mount and `GIT_SSH_COMMAND` in `docker-compose.yml`. If the path does not exist, Podman creates a *directory* there and every git-over-SSH call fails. |

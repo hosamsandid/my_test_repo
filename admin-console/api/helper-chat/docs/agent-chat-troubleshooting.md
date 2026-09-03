@@ -27,7 +27,7 @@ make ps
 ```
 
 After `make up`:
-- `podman ps` shows fresh `conduwuit`, `orchestrator`, `admin-console` (and `bp-explorer`).
+- `podman ps` shows fresh `conduwuit`, `orchestrator`, `admin-console`.
 - Enabling an agent starts its container **without** sending a message (containers
   start eagerly — see #184). Confirm: `podman ps` lists a container labelled
   `aee.agent.id=<id>` shortly after enable.

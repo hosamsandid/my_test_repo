@@ -18,11 +18,8 @@ images:
   - name: agent-studio-admin-console
     newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-admin-console
     newTag: latest
-  - name: agent-studio-bp-explorer
-    newName: europe-west3-docker.pkg.dev/acn-projectroots/agent-studio/agent-studio-bp-explorer
-    newTag: latest
 patches:
-  # All three app Deployments pull from AR — Always protects against a
+  # Both app Deployments pull from AR — Always protects against a
   # force-pushed tag (and matches the historic gke-up.sh sed behaviour).
   - path: patch-pull-policy.yaml
     target:

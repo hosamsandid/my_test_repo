@@ -200,7 +200,6 @@ const DEFAULT_TEAM_ID = 'default';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
-const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || 'http://bp-explorer:8765';
 
 fs.mkdirSync(ENVIRONMENTS_DIR, { recursive: true });
 fs.mkdirSync(SSH_KEYS_DIR, { recursive: true });
@@ -16138,27 +16137,14 @@ app.get('/api/agents/:agentId/git-info', async (req, res) => {
   }
 });
 
-// Directory-only listing — delegated to BP-Explorer for orchestrator directory picker.
-app.get('/api/agents/:agentId/workspace/dirs', apiLimiter, async (req, res) => {
-  const { agentId } = req.params;
-  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
-  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
-  // Resolve the agent root through the shared safeAgentPath resolver (same as
-  // the sibling workspace/tree + workspace/file handlers): it realpaths the
-  // root, returns null when the agent dir is absent (→ 404), and its final
-  // path.relative containment check is a CodeQL js/path-injection barrier on
-  // the returned value, so `root` is no longer a tainted path expression.
-  const root = safeAgentPath(agentId, '');
-  if (!root) return res.status(404).json({ error: 'Agent not found' });
-  try {
-    const qs = new URLSearchParams({ root, path: relPath }).toString();
-    const upstream = await fetch(`${BP_EXPLORER_URL}/api/workspace/tree?${qs}`);
-    const data = await upstream.json();
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    res.status(502).json({ error: `BP-Explorer unreachable: ${err.message}` });
-  }
-});
+// A directory-only listing used to sit here (`GET .../workspace/dirs`), the one
+// non-BriefingPack consumer of bp-explorer: it proxied the service's
+// `/api/workspace/tree`. It went with the service in #1963 (epic #1961 Phase 2)
+// as dead code — its only caller was `src/components/DirectoryPicker.jsx`, the
+// orchestrator-role directory picker, which nothing imported. Should a live
+// consumer ever want it back, re-implement it locally rather than reviving a
+// proxy: the sibling `workspace/tree` handler above already walks the agent
+// workspace directly through `safeAgentPath`, so directories are one filter away.
 
 // File content. Caps reads at WORKSPACE_FILE_MAX_BYTES; flags binary files
 // (NUL byte detection in the prefix) so the UI can show a "binary file"

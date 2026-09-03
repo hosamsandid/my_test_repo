@@ -115,7 +115,6 @@ docker-compose.yml  +  docker-compose.e2e.yml  (project: aee-e2e)
 ├── conduwuit        REAL   (local Matrix — fast, free, no reason to stub)
 ├── orchestrator     REAL   (the thing under test)
 ├── admin-console    REAL   (serves built SPA + API on :4000 — single origin)
-├── bp-explorer      REAL   (idles; not exercised by F0–F4)
 └── agent containers REAL image (as-agent:latest) with a FAKE `claude` on PATH
 GitHub               ABSENT (repo-less envs; the poller only polls repos with tokens)
 LLM                  STUBBED (fake `claude` shim; ANTHROPIC_* point at a dead address)

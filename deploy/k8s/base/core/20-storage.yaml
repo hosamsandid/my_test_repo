@@ -1,7 +1,7 @@
 # The four compose volumes as PVCs.
 #
 # POC/single-node note: the shared workspace is conceptually ReadWriteMany
-# (orchestrator + admin-console + bp-explorer + every agent pod mount it), but
+# (orchestrator + admin-console + every agent pod mount it), but
 # on a SINGLE-node cluster (kind locally, k3s on one VM) ReadWriteOnce is
 # sufficient — RWO permits many pods on the same node. On multi-node GKE this
 # claim must move to an RWX StorageClass (Filestore CSI) — see

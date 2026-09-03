@@ -8,7 +8,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 **agent-studio** is a local Matrix-to-Claude-Code stack for an enterprise context. It provides chat-based AI agents extensible with domain-specific skills for **Mainframe Migration** (COBOL, JCL, DB2, IMS, etc.).
 
-The stack runs locally with Podman as a single compose file: **Conduwuit** (Matrix homeserver); **Orchestrator** (control-plane, spawns/manages one container per agent, no Matrix identity); **Admin Console** (web UI on `:4000` for agents, environments, SSH keys, skills, etc.; embeds a chat UI at `/chats/:agentId`); **bp-explorer** (read-only viewer for ACE BriefingPack metadata).
+The stack runs locally with Podman as a single compose file: **Conduwuit** (Matrix homeserver); **Orchestrator** (control-plane, spawns/manages one container per agent, no Matrix identity); **Admin Console** (web UI on `:4000` for agents, environments, SSH keys, skills, etc.; embeds a chat UI at `/chats/:agentId`).
 
 The LLM backend is reached via an Anthropic-compatible proxy: `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in `.env` (gitignored). Default Sonnet/Haiku models set there too.
 

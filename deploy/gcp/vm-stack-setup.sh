@@ -29,18 +29,18 @@ tar -xzf "$HOME/agent-studio.tar.gz" -C "${STACK_DIR}"
 cp "$HOME/agent-studio.env" "${STACK_DIR}/.env"
 
 echo "=== [3/6] host files the compose mounts expect ==="
-# bp-explorer bind-mounts ~/.gitconfig (required). The orchestrator's baseline
-# SSH identity is now OPTIONAL (ORCHESTRATOR_SSH_KEY, defaults to /dev/null in
-# docker-compose.yml). We still generate a fresh keypair for the pilot and point
-# the var at it in [4/6] so the orchestrator can pull briefings over SSH —
-# replace it with a real GitHub deploy key when the orchestrator should push.
+# The orchestrator's baseline SSH identity is OPTIONAL (ORCHESTRATOR_SSH_KEY,
+# defaults to /dev/null in docker-compose.yml). We still generate a fresh
+# keypair for the pilot and point the var at it in [4/6] so the orchestrator can
+# clone an environment's repositories over SSH — replace it with a real GitHub
+# deploy key when the orchestrator should push.
+#
+# ~/.gitconfig used to be generated here too, because bp-explorer bind-mounted
+# it and refused to start without it. That service was deleted in #1963 and no
+# compose service mounts the file any more, so the VM no longer needs one.
 if [ ! -f "$HOME/.ssh/id_orchestrator" ]; then
   ssh-keygen -t ed25519 -N "" -C "agent-studio-pilot" \
     -f "$HOME/.ssh/id_orchestrator"
-fi
-if [ ! -f "$HOME/.gitconfig" ]; then
-  git config --global user.name  "Agent Studio Pilot"
-  git config --global user.email "agent-studio-pilot@agents.local"
 fi
 
 echo "=== [4/6] pin VM-specific .env values ==="

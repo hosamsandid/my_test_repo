@@ -142,7 +142,7 @@ overlay — there is no script-side manifest rewriting anymore:
 | `preprod` | deploy-gke workflow, `gke-up.sh --env preprod` | as test + namespace `agent-studio-preprod`, own IP/hostname, own `AEE_INSTANCE_ID` |
 
 Each overlay is split `core/` (namespace, RBAC, PVCs, conduwuit) and `app/`
-(orchestrator, console, bp-explorer, ingress) because the `agent-studio-env`
+(orchestrator, console, ingress) because the `agent-studio-env`
 Secret is created between the two by the up scripts. Apply **only through an
 overlay** (`kubectl apply -k deploy/k8s/overlays/<env>/…`), never `-f base/`.
 

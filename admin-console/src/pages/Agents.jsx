@@ -596,27 +596,20 @@ function OrchestratorCard({ agent, onEdit, onDelete, onSyncBps, onActivate, onDe
     try { localStorage.setItem(expandedKey, String(next)); } catch {}
     return next;
   });
-  const [bps, setBps] = useState(null); // null = not yet loaded
+  // BP metadata used to be lazily fetched here on first expansion, through the
+  // `/api/bp-explorer/*` console proxy. That proxy went in #1962 (epic #1961
+  // Phase 1), which left the call answering 404 and falling through to its own
+  // alphabetical fallback; #1963 (Phase 2) deleted the service behind it, so
+  // the fetch is removed rather than left pointing at nothing. Permanently
+  // `null` is the same input `buildAgentTree`/`briefPathByAgentId` already got
+  // from the failed request (both branch on `!Array.isArray(bps) || !length`),
+  // so the rendered tree is unchanged. This whole card goes in #1930 (Phase 7).
+  const bps = null;
   // Subtrees default to fully expanded — entries in this set are collapsed.
   const [collapsedNodes, setCollapsedNodes] = useState(() => new Set());
   const children = agent.children || [];
   const state = agentState(agent);
   const isStub = state === 'stub';
-
-  // Lazy fetch BP metadata on first expansion. We re-fetch whenever the BP
-  // count changes (sync added/removed stubs) so the order stays consistent
-  // with what the user just clicked. Failures fall through to alphabetical.
-  useEffect(() => {
-    if (!expanded || isStub || !agent.briefingsPath) return;
-    let cancelled = false;
-    const rel = (agent.briefingsPath || '').replace(/^\/+|\/+$/g, '');
-    const workspace = `/workspace/agents/${agent.id}${rel ? `/${rel}` : ''}`;
-    fetch(`/api/bp-explorer/briefings?workspace=${encodeURIComponent(workspace)}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => { if (!cancelled) setBps(Array.isArray(data) ? data : []); })
-      .catch(() => { if (!cancelled) setBps([]); });
-    return () => { cancelled = true; };
-  }, [expanded, isStub, agent.id, agent.briefingsPath, children.length]);
 
   const toggleCollapse = (id) => {
     setCollapsedNodes((prev) => {

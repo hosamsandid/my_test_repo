@@ -1,4 +1,4 @@
-# Base "app" — the three services that consume the agent-studio-env Secret
+# Base "app" — the two services that consume the agent-studio-env Secret
 # (envFrom); applied by the up scripts only after the Secret exists. See
 # base/core/kustomization.yaml for the staged-apply rationale (#1348).
 #
@@ -11,4 +11,3 @@ kind: Kustomization
 resources:
   - 40-orchestrator.yaml
   - 50-admin-console.yaml
-  - 60-bp-explorer.yaml

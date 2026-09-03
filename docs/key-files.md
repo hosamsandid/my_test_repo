@@ -4,12 +4,11 @@
 
 ```
 .
-├── docker-compose.yml        # Four services + named volumes
+├── docker-compose.yml        # The platform services + named volumes
 ├── .env / .env.example       # Secrets and endpoint configuration
 ├── Makefile                  # make up / down / logs / build / ps
 ├── orchestrator/             # Backend service (agent lifecycle, triggers, API)
 ├── admin-console/            # Browser-based management UI
-├── bp-explorer/              # BriefingPack metadata viewer (read-only)
 ├── mcp-servers/              # Model Context Protocol server configurations
 ├── scripts/                  # Utility and setup scripts
 └── docs/                     # Technical reference documents
@@ -19,7 +18,7 @@
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yml` | Defines four services (conduwuit, orchestrator, admin-console, bp-explorer) and the named volumes they share |
+| `docker-compose.yml` | Defines the platform services (conduwuit, orchestrator, admin-console, stt) and the named volumes they share |
 | `.env` / `.env.example` | Secrets: Matrix admin token, LLM proxy URL and auth token, port overrides |
 | `Makefile` | Convenience targets: `make up`, `make down`, `make logs`, `make build`, `make ps` |
 | `orchestrator/orchestrator.js` | Agent lifecycle management, child-process spawning, environment seeding, internal HTTP API |

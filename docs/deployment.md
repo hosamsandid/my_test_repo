@@ -97,16 +97,15 @@ Two rough edges to know about behind a proxy:
 
 #### 3. Replace the developer bind-mounts
 
-The compose file mounts two things from a *developer's* home directory. On a server, these
-are wrong and must be provisioned deliberately:
+The compose file mounts a key from a *developer's* home directory. On a server, this
+is wrong and must be provisioned deliberately:
 
 - `~/.ssh/id_accenturecodefoundry` (+ `.pub`) — a **single SSH key shared by every agent**,
   referenced by name in `GIT_SSH_COMMAND`. If the file does not exist, Podman silently
   creates a *directory* there and every git-over-SSH operation fails.
-- `~/.gitconfig` — `bp-explorer` will not start without it.
 
-Create both for the service account that runs the stack, or edit the mounts in
-`docker-compose.yml` to point at managed paths.
+Create it for the service account that runs the stack, or edit the mount in
+`docker-compose.yml` to point at a managed path.
 
 #### 4. Run it as a dedicated, unprivileged user
 

@@ -215,13 +215,10 @@ Open `.env` and fill in the required values:
 | `ADMIN_PASS` | Password for that Matrix admin user. Not in `.env.example` — **add the line yourself**, otherwise `setup.sh` prompts interactively (unreliable in Git Bash on Windows) |
 | `PODMAN_HOST_SOCKET` | Path to your Podman socket — see below |
 
-> **Two host-side prerequisites that are easy to miss:** `jq` must be installed
-> (`setup.sh` aborts without it), and `~/.gitconfig` must exist (`bp-explorer` bind-mounts
-> it read-only and will not start otherwise):
-> ```bash
-> git config --global user.name "Your Name"
-> git config --global user.email "you@example.com"
-> ```
+> **One host-side prerequisite that is easy to miss:** `jq` must be installed —
+> `setup.sh` aborts without it. (A global `~/.gitconfig` used to be a second one,
+> because `bp-explorer` bind-mounted it and refused to start otherwise; that service
+> was removed in #1963 and no compose service mounts the file any more.)
 
 > **Discover your Podman socket path:**
 > ```bash
@@ -261,7 +258,7 @@ reference MCP servers into the pool volume.
 make up
 ```
 
-This builds the per-agent container image (`as-agent:latest`) and starts all services (Conduwuit, Orchestrator, Admin Console, bp-explorer). After a successful start you will see a container status table.
+This builds the per-agent container image (`as-agent:latest`) and starts all services (Conduwuit, Orchestrator, Admin Console, STT). After a successful start you will see a container status table.
 
 ## 6. First Steps — Get Oriented
 
@@ -300,7 +297,7 @@ make update   # git pull --ff-only + down + up
 | `make agent-image` | Rebuild the per-agent container image (`as-agent:latest`) |
 | `make update` | `git pull --ff-only` + down + up in one step. Fails (rather than merging) if you have local commits or a dirty tree |
 | `make ps` | Show container status for `conduwuit`, `orchestrator`, `admin-console` |
-| `make logs` | Follow logs of those three. **`bp-explorer` is not included** — use `podman logs -f <project>-bp-explorer` for it |
+| `make logs` | Follow logs of those three |
 | `make seed-pool` | Seed skills, memory, agent role templates, process templates and reference MCP servers into the shared pool volume |
 
 ### VS Code extension (optional)

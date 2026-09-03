@@ -151,9 +151,8 @@ jobs:
           GIT_COMMIT="$(git rev-parse --short=8 HEAD)"
           docker build -t "$AR/agent-studio-orchestrator:${TAG}"  orchestrator/
           docker build -t "$AR/agent-studio-admin-console:${TAG}" --build-arg "GIT_COMMIT=${GIT_COMMIT}" admin-console/
-          docker build -t "$AR/agent-studio-bp-explorer:${TAG}"   bp-explorer/
           docker build -t "$AR/as-agent:${TAG}" -f agent-image/Dockerfile agent-image/
-          for img in agent-studio-orchestrator agent-studio-admin-console agent-studio-bp-explorer as-agent; do
+          for img in agent-studio-orchestrator agent-studio-admin-console as-agent; do
             docker push "$AR/$img:${TAG}"
           done
 
@@ -236,7 +235,7 @@ jobs:
             exit 1
           }
 
-      - name: Apply app (orchestrator / admin-console / bp-explorer / ingress)
+      - name: Apply app (orchestrator / admin-console / ingress)
         run: |
           set -euo pipefail
           # Same failure diagnostics as the core step (steps are separate
@@ -255,7 +254,14 @@ jobs:
             return 1
           }
           kubectl apply -k "deploy/k8s/overlays/${{ inputs.environment }}/app"
-          for d in orchestrator admin-console bp-explorer; do
+          # bp-explorer was removed from the stack (#1963). `apply -k` does not
+          # prune, so an environment first deployed before the removal would
+          # keep the old Deployment and Service running against the workspace
+          # PVC indefinitely. Reap them here rather than orphaning them; a
+          # no-op where the service never existed.
+          kubectl -n "$NS" delete deploy/bp-explorer svc/bp-explorer --ignore-not-found >/dev/null \
+            || echo "::warning::could not remove the legacy bp-explorer workload — remove it by hand"
+          for d in orchestrator admin-console; do
             rollout_or_diagnose "$d"
           done
           kubectl -n "$NS" get pods

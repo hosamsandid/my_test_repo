@@ -106,17 +106,19 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // the size of the prompt).
 //
 // 340 000 is a STOP-GAP sized for roughly the next handful of #1981 children, not
-// for all twelve. If you are the child ticket that hits it again, the right move
-// is to open the route-scoped-folding ticket rather than to raise this a fourth
-// time.
+// for all twelve. The route-scoped-folding ticket the paragraph above asks for is
+// now OPEN — #2006, filed by #1985 — so the answer to the next raise request is
+// "land #2006", not "make the number bigger".
 //
 // Running total, so the next child does not have to measure to find out how much
-// room is left. Measured ON THE MERGE, not on the branch — four children have
+// room is left. Measured ON THE MERGE, not on the branch — four children had
 // landed (#1990 Skills, #1995 GitHub Event Log, #1994 Token Usage, #1993
-// credentials) and together they take the assembled prompt to 322 243, leaving
-// 17 757 (94.8% used). The last two cost ~9 950 each, so ONE more topic of that
-// size fits — not two or three — with about nine children still open. Whoever
-// picks up the next one: open the route-scoped-folding ticket first.
+// credentials) and together they took the assembled prompt to 322 243, leaving
+// 17 757 (94.8% used). #1985 (Knowledge) adds ~4 700 — deliberately restrained,
+// 5 914 -> 10 637 chars of topic rather than the ~12k the previous two ran to —
+// for 326 901, leaving 13 099 (96.1% used). That is NO LONGER one topic of
+// typical size, and EIGHT children are still open. Whoever picks up the next one:
+// #2006 first.
 const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
 function measureSystemPrompt() {

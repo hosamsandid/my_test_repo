@@ -17,6 +17,9 @@ import KnowledgeLearningSections, {
   AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
 } from '../components/KnowledgeLearningConfig';
 import useSSE from '../hooks/useSSE';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_KNOWLEDGE_CONFIG, OVERLAY_KNOWLEDGE_SKILL } from '../context/page-help-view.js';
+import { KNOWLEDGE_HELP_SECTIONS } from './knowledge-help-sections.js';
 import { assistFetch } from '../context/assist-transport.js';
 import { parseTeamParam, resolveSelectedTeam, teamTotals, streamScopeUrl } from './knowledge-scope';
 import { summarizeActivation } from './knowledge-activation-view';
@@ -457,6 +460,12 @@ export default function KnowledgeFlow() {
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', padding: 'var(--eb-space-4) 0 0', flexWrap: 'wrap' }}>
         <Brain size={20} style={{ color: 'var(--eb-accent-primary)' }} />
+        {/* The page's shared "?" — chapter 1 of the topic, which is the
+            Memory/Knowledge/Skills distinction the whole page is built around.
+            The Shell supplies the <h1>, so this sits with the header row's own
+            icon rather than next to a title (#1985; the affordance itself was
+            lost in the #1847 header merge). */}
+        <PageHelpButton label="Help for Knowledge" section={KNOWLEDGE_HELP_SECTIONS.page} />
         {selectedTeam && (
           <span style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
             <span title="Lessons this team's agents have recorded so far">{totals.items} learned</span>
@@ -886,8 +895,22 @@ const TeamSection = React.forwardRef(function TeamSection({
               title: 'The shared knowledge base',
               text: 'Everything this team’s agents have learned, pooled so every agent can use it. Click a card to see where it came from — which agent, which session, which PR. Tick the checkboxes to combine several related lessons into one skill.',
             }}
-            trailing={agentFilter && (
-              <Chip active title="Clear this filter" onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
+            trailing={(
+              <>
+                {agentFilter && (
+                  <Chip active title="Clear this filter" onClick={() => setAgentFilter(null)}>only {agentFilter} ✕</Chip>
+                )}
+                {/* The list is where the `digest` badges show up, so its "?" opens
+                    the chapter that explains what being in the digest buys — and
+                    that everything outside it is still searchable. Outside the
+                    agentFilter branch above: the question is asked about the
+                    unfiltered list at least as often (#1985). */}
+                <PageHelpButton
+                  label="How the digest picks what is always in context"
+                  size={13}
+                  section={KNOWLEDGE_HELP_SECTIONS.digest}
+                />
+              </>
             )}
           />
           {reviewQueue.length > 0 && (
@@ -1141,7 +1164,12 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
           }}>
             A <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> is a theme this team’s
             lessons cluster into — e.g. “JCL conversion”. Changing them is always a human decision.
-            <PageHelpButton label="What domains are for" size={12} style={{ padding: 0, marginLeft: 4, verticalAlign: '-2px' }} />
+            <PageHelpButton
+              label="What domains are for"
+              size={12}
+              style={{ padding: 0, marginLeft: 4, verticalAlign: '-2px' }}
+              section={KNOWLEDGE_HELP_SECTIONS.powerTools}
+            />
           </div>
           {/* Toolbar: LLM bootstrap + merge action */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginBottom: 'var(--eb-space-2)' }}>
@@ -1477,6 +1505,12 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
             Consolidation collapses the many small skills that belong to one <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> into
             a single <strong style={{ color: 'var(--eb-text-secondary)' }}>playbook</strong> — one well-structured skill
             replacing a scattered set. You review every playbook before it is applied; nothing is merged automatically.
+            <PageHelpButton
+              label="How consolidation relates to domains and distill"
+              size={12}
+              style={{ padding: 0, marginLeft: 4, verticalAlign: '-2px' }}
+              section={KNOWLEDGE_HELP_SECTIONS.powerTools}
+            />
           </div>
           {!hasDomains ? (
             <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
@@ -2973,6 +3007,12 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
   const [confirmDelete, setConfirmDelete] = useState(false);
   // #781 distillation: preview a whole-skill re-synthesis (old vs. new), then apply.
   const [distill, setDistill] = useState(null); // null | {loading} | {old,new,changed,reason} | {error}
+
+  // This inspector is a SidePanel (z-index 60/61) and it hosts a "?"; without
+  // publishing the overlay the help panel (z-index 50) would open BEHIND it.
+  // Claims no topic of its own — resolution falls through to /knowledge, which is
+  // where its chapters live (#1985).
+  useHelpSubject({ overlay: OVERLAY_KNOWLEDGE_SKILL, active: !!open });
   const [distillBusy, setDistillBusy] = useState(false);
 
   const qs = (extra = {}) => {
@@ -3264,6 +3304,15 @@ function SkillInspector({ open, onClose, skill, teamId, status, busy, installedC
           </button>
         )}
         <button onClick={onShare} style={ghostBtn}><Share2 size={13} />Share…</button>
+        {/* Distill's "?", deliberately OUTSIDE the team-tier branch below: the
+            operator looking at a pool skill and wondering why it cannot be
+            distilled here needs the chapter at least as much as the one who can
+            press the button (#1985). */}
+        <PageHelpButton
+          label="What distill, consolidate and domains do"
+          size={13}
+          section={KNOWLEDGE_HELP_SECTIONS.powerTools}
+        />
         {skill.tier === 'team' && (
           <button
             onClick={previewDistill}
@@ -3869,6 +3918,11 @@ function ControlStrip({ teamId, gates, onChanged }) {
 // inline strip used; a successful save refreshes the summary via onChanged.
 // The former standalone StorageDialog (#558) is now the Storage section here.
 function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
+  // Mounted only while slid out, so the subject needs no `active` flag. Same
+  // z-index reason as the skill inspector: this panel hosts two "?" of its own
+  // and would otherwise open the help panel underneath itself (#1985).
+  useHelpSubject({ overlay: OVERLAY_KNOWLEDGE_CONFIG });
+
   const [busy, setBusy] = useState(null); // which control is writing
   const [flash, setFlash] = useState(null); // { kind: 'ok' | 'error', text }
   const flashTimer = useRef(null);
@@ -3999,7 +4053,28 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
       <p style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         Control how this team turns what its agents learn into shared knowledge and reusable skills, and where that
         knowledge is kept. Changes save immediately; running agents pick them up at their next rebuild.
+        {/* The panel's own "?" — the forgetting / assist-model / storage chapter,
+            which is what the three sections below the ladder cover (#1985). */}
+        <PageHelpButton
+          label="About these knowledge settings"
+          size={13}
+          style={{ marginLeft: 4, verticalAlign: '-2px' }}
+          section={KNOWLEDGE_HELP_SECTIONS.configuration}
+        />
       </p>
+
+      {/* The autonomy ladder's own "?" sits HERE and not inside
+          KnowledgeLearningSections: that component is also rendered by the Agent
+          Team wizard's Knowledge step, where openHelpFor() would resolve against
+          /team-setup and land on a different topic. The wizard step is #1991's
+          to wire (#1985). */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'calc(-1 * var(--eb-space-2))' }}>
+        <PageHelpButton
+          label="How autonomy, review and the promotion gates work"
+          size={13}
+          section={KNOWLEDGE_HELP_SECTIONS.autonomy}
+        />
+      </div>
 
       {/* Autonomy / Review / Promotion gates — shared with the wizard (#566/#567) */}
       <KnowledgeLearningSections

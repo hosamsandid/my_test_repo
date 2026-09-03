@@ -315,7 +315,9 @@ legend and the Pending-queue tab), and **E11 → #1994** (Token Usage: a per-sur
 with chapter deep-links, where E11 had lifted only the intro banner, `COST_NOTE` and the
 `TIER_SIGNAL_HELP` attribution-tier explainer), and **E10 → #1993** (Credentials: a
 per-surface reference with a "?" on each of the three pages the one topic serves —
-`/ssh-keys`, `/github-tokens` and `/my-credentials`).
+`/ssh-keys`, `/github-tokens` and `/my-credentials`), and **E3 → #1985** (Knowledge: a
+per-surface reference with a deep-linked "?" on each surface, written deliberately leaner
+than its siblings — ~4.7k rather than ~12k — because the grounding budget was nearly spent).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -361,13 +363,18 @@ sized for roughly the next handful of children. The remaining children cannot al
 by raising the number again — **route-scoped folding** (fold the current route's topic plus its
 `seeAlso` neighbours, not all of them) is the structural fix this epic finally makes urgent, and
 it is still a separable ticket because it changes what the assistant can answer about *other*
-pages. The next child that hits the ceiling should open that ticket rather than raise the limit
-a fourth time. **Running total, measured on each merge so the next child need not:** with the
-Skills (#1990), GitHub Event Log (#1995), Token Usage (#1994) and credentials (#1993) children
-in, the assembled prompt is **322 243 of 340 000 — 94.8% used, 17 757 left**. The last two
-children cost ~9 950 each, so roughly ONE more topic of that size fits, not two or three, and
-about nine children are still open. The paragraph above is no longer predicting a trend: the
-route-scoped-folding ticket is now the next step, not a later one.
+pages. **That ticket is now open: #2006** — filed by the Knowledge child (#1985), which is the
+one topic the previous measurement said would still fit. **Running total, measured on each merge
+so the next child need not:** with the Skills (#1990), GitHub Event Log (#1995), Token Usage
+(#1994) and credentials (#1993) children in, the assembled prompt was **322 243 of 340 000 —
+94.8% used, 17 757 left**; the Knowledge child (#1985) adds ~4 700 (a deliberately restrained
+expansion: it grew the topic from 5 914 to 10 637 chars rather than the ~12k the last two
+children ran to) and takes it to **326 901 — 96.1% used, 13 099 left**. That is *no longer one
+topic of typical size*, with eight children still open (#1984 Flows, #1985's tier-1 siblings
+#1986 Plugins, #1987 Working Environments, #1988 Model Providers, #1989 MCP Servers, #1991 Agent
+Team Wizard, #1992 Create & Quickstart, #1996 the small pages). **#2006 is now a blocker in
+practice, not a recommendation:** the next child should land it first rather than raise the limit
+a fourth time or trim its own topic to fit.
 
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.

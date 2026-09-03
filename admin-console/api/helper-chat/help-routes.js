@@ -159,6 +159,8 @@ const OVERLAY_KEYS = {
   'wizard:setup': 'The first-run setup wizard, rendered before the Shell exists.',
   'modal:skill-detail': 'The skill detail side panel on the Skills page.',
   'modal:skills-merge': 'The Merge skills dialog on the Skills page.',
+  'modal:knowledge-config': 'The Team knowledge configuration side panel on the Knowledge page.',
+  'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
 };
 
 const CONTEXT_KEYS = {
@@ -195,6 +197,12 @@ const CONTEXT_KEYS = {
   // visible next to the surface it is explaining.
   'modal:skill-detail': { label: 'Skill detail' },
   'modal:skills-merge': { label: 'Merge skills' },
+  // Knowledge page overlays (#1985), registered for the same reason: both are
+  // shared `SidePanel`s (z-index 60/61) and both host a "?" that deep-links into
+  // the `/knowledge` chapters, so without the lift the help panel would open
+  // *behind* the very surface it explains. Neither claims a topic of its own.
+  'modal:knowledge-config': { label: 'Team knowledge configuration' },
+  'modal:knowledge-skill': { label: 'Knowledge · skill inspector' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

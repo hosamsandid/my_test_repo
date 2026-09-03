@@ -190,7 +190,7 @@ function buildRegistry(topics) {
     return hit ? hit.topic : null;
   }
 
-  return {
+  const registry = {
     all: list,
     byId,
     overview,
@@ -199,6 +199,9 @@ function buildRegistry(topics) {
     topicForContext,
     foldTopics: () => foldTopics(list),
   };
+  // Route-scoped grounding (#2006) — the fold the chat corpus actually uses.
+  registry.foldForContext = (context) => foldTopicsForContext(registry, context);
+  return registry;
 }
 
 // Concatenate topic bodies into one grounding block for the chat corpus (§3.2).
@@ -214,6 +217,70 @@ function foldTopics(topics) {
       return `${head}\n\n${summary}${t.body}`.trim();
     })
     .join('\n\n---\n\n');
+}
+
+// ── route-scoped grounding fold (#2006) ──────────────────────────────────────
+//
+// foldTopics(list) above concatenates whatever it is handed; the chat corpus used
+// to hand it EVERY topic on every request, so one global char ceiling absorbed
+// the growth of every page's help at once (raised three times: 180k → 260k →
+// 300k → 340k) while the assistant is almost always asked about the page the user
+// is on. The fold is therefore scoped to the resolved help context: that page's
+// topic plus the topics its `seeAlso` links point at, which is what keeps the
+// common cross-page pairs ("how does Skills relate to Knowledge?") answerable.
+//
+// The scoping rule is deliberately the SAME resolution the panel uses, so the
+// grounding and the "This page" face can never disagree about which topic
+// answers a context: `resolveHelpContext` (overlay → step → route → canonical
+// route, alias-aware), and the Overview topic when nothing resolves — exactly the
+// panel's documented Overview fallback (§3.4/§4).
+
+// The topics a help context is grounded on, most relevant first: the resolved
+// topic (or the Overview fallback), then its `seeAlso` neighbours in authored
+// order. A `seeAlso` entry pointing at a route with no topic (yet) is skipped
+// rather than failing, and a duplicate (a neighbour that is also the primary, or
+// listed twice) appears once.
+function contextTopics(registry, context) {
+  const hit = registry.resolveHelpContext(context);
+  const primary = (hit && hit.topic) || registry.overview || null;
+  if (!primary) return [];
+  const picked = [primary];
+  for (const link of primary.seeAlso || []) {
+    const to = (link && typeof link.to === 'string') ? link.to.trim() : '';
+    if (!to) continue;
+    const neighbour = registry.topicForRoute(to);
+    if (neighbour && !picked.includes(neighbour)) picked.push(neighbour);
+  }
+  return picked;
+}
+
+// The grounding block for one help context (the string corpus.js splices in).
+function foldTopicsForContext(registry, context) {
+  return foldTopics(contextTopics(registry, context));
+}
+
+// Every context the fold can be asked to scope to: the no-route fallback (null)
+// plus every key a topic claims. This is what makes the budget guard measure a
+// REAL assembled prompt — the largest one the mechanism can actually produce —
+// instead of the hypothetical all-topics fold nothing sends any more.
+function groundingContexts(registry) {
+  const out = [null];
+  for (const t of registry.all || []) {
+    for (const key of t.routes || []) if (!out.includes(key)) out.push(key);
+  }
+  return out;
+}
+
+// The worst case over those contexts, as `{ context, length }`. Pure over an
+// injected registry, so the guard can run it on the shipped topics and a test can
+// run it on a synthetic set (e.g. "what does one more page topic cost?").
+function worstCaseFold(registry) {
+  let worst = { context: null, length: -1 };
+  for (const context of groundingContexts(registry)) {
+    const length = foldTopicsForContext(registry, context).length;
+    if (length > worst.length) worst = { context, length };
+  }
+  return worst;
 }
 
 // A one-line grounding pointer at the topic for the current route (used by the
@@ -301,6 +368,10 @@ module.exports = {
   parseTopic,
   buildRegistry,
   foldTopics,
+  contextTopics,
+  foldTopicsForContext,
+  groundingContexts,
+  worstCaseFold,
   routeGroundingPointer,
   baselineTopic,
   baselineProblems,

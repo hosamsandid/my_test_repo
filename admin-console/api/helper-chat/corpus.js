@@ -28,6 +28,10 @@ const PROMPT_FILE = path.join(__dirname, 'system-prompt.md');
 // panel, so there is no vendoring/parity test to maintain (unlike the docs/**
 // copies above). Loaded once at module init (fail-soft: a missing dir yields an
 // empty registry and the corpus is unchanged).
+//
+// Only the CURRENT context's topics are folded in, not all of them (#2006) — see
+// the SYSTEM_PROMPT_CHAR_LIMIT comment below for why, and
+// help-registry.js `foldTopicsForContext` for the scoping rule.
 const _helpRegistry = helpRegistry.loadRegistry();
 
 // List of files in the order they are concatenated (importance-ordered)
@@ -50,6 +54,12 @@ const CORPUS_FILES = [
   'walkthrough/06-knowledge.md',
 ];
 
+// Stated in the prompt because the narrowing is a real limit on what the model
+// can answer: the topics for OTHER pages are not in front of it, so an honest
+// "open that page and ask again" beats an invented answer (the template already
+// forbids inventing UI, this tells it when it is short of material).
+const HELP_FOLD_NOTE = ' (the current page and the pages it links to — other pages\' topics are not included; say so rather than guessing)';
+
 function buildSystemPrompt(currentRouteLabel, currentRoute) {
   const promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
   const docsCorpus = CORPUS_FILES
@@ -61,11 +71,13 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
     .join('\n\n---\n\n');
 
   // Append the curated per-page help topics so a page-specific question is
-  // answered from the very content the panel shows (§3.2). Empty when no topics
-  // exist yet — the docs corpus is then unchanged.
-  const helpFold = _helpRegistry.foldTopics();
+  // answered from the very content the panel shows (§3.2) — scoped to the
+  // current context (#2006): this page's topic plus its `seeAlso` neighbours,
+  // and the Overview topic plus its neighbours when no route resolves. Empty
+  // when no topics exist yet — the docs corpus is then unchanged.
+  const helpFold = _helpRegistry.foldForContext(currentRoute);
   const corpus = helpFold
-    ? `${docsCorpus}\n\n---\n\n### page-help topics\n\n${helpFold}`
+    ? `${docsCorpus}\n\n---\n\n### page-help topics${HELP_FOLD_NOTE}\n\n${helpFold}`
     : docsCorpus;
 
   const routeContext = currentRouteLabel
@@ -79,50 +91,76 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 
 // Guard on the assembled grounding prompt (docs corpus + the folded page-help
 // topics), ~75 000 tokens at the common 4-chars/token heuristic — same order as
-// flow-copilot.js's 200 000. Raised 180 000 → 260 000 in #1879 (epic #1870) and
-// 260 000 → 300 000 in #1889: the per-page topics are a deliberate, growing part
-// of this corpus, and E5 alone added the whole build-a-plugin reference because
-// it DELETED the standalone /plugin-system page that used to carry it. Trimming
-// a topic to fit would degrade the panel too — the topic files are the single
-// source both the panel and this prompt read — so the budget, not the content,
-// is what gives.
+// flow-copilot.js's 200 000. Raised 180 000 → 260 000 in #1879 (epic #1870),
+// 260 000 → 300 000 in #1889 and 300 000 → 340 000 in #1990 (epic #1981), each
+// time because the per-page topics are a deliberate, growing part of this corpus
+// and trimming one to fit would degrade the panel too (the topic files are the
+// single source both consumers read) — so the budget, not the content, gave.
 //
-// Raised a THIRD time, 300 000 → 340 000 in #1990 (epic #1981).
+// **#2006 stopped the raising instead of raising it again.** The limit is the same
+// 340 000 it was after #1990; what changed is WHAT is measured against it. The
+// prompt no longer carries every page's topic, only the current context's plus
+// its `seeAlso` neighbours (route-scoped folding — `foldTopicsForContext` in
+// help-registry.js), so the two growth sources that used to add up against one
+// ceiling now behave differently:
 //
-// **The "it stops growing here" note that used to end this comment was wrong.**
-// #1889 was the last topic of epic #1870, but epic #1981 re-opened every one of
-// them: each of its 13 children expands one page's topic into a per-surface
-// reference, so the fold grows once per child ticket. And it is not only the
-// topics — the docs/** corpus grows on its own: #1990's Skills topic alone fit
-// under 300 000 (297 864), and it was #1956's unrelated docs/admin-console.md
-// additions landing on main in the same window that took the assembled prompt to
-// 301 679. Two independent growth sources against one ceiling.
+//   • a NEW page topic adds a new *candidate* context of its own size, and does
+//     not enlarge any existing one unless a topic links to it;
+//   • EXPANDING an existing topic (what every #1981 child does) enlarges the
+//     contexts of its own page and of the pages that link to it — so it still
+//     costs, but against the largest single page's neighbourhood rather than
+//     against the sum of all thirteen;
+//   • the docs/** corpus still counts in full on every request (CORPUS_FILES is
+//     untouched — narrowing that is a separate question).
 //
-// Do NOT answer that by trimming a topic: the topic files are the single source
-// both the panel and this prompt read, so a trim degrades the panel too. The
-// structural fix is to fold only the current route's topic plus its `seeAlso`
-// neighbours instead of all of them (route-scoped folding — a separable ticket,
-// since it changes what the assistant can answer about *other* pages, not just
-// the size of the prompt).
+// The number therefore now means "docs corpus + the biggest single page
+// neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
+// corpus.test.js asserts. Measured on this branch: the worst context is
+// **/flows** (seven neighbours, incl. the two largest topics) at 229 272 of
+// 340 000 — 67.4% used, 110 728 left — against 322 243 (94.8%) for the all-topics
+// fold it replaced. The all-topics fold is not the no-route fallback either — see
+// measureWorstCaseSystemPrompt().
 //
-// 340 000 is a STOP-GAP sized for roughly the next handful of #1981 children, not
-// for all twelve. The route-scoped-folding ticket the paragraph above asks for is
-// now OPEN — #2006, filed by #1985 — so the answer to the next raise request is
-// "land #2006", not "make the number bigger".
+// If this ever gets tight again, the next structural step is the docs corpus
+// (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth
+// raise and NOT trimming a topic.
 //
-// Running total, so the next child does not have to measure to find out how much
-// room is left. Measured ON THE MERGE, not on the branch — four children had
-// landed (#1990 Skills, #1995 GitHub Event Log, #1994 Token Usage, #1993
-// credentials) and together they took the assembled prompt to 322 243, leaving
-// 17 757 (94.8% used). #1985 (Knowledge) adds ~4 700 — deliberately restrained,
-// 5 914 -> 10 637 chars of topic rather than the ~12k the previous two ran to —
-// for 326 901, leaving 13 099 (96.1% used). That is NO LONGER one topic of
-// typical size, and EIGHT children are still open. Whoever picks up the next one:
-// #2006 first.
+// The running total the #1981 children used to keep here is retired: a child no
+// longer has to measure before writing, because its topic can only enlarge its own
+// page's neighbourhood and those of the pages linking to it. If you want the
+// number anyway, from admin-console/api:
+//   node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"
 const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
-function measureSystemPrompt() {
-  return buildSystemPrompt(null).length;
+// The assembled prompt for one context (default: the no-route fallback). Kept
+// arg-compatible with its pre-#2006 no-argument form.
+function measureSystemPrompt(currentRoute = null) {
+  return buildSystemPrompt(null, currentRoute).length;
 }
 
-module.exports = { buildSystemPrompt, measureSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT, CORPUS_FILES };
+// The largest prompt the route-scoped mechanism can actually assemble, as
+// `{ context, length }`: the docs corpus plus the biggest page neighbourhood, over
+// every context a topic claims AND the no-route fallback (which is the Overview
+// topic plus its neighbours — the panel's own documented fallback, deliberately
+// NOT every topic, since an all-topics fallback would keep the worst case exactly
+// where it was and make every new topic move it by its full size again).
+//
+// The context key doubles as the route label so the "currently on the …" sentence
+// is included; that sentence is a bounded few dozen characters, so the reported
+// worst case is the assembled prompt to within a rounding error of the real label.
+function measureWorstCaseSystemPrompt() {
+  let worst = { context: null, length: -1 };
+  for (const context of helpRegistry.groundingContexts(_helpRegistry)) {
+    const length = buildSystemPrompt(context || null, context).length;
+    if (length > worst.length) worst = { context, length };
+  }
+  return worst;
+}
+
+module.exports = {
+  buildSystemPrompt,
+  measureSystemPrompt,
+  measureWorstCaseSystemPrompt,
+  SYSTEM_PROMPT_CHAR_LIMIT,
+  CORPUS_FILES,
+};

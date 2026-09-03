@@ -17,14 +17,14 @@ askPrompts:
   - "Why can't I delete this server?"
 ---
 
-## What this page configures
+## The three-part model
 
 **Model Context Protocol (MCP)** servers are runtime knowledge sources and tools
 — a wiki, a vector store, a graph or SQL database, an internal REST API, any CLI
 wrapped as a server — that agents can query during a session, in addition to the
 files in their workspace.
 
-It is a **three-part model**, and this page owns the first two parts:
+Reaching one takes three separate pieces, and this page owns the first two:
 
 | Part | Where | What it holds |
 |---|---|---|
@@ -32,112 +32,140 @@ It is a **three-part model**, and this page owns the first two parts:
 | **Credential** | this page, *Credentials* | The raw secret (API token, bearer token, …), stored separately under its own id. |
 | **The pairing** | a **Working Environment** | Which credential is bound to which server for the agents created from that environment. |
 
-Splitting the catalog from the secrets is the point: the same server entry can be
-paired with a different credential per environment, and a token can be **rotated
-without touching the catalog**.
+Splitting the catalog from the secrets is the point of the **three-part model**:
+the same server entry can be paired with a different credential per environment,
+and a token can be **rotated without touching the catalog**. It is also why
+nothing on this page alone makes a server reachable — a server and a credential
+sitting side by side here are still unpaired until an environment names them
+together.
 
-## The `${credential}` placeholder and the *required* status
+The two tables show what each part looks like once saved. A server row lists its
+id, name, transport, the command or URL it resolves to, and whether it needs a
+credential; a credential row lists its id, name, its *Default server* hint, its
+**fingerprint** and when it was added. Neither table has an edit action: an entry
+is created and deleted, and a change of secret is a new credential (see below).
 
-Write `${credential}` into any value of a server's template — the environment
-template for `stdio`, the headers template for `http`/`sse`:
+## The server registry and its transports
+
+**New server** opens the create form. *Name* is the label operators read; the
+*ID* is auto-derived from it and is the key the seeded config uses, so it is
+worth keeping recognisable. *Description* is free text for whoever comes next.
+
+*Transport* is the decision the rest of the form follows, and the three options
+need different fields:
+
+| Transport | Reaches the backend by | Required | Template |
+|---|---|---|---|
+| `stdio` | spawning a local subprocess | `command` (plus optional `args`, one per line) | **environment variables** (`KEY=value`, one per line) |
+| `http` | a remote streamable-HTTP endpoint | `url` | **HTTP headers** (`Header: value`, one per line) |
+| `sse` | a remote Server-Sent-Events endpoint | `url` | **HTTP headers** |
+
+The two shapes are **mutually exclusive** on the wire: sending `url`/`headers`
+for a `stdio` server, or `command`/`args`/`env` for an `http`/`sse` one, is
+rejected rather than silently stored — keys the seed step would never propagate
+should not look saved. The form switches fields with the transport for exactly
+that reason, so you cannot fill in both halves by hand.
+
+The template is the last field, and it is where the secret slot is marked. Write
+`${credential}` into any value:
 
 ```
 WIKI_BASE_URL=https://wiki.example/api
 WIKI_TOKEN=${credential}
 ```
 
-The **Credential** column then shows **required** for that server. That status is
-**derived from the template on every read, never set by hand**: the API reports
-`requiresCredential` for any server whose template references the placeholder, so
-it flips the moment you save a template that uses it, and there is no checkbox to
-get out of sync with.
+Values without the placeholder are passed through unchanged, so a template can
+mix plain configuration and one secret. Nothing here is validated against the
+backend — a saved server is a claim about how to reach it, and the first real
+test is an agent calling it.
 
-*required* is a reminder that agents cannot use this server until an environment
-binds a credential to it — it does not block saving the server.
+## The credential store and `${credential}` substitution
 
-## What happens at workspace seed time
+**New credential** stores one secret. *Name* is a descriptive label, the *ID* is
+auto-derived and becomes the filename the secret is written to, and *Secret* is
+the value itself — pasted once. It is written to its own file under
+`/workspace/mcp-credentials/_keys/<id>` with owner-only permissions (mode 0600)
+and the API **never returns it**: the list shows only a **fingerprint** (a short
+hash) so you can tell two credentials apart and confirm which one you uploaded.
+There is no reveal, no preview and no in-place edit — to rotate a secret, add
+the new credential and re-point the environment at it, then delete the old one.
 
-When an agent's workspace is created, the orchestrator walks the environment's
-server/credential pairs and, for each one:
+The optional *Default server* field is a **hint only** — a note about what the
+secret belongs to. It creates no pairing and nothing at seed time reads it; an
+environment may pair the credential with any compatible server.
 
-1. reads the server entry and the bound secret,
-2. replaces every `${credential}` occurrence in the template with that secret,
-3. writes the resulting stanza into **that agent's own `.claude/settings.json`**,
-   under `mcpServers.<server id>`.
+The *Credential* column on the Servers table is where the two halves meet. A
+server shows **required** there when its template references `${credential}` —
+that status is **derived from the template on every read, never set by hand**
+(the API computes `requiresCredential` for any server whose template mentions
+the placeholder), so it flips the moment you save a template that uses it, and
+there is no checkbox to get out of sync with. *required* is a reminder that
+agents cannot authenticate to this server until an environment binds a
+credential to it; it does not block saving the server.
+
+Two consequences worth knowing before you store production tokens here: the
+substituted secret ends up **in plaintext inside each agent's workspace** (that
+is what the agent's CLI reads at startup), and the credential store is
+**global** — any operator who can manage environments can bind any credential to
+any server.
+
+## Environment pairing and the seed-time merge
+
+The pairing lives on the **Working Environment** record as a list of
+*server + optional credential* references, and that list is what the seed step
+reads. When an agent's workspace is created, the orchestrator walks the pairs
+and, for each one, reads the server entry and the bound secret, replaces every
+`${credential}` occurrence in the template with that secret, and writes the
+resulting stanza into **that agent's own `.claude/settings.json`** under
+`mcpServers.<server id>`.
 
 The file is **merged, not replaced** — other settings the agent already has
 survive, and each server is keyed by its id. Every agent gets its own
 substituted copy, so two agents sharing one server entry can hold different
 secrets.
 
-If the template uses `${credential}` but **no credential is bound**, that single
-key is **dropped** — the literal placeholder is never written into a workspace —
-a warning is recorded in the seed log, and the agent is still created. The server
-is present but unauthenticated, so calls to it fail at runtime with no hint
-inside the container. The reverse case (a credential bound to a template that
-never mentions the placeholder) is also just a warning: the credential is
-ignored.
+Three cases are worth knowing:
 
-## Transports
-
-| Transport | Reaches the backend by | Required | Template |
-|---|---|---|---|
-| `stdio` | spawning a local subprocess | `command` (plus optional `args`) | **environment variables** (`KEY=value`, one per line) |
-| `http` | a remote streamable-HTTP endpoint | `url` | **HTTP headers** (`Header: value`, one per line) |
-| `sse` | a remote Server-Sent-Events endpoint | `url` | **HTTP headers** |
-
-The two shapes are **mutually exclusive**: sending `url`/`headers` for a `stdio`
-server, or `command`/`args`/`env` for an `http`/`sse` one, is rejected rather
-than silently stored — keys the seed step would never propagate should not look
-saved.
-
-## Where the pairing is made
-
-The pairing lives on the **Working Environment** record as a list of
-*server + optional credential* references, and it is what the seed step reads.
-Note where it is visible today:
-
-- The **Agent Team wizard** shows the inherited pairs read-only in its Knowledge
-  step ("Knowledge sources") and again on the review step.
-- A single `team-member` agent can **override** the inherited list on the Agents
-  page (*MCP Servers* → Custom, one `serverId[:credentialId]` per line).
-- The Working Environments **form does not currently expose a picker**, so an
-  environment's pairs are set through the API or when a team is created.
-
-The **Default server** field on a credential is a *hint only* — a note about
-what the secret belongs to. It does not create a pairing; an environment may
-pair the credential with any compatible server.
-
-## Secrets: what is stored and what is readable
-
-A credential's secret is written to its own file under
-`/workspace/mcp-credentials/_keys/<id>` with owner-only permissions. The API
-**never returns it** — the list shows only a **fingerprint** (a short hash) so
-you can tell two credentials apart and confirm which one you uploaded, and there
-is no reveal or preview.
-
-There is no in-place edit: to rotate a secret, add the new credential and
-re-point the environment at it.
-
-Two consequences worth knowing: the substituted secret ends up **in plaintext
-inside each agent's workspace** (that is what the agent's CLI reads at startup),
-and the credential store is **global** — any operator who can manage
-environments can bind any credential to any server. Treat MCP credentials as
-production secrets accordingly.
-
-## Changes reach agents at their next start
+- If the template uses `${credential}` but **no credential is bound**, that
+  single key is **dropped** — the literal placeholder is never written into a
+  workspace — a warning is recorded in the seed log, and the agent is still
+  created. The server is present but unauthenticated, so calls to it fail at
+  runtime with no hint inside the container.
+- The reverse (a credential bound to a template that never mentions the
+  placeholder) is also just a warning: the credential is ignored.
+- If the named server is missing from the registry, or its bound secret cannot
+  be read, that pair is skipped entirely with a warning and the server does not
+  appear in the agent's config at all.
 
 Substitution happens **once, at seed time**. Editing a server template, adding a
 credential or changing an environment's pairs does **not** reach into the
 workspaces of agents that already exist — those keep the config they were seeded
-with. New agents pick the change up; an existing agent picks it up when its
-workspace is re-seeded.
+with. Only agents seeded afterwards pick the change up, and an existing agent
+picks it up when its workspace is re-seeded. Even for an agent that has the
+config, a newly registered server becomes available on its **next invocation**,
+not inside a session that is already running.
 
-Registered servers become available to an agent **on its next invocation**, not
-inside a session that is already running.
+Note where the pairing is visible today:
 
-## Deleting
+- The Working Environments **form exposes no MCP picker**, so an environment's
+  pairs are set through the API or when a team is created — opening this page's
+  help from there will not show you a control that does not exist.
+- The **Agent Team wizard** shows the inherited pairs read-only in its Knowledge
+  step ("Knowledge sources") and again on the review step.
+- A single `team-member` agent can **override** the inherited list on the Agents
+  page (*MCP Servers* → Custom, one `serverId[:credentialId]` per line).
+
+## Deleting a server or a credential
 
 Neither a server nor a credential can be deleted while a Working Environment
-still references it — the delete is refused and names the environment that is
+still references it. The delete is refused by the server — not merely
+discouraged in the dialog — and the message names the environment that is
 holding it. **Detach it there first**, then delete.
+
+The refusal names one environment even when several hold the same entry, so a
+second attempt can surface a different name; repeat until it succeeds. Deleting
+a credential also needs rights over the team that owns it.
+
+Deleting either one changes nothing in the workspaces of agents that were
+already seeded — they keep the stanza they were given, secret included, until
+they are re-seeded.

@@ -329,6 +329,22 @@ const TOPIC_CONTENT = [
     // merge into the agent's own settings.json, the dropped-key behaviour when
     // nothing is bound, the per-transport field split, and where the pairing is
     // actually visible today.
+    //
+    // #1989 (epic #1981) widened it into a per-surface reference. Chapters 1/2/3
+    // are the deep-link targets of the four surfaces the ticket names (page
+    // header → 1, server panel → 2, credential panel and the *required* column
+    // marker → 3). Chapters 4 and 5 carry no "?" of their own: the pairing has
+    // no surface on this page at all (the Working Environments form exposes no
+    // MCP picker) and deleting happens in a ConfirmDialog that already states
+    // the rule. Both stay separately addressable because the panel renders the
+    // whole topic — they are one scroll from wherever a deep link lands.
+    chapters: [
+      'The three-part model',
+      'The server registry and its transports',
+      'The credential store and `${credential}` substitution',
+      'Environment pairing and the seed-time merge',
+      'Deleting a server or a credential',
+    ],
     concepts: [
       'three-part model',
       '${credential}',
@@ -537,6 +553,17 @@ const TOPIC_CONTENT = [
     // pair and BOTH "what happens here" branches, and adds what neither said:
     // an existing environment *and* an existing standalone agent are reused, and
     // on the repository path the Name / Model Provider fields are not used.
+    //
+    // #1992 (epic #1981) re-cut it into a per-surface reference: the four
+    // chapters below are each the landing target of a "?" on the matching
+    // surface across BOTH routes the topic claims, so the headings are
+    // load-bearing rather than decorative.
+    chapters: [
+      'The entry paths',
+      'A single agent is a team of one',
+      'The repository fast lane',
+      'What you need before you start',
+    ],
     concepts: [
       'equally ranked',
       'Describe what you need',
@@ -554,6 +581,14 @@ const TOPIC_CONTENT = [
       'Model Provider',
       'SSH key',
       'GitHub token',
+      // #1992 additions. Each is a statement the pages never made and that the
+      // chapter behind a "?" now owes its surface — a reword that drops one
+      // leaves that surface's deep link pointing at prose that no longer
+      // answers the question it was mounted for.
+      'materialise',
+      'chat history',
+      'is normalised',
+      'blocks the button',
     ],
   },
   {

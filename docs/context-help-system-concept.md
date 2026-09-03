@@ -329,7 +329,13 @@ and **E14 → #1992** (Create & Quickstart: E14 lifted the launcher's tile prose
 reaching it from the top; the topic is now four chapters — the entry paths · a single agent
 is a team of one · the repository fast lane · what you need before you start — with a "?" on
 the launcher header, the one-assistant header, the prerequisite checklist and the
-team-of-one note).
+team-of-one note),
+and **E9 → #1989** (MCP Servers: E9 lifted the intro box and the *required* `InfoTip`, which
+left the two **create forms** — the page's only real decision surfaces — reaching that
+explanation from the top; the topic is now five chapters — the three-part model · the server
+registry and its transports · the credential store and `${credential}` substitution ·
+environment pairing and the seed-time merge · deleting — with a "?" on the page header, each
+create panel and the *required* column marker).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -380,6 +386,13 @@ all-topics fold it replaced stood at 322,243 (94.8%). Re-measure rather than tru
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,
 which `/flows`' `seeAlso` names, so the worst case moved by exactly that topic's growth even
 though the ticket touched neither `/flows` nor the docs corpus.)
+
+Measured again on the MCP Servers child (#1989), which grew its topic from 6 946 to 9 327 chars:
+the worst context is **still `/flows` at 229,272**, unmoved, because nothing in that
+neighbourhood links to `/mcp`; `/mcp`'s own context sits at **207,122 — 60.9% used**. That is the
+first child measured after #2006 landed, and it is what consequence 2 below looks like in
+practice: the growth is paid for by the expanded page's own neighbourhood, not by every page at
+once.
 
 Three consequences a remaining #1981 child should know:
 

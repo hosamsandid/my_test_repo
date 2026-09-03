@@ -75,6 +75,11 @@ export const CONTEXT_KEYS = {
   // a known key and the panel lifts above them (both are z-index 60/61).
   'modal:knowledge-config': { label: 'Team knowledge configuration' },
   'modal:knowledge-skill': { label: 'Knowledge · skill inspector' },
+  // The MCP Servers page's two create panels (#1989) — same story again: no
+  // topic of their own, registered so their published subject is a known key
+  // and the panel lifts above them (both are z-index 60/61).
+  'modal:mcp-server': { label: 'New MCP server' },
+  'modal:mcp-credential': { label: 'New MCP credential' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -84,6 +89,8 @@ export const OVERLAY_SKILL_DETAIL = 'modal:skill-detail';
 export const OVERLAY_SKILLS_MERGE = 'modal:skills-merge';
 export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
 export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
+export const OVERLAY_MCP_SERVER = 'modal:mcp-server';
+export const OVERLAY_MCP_CREDENTIAL = 'modal:mcp-credential';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

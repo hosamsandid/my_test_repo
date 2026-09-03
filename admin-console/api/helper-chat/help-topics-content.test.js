@@ -329,6 +329,22 @@ const TOPIC_CONTENT = [
     // merge into the agent's own settings.json, the dropped-key behaviour when
     // nothing is bound, the per-transport field split, and where the pairing is
     // actually visible today.
+    //
+    // #1989 (epic #1981) widened it into a per-surface reference. Chapters 1/2/3
+    // are the deep-link targets of the four surfaces the ticket names (page
+    // header → 1, server panel → 2, credential panel and the *required* column
+    // marker → 3). Chapters 4 and 5 carry no "?" of their own: the pairing has
+    // no surface on this page at all (the Working Environments form exposes no
+    // MCP picker) and deleting happens in a ConfirmDialog that already states
+    // the rule. Both stay separately addressable because the panel renders the
+    // whole topic — they are one scroll from wherever a deep link lands.
+    chapters: [
+      'The three-part model',
+      'The server registry and its transports',
+      'The credential store and `${credential}` substitution',
+      'Environment pairing and the seed-time merge',
+      'Deleting a server or a credential',
+    ],
     concepts: [
       'three-part model',
       '${credential}',

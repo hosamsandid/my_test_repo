@@ -160,6 +160,8 @@ const OVERLAY_KEYS = {
   'modal:skills-merge': 'The Merge skills dialog on the Skills page.',
   'modal:knowledge-config': 'The Team knowledge configuration side panel on the Knowledge page.',
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
+  'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
+  'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
 };
 
 const CONTEXT_KEYS = {
@@ -202,6 +204,13 @@ const CONTEXT_KEYS = {
   // *behind* the very surface it explains. Neither claims a topic of its own.
   'modal:knowledge-config': { label: 'Team knowledge configuration' },
   'modal:knowledge-skill': { label: 'Knowledge · skill inspector' },
+  // The MCP Servers page's two create panels (#1989), registered for the same
+  // reason: both are shared `SidePanel`s (z-index 60/61) and both host a "?"
+  // that deep-links into the `/mcp` chapters, so without the lift the help
+  // panel would open *behind* the form it explains. Neither claims a topic of
+  // its own — resolution falls through to `/mcp`.
+  'modal:mcp-server': { label: 'New MCP server' },
+  'modal:mcp-credential': { label: 'New MCP credential' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

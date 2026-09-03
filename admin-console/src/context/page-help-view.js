@@ -62,11 +62,21 @@ export const CONTEXT_KEYS = {
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
   '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
   '/team-setup#review': { label: 'Agent Team Wizard · Review' },
+  // The two Skills-page surfaces that render *over* the page (#1990). Neither
+  // claims a topic — the resolver falls through to the `/skills` route topic, so
+  // their "?" opens the page's own chapters. They are registered purely so the
+  // published subject is a known key and the panel lifts above them (a side
+  // panel is z-index 60/61, the merge dialog 1000; the panel's own 50 would put
+  // help *behind* the surface it explains).
+  'modal:skill-detail': { label: 'Skill detail' },
+  'modal:skills-merge': { label: 'Merge skills' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
 export const OVERLAY_SETTINGS = 'modal:settings';
 export const OVERLAY_SETUP_WIZARD = 'wizard:setup';
+export const OVERLAY_SKILL_DETAIL = 'modal:skill-detail';
+export const OVERLAY_SKILLS_MERGE = 'modal:skills-merge';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

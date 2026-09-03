@@ -85,11 +85,22 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // it DELETED the standalone /plugin-system page that used to carry it. Trimming
 // a topic to fit would degrade the panel too — the topic files are the single
 // source both the panel and this prompt read — so the budget, not the content,
-// is what gives. #1889 is the epic's LAST topic, so this fold stops growing
-// here; the structural fix, when the corpus does grow again, is to fold only the
-// current route's topic plus its `seeAlso` neighbours instead of all of them
-// (route-scoped folding — a separable ticket, since it changes what the assistant
-// can answer about *other* pages, not just the size of the prompt).
+// is what gives.
+//
+// **The "it stops growing here" note that used to end this comment was wrong.**
+// #1889 was the last topic of epic #1870, but epic #1981 re-opened every one of
+// them: each of its 13 children expands one page's topic into a per-surface
+// reference, so the fold grows once per child ticket. #1990 (Skills, the first
+// one) landed at **297 864** of these 300 000 — roughly 2 kB of headroom for
+// twelve remaining pages, i.e. the next child will hit this limit.
+//
+// Do NOT answer that by trimming a topic: the topic files are the single source
+// both the panel and this prompt read, so a trim degrades the panel too. The
+// structural fix is to fold only the current route's topic plus its `seeAlso`
+// neighbours instead of all of them (route-scoped folding — a separable ticket,
+// since it changes what the assistant can answer about *other* pages, not just
+// the size of the prompt). Raising the number again is the stop-gap that has
+// already been taken twice.
 const SYSTEM_PROMPT_CHAR_LIMIT = 300_000;
 
 function measureSystemPrompt() {

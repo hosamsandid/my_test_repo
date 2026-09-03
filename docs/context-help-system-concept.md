@@ -304,6 +304,30 @@ a full per-surface reference and every surface gained a chapter-linked "?". This
 product decision, not a regression of E15 — the extraction table above records what each
 ticket *lifted*, not a ceiling on what a topic may later cover.
 
+**Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
+the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
+densest pages first), each ticket adding only prose, a `<page>-help-sections.js` slug
+registry, the `section=` props and the two guards — the deep-link mechanism above is already
+generic, so there is no shared plumbing left to build. Two things every child inherits:
+
+1. **The extraction table is not a ceiling** (the paragraph above) — a child widening its
+   page's E-ticket scope records that in this section rather than reading as a regression.
+2. **A "?" over a modal surface needs an overlay subject.** `panelZIndex` lifts the panel
+   above the `Modal` layer *only* while an overlay subject is published (§9.5 / E17), so a
+   `PageHelpButton` inside a `SidePanel` (z-index 60/61) or a bespoke dialog opens the panel
+   **behind** the very surface it explains unless that surface calls `useHelpSubject()`. The
+   Skills child (#1990) registers `modal:skill-detail` + `modal:skills-merge` for exactly
+   this — neither claims a topic, so resolution still falls through to `/skills` and the
+   registration buys only the z-index lift. `/flows`' `EdgeDialogs` "?" (added by E2) has the
+   same latent problem and is still unfixed.
+
+**Grounding-budget consequence.** Each child grows `corpus.js`'s folded topic set, and #1990
+alone brought the assembled prompt to ~297.9k of the 300k limit. The remaining twelve
+children cannot all be absorbed by raising the number a fourth time — **route-scoped folding**
+(fold the current route's topic plus its `seeAlso` neighbours, not all of them) is the
+structural fix this epic finally makes urgent, and it is still a separable ticket because it
+changes what the assistant can answer about *other* pages.
+
 **Deferred (post-v1):** full-text help **search** — Ask already covers free-text; revisit only
 if the topic set grows large.
 

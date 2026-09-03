@@ -218,6 +218,9 @@ clone, running container) and gets its DM room; unticked, the members are laid o
 **stubs** — config and triggers only, nothing cloned and nothing running — and each is
 provisioned when you enable it. The Team-Setup wizard ticks it by default; the canvas'
 Materialize dialog leaves it off, because a process can have dozens of members.
+The word also names the per-member action (#1957): a stub is listed in Agent Chat under
+its team's **Not materialized yet** section, and its **Materialize** entry runs exactly
+the provisioning the Agents page's **Activate** does.
 
 ---
 

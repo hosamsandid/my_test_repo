@@ -625,6 +625,13 @@ const TOPIC_CONTENT = [
       'TODO',
       'Cmd/Ctrl+Shift+L',
       'unsaved changes',
+      // #1957 — the not-yet-materialized members the rail could not show at all
+      // before. The stub-vs-paused distinction is the point of the section, so
+      // it must survive a reword as much as the section's own name does.
+      'Not materialized yet',
+      'Not initialised',
+      'Materialize',
+      'never provisioned at all',
     ],
   },
   {

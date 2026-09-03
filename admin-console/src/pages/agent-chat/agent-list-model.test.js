@@ -10,6 +10,8 @@ import {
   passesDisabledFilter,
   buildAgentListModel,
   groupKey,
+  isStub,
+  stubSectionLabel,
 } from './agent-list-model.js';
 
 const EMPTY_ORDER = { groups: [], singles: [], members: {} };
@@ -194,11 +196,15 @@ test('groupKey namespaces team and orchestrator ids so they cannot collide', () 
 
 // ── disabled-agents filter (#1928, epic decision D2) ─────────────────────────
 
-const off = (agent) => ({ ...agent, enabled: false });
+// A *paused* agent: provisioned (it has a chat identity) and then switched off.
+// `hasToken` is what tells it apart from a stub, and the endpoint has shipped
+// that field since #1928 — the fixture spells it out because since #1957 the
+// two states are filtered differently.
+const off = (agent) => ({ ...agent, enabled: false, hasToken: true });
 
 test('passesDisabledFilter hides disabled rows only while the opt-in is off', () => {
-  assert.equal(passesDisabledFilter({ enabled: false }, false), false);
-  assert.equal(passesDisabledFilter({ enabled: false }, true), true);
+  assert.equal(passesDisabledFilter({ enabled: false, hasToken: true }, false), false);
+  assert.equal(passesDisabledFilter({ enabled: false, hasToken: true }, true), true);
   assert.equal(passesDisabledFilter({ enabled: true }, false), true);
   // An absent flag means enabled — the pre-#1928 payload shape.
   assert.equal(passesDisabledFilter({}, false), true);
@@ -268,4 +274,111 @@ test('the disabled filter composes with the text/entity filter rather than overr
   // though the disabled opt-in is on.
   assert.deepEqual(model.visibleSingles, []);
   assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-qa']);
+});
+
+// ── not-materialized members (#1957) ─────────────────────────────────────────
+
+// A STUB member: configuration and triggers only. The endpoint ships
+// `hasToken: false` for it and never sets `enabled`, which is exactly what
+// `agentState()` reads to tell it apart from the paused row above.
+const stub = (id, parentTeamId, displayName) =>
+  ({ id, role: 'team-member', parentTeamId, displayName, enabled: false, hasToken: false });
+
+test('isStub tells a never-provisioned member from a paused one', () => {
+  assert.equal(isStub(stub('t1-dev', 't1', 'Dev')), true);
+  assert.equal(isStub(off(member('t1-qa', 't1', 'QA'))), false);
+  assert.equal(isStub(member('t1-ops', 't1', 'Ops')), false);
+});
+
+test('stubSectionLabel carries the count so it is readable while collapsed (AC2)', () => {
+  assert.equal(stubSectionLabel(3), 'Not materialized yet (3)');
+  assert.equal(stubSectionLabel(1), 'Not materialized yet (1)');
+});
+
+test('AC1 — stubs land in their team group, split out of the active members', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    stub('t1-qa', 't1', 'QA'),
+    stub('t1-arch', 't1', 'Architect'),
+  ];
+  const { groups } = buildGroups(agents);
+  assert.deepEqual(groups[0].children.map(c => c.id), ['t1-dev']);
+  // Sorted by display name like the active members are.
+  assert.deepEqual(groups[0].stubs.map(c => c.id), ['t1-arch', 't1-qa']);
+});
+
+test('AC2 — a team with no stubs gets an empty section list, never a placeholder', () => {
+  const { groups } = buildGroups([team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev')]);
+  assert.deepEqual(groups[0].stubs, []);
+});
+
+test('an orchestrator group always has an empty stub list (out of scope)', () => {
+  const { groups } = buildGroups([orch('o1', 'Orch'), bp('o1-a', 'o1', 'A')]);
+  assert.deepEqual(groups[0].stubs, []);
+});
+
+test('edge case — a team whose members are ALL stubs still appears', () => {
+  const agents = [team('t1', 'Alpha'), stub('t1-dev', 't1', 'Dev'), stub('t1-qa', 't1', 'QA')];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ALL);
+  assert.equal(model.empty, false);
+  assert.equal(model.visibleGroups.length, 1);
+  assert.deepEqual(model.visibleGroups[0].children, []);
+  assert.deepEqual(model.visibleGroups[0].stubs.map(s => s.id), ['t1-dev', 't1-qa']);
+});
+
+test('a fully-deferred team with no team row of its own still forms a group', () => {
+  // Nothing but stubs and no header: the group has to survive the
+  // "header or children" drop rule, or the team is invisible.
+  const model = buildAgentListModel([stub('t1-dev', 't1', 'Dev')], EMPTY_ORDER, ALL);
+  assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
+  assert.deepEqual(model.visibleGroups[0].stubs.map(s => s.id), ['t1-dev']);
+  assert.deepEqual(model.visibleSingles, []);
+});
+
+test('a stub is never swept up by the disabled-agents filter', () => {
+  // `stub` and `paused` are different states (the edge case in the ticket): the
+  // opt-in governs paused rows only, so the stub section neither appears nor
+  // vanishes with it.
+  assert.equal(passesDisabledFilter(stub('t1-qa', 't1', 'QA'), false), true);
+
+  const agents = [team('t1', 'Alpha'), stub('t1-qa', 't1', 'QA'), off(member('t1-dev', 't1', 'Dev'))];
+  const hidden = buildAgentListModel(agents, EMPTY_ORDER, ALL, false);
+  assert.deepEqual(hidden.visibleGroups[0].children, []);            // paused row hidden
+  assert.deepEqual(hidden.visibleGroups[0].stubs.map(s => s.id), ['t1-qa']);
+
+  const shown = buildAgentListModel(agents, EMPTY_ORDER, ALL, true);
+  assert.deepEqual(shown.visibleGroups[0].children.map(c => c.id), ['t1-dev']);
+  assert.deepEqual(shown.visibleGroups[0].stubs.map(s => s.id), ['t1-qa']);
+});
+
+test('the team filter narrows the stub section like the member list', () => {
+  const agents = [
+    team('t1', 'Alpha'), stub('t1-qa', 't1', 'QA'),
+    team('t2', 'Beta'),  stub('t2-qa', 't2', 'QA2'),
+  ];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' });
+  assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
+  assert.deepEqual(model.visibleGroups[0].stubs.map(s => s.id), ['t1-qa']);
+});
+
+test('AC8 — stubs do not disturb the stored member order or the active list', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    member('t1-qa', 't1', 'QA'),
+    stub('t1-arch', 't1', 'Architect'),
+  ];
+  const order = { groups: [], singles: [], members: { 'team:t1': ['t1-qa', 't1-dev'] } };
+  const model = buildAgentListModel(agents, order, ALL);
+  // The stored order names only the materialized members and still applies
+  // verbatim — a stub is not part of the drag-reorderable list.
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-qa', 't1-dev']);
+  assert.deepEqual(model.visibleGroups[0].stubs.map(s => s.id), ['t1-arch']);
+});
+
+test('a parentless stub is listed as a single rather than dropped silently', () => {
+  const { groups, singles } = buildGroups([team('t1', 'Alpha'), stub('lost', undefined, 'Lost')]);
+  assert.deepEqual(groups.map(g => g.id), ['t1']);
+  assert.deepEqual(singles.map(s => s.id), ['lost']);
 });

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
-import { buildGroups, groupKey, orderModel, filterModel } from './agent-list-model.js';
-import { isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel } from './agent-list-model.js';
+import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
 // the model module directly (the grouping logic used to live in this file).
@@ -12,6 +12,13 @@ export { buildGroups } from './agent-list-model.js';
 
 const COLLAPSED_KEY = 'agentChat.collapsedGroups';
 const ORDER_KEY = 'agentChat.sidebarOrder';
+
+/**
+ * Module-level default for the `busyIds` prop so an embedding that passes none
+ * hands the memoized rows the *same* empty Set on every render (a `new Set()`
+ * default would change identity each time and defeat `React.memo`).
+ */
+const EMPTY_BUSY = new Set();
 
 /**
  * Per-group collapse-state defaults — matches the Agents overview page so the
@@ -67,6 +74,10 @@ function saveOrder(order) {
  * @param {Record<string,string>} statuses  Map agentId → activityState
  * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'orchestrator',id:string}|{kind:'agent',id:string}} filter
  * @param {boolean} showDisabled  Opt-in: also list disabled agents (#1928 AC6)
+ * @param {Set<string>} busyIds   ids with a lifecycle mutation in flight, owned
+ *   by `RailLifecycleHost` and passed down so a **Materialize** shows progress
+ *   on the row it was started from (#1957 AC5) — materializing clones the
+ *   role's repositories, so it can take a while and must not look frozen.
  * @param {(target:{kind:'agent'|'team',agent?:object,group?:object}, anchor:{x:number,y:number})=>void} onRequestMenu
  *   Lifecycle quick actions (#1928). The rail only reports *where* a menu was
  *   asked for and *for what* — which entries it gets, and what they do, is the
@@ -81,6 +92,7 @@ export default function AgentList({
   statuses = {},
   filter = { kind: 'all' },
   showDisabled = false,
+  busyIds = EMPTY_BUSY,
   onRequestMenu = null,
 }) {
   const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
@@ -253,6 +265,7 @@ export default function AgentList({
           drag={drag}
           groupDragKey={groupKey(group)}
           dragEnabled={canReorder && visibleGroups.length > 1}
+          busyIds={busyIds}
           onRequestMenu={onRequestMenu}
         />
       ))}
@@ -307,10 +320,15 @@ const GroupSection = React.memo(function GroupSection({
   drag,
   groupDragKey,
   dragEnabled,
+  busyIds,
   onRequestMenu,
 }) {
   const Icon = group.kind === 'team' ? Users : Layers;
-  const count = group.children.length + (group.header ? 1 : 0);
+  const stubs = group.stubs || [];
+  // Stubs count towards the header's total (#1957): they are members of this
+  // team, and a team whose members are *all* stubs would otherwise announce
+  // itself with a `0` next to a section listing several names.
+  const count = group.children.length + stubs.length + (group.header ? 1 : 0);
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
@@ -366,9 +384,98 @@ const GroupSection = React.memo(function GroupSection({
           onRequestMenu={onRequestMenu}
         />
       ))}
+      {/*
+       * The team's not-yet-materialized members (#1957), below the active ones
+       * and behind their own collapsed sub-header. A group with no stubs renders
+       * nothing at all here (AC2) — the section is never an empty affordance.
+       */}
+      {!collapsed && stubs.length > 0 && (
+        <StubSection
+          stubs={stubs}
+          groupEnv={groupEnv}
+          selectedAgentId={selectedAgentId}
+          onSelect={onSelect}
+          busyIds={busyIds}
+          onRequestMenu={onRequestMenu}
+        />
+      )}
     </>
   );
 });
+
+/**
+ * "Not materialized yet (N)" — the collapsed home for a team's stub members
+ * (#1957).
+ *
+ * Collapsed by default and never persisted, unlike the group collapse state: a
+ * stub section is a to-do list that empties itself as members are materialized,
+ * so remembering that it was once open would keep re-opening a section that no
+ * longer has anything to show. The count is on the header, so the number is
+ * readable without expanding (AC2).
+ *
+ * Its rows are ordinary `AgentRow`s: a stub is already not chat-openable
+ * (`isChatOpenable` is false for anything disabled), so clicking one opens its
+ * menu — where **Materialize** sits — exactly as a paused row does. They inherit
+ * the group's hoisted environment (#1451) but deliberately do not *vote* on what
+ * it is: `groupEnvironmentName` keeps reading the header + active members only,
+ * so adding stubs to a team can never flip an existing group's hoist.
+ */
+function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRequestMenu }) {
+  const [collapsed, setCollapsed] = useState(true);
+  const [hovered, setHovered] = useState(false);
+  const label = stubSectionLabel(stubs.length);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setCollapsed(v => !v)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        aria-expanded={!collapsed}
+        title="Members that exist as configuration only — materialize one to start it"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          width: '100%',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
+          background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
+          border: 'none',
+          fontSize: 'var(--eb-text-xs)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: 'var(--eb-text-muted)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          textAlign: 'left',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+      >
+        {collapsed
+          ? <ChevronRight size={12} style={{ flexShrink: 0 }} />
+          : <ChevronDown  size={12} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+      </button>
+      {!collapsed && stubs.map((agent) => (
+        <AgentRow
+          key={agent.id}
+          agent={agent}
+          selected={agent.id === selectedAgentId}
+          onSelect={onSelect}
+          // A stub has no chat identity, so the status poll never keys on it —
+          // its row state comes from its own payload (see `AgentRow`).
+          activityState="idle"
+          environmentName={rowEnvironmentName(agent, groupEnv)}
+          indent
+          busy={busyIds.has(agent.id)}
+          onRequestMenu={onRequestMenu}
+        />
+      ))}
+    </>
+  );
+}
 
 function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, onToggle, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
@@ -533,6 +640,10 @@ const STATUS_DOT = {
   // required. They now render as two distinct dots with actionable tooltips.
   disabled: { color: 'var(--eb-status-warning)', label: 'Disabled — enable it to chat',   pulse: false },
   offline:  { color: 'var(--eb-status-error)',   label: 'Offline — container not running', pulse: false },
+  // #1957 — a stub is not a paused agent: there is nothing to un-pause, the
+  // agent has never been provisioned. A muted dot rather than the amber
+  // "disabled" one, so the two states stay tellable apart at a glance.
+  stub:     { color: 'var(--eb-text-muted)',     label: 'Not initialised — materialize it to chat', pulse: false },
   // Kept as a fallback for any unrecognised state (see STATUS_DOT lookup below).
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
 };
@@ -547,16 +658,24 @@ const STATUS_DOT = {
 // actually pays off: a status poll re-renders only the rows whose
 // `activityState` string changed, not the whole list. The per-row click
 // closures are built inside — they only matter when the row does re-render.
-const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activityState = 'idle', environmentName = null, indent = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activityState = 'idle', environmentName = null, indent = false, busy = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const Icon = iconForRole(agent.role);
   const [hovered, setHovered] = useState(false);
 
   // A disabled agent is only ever in this list because the caller opted in
-  // (#1928 AC6). Its state is read from the row's own payload rather than the
-  // `statuses` poll, which is keyed on the enabled-agent list and would leave
-  // such a row looking idle.
+  // (#1928 AC6); a stub, because the chat always asks for them (#1957). Both
+  // read their state from the row's own payload rather than the `statuses`
+  // poll, which is keyed on the enabled-agent list and would leave such a row
+  // looking idle.
   const openable = isChatOpenable(agent);
-  const dot = openable ? (STATUS_DOT[activityState] ?? STATUS_DOT.problem) : STATUS_DOT.disabled;
+  const stub = agentState(agent) === 'stub';
+  const dot = openable
+    ? (STATUS_DOT[activityState] ?? STATUS_DOT.problem)
+    : (stub ? STATUS_DOT.stub : STATUS_DOT.disabled);
+  // The word next to the name. "Not initialised" is the Agents page's own
+  // vocabulary for this state (AC3) — the same agent must not be called two
+  // different things depending on which surface you are looking at.
+  const stateBadge = openable ? null : (stub ? 'Not initialised' : 'Disabled');
 
   const requestMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'agent', agent }, anchor)
@@ -571,8 +690,10 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
       aria-disabled={!openable || undefined}
       // A disabled agent has no chat to open (the DM route rejects it), so the
       // row opens its own menu instead — Enable sits right there, which beats
-      // both a silent no-op and a dead-end "agent disabled" panel (AC6).
-      title={!openable ? STATUS_DOT.disabled.label : undefined}
+      // both a silent no-op and a dead-end "agent disabled" panel (AC6). A stub
+      // has no chat *identity* at all (the DM route 409s on a tokenless agent),
+      // so the same rule covers it, pointing at Materialize instead (#1957 AC3).
+      title={!openable ? dot.label : undefined}
       onClick={e => {
         if (openable) { onSelect(agent.id); return; }
         if (requestMenu) requestMenu({ x: e.clientX, y: e.clientY });
@@ -640,9 +761,11 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
           {/*
            * The word, not just the amber dot: with the opt-in on, a disabled row
            * sits among enabled ones and has to read as disabled at a glance
-           * (AC6) — a colour alone would also fail anyone who can't see it.
+           * (AC6) — a colour alone would also fail anyone who can't see it. The
+           * same applies to a stub, which says "Not initialised" (#1957 AC3):
+           * two different states must not wear one badge.
            */}
-          {!openable && (
+          {stateBadge && (
             <span style={{
               flexShrink: 0,
               padding: '0 4px',
@@ -654,7 +777,7 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
               textTransform: 'uppercase',
               letterSpacing: '0.04em',
             }}>
-              Disabled
+              {stateBadge}
             </span>
           )}
         </div>
@@ -702,17 +825,32 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
           />
         )}
         {dnd && <DragGrip dnd={dnd} active={hovered} />}
-        <span
-          title={dot.label}
-          className={dot.pulse ? 'eb-status-pulse' : undefined}
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: dot.color,
-            flexShrink: 0,
-          }}
-        />
+        {/*
+         * A lifecycle mutation in flight replaces the status dot with a spinner
+         * (#1957 AC5). Materializing a role that declares repositories does the
+         * clone now, so the operation can take a while: the dot alone would
+         * leave the row looking untouched for the whole of it. It takes the
+         * dot's slot rather than adding one, so the cluster's width is stable.
+         */}
+        {busy ? (
+          <Loader2
+            size={12}
+            aria-label="Working…"
+            style={{ flexShrink: 0, color: 'var(--eb-text-muted)', animation: 'spin 1s linear infinite' }}
+          />
+        ) : (
+          <span
+            title={dot.label}
+            className={dot.pulse ? 'eb-status-pulse' : undefined}
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: dot.color,
+              flexShrink: 0,
+            }}
+          />
+        )}
       </span>
     </button>
   );

@@ -92,6 +92,27 @@ menu reads the same for everyone; the server enforces the same boundary
 independently. A **disabled** agent has no chat to open, so clicking its row
 opens this menu instead — which is where *Enable* is.
 
+**Members that have not been started yet.** A team can be created with its
+members left as **stubs** — configuration and triggers only, with no chat
+account, no workspace and no cloned repositories — so a process with dozens of
+roles does not provision all of them on day one. Such members appear at the
+bottom of their team group under a collapsed **Not materialized yet (N)**
+section; the count is on the header, so you can see how many are waiting without
+opening it. A stub row is marked **Not initialised** and cannot be opened as a
+chat, because there is no chat account to open yet. Its menu offers
+**Materialize**, which is the same operation as *Activate* on the Agents page:
+it creates the chat account, seeds the workspace with the agent's skills, prompt
+and MCP configuration, clones the environment's repositories and starts the
+agent. Expect it to take a moment when repositories are involved — the row shows
+it working — and when it finishes the member moves up into the list above.
+
+A stub is *not* the same thing as a **paused** agent: paused means provisioned
+and switched off, stub means never provisioned at all. That is why the *show
+disabled agents* opt-in has no effect on this section, and why the two carry
+different marks. If the team itself is disabled, **Materialize** is offered but
+inert with *enable the team first* — a member cannot be started while its team
+is off.
+
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Create a single agent*
 opens the direct form; **Import Agent** next to it takes an exported agent ZIP

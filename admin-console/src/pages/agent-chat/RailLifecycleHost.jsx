@@ -63,6 +63,12 @@ import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
  * @param {Record<string,string>} props.statuses
  *        agentId → activity state, the same map the rail renders its dots
  *        from. Read only to decide whether "Mark as unread" applies.
+ * @param {(ids:Set<string>) => void} props.onBusyIdsChange
+ *        report which ids currently have a mutation in flight, so the rail can
+ *        show progress on the row the action was started from (#1957 AC5).
+ *        Reported rather than owned by the rail: every request lives here, and
+ *        a **Materialize** clones repositories, so the row must not look
+ *        untouched for the length of it.
  * @param {{kind:string, id?:string}} props.listFilter
  *        the rail's current filter spec. Read for one thing only: after an
  *        import, whether the new agent is inside it (#1956 AC4) — a narrowed
@@ -78,7 +84,7 @@ import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
  */
 const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread,
-  statuses = {}, listFilter = { kind: 'all' },
+  statuses = {}, listFilter = { kind: 'all' }, onBusyIdsChange = null,
 }, ref) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -92,6 +98,10 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   const [configs, setConfigs] = useState(null);
 
   const [busyIds, setBusyIds] = useState(() => new Set());
+  // Mirrored up to the rail so a row can show it (#1957). The set is already the
+  // one the menu's own `busy` gate reads, so the rail's spinner and the menu's
+  // greyed-out entry can never disagree about what is in flight.
+  useEffect(() => { if (onBusyIdsChange) onBusyIdsChange(busyIds); }, [busyIds, onBusyIdsChange]);
   const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
 

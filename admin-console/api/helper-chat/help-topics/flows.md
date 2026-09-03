@@ -50,7 +50,10 @@ agent is taken: **Materialize agents now** is off here by default, so the member
 are created as **stubs** — they appear in the team with their prompts and
 triggers, but no repository is cloned and nothing is running until you enable
 one (a process can have dozens of members, and each materialisation clones the
-repository). Tick it and every member is provisioned right away. Materialize
+repository). Such a member is listed on the Agents page as *Not initialised*,
+and in Agent Chat under its team's collapsed *Not materialized yet* section —
+starting it from either place does the same thing. Tick it and every member is
+provisioned right away. Materialize
 needs at least one agent before it can turn a design into a team, and while a
 Copilot proposal is on screen the structural buttons pause, because the canvas
 is previewing the proposal rather than the draft underneath.

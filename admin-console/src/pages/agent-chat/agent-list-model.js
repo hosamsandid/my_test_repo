@@ -14,9 +14,36 @@
  * (mirrors agent-list-dnd.js / agent-list-env.js / message-draft.js).
  */
 
+import { agentState } from '../agent-lifecycle/agent-lifecycle-menu.js';
+
 /** Stable key for a group across the ordering / drag / collapse maps. */
 export function groupKey(g) {
   return `${g.kind}:${g.id}`;
+}
+
+/**
+ * A **not-yet-materialized** member (#1957): configuration and triggers only —
+ * no Matrix user, no workspace, no container. Derived from the shared
+ * `agentState()` rather than re-read off the payload, so the rail and the
+ * lifecycle menu can never disagree about what a stub is.
+ *
+ * Such a row is only in the list because the chat asked for it
+ * (`?includeStubs=1`), and the endpoint only ever ships stubs that are team
+ * members with a `parentTeamId` — which is what lets `buildGroups` treat "is a
+ * stub" as "belongs in its team's not-materialized section" without a second
+ * shape check.
+ */
+export function isStub(agent) {
+  return agentState(agent) === 'stub';
+}
+
+/**
+ * The collapsed section's label. Its count is the point — AC2 wants the number
+ * readable *without* expanding — so it is built here rather than assembled in
+ * the JSX, and the tests can hold the wording.
+ */
+export function stubSectionLabel(count) {
+  return `Not materialized yet (${count})`;
 }
 
 /**
@@ -24,18 +51,27 @@ export function groupKey(g) {
  * Exported so AgentChat can populate the filter without duplicating the
  * grouping logic.
  *
- * Returns `{ groups: [{ kind, id, displayName, header?, children[] }], singles: [] }`.
+ * Returns `{ groups: [{ kind, id, displayName, header?, children[], stubs[] }], singles: [] }`.
  *  - `kind` is either `'team'` or `'orchestrator'`.
  *  - `header` is the matching parent agent row when one is visible — absent
  *    when the parent is only referenced by orphaned children (e.g. a team
  *    has no Matrix presence, or an orchestrator stub is disabled).
+ *  - `stubs` are the team's not-yet-materialized members (#1957), split out of
+ *    `children` rather than mixed in: they render in their own collapsed
+ *    section, are not chat-openable and are not drag-reorderable, so keeping
+ *    them out of `children` means every existing consumer of that array (the
+ *    stored member order, the member drag scope, the group's own count) keeps
+ *    describing exactly the rows it used to. An orchestrator group is always
+ *    `stubs: []` — a stub bp-instance is out of scope and the endpoint never
+ *    ships one.
  */
 export function buildGroups(agents) {
   const byName = (a, b) =>
     (a.displayName || a.id).localeCompare(b.displayName || b.id);
 
   const teamRows         = agents.filter(a => a.role === 'team');
-  const memberRows       = agents.filter(a => a.role === 'team-member');
+  const memberRows       = agents.filter(a => a.role === 'team-member' && !isStub(a));
+  const stubRows         = agents.filter(a => a.role === 'team-member' && isStub(a));
   const orchestratorRows = agents.filter(a => a.role === 'orchestrator');
   const bpInstanceRows   = agents.filter(a => a.role === 'bp-instance');
   const others = agents.filter(a =>
@@ -47,9 +83,13 @@ export function buildGroups(agents) {
 
   // Union of team / orchestrator ids that should appear as a section: real
   // parent rows, plus any parent id referenced by a visible child.
+  // A stub member counts towards its team's existence too — a team created with
+  // deferred materialization may have *nothing but* stubs, and it has to appear
+  // (AC1, and the all-stubs edge case) rather than look like an empty list.
   const teamIds = new Set([
     ...teamRows.map(t => t.id),
     ...memberRows.map(m => m.parentTeamId).filter(Boolean),
+    ...stubRows.map(m => m.parentTeamId).filter(Boolean),
   ]);
   const orchestratorIds = new Set([
     ...orchestratorRows.map(o => o.id),
@@ -59,12 +99,14 @@ export function buildGroups(agents) {
   const teamGroups = [...teamIds].map(id => {
     const header   = teamRows.find(t => t.id === id) || null;
     const children = memberRows.filter(m => m.parentTeamId === id).sort(byName);
+    const stubs    = stubRows.filter(m => m.parentTeamId === id).sort(byName);
     return {
       kind: 'team',
       id,
       displayName: header?.displayName || id,
       header,
       children,
+      stubs,
     };
   });
 
@@ -77,6 +119,9 @@ export function buildGroups(agents) {
       displayName: header?.displayName || id,
       header,
       children,
+      // Always empty — kept so every group has the same shape and the renderer
+      // needs no per-kind branch.
+      stubs: [],
     };
   });
 
@@ -84,9 +129,14 @@ export function buildGroups(agents) {
     (a, b) => a.displayName.localeCompare(b.displayName),
   );
 
-  // Orphans: children whose parent is not in the visible set.
+  // Orphans: children whose parent is not in the visible set. A stub is only
+  // ever orphaned by having no `parentTeamId` at all (its team id is in
+  // `teamIds` by construction above) — the endpoint never ships such a row, but
+  // listing it beats dropping it silently, which is the one outcome the user
+  // could not tell from a missing agent.
   const orphans = [
     ...memberRows.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
+    ...stubRows.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
     ...bpInstanceRows.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
   ];
 
@@ -155,9 +205,16 @@ export function matchesFilter(agent, filter) {
  * agents when asked, so with the opt-in off this predicate is a no-op — it is
  * the guard that keeps a *stale* disabled row (an agent disabled in another tab,
  * still in the last fetched payload) from lingering as a chat-openable row.
+ *
+ * A **stub** is exempt (#1957): it is `enabled: false` by definition, so folding
+ * it into this predicate would mean the disabled opt-in silently governed two
+ * different states — and the not-materialized section would appear and vanish
+ * with a filter that is about paused agents. Stubs are governed by their own
+ * list opt-in (`?includeStubs=1`) and their own collapsed section instead.
  */
 export function passesDisabledFilter(agent, showDisabled) {
   if (showDisabled) return true;
+  if (isStub(agent)) return true;
   return !agent || agent.enabled !== false;
 }
 
@@ -175,9 +232,13 @@ export function filterModel(orderedGroups, orderedSingles, filter, showDisabled 
     .map(group => {
       const header   = group.header && keep(group.header) ? group.header : null;
       const children = group.children.filter(keep);
-      return { ...group, header, children };
+      // The team filter narrows the stub section exactly like the member list;
+      // a group whose only surviving rows are stubs still belongs in the list
+      // (a fully-deferred team is the whole point of #1957).
+      const stubs    = (group.stubs || []).filter(keep);
+      return { ...group, header, children, stubs };
     })
-    .filter(group => group.header || group.children.length > 0);
+    .filter(group => group.header || group.children.length > 0 || group.stubs.length > 0);
 
   const visibleSingles = orderedSingles.filter(keep);
 

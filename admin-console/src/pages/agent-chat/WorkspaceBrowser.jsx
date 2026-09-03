@@ -16,6 +16,8 @@ import {
   mountForKey, sameWritableSource, writeApiBase, apiRelOf,
 } from './workspace-source';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 
 const MODE_KEY = 'agentChat.workspaceMode';
 
@@ -415,6 +417,16 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
           onClick={() => setMode('diff')}
         />
         <div style={{ flex: 1 }} />
+        {/* #1972: this tab's "?" — what the tree shows, "reference in chat", and
+            how a context-folder mount differs (read-only vs read-write). The
+            chapter describes mounts generally, so the "?" reads the same for an
+            agent that has none. */}
+        <PageHelpButton
+          label="What the workspace tab shows"
+          size={13}
+          section={AGENT_CHAT_HELP_SECTIONS.workspace}
+          style={{ padding: '0 var(--eb-space-2)', alignSelf: 'center' }}
+        />
       </div>
 
       {/* Diff mode renders its own toolbar + list + diff pane. */}

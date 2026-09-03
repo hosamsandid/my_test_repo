@@ -45,6 +45,7 @@ export function useHelperChat() {
     sendMessage: () => {}, isStreaming: false, clearHistory: () => {},
     mode: 'chat', setMode: () => {}, openTour: () => {}, openHelpFor: () => {},
     pageHelp: EMPTY_PAGE_HELP, currentRoute: '/',
+    helpSection: { slug: '', nonce: 0 },
     helpContext: { route: '/', overlay: '', step: '' },
     publishHelpSubject: () => {}, retractHelpSubject: () => {},
     registerHelpPanel: () => () => {},
@@ -169,11 +170,21 @@ export function HelperChatProvider({ children }) {
     setIsOpen(true);
   }, []);
 
+  // Which chapter of the topic the face should scroll to (#1972). The nonce is
+  // bumped on every request so pressing the same "?" twice re-scrolls even
+  // though the slug did not change — without it a second press on an already
+  // open panel would do nothing visible.
+  const [helpSection, setHelpSection] = useState({ slug: '', nonce: 0 });
+
   // Open the panel on the page-aware "This page" face (#1873) — used by the
   // header Help button and every page's PageHelpButton. The face resolves the
   // topic from the live route, so the optional `route` argument is accepted for
   // call-site clarity but the panel always shows help for wherever the user is.
-  const openHelpFor = useCallback(() => {
+  // An optional `{ section }` (#1972) names the chapter to land on; a surface
+  // whose chapter is missing or misspelled just gets the topic from the top.
+  const openHelpFor = useCallback((_route, options) => {
+    const slug = (options && typeof options.section === 'string') ? options.section.trim() : '';
+    setHelpSection((prev) => ({ slug, nonce: prev.nonce + 1 }));
     setMode('page');
     setIsOpen(true);
   }, []);
@@ -288,9 +299,9 @@ export function HelperChatProvider({ children }) {
 
   const value = useMemo(() => ({
     isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
-    mode, setMode, openTour, openHelpFor, pageHelp, currentRoute,
+    mode, setMode, openTour, openHelpFor, pageHelp, currentRoute, helpSection,
     helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel]);
+  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpSection, helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel]);
 
   return (
     <HelperChatContext.Provider value={value}>

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 
 import { apiCall } from '../../hooks/useApi';
+import { useHelperChat } from '../../context/HelperChatContext';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
 import { summarizeTeamAction } from '../team-action-summary.js';
@@ -22,6 +23,7 @@ import {
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 
 /**
  * RailLifecycleHost — the Agent Chat left rail's lifecycle quick actions
@@ -63,6 +65,8 @@ export default function RailLifecycleHost({
   request, onClose, chatAgents, onChanged, onOpenSettings, onMarkAsUnread, statuses = {},
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { openHelpFor } = useHelperChat();
 
   // The scoped `GET /api/agents` configs, loaded lazily on the first menu and
   // re-read after every mutation. The chat payload is deliberately thin (no
@@ -353,6 +357,15 @@ export default function RailLifecycleHost({
     const target = request?.target;
     setActionError(null);
     setNotice(null);
+
+    // #1972: the menu's own "?" — a menu cannot host a PageHelpButton (its
+    // entries are index-walked for keyboard traversal), so the affordance is an
+    // entry that opens the help panel at the agent-list chapter. Handled before
+    // the per-target switches because it means the same thing on every menu.
+    if (kind === 'help') {
+      openHelpFor(location.pathname, { section: AGENT_CHAT_HELP_SECTIONS.agentList });
+      return;
+    }
 
     if (target?.kind === 'create') {
       if (kind === 'new-agent') navigate('/create');

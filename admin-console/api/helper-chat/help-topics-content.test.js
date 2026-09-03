@@ -529,6 +529,23 @@ const TOPIC_CONTENT = [
     // appears in the Triggers list, the workspace gate that makes everything else
     // wait while a loop holds it, and that an entry backing a promoted skill
     // cannot be retired at all.
+    //
+    // #1972 widened it from "the three side panels" to the WHOLE page: the agent
+    // list, the header, the composer and the right rail each gained a chapter,
+    // and each chapter is the landing target of a "?" on that surface. The
+    // `chapters` list below is therefore load-bearing, not decorative — the
+    // heading is what the deep-link resolves against.
+    chapters: [
+      'What the Agent Chat page is',
+      'The agent list',
+      'The chat header',
+      'The message composer',
+      'The right rail',
+      'Triggers — when the agent wakes on its own',
+      'Outcomes — what the agent signals when a run ends',
+      'Knowledge — what this agent has learned',
+      'Settings — configuring the agent',
+    ],
     concepts: [
       'one long-running Claude session',
       'Reset Session',
@@ -566,6 +583,26 @@ const TOPIC_CONTENT = [
       'un-retired',
       'backs a promoted skill',
       'validity window',
+      // #1972 — the surfaces the topic did not cover before.
+      'show disabled agents',
+      'Mark as unread',
+      'Reset to stub',
+      'learning badge',
+      'context window',
+      'restarts the agent',
+      'About this chat',
+      'Clear History',
+      'Settings → Behavior',
+      'slash command',
+      'Stop',
+      'meeting',
+      'reference in chat',
+      'context folder',
+      'read-write',
+      'Sessions',
+      'TODO',
+      'Cmd/Ctrl+Shift+L',
+      'unsaved changes',
     ],
   },
   {
@@ -677,6 +714,24 @@ for (const spec of TOPIC_CONTENT) {
       );
     }
   });
+
+  // Optional (#1972): a topic whose chapters are deep-link targets declares
+  // them, and each one must stay a top-level `## ` heading. A reworded heading
+  // does not throw at runtime — the panel silently renders from the top — so a
+  // test is the only thing that notices.
+  if (spec.chapters) {
+    test(`topic ${spec.id}: every deep-linked chapter is still a heading`, () => {
+      const headings = (topic.body.match(/^##\s+(.+?)\s*$/gm) || [])
+        .map((h) => h.replace(/^##\s+/, '').trim());
+      const missing = spec.chapters.filter((c) => !headings.includes(c));
+      assert.deepEqual(
+        missing, [],
+        `help-topics/${spec.id}.md lost the chapter heading(s): ${missing.join(' · ')} — `
+        + 'a "?" on the page deep-links to these by heading, so a reword breaks the '
+        + `link silently. Headings found: ${headings.join(' · ')}`,
+      );
+    });
+  }
 
   test(`topic ${spec.id}: the concepts lifted from the page survive`, () => {
     const hay = `${topic.summary}\n${topic.body}`.toLowerCase();

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { RefreshCw, AlertCircle, Loader2, ArrowRight, Target, GitPullRequest, CircleDot, Tag, Ban, MessageSquare } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   resolveOutcomeView,
   modeSummary,
@@ -104,6 +106,15 @@ export default function OutcomesPanel({ agentId, active }) {
       >
         <RefreshCw size={12} style={loading ? { animation: 'spin 1s linear infinite' } : {}} />
       </button>
+      {/* #1972: this tab's "?" — same slot as the Triggers toolbar's, landing on
+          the Outcomes chapter. The tab is conditional (team members only), so
+          the affordance appears exactly when the surface does. */}
+      <PageHelpButton
+        label="What an outcome is"
+        size={13}
+        section={AGENT_CHAT_HELP_SECTIONS.outcomes}
+        style={{ padding: 2 }}
+      />
     </div>
   );
 

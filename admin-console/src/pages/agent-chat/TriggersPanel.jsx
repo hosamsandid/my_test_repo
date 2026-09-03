@@ -6,6 +6,7 @@ import ScriptViewerPanel from '../../components/ScriptViewerPanel';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -1559,7 +1560,12 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       {/* E15 (#1889): the trigger-type concept prose moved into the Agent Chat
           help topic. This panel only ever renders on /chats, so the shared "?"
           resolves to that topic. */}
-      <PageHelpButton label="What the trigger types do" size={13} style={{ padding: 2 }} />
+      <PageHelpButton
+        label="What the trigger types do"
+        size={13}
+        section={AGENT_CHAT_HELP_SECTIONS.triggers}
+        style={{ padding: 2 }}
+      />
       <button
         onClick={() => setAddOpen(true)}
         disabled={!agentId}

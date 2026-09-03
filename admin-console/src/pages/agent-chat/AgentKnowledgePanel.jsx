@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Brain, RefreshCw, Archive, Sparkles, ArrowUpRight } from 'lucide-react';
 import ConfirmDialog from '../../components/ConfirmDialog';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 
 /**
  * Agent-chat "Knowledge" tab: the CONCRETE facts this agent has learned, not a
@@ -118,6 +120,14 @@ export default function AgentKnowledgePanel({ agentId, active = false }) {
           style={{ ...linkBtn }}>
           Skills <ArrowUpRight size={11} />
         </button>
+        {/* #1972: this tab's "?" — what the list is, and what Propose as skill
+            and Retire actually do. */}
+        <PageHelpButton
+          label="What this agent has learned"
+          size={13}
+          section={AGENT_CHAT_HELP_SECTIONS.knowledge}
+          style={{ padding: 2 }}
+        />
       </div>
 
       {/* Entries */}

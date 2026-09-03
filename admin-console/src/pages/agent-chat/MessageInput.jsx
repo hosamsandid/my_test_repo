@@ -3,6 +3,8 @@ import { Send, Paperclip, Loader2, Mic, Square, Repeat, ChevronDown, Radio } fro
 import useVoiceRecorder from '../../hooks/useVoiceRecorder.js';
 import LoopSummaryCard from './LoopSummaryCard';
 import Tooltip from '../../components/Tooltip.jsx';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   isMacPlatform,
   loadSendKeybinding,
@@ -727,6 +729,9 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       </div>
 
       <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--eb-space-2)',
         fontSize: 'var(--eb-text-xs)',
         color: voiceError ? 'var(--eb-status-error-text, #dc2626)' : 'var(--eb-text-muted)',
         marginTop: 'var(--eb-space-1)',
@@ -736,13 +741,26 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       }}>
         {/* Status line (transcribing / uploading / voice error). The send-on-Enter
             selector that used to sit here (#1354) moved to Settings → Behavior (#1804). */}
-        {voiceError
-          ? voiceError
-          : voiceState === 'transcribing'
-            ? 'Transcribing…'
-            : uploading
-              ? 'Uploading attachment…'
-              : null}
+        <span style={{ flex: 1, minWidth: 0 }}>
+          {voiceError
+            ? voiceError
+            : voiceState === 'transcribing'
+              ? 'Transcribing…'
+              : uploading
+                ? 'Uploading attachment…'
+                : null}
+        </span>
+        {/* #1972: the composer's "?" — sending, drafts, the slash-command
+            palette, Stop, loops, dictation vs the note-taker, attachments and
+            @-references are one surface with one chapter. It rides the status
+            row rather than the icon cluster so it never competes with the
+            controls it explains. */}
+        <PageHelpButton
+          label="What the composer can do"
+          size={13}
+          section={AGENT_CHAT_HELP_SECTIONS.composer}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </div>
     </div>
   );

@@ -4,6 +4,8 @@ import {
   History, ChevronDown, ChevronUp, ArrowLeft, RefreshCw, RotateCcw,
 } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import SessionLogPanel from './SessionLogPanel';
 import { canResumeSession, resumeNeedsConfirm } from './resume-session';
 import { resolveHistoricalId, historyFetchLimit } from './session-default';
@@ -590,6 +592,14 @@ export default function SessionsPanel({
                     Live
                   </button>
                 )}
+                {/* #1972: the same session-log "?" as on the live toolbar — a
+                    finished run's log is read exactly the same way. */}
+                <PageHelpButton
+                  label="How to read the session log"
+                  size={13}
+                  section={AGENT_CHAT_HELP_SECTIONS.sessionLog}
+                  style={{ padding: 2, flexShrink: 0 }}
+                />
               </div>
               {/* Row 2: timestamp + count + "last session" badge — all nowrap so
                   the date string never breaks mid-word at narrow widths. */}
@@ -677,6 +687,16 @@ export default function SessionsPanel({
                   : <Square size={11} />}
                 Stop
               </button>
+              {/* #1972: the session log's own "?" — it sits on the toolbar
+                  directly above the timeline, which is the only header the log
+                  has inside the rail (SessionLogPanel's own is suppressed when
+                  embedded). */}
+              <PageHelpButton
+                label="How to read the session log"
+                size={13}
+                section={AGENT_CHAT_HELP_SECTIONS.sessionLog}
+                style={{ padding: 2, flexShrink: 0 }}
+              />
             </div>
             <div style={{ flex: 1, minHeight: 0 }}>
               <SessionLogPanel
@@ -729,31 +749,42 @@ export default function SessionsPanel({
         background: 'var(--eb-bg-surface)',
         flexShrink: 0,
       }}>
-        <button
-          type="button"
-          onClick={() => setHistoryOpen(o => !o)}
-          aria-expanded={historyOpen}
-          title="Browse finished sessions"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            width: '100%',
-            padding: 'var(--eb-space-2) var(--eb-space-4)',
-            background: 'none',
-            border: 'none',
-            color: 'var(--eb-text-secondary)',
-            cursor: 'pointer',
-            fontFamily: 'inherit',
-            fontSize: 'var(--eb-text-xs)',
-            textAlign: 'left',
-          }}
-        >
-          <History size={13} />
-          <span style={{ fontWeight: 'var(--eb-font-medium)' }}>Finished sessions</span>
-          <div style={{ flex: 1 }} />
-          {historyOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(o => !o)}
+            aria-expanded={historyOpen}
+            title="Browse finished sessions"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              width: '100%',
+              padding: 'var(--eb-space-2) var(--eb-space-4)',
+              background: 'none',
+              border: 'none',
+              color: 'var(--eb-text-secondary)',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-xs)',
+              textAlign: 'left',
+            }}
+          >
+            <History size={13} />
+            <span style={{ fontWeight: 'var(--eb-font-medium)' }}>Finished sessions</span>
+            <div style={{ flex: 1 }} />
+            {historyOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+          </button>
+          {/* #1972: the Sessions tab's own "?". It rides this row rather than a
+              toolbar because this is the one control the tab always shows — the
+              per-session toolbars above it only exist once a run is selected. */}
+          <PageHelpButton
+            label="What the Sessions tab shows"
+            size={13}
+            section={AGENT_CHAT_HELP_SECTIONS.sessions}
+            style={{ padding: '0 var(--eb-space-3) 0 0', flexShrink: 0 }}
+          />
+        </div>
 
         {historyOpen && (
           <div style={{

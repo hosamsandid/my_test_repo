@@ -27,6 +27,7 @@ import {
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import VirtualList from '../../components/VirtualList.jsx';
 import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
 import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
@@ -1255,6 +1256,15 @@ export default function ChatPanel({
           environmentName={agent.environmentName}
           gitInfo={gitInfo}
         />
+        {/* #1972: the header controls — model/provider selector, context-usage
+            indicator, About this chat, the session tools — get their own "?"
+            landing on the chapter that explains them. */}
+        <PageHelpButton
+          label="What the header controls do"
+          size={13}
+          section={AGENT_CHAT_HELP_SECTIONS.header}
+          style={{ padding: 2, flexShrink: 0 }}
+        />
       </div>
 
       {disabled && (
@@ -1551,6 +1561,7 @@ export default function ChatPanel({
           <PageHelpButton
             label="How loops work"
             size={13}
+            section={AGENT_CHAT_HELP_SECTIONS.loops}
             style={{ padding: 0, marginLeft: 4, verticalAlign: 'middle' }}
           />
         </p>

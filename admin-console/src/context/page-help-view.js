@@ -243,6 +243,58 @@ export function panelZIndex(context) {
   return overlay ? PANEL_Z_INDEX_OVER_MODAL : PANEL_Z_INDEX;
 }
 
+// ─── Chapter deep-linking (#1972) ────────────────────────────────────────────
+//
+// A "?" next to one surface of a page should land on the chapter that explains
+// *that* surface, not at the top of a long topic. openHelpFor() therefore takes
+// an optional `section` — the slug of the chapter heading to scroll to — and the
+// face resolves it against the headings it just rendered.
+//
+// Matching on the *heading text* rather than an authored anchor keeps the topic
+// a plain markdown file (no `{#id}` syntax react-markdown would render
+// literally, no rehype-slug dependency, no second list to keep in step). The
+// cost — a reworded heading silently breaks its "?" — is paid by a drift-guard
+// test that asserts every slug a call site uses is a heading in the topic.
+//
+// An unmatched slug is never an error: the face just renders the topic from the
+// top, which is exactly the behaviour of a "?" whose surface has no chapter.
+
+// The slug of a heading: lowercased, markdown decoration stripped, runs of
+// anything that is not a letter/digit collapsed to a single hyphen.
+export function sectionSlug(text) {
+  return String(text == null ? '' : text)
+    .toLowerCase()
+    .replace(/`/g, '')
+    .replace(/\*\*|__|\*|_/g, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// The `##`/`###` headings of a topic body as { level, text, slug } rows, in
+// document order. Used by the drift guard; the face reads the rendered DOM
+// instead, so both sides agree only if the slug rule is the same one — which is
+// why it lives here rather than in either consumer.
+export function topicSections(body) {
+  const out = [];
+  for (const line of String(body || '').split('\n')) {
+    const m = /^(#{2,3})\s+(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    out.push({ level: m[1].length, text: m[2], slug: sectionSlug(m[2]) });
+  }
+  return out;
+}
+
+// Which of the rendered headings a section request points at: the index of the
+// first heading whose slug matches, or -1 for "no target — stay at the top".
+// `headings` is the list of heading texts as they appear on screen.
+export function findSectionIndex(headings, section) {
+  const want = sectionSlug(section);
+  if (!want) return -1;
+  const list = Array.isArray(headings) ? headings : [];
+  return list.findIndex((h) => sectionSlug(h) === want);
+}
+
 // True when the route has its own dedicated topic (drives first-run auto-open in
 // C2 — routes with only the Overview fallback do not auto-open, concept §4).
 export function hasDedicatedTopic(payload, pathname) {

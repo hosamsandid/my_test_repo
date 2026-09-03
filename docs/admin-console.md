@@ -165,7 +165,7 @@ The Agent Chat page (`/chats/:agentId`) embeds a full Matrix chat client with a 
 
 ### Left panel — Agent list
 
-Pick any enabled agent. The status indicator shows current state: **Unread** (new message), **Busy** (active run), **Idle** (waiting), **Disabled** (amber — intentionally off, one-click enable to resume), **Offline** (red — container not running).
+Pick any enabled agent. The status indicator shows current state: **Unread** (new message), **Busy** (active run), **Idle** (waiting), **Disabled** (amber — intentionally off, one-click enable to resume), **Offline** (red — container not running), **Not initialised** (muted — a stub that was never provisioned; materialize it to chat, #1957).
 
 Each row shows the agent's Working Environment name below its display name. Inside a team group whose members all share one environment, that name is shown once on the collapsible group header instead of repeating on every row; a member on a different environment keeps its own line. Standalone agents (outside any group) always show their own environment line.
 

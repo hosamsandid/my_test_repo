@@ -52,7 +52,8 @@ After creation an agent appears below as a card:
   workspace, no cloned repository and no running process. Either an
   orchestrator's mission agents, or the members of a team materialized with
   **Materialize agents now** left off. One click on **Activate** brings it to
-  life.
+  life — a team member can also be started from its team's *Not materialized
+  yet* section in Agent Chat, where the same action is called **Materialize**.
 
 ## Disable vs Reset to stub vs Delete
 

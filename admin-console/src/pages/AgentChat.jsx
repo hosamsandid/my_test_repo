@@ -608,7 +608,6 @@ export default function AgentChat() {
               agents={agents}
               selectedAgentId={agentId || null}
               onSelect={handleSelect}
-              onMarkAsUnread={handleMarkAsUnread}
               statuses={agentStatuses}
               filter={listFilter}
               showDisabled={showDisabled}
@@ -720,6 +719,8 @@ export default function AgentChat() {
         chatAgents={agents || []}
         onChanged={refetch}
         onOpenSettings={handleOpenSettings}
+        onMarkAsUnread={handleMarkAsUnread}
+        statuses={agentStatuses}
       />
     </div>
   );

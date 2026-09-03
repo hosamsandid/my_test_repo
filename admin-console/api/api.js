@@ -83,6 +83,19 @@ const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
+// Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
+// to orchestrator/toolchain-registry.js. The console owns the WRITE side (a
+// System Admin registering an image reference); the orchestrator reads the same
+// file at spawn time.
+const {
+  validateToolchain,
+  validateToolchainManifest,
+  toolchainFromManifest,
+  resolveToolchainImage,
+  normalizeRegistry: normalizeToolchainRegistry,
+  normalizeRuntime: normalizeToolchainRuntime,
+  DEFAULT_AGENT_IMAGE: BUILTIN_AGENT_IMAGE,
+} = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
@@ -3183,35 +3196,21 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
       vars: { ...resolved.vars, agentId: memberId },
     });
   } else if (typeof inBody.processTemplateId === 'string' && inBody.processTemplateId) {
-    // Add-role-from-a-PROCESS-template (#1375): surface a loop-closing role a
-    // team is missing (e.g. merger/reworker) and add it in one click. Unlike the
-    // agent-template branch above, the role comes from a whole-process bundle
-    // (orchestrator/skill-pool/process-templates/), so we mirror the Team-Setup
-    // wizard's per-role materialisation for a SINGLE role — reusing the exact
-    // same pure builders so the added member is byte-identical to one created at
-    // team-setup time: templateToCustomRoles → labelSuffix stamp → buildMemberFromTemplate.
-    const bundle = loadProcessTemplate(PROCESS_TEMPLATES_DIR, inBody.processTemplateId);
-    if (!bundle) return res.status(400).json({ error: `Process template '${inBody.processTemplateId}' not found` });
-    const roleId = typeof inBody.roleId === 'string' ? inBody.roleId : '';
-    const role = (bundle.roles || []).find(r => r.id === roleId);
-    if (!role) return res.status(400).json({ error: `Role '${roleId}' not found in process template '${inBody.processTemplateId}'` });
-    const memberId = typeof inBody.id === 'string' && inBody.id ? inBody.id : `${teamId}-${role.id}`;
-    if (!AGENT_ID_RE.test(memberId)) return res.status(400).json({ error: 'Invalid member id' });
-    const memberDisplayName = typeof inBody.displayName === 'string' && inBody.displayName.trim()
-      ? inBody.displayName.trim() : (role.displayName || role.id);
-    const resolved = resolveTeamMemberVars(teamId, inBody);
-    if (resolved.error) return res.status(400).json({ error: resolved.error });
-    // One role → its member-shaped "custom role", then apply the team's own
-    // labelSuffix (#902) so the new role's labels line up with the rest of the
-    // team, exactly as the wizard stamps the whole bundle before materialising.
-    let customRole = templateToCustomRoles({ roles: [role] })[0];
-    const suffix = teamCfg && typeof teamCfg.labelSuffix === 'string' ? teamCfg.labelSuffix : '';
-    if (suffix) customRole = applyLabelSuffix([customRole], [], suffix).members[0];
-    outBody = buildMemberFromTemplate(customRole, {
-      teamId,
-      memberId,
-      memberDisplayName,
-      vars: { ...resolved.vars, agentId: memberId },
+    // Add-role-from-a-PROCESS-template (#1375) is GONE (#1959). It existed only
+    // to serve the missing-roles suggestion — the platform inferred which
+    // loop-closing role a team lacked and offered a one-click add — and that
+    // capability was retired by requester decision, not re-homed.
+    //
+    // Refused explicitly rather than ignored: silently falling through would
+    // create a free-form member named after the role id but WITHOUT the
+    // template's prompt, session policy or triggers, which reads as success and
+    // is worse than an error. The `templateId` branch above (generic "Add
+    // member" from a role template) and the free-form branch are unaffected.
+    return res.status(400).json({
+      error: 'The missing-roles suggestion was removed (#1959): adding a single role from a '
+        + 'process template is no longer supported. Use `templateId` to add a member from a '
+        + 'role template, or wire the role in the Flow editor.',
+      code: 'process-template-role-removed',
     });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
@@ -11752,6 +11751,224 @@ app.delete('/api/admin/memberships', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `memberships${adminQuery(req)}`);
 });
 
+/* ─── Agent toolchain registry (#1940, concept docs/agent-toolchains-concept.md §3)
+ *
+ * The operator-curated list of agent container images a Working Environment may
+ * select from. It exists because the alternative — a free-text image field on
+ * the environment — is a privilege-escalation path, not a convenience:
+ * `startAgentProcess` injects the environment's SSH identity, its GitHub PAT and
+ * the model credential into every agent container, so whoever types the image
+ * reference runs arbitrary code with those secrets.
+ *
+ * The authorisation split therefore copies the plugin registry rather than
+ * inventing a second model (`POST /api/plugins/:id/install`, System-Admin-only):
+ *   - a SYSTEM ADMIN registers/removes a toolchain — the only place in the whole
+ *     product where an image reference is accepted from a client;
+ *   - a TEAM ADMIN selects a registered one by ID on their environment, and can
+ *     do nothing else. `PUT /api/environments/:id` validates the id against this
+ *     registry and stores the id; the orchestrator resolves it to an image at
+ *     spawn time (orchestrator/toolchain-registry.js).
+ * Both gates are SERVER-SIDE 403s (AC6), not hidden buttons.
+ *
+ * This ticket ships the mechanism and no toolchain: the `toolchains/<id>/`
+ * source tree, `make toolchain-images` and the first JVM variant are #1941,
+ * which fills this registry rather than replacing it.
+ */
+const TOOLCHAINS_DIR = path.join(WORKSPACE, 'toolchains');
+const TOOLCHAINS_INDEX = path.join(TOOLCHAINS_DIR, 'index.json');
+
+// Re-validated on every read (the plugin-registry.js discipline) — this file is
+// the boundary that keeps a Team Admin from introducing an image reference, so a
+// hand-edited entry is rejected here too, not only at the route that wrote it.
+function listToolchains() {
+  const { toolchains } = normalizeToolchainRegistry(readJsonFile(TOOLCHAINS_INDEX, []));
+  return toolchains;
+}
+
+function saveToolchains(list) {
+  fs.mkdirSync(TOOLCHAINS_DIR, { recursive: true });
+  writeJsonAtomic(TOOLCHAINS_INDEX, list);
+}
+
+// The SHIPPED variants (#1941): `toolchains/<id>/toolchain.json` from this
+// repository, seeded into the pool by `make seed-toolchains` exactly like a
+// reference plugin. Seeding installs nothing — it only makes the manifest
+// readable here, so installing a variant is picking an id whose description an
+// operator just read, instead of retyping an image reference from a Dockerfile.
+//
+// `_`-prefixed directories hold material shared between variants (the bootstrap
+// script), never a variant — the same convention `listPluginDirs` uses.
+const POOL_TOOLCHAINS_DIR = path.join(POOL_DIR, 'toolchains');
+
+// Where a variant's image actually lives in THIS deployment (#1941 AC11). A
+// manifest declares the bare `repo:tag` the build produces; a cluster pulls the
+// same image from its Artifact Registry under the release's tag. Both halves
+// arrive as env vars on the deployment (the overlay patch that carries
+// AGENT_IMAGE, pinned per release by deploy/k8s/set-images.sh) and are empty on
+// a local Podman stack.
+//
+// The console is DISPLAY-ONLY here. The registry entry it persists keeps the
+// manifest's bare tag and the orchestrator resolves the deployment reference at
+// spawn time — persisting a release-pinned reference would go stale on the next
+// release. This is used to show an operator what will actually be pulled, and
+// the console gets the same two env vars for exactly that reason: shown from one
+// side and resolved from the other, the install review would otherwise describe
+// an image the cluster never pulls.
+function toolchainImageRef(image) {
+  return resolveToolchainImage(image, {
+    prefix: process.env.AEE_TOOLCHAIN_IMAGE_PREFIX || '',
+    tag: process.env.AEE_TOOLCHAIN_IMAGE_TAG || '',
+  });
+}
+
+// Read + validate one seeded manifest. Never throws: an invalid manifest is
+// reported WITH its errors rather than hidden, so an operator can see why a
+// variant they expected is not installable (the readPluginDir discipline).
+function readSeededToolchain(id) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,39}$/.test(id)) return { id, ok: false, errors: ['invalid toolchain id'] };
+  const file = path.join(POOL_TOOLCHAINS_DIR, id, 'toolchain.json');
+  // Containment: the id is regex-bounded above (no slashes), re-checked here
+  // because this path is attacker-adjacent.
+  if (!path.resolve(file).startsWith(path.resolve(POOL_TOOLCHAINS_DIR) + path.sep)) {
+    return { id, ok: false, errors: ['invalid toolchain id'] };
+  }
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (err) { return { id, ok: false, errors: [`cannot read toolchain.json: ${err.message}`] }; }
+  const v = validateToolchainManifest(parsed, { dirId: id });
+  if (!v.ok) return { id, ok: false, errors: v.errors };
+  return { id, ok: true, manifest: v.manifest };
+}
+
+function listSeededToolchains() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(POOL_TOOLCHAINS_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort();
+  } catch { return []; }
+  return entries.map(readSeededToolchain);
+}
+
+// Which environments currently select a toolchain — used to refuse a removal
+// that would leave an environment pointing at nothing (its agents would then
+// refuse to spawn with `toolchain-not-registered`, which is correct but a
+// terrible way to find out).
+function environmentsUsingToolchain(toolchainId) {
+  return listEnvironmentIds().map(loadEnvironment).filter(Boolean)
+    .filter((e) => (e.toolchainId || null) === toolchainId)
+    .map((e) => ({ id: e.id, name: e.name }));
+}
+
+// Readable by any authenticated user: a Team Admin has to see the options to
+// pick one, and an entry carries no secret (a name, a description and an image
+// reference the operator chose to publish).
+app.get('/api/toolchains', (req, res) => {
+  const toolchains = listToolchains().map((t) => ({
+    ...t,
+    environments: environmentsUsingToolchain(t.id),
+    // What the orchestrator will ACTUALLY pull for this entry (#1941 AC11).
+    // The stored `image` is the manifest's bare tag; on a cluster the pull is
+    // from the Artifact Registry under the pinned release tag. Reported next to
+    // it rather than instead of it, so an operator debugging an ImagePullBackOff
+    // can see both the registered name and the resolved reference.
+    effectiveImage: toolchainImageRef(t.image),
+  }));
+  // The shipped-but-not-yet-installed variants (#1941), each with the
+  // plain-language description the System Admin is meant to read BEFORE
+  // installing. An invalid manifest is listed with its errors rather than
+  // dropped, so "where is the JVM toolchain?" has an answer.
+  const installed = new Set(toolchains.map((t) => t.id));
+  const available = listSeededToolchains()
+    .filter((entry) => !installed.has(entry.id))
+    .map((entry) => (entry.ok
+      ? {
+        ...toolchainFromManifest(entry.manifest),
+        effectiveImage: toolchainImageRef(entry.manifest.image),
+        versionManager: entry.manifest.versionManager,
+        ok: true,
+      }
+      : { id: entry.id, ok: false, errors: entry.errors }));
+  res.json({
+    toolchains,
+    available,
+    // The installation-wide default every environment without a toolchain uses
+    // (AC1/AC9) — shown so an operator can see what "no toolchain" resolves to.
+    defaultImage: process.env.AGENT_IMAGE || BUILTIN_AGENT_IMAGE,
+    runtime: normalizeToolchainRuntime(process.env.AEE_CONTAINER_RUNTIME),
+    canManage: !!getScope(req).all,
+  });
+});
+
+app.post('/api/toolchains', heavyLimiter, (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const body = req.body || {};
+  // TWO DOORS, ONE GATEKEEPER (#1941). A bare `{ id }` installs a SHIPPED
+  // variant: the image reference is then read from the seeded manifest, so the
+  // operator never retypes it and cannot typo it. Anything else is still the
+  // #1940 path — a hand-registered entry for an image this repository does not
+  // ship. Either way the result goes through `validateToolchain` before it is
+  // persisted, and either way what is PERSISTED is the reference as declared:
+  // the deployment's registry path and release tag are applied at spawn time
+  // (AC11), so this file never carries a reference that a release can stale.
+  let candidate = body;
+  if (body.id && body.image === undefined) {
+    const seeded = readSeededToolchain(String(body.id));
+    if (!seeded.ok) {
+      return res.status(400).json({
+        error: `Toolchain '${body.id}' is not available to install: ${seeded.errors.join('; ')}. `
+          + 'Shipped toolchains reach the pool via `make seed-toolchains`; for anything else, supply the image reference.',
+        errors: seeded.errors,
+      });
+    }
+    candidate = toolchainFromManifest(seeded.manifest);
+  }
+  const v = validateToolchain(candidate);
+  if (!v.ok) return res.status(400).json({ error: v.errors[0], errors: v.errors });
+  const list = listToolchains();
+  if (list.some((t) => t.id === v.toolchain.id)) {
+    return res.status(409).json({ error: `Toolchain '${v.toolchain.id}' already exists` });
+  }
+  saveToolchains([...list, v.toolchain]);
+  res.status(201).json(v.toolchain);
+});
+
+app.delete('/api/toolchains/:id', heavyLimiter, (req, res) => {
+  if (!getScope(req).all) return res.status(403).json({ error: 'System Admin required' });
+  const id = String(req.params.id || '');
+  const list = listToolchains();
+  if (!list.some((t) => t.id === id)) {
+    return res.status(404).json({ error: `Toolchain '${id}' not found` });
+  }
+  const usedBy = environmentsUsingToolchain(id);
+  if (usedBy.length) {
+    return res.status(409).json({
+      error: `Toolchain '${id}' is selected by ${usedBy.length} Working Environment(s): `
+        + `${usedBy.map((e) => e.name || e.id).join(', ')}. Clear it there first.`,
+      environments: usedBy,
+    });
+  }
+  saveToolchains(list.filter((t) => t.id !== id));
+  res.status(204).end();
+});
+
+// Resolve a client-supplied toolchain SELECTION (an id, never an image) against
+// the registry. A Team Admin may only name something a System Admin registered —
+// this is the enforcement point for that half of AC6, and the reason no
+// environment route ever reads an `image` field from a request body.
+function resolveToolchainSelection(toolchainId) {
+  if (toolchainId === undefined || toolchainId === null || toolchainId === '') {
+    return { toolchainId: null };
+  }
+  if (typeof toolchainId !== 'string') return { error: 'toolchainId must be a string' };
+  const found = listToolchains().find((t) => t.id === toolchainId.trim());
+  if (!found) {
+    return { error: `Toolchain '${toolchainId}' is not registered. A System Admin must add it first.` };
+  }
+  return { toolchainId: found.id };
+}
+
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
@@ -11798,7 +12015,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // (orchestrator/skill-grants.js) and lives on the agent constructs — the
   // Working Environment is a pure infrastructure template. Old clients may
   // still send the field; it is ignored so it can't silently grant anything.
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId, toolchainId } = req.body || {};
   const id = normalizeEnvId(req.body?.id);
   if (!id) return res.status(400).json({ error: 'id is required (a-z, 0-9, -)' });
   if (!name) return res.status(400).json({ error: 'name is required' });
@@ -11839,6 +12056,11 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
   if (llm.error) return res.status(400).json({ error: llm.error });
 
+  // Agent toolchain (#1940): an ID from the operator registry, resolved to an
+  // image server-side at spawn time. Never an image string from the client.
+  const toolchain = resolveToolchainSelection(toolchainId);
+  if (toolchain.error) return res.status(400).json({ error: toolchain.error });
+
   const env = {
     id,
     name,
@@ -11852,6 +12074,10 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     additionalContext: additionalContext || '',
     createdAt: new Date().toISOString(),
   };
+  // Written only when a toolchain was actually selected, so an environment
+  // without one is byte-identical to a pre-#1940 environment on disk (AC1) —
+  // the same discipline as contextMountRw (#1289).
+  if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
   saveEnvironment(id, env);
   res.status(201).json(env);
 });
@@ -11868,10 +12094,11 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const prevGithubTokenId = env.githubTokenId || null;
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
+  const prevToolchainId = env.toolchainId || null;
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
-  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId } = req.body || {};
+  const { name, description, repositories, repository, additionalContext, githubTokenId, llmEndpointId, defaultModelId, mcpServers, teamId, toolchainId } = req.body || {};
 
   if (githubTokenId) {
     const tokens = listGithubTokens();
@@ -11921,15 +12148,32 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
   }
   if (additionalContext !== undefined) env.additionalContext = additionalContext;
+  if (toolchainId !== undefined) {
+    const toolchain = resolveToolchainSelection(toolchainId);
+    if (toolchain.error) return res.status(400).json({ error: toolchain.error });
+    // Clearing it DELETES the key rather than storing null, so an environment
+    // that never had a toolchain — or had one and gave it up — is byte-identical
+    // to a pre-#1940 environment on disk (AC1).
+    if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
+    else delete env.toolchainId;
+  }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
-  // Spawn-time bindings (GitHub PAT, LLM provider/model) are baked into each
-  // agent container at start, so a change only takes effect on respawn. Respawn
-  // the env's running agents whenever any of them changed — otherwise a provider
-  // switch at the environment level would silently not apply until a manual
-  // disable→enable. (A per-agent override is handled by PATCH /agents/:id/provider.)
+  // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
+  // baked into each agent container at start, so a change only takes effect on
+  // respawn. Respawn the env's running agents whenever any of them changed —
+  // otherwise a provider switch at the environment level would silently not apply
+  // until a manual disable→enable. (A per-agent override is handled by
+  // PATCH /agents/:id/provider.)
+  //
+  // The toolchain (#1940 AC5) rides this exact path, and it must: a container's
+  // image is immutable for its whole lifetime, so a toolchain change reaches a
+  // RUNNING agent only by recreating it. The console warns about the interruption
+  // before the save, as the personal-credential rotate panel does.
   if ((env.githubTokenId || null) !== prevGithubTokenId) {
     notifyEnvCredentialChange(env.id, 'githubTokenId-changed');
+  } else if ((env.toolchainId || null) !== prevToolchainId) {
+    notifyEnvCredentialChange(env.id, 'toolchain-changed');
   } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');

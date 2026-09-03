@@ -7,8 +7,9 @@
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
 #   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
-#   agent-image           — agent-image/scripts/test_*.py     (pytest, python 3.12)
+#   agent-image           — agent-image/scripts/test_*.py + toolchains/_shared/test_aee_toolchain.py (pytest, python 3.12)
 #   e2e-journeys          — journey unit tests + lint + dry-run + catalog freshness (#706, podman-free)
+#   toolchain-images      — toolchains/*/ variant image build + base-contract smoke test (#1941, docker)
 #
 # admin-console-src covers pure, non-JSX helper modules colocated under src/
 # (e.g. credential-scope-view.js, group-agents-by-team.js) that have zero React
@@ -19,6 +20,12 @@
 # Deliberately minimal (issue #665 / e2e-testing-concept §1): no lint, no coverage —
 # just make the suites that already exist run automatically. Recommend promoting these
 # to required checks once green.
+#
+# The one job that is NOT a test suite is toolchain-images (#1941 AC3): "derive,
+# never fork" is a property of a BUILT image, so it can only be checked by
+# building one — that job builds the base agent image plus every toolchain
+# variant and probes the result. Like every job here it carries no `needs`, so it
+# runs beside the fast suites rather than in front of them.
 
 name: CI
 
@@ -149,6 +156,17 @@ jobs:
         working-directory: agent-image/scripts
         run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py -q
 
+      # The toolchain bootstrap (#1941) is python and lives outside agent-image/,
+      # but it is the same KIND of test — a pure unit suite over an agent-runtime
+      # script — and it needs the same interpreter, so it rides this job rather
+      # than paying for a second setup-python. Deliberately NOT in the
+      # toolchain-images job: that one builds real images and takes ~30 min,
+      # while `aee-toolchain`'s version-resolution logic is exactly the thing you
+      # want a red X on in seconds.
+      - name: Run toolchain bootstrap unit tests
+        working-directory: toolchains/_shared
+        run: python -m pytest test_aee_toolchain.py -q
+
   # The walkthrough-video chapter selection (#749) is pure ESM — no @revideo, no
   # ffmpeg, no browser — so its unit tests run on the fast PR lane (like the
   # journey tooling below), while the heavy render stays in the manual
@@ -212,3 +230,146 @@ jobs:
       - name: Dry-run journeys
         working-directory: e2e
         run: npm run journeys:dryrun
+
+  # Toolchain variant images (#1941 AC3, concept docs/agent-toolchains-concept.md
+  # §4). A variant is an added LAYER on the published agent image, and "derive,
+  # never fork" is unenforceable by review: a variant that re-implements the base,
+  # drops the /opt/aee/plugin-bin PATH hook or shadows one of the platform CLIs
+  # builds perfectly cleanly and then fails at RUNTIME as "command not found" —
+  # for something the agent's own CLAUDE.md told it to use, hours later, in an
+  # unattended run. toolchains/_shared/base-contract-check.sh is that failure made
+  # loud at build time, and it is a HARD gate in this job.
+  #
+  # WHY HERE AND NOT IN THE NIGHTLY PODMAN LANE (e2e.yml): the thing under test is
+  # an image build, so it has to run on the change that edits a Dockerfile — a
+  # nightly would report the drift a day after the PR merged. It needs no libpod
+  # socket and no stack, so nothing forces it onto that lane.
+  #
+  # ENGINE IS DOCKER, NOT PODMAN. `make toolchain-images` drives podman (what a
+  # developer machine has) while a hosted runner has docker, so the steps below
+  # re-drive the same two scripts with AEE_CONTAINER_CLI=docker instead of calling
+  # the make target. Variant DISCOVERY is deliberately the same shape — and the
+  # same `sed` — as that target: every toolchains/<id>/ carrying a toolchain.json,
+  # `_`-prefixed directories skipped as shared material (the convention
+  # listPluginDirs already uses), the tag read out of the manifest. So adding a
+  # stack stays "one Dockerfile and one manifest" with no edit to this file (AC14).
+  toolchain-images:
+    name: toolchain variants (build + base contract)
+    runs-on: ubuntu-latest
+    # Generous by this file's standards (the fast suites are 5–10): two image
+    # builds, one of which downloads a JDK. The two heavy steps are bounded
+    # separately below so a hung build can't eat the whole budget.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the base agent image (as-agent:latest)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # Each variant's `FROM ${AGENT_BASE_IMAGE}` defaults to as-agent:latest
+          # and resolves against the LOCAL image store, so the base has to exist
+          # under exactly that tag before any variant builds — this is also what
+          # proves the variant layers onto the base built from THIS commit rather
+          # than a stale published one. Same invocation as deploy-gke.yml's
+          # as-agent build: context agent-image/, no --target (the final stage is
+          # the aee-agent tier-1 target).
+          #
+          # Retried like the Makefile's agent-image target: what this guards is a
+          # transient registry pull, not a broken Dockerfile.
+          n=0
+          until docker build -t as-agent:latest -f agent-image/Dockerfile agent-image/; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "agent-image: build failed after $n attempts" >&2
+              exit 1
+            fi
+            echo "agent-image: build failed (attempt $n/3) — likely a transient registry pull; retrying in 15s…" >&2
+            sleep 15
+          done
+
+      - name: Build every toolchain variant + assert the base contract
+        timeout-minutes: 25
+        env:
+          # Both scripts auto-detect podman first and fall back to docker; the
+          # runner has only docker, so say so explicitly rather than relying on
+          # the fallback.
+          AEE_CONTAINER_CLI: docker
+        run: |
+          set -euo pipefail
+          # BUILD CONTEXT is `toolchains/`, not `toolchains/<id>/`, because every
+          # variant COPYs the shared bootstrap from _shared/ and a build context
+          # cannot reach a sibling directory — the same reason the plugin brokers
+          # build from the repository root.
+          #
+          # base-contract-check.sh runs from the repository ROOT (the default
+          # working directory here): it reads the pinned Claude CLI version
+          # straight out of agent-image/Dockerfile instead of restating it, so a
+          # variant that reinstalled or upgraded the CLI is caught even though
+          # every name still resolves.
+          : > /tmp/toolchain-variants.txt
+          for dir in toolchains/*/; do
+            id="$(basename "$dir")"
+            case "$id" in _*) continue ;; esac
+            if [ ! -f "$dir/toolchain.json" ]; then
+              echo "== skipping $id (no toolchain.json)"
+              continue
+            fi
+            tag="$(sed -n 's/.*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/toolchain.json" | head -1)"
+            if [ -z "$tag" ]; then
+              echo "ERROR: $id/toolchain.json declares no image" >&2
+              exit 1
+            fi
+            echo "== building $id -> $tag"
+            n=0
+            until docker build -t "$tag" -f "$dir/Dockerfile" toolchains/; do
+              n=$((n + 1))
+              if [ "$n" -ge 3 ]; then
+                echo "toolchain-images: $id failed after $n attempts" >&2
+                exit 1
+              fi
+              echo "toolchain-images: $id failed (attempt $n/3) — likely a transient registry pull; retrying in 15s…" >&2
+              sleep 15
+            done
+            # THE GATE. Non-zero here = the variant is no longer an agent image.
+            ./toolchains/_shared/base-contract-check.sh "$tag" "$id"
+            # Hand the verified (id, tag) pairs to the demo step below so the tag
+            # is parsed out of the manifest exactly once.
+            echo "$id $tag" >> /tmp/toolchain-variants.txt
+          done
+          # Guards the DISCOVERY, not the variants: a glob or `sed` that stopped
+          # matching would otherwise leave this gate vacuously green — the same
+          # failure mode as a passing test with no inputs.
+          if [ ! -s /tmp/toolchain-variants.txt ]; then
+            echo "ERROR: no toolchain variant was built — discovery matched nothing under toolchains/*/" >&2
+            exit 1
+          fi
+          docker images --filter reference='as-agent-*' --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
+
+      - name: Toolchain verification demo (AC5–AC9 + AC12 measurements)
+        # NOT a gate, deliberately. verify-toolchain.sh DEMONSTRATES the bootstrap
+        # model against real containers — a pinned `mvn test`, a pin change that
+        # needs no rebuild, two projects on two Java versions, and the measured
+        # image size plus cold/warm build cost. Getting those numbers into the CI
+        # log is the point (the ticket asks for them measured, not estimated), but
+        # it downloads a JDK and Maven dependencies from the public internet, so a
+        # network hiccup here must not turn a base-contract-clean build red. The
+        # hard gate is the step above; this one reports.
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          AEE_CONTAINER_CLI: docker
+        run: |
+          set -uo pipefail
+          # Driven off the list the build step wrote, so nothing here is
+          # Java-specific: a variant that ships no sample project simply has no
+          # demo, and a second stack needs no edit to this file (AC14).
+          while read -r id tag; do
+            if [ ! -d "toolchains/$id/sample" ]; then
+              echo "== $id: no sample project — nothing to demonstrate"
+              continue
+            fi
+            echo "== verifying $id ($tag)"
+            ./toolchains/_shared/verify-toolchain.sh "$tag" "$id" \
+              || echo "== $id: verification demo did not pass (non-blocking; the base contract above is the gate)"
+          done < /tmp/toolchain-variants.txt

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { MessageCircle, Bot, Server, MailOpen, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical } from 'lucide-react';
+import { MessageCircle, Bot, Server, Users, Layers, ChevronDown, ChevronRight, GripVertical, MoreVertical } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
@@ -64,7 +64,6 @@ function saveOrder(order) {
  * @param {object[]} agents          List of `/api/matrix/agents` entries
  * @param {string|null} selectedAgentId
  * @param {(id:string)=>void} onSelect
- * @param {(id:string)=>void} onMarkAsUnread
  * @param {Record<string,string>} statuses  Map agentId → activityState
  * @param {{kind:'all'}|{kind:'team',id:string}|{kind:'orchestrator',id:string}|{kind:'agent',id:string}} filter
  * @param {boolean} showDisabled  Opt-in: also list disabled agents (#1928 AC6)
@@ -79,7 +78,6 @@ export default function AgentList({
   agents,
   selectedAgentId,
   onSelect,
-  onMarkAsUnread,
   statuses = {},
   filter = { kind: 'all' },
   showDisabled = false,
@@ -249,7 +247,6 @@ export default function AgentList({
           onToggle={toggleCollapsed}
           selectedAgentId={selectedAgentId}
           onSelect={onSelect}
-          onMarkAsUnread={onMarkAsUnread}
           statuses={statuses}
           memberReorder={canReorderMembers}
           onReorder={reorderByOne}
@@ -269,7 +266,6 @@ export default function AgentList({
               agent={agent}
               selected={agent.id === selectedAgentId}
               onSelect={onSelect}
-              onMarkAsUnread={onMarkAsUnread}
               activityState={statuses[agent.id] || 'idle'}
               // Ungrouped: no header to hoist the environment to (#1451).
               environmentName={rowEnvironmentName(agent)}
@@ -305,7 +301,6 @@ const GroupSection = React.memo(function GroupSection({
   onToggle,
   selectedAgentId,
   onSelect,
-  onMarkAsUnread,
   statuses,
   memberReorder,
   onReorder,
@@ -349,7 +344,6 @@ const GroupSection = React.memo(function GroupSection({
           agent={group.header}
           selected={group.header.id === selectedAgentId}
           onSelect={onSelect}
-          onMarkAsUnread={onMarkAsUnread}
           activityState={statuses[group.header.id] || 'idle'}
           environmentName={rowEnvironmentName(group.header, groupEnv)}
           onRequestMenu={onRequestMenu}
@@ -361,7 +355,6 @@ const GroupSection = React.memo(function GroupSection({
           agent={agent}
           selected={agent.id === selectedAgentId}
           onSelect={onSelect}
-          onMarkAsUnread={onMarkAsUnread}
           activityState={statuses[agent.id] || 'idle'}
           environmentName={rowEnvironmentName(agent, groupEnv)}
           indent
@@ -549,12 +542,12 @@ const STATUS_DOT = {
  * rather than read off `agent`: inside a group the shared env lives on the
  * header, so an inheriting row is passed `null` and renders single-line (#1451).
  */
-// `onSelect`/`onMarkAsUnread` are the id-taking callbacks straight from the
-// parent (stable `useCallback`s), so wrapping the row in `React.memo` (#1682)
+// `onSelect` is the id-taking callback straight from the parent (a stable
+// `useCallback`), so wrapping the row in `React.memo` (#1682)
 // actually pays off: a status poll re-renders only the rows whose
 // `activityState` string changed, not the whole list. The per-row click
 // closures are built inside — they only matter when the row does re-render.
-const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMarkAsUnread, activityState = 'idle', environmentName = null, indent = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activityState = 'idle', environmentName = null, indent = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const Icon = iconForRole(agent.role);
   const [hovered, setHovered] = useState(false);
 
@@ -570,14 +563,6 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMar
     : null;
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
-
-  // The "mark as unread" button is shown on hover when the agent is not
-  // already unread and not in a disabled/offline/error state.
-  const canMarkUnread = onMarkAsUnread
-    && activityState !== 'unread'
-    && activityState !== 'disabled'
-    && activityState !== 'offline'
-    && activityState !== 'problem';
 
   return (
     <button
@@ -699,36 +684,16 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, onMar
 
       <span style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
         {/*
-         * Trailing cluster order (left→right): hover-revealed mark-as-unread →
-         * grip → persistent status dot. The grip sits immediately left of the
-         * always-present dot so its horizontal position never changes when
-         * hover reveals the mark-as-unread icon — it grows to the *left* of it
-         * (#1377). The visible up/down arrow reorder buttons were removed as
-         * redundant with drag&drop; the keyboard path stays as Alt+↑/↓ (see
-         * aria-keyshortcuts above) (#1381).
+         * Trailing cluster order (left→right): kebab → grip → persistent status
+         * dot. Every one of them is *always rendered* — hover only changes the
+         * kebab's and the grip's opacity — so the grip's horizontal position is
+         * fixed, which is what the #1377 order was for. It is now fixed
+         * outright: the hover-*revealed* mark-as-unread mail icon that used to
+         * lead this cluster is gone, its action being a "Mark as unread" entry
+         * in the kebab menu instead (#1938). The visible up/down arrow reorder
+         * buttons were removed as redundant with drag&drop; the keyboard path
+         * stays as Alt+↑/↓ (see aria-keyshortcuts above) (#1381).
          */}
-        {hovered && canMarkUnread && (
-          <span
-            role="button"
-            title="Mark as unread"
-            onClick={e => { e.stopPropagation(); onMarkAsUnread(agent.id); }}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: 18,
-              height: 18,
-              borderRadius: 'var(--eb-radius-sm)',
-              color: 'var(--eb-text-muted)',
-              cursor: 'pointer',
-              transition: 'color var(--eb-transition-fast)',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
-            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-          >
-            <MailOpen size={12} />
-          </span>
-        )}
         {requestMenu && (
           <KebabButton
             label={`Actions for ${agent.displayName || agent.id}`}
@@ -810,11 +775,11 @@ function makeRowDnd(drag, scope, key) {
  *
  * Rendered as a `span[role=button]`: the rows it sits in are themselves
  * `<button>`s, and a nested `<button>` is invalid HTML that browsers recover
- * from by hoisting it out of its parent — the same reason the sibling
- * mark-as-unread control is a span. Always mounted while a menu is available
- * (faint at rest, full-strength on row hover) so its width never shifts the
- * trailing cluster, and `stopPropagation` keeps a click off the row's own
- * select/collapse handler.
+ * from by hoisting it out of its parent — the same reason the drag grip beside
+ * it is a span. Always mounted while a menu is available (faint at rest,
+ * full-strength on row hover) so its width never shifts the trailing cluster,
+ * and `stopPropagation` keeps a click off the row's own select/collapse
+ * handler.
  */
 function KebabButton({ label, active, onOpen }) {
   function open(e) {

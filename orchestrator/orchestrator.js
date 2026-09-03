@@ -194,6 +194,12 @@ const BP_EXPLORER_URL = process.env.BP_EXPLORER_URL || "http://bp-explorer:8765"
 // the same value as spawn-container.js's INSTANCE_ID (identical precedence).
 const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || 'agent-studio-314092';
 const INSTANCE_LABEL_KEY = 'aee.instance';
+// The platform's own per-agent label, stamped on every agent container/pod by
+// both spawn implementations. It — not the image ancestor — is how this file
+// finds agent containers, so a container spawned from a per-environment
+// toolchain variant is still found (#1940 AC4). Schema constant; keep in sync
+// with AGENT_LABEL_KEY in spawn-container.js / spawn-kubernetes-pod.js.
+const AGENT_ID_LABEL_KEY = 'aee.agent.id';
 
 const AGENTS_DIR = "/workspace/agents";
 // The filename CLAUDE.md references for the authored prompt. The seeded
@@ -397,7 +403,11 @@ function resolveAssistBindingFromSelection(endpointId, modelId) {
 const { execFile, execFileSync } = require("child_process");
 const execFileP = require("util").promisify(execFile);
 // Container-runtime seam: Podman (default) or Kubernetes, per AEE_CONTAINER_RUNTIME.
-const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume, perAgentNetworkName } = require("./container-runtime");
+const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwork, reseedPerAgentVolume, perAgentNetworkName, DEFAULT_AGENT_IMAGE } = require("./container-runtime");
+// Per-Working-Environment agent toolchain (#1940). The image an agent is
+// spawned from is decided HERE — the seam only executes it — because the
+// decision needs the agent's environment, which no spawn adapter loads.
+const { normalizeRegistry, resolveAgentImage, normalizeRuntime } = require("./toolchain-registry");
 // Fast/background split of agent deletion (#1791): graceful-role decision +
 // the in-memory "teardown in progress" guard for same-id re-create safety.
 const { isGracefulDeleteRole, TeardownRegistry } = require("./agent-delete-plan");
@@ -605,7 +615,32 @@ function startAgentProcess(config) {
   // mount at all, so the no-mount spawn path is byte-identical to before (AC9).
   const contextMounts = CONTEXT_MOUNT_RUNTIME_OK ? resolveContextMounts(config) : [];
 
-  const child = spawnContainer({ id, env: childEnv, contextMounts });
+  // Agent toolchain (#1940). The environment may name a toolchain whose image
+  // this agent is spawned from; absent, this is the installation-wide default
+  // and the spawn is byte-identical to before (AC1). A selection that cannot be
+  // honoured (unregistered toolchain, wrong runtime) REFUSES the spawn with a
+  // named reason — the same fail-closed stance as the un-seeded-workspace guard
+  // above, and for the same reason: booting the agent anyway would produce a
+  // container that looks healthy and breaks at the first build command.
+  const resolvedImage = resolveImageForAgent(config);
+  if (resolvedImage.error) {
+    console.error(`[Orchestrator] Refusing to start agent ${id}: ${resolvedImage.message}`);
+    return;
+  }
+  if (resolvedImage.toolchain) {
+    console.log(
+      `[Orchestrator] Agent ${id} -> toolchain '${resolvedImage.toolchain.toolchainId}' ` +
+      `image ${resolvedImage.image}`,
+    );
+  }
+
+  const child = spawnContainer({
+    id,
+    env: childEnv,
+    contextMounts,
+    image: resolvedImage.image,
+    toolchain: resolvedImage.toolchain,
+  });
 
   child.stdout.on('data', (d) =>
     d.toString().split('\n').filter(Boolean).forEach(line =>
@@ -665,9 +700,20 @@ function stopAgentSession(id, sessionId) {
 
 async function evictStaleAgentContainers() {
   if (process.env.EVICT_STALE_AGENTS === '0') return;
-  const image = process.env.AGENT_IMAGE || 'as-agent:latest';
   try {
-    const filters = encodeURIComponent(JSON.stringify({ ancestor: [image] }));
+    // Key on the platform's OWN label, not the image ancestor (#1940 AC4).
+    // Filtering by `{ ancestor: [AGENT_IMAGE] }` was correct only while every
+    // agent ran the one installation-wide image: the moment an agent is spawned
+    // from a per-environment toolchain variant, a stale container of that
+    // variant is invisible to this sweep and is left running forever. Every
+    // agent container carries `aee.agent.id` on both runtimes (spawn-container's
+    // AGENT_LABEL_KEY / the pod label in buildPodManifest), so a label-key
+    // filter sees them all regardless of image — and also covers the
+    // short-lived seed/reseed helpers, whose stale leftovers we equally want
+    // gone. The aee.instance check below is UNCHANGED, so the "left N
+    // foreign/legacy container(s) untouched" safety is preserved: a sibling
+    // stack's agents are still skipped, they are simply now seen first.
+    const filters = encodeURIComponent(JSON.stringify({ label: [AGENT_ID_LABEL_KEY] }));
     const list = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
     if (list.status >= 300 || !Array.isArray(list.body)) {
       console.warn(`[Orchestrator] evict: list returned status=${list.status}`);
@@ -691,7 +737,7 @@ async function evictStaleAgentContainers() {
       else console.warn(`[Orchestrator] evict: delete ${cid.slice(0, 12)} status=${del.status}`);
     }
     if (evicted > 0 || skippedForeign > 0) {
-      console.log(`[Orchestrator] evicted ${evicted} stale ${image} container(s) for instance '${INSTANCE_ID}'` +
+      console.log(`[Orchestrator] evicted ${evicted} stale agent container(s) for instance '${INSTANCE_ID}'` +
         (skippedForeign > 0 ? ` (left ${skippedForeign} foreign/legacy container(s) untouched)` : ''));
     }
   } catch (err) {
@@ -1238,6 +1284,78 @@ function loadEnvironment(envId) {
     console.error(`[Orchestrator] Cannot parse environment ${envId}: ${err.message}`);
     return null;
   }
+}
+
+// ============================================================
+// Toolchain registry (#1940)
+// ============================================================
+// The operator-curated list of agent container images a Working Environment may
+// select from. Written ONLY by the admin console's System-Admin-gated routes
+// (POST/DELETE /api/toolchains); read here at spawn time — the same
+// console-writes / orchestrator-reads split as /workspace/llm-endpoints.
+//
+// Re-validated on every read rather than trusted (the plugin-registry.js
+// discipline): the file is the security boundary that keeps a Team Admin from
+// introducing an image reference, so a hand-edited or half-written entry must be
+// rejected here too, not just at the route that wrote it.
+const TOOLCHAINS_INDEX = "/workspace/toolchains/index.json";
+
+function loadToolchains() {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(TOOLCHAINS_INDEX, "utf8"));
+  } catch (err) {
+    // Absent is the normal state — an installation that registered no toolchain
+    // has no file, and every environment then resolves to the default image.
+    if (err.code !== "ENOENT") {
+      console.warn(`[Orchestrator] toolchain registry unreadable (${err.message}) — treating as empty`);
+    }
+    return [];
+  }
+  const { toolchains, errors } = normalizeRegistry(raw);
+  for (const e of errors) console.warn(`[Orchestrator] toolchain registry: ${e} — entry skipped`);
+  return toolchains;
+}
+
+// Resolve the container image for one agent: its Working Environment's
+// toolchain, else the installation-wide default. Returns the seam's
+// `{ image, toolchain }` pair, or `{ error }` with an operator-readable message
+// when the selection cannot be honoured — never a silent fallback (AC7).
+function resolveImageForAgent(config) {
+  const env = config && config.environmentId ? loadEnvironment(config.environmentId) : null;
+  const resolved = resolveAgentImage({
+    environmentId: env ? env.id : (config && config.environmentId) || null,
+    environmentName: env ? env.name : null,
+    toolchainId: env ? env.toolchainId || null : null,
+    toolchains: loadToolchains(),
+    defaultImage: DEFAULT_AGENT_IMAGE,
+    runtime: normalizeRuntime(process.env.AEE_CONTAINER_RUNTIME),
+    // Where THIS deployment keeps its toolchain variant images (#1941 AC11).
+    // A manifest declares the bare `as-agent-jvm:latest` the build produces;
+    // a cluster pulls it from its Artifact Registry under the release's tag.
+    // Both halves arrive on the deployment (the same overlay patch that carries
+    // AGENT_IMAGE, pinned per release by deploy/k8s/set-images.sh) and are empty
+    // on a local Podman stack, where the image IS in the local store under that
+    // bare tag. Applied here at spawn time rather than baked into the registry
+    // entry at install time, so a release re-pin reaches a toolchain that was
+    // registered long before it, with no operator re-install.
+    imagePrefix: process.env.AEE_TOOLCHAIN_IMAGE_PREFIX || "",
+    imageTag: process.env.AEE_TOOLCHAIN_IMAGE_TAG || "",
+  });
+  if (resolved.error) return { error: resolved.error, message: resolved.message };
+  return {
+    image: resolved.image,
+    // Non-null only for a toolchain image, so the seam knows whether an
+    // image-missing failure is worth the "which environment / which toolchain"
+    // sentence — a missing DEFAULT image is a broken installation, not this.
+    toolchain: resolved.source === "toolchain"
+      ? {
+          toolchainId: resolved.toolchainId,
+          environmentId: env ? env.id : null,
+          environmentName: env ? env.name : null,
+        }
+      : null,
+  };
 }
 
 // ============================================================

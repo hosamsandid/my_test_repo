@@ -32,6 +32,7 @@ function code(src) {
 const agentChat = code(read('../AgentChat.jsx'));
 const agentList = code(read('./AgentList.jsx'));
 const host = code(read('./RailLifecycleHost.jsx'));
+const menu = code(read('./RowContextMenu.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
   assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);
@@ -109,4 +110,39 @@ test('disabling probes first so a mid-run agent gets the drain/abort dialog', ()
 test('a create or import lands in the list without a reload (AC3)', () => {
   assert.match(host, /refresh\(\)/);
   assert.match(host, /if \(onChanged\) onChanged\(\)/);
+});
+
+// --------------------------------------------------------------------- #1938
+
+test('the row no longer carries its own mark-as-unread affordance (AC1/AC8)', () => {
+  // The whole point of #1938: the hover icon is gone, and with it every trace
+  // of the prop that fed it. A leftover `onMarkAsUnread` in the rail would mean
+  // the action still has two homes.
+  assert.doesNotMatch(agentList, /MailOpen/);
+  assert.doesNotMatch(agentList, /onMarkAsUnread/);
+  assert.doesNotMatch(agentList, /canMarkUnread/);
+});
+
+test('the chat hands mark-as-unread to the menu host, not to the list (AC1/AC3)', () => {
+  // Same handler as before — the action moved surface, not behaviour.
+  assert.match(agentChat, /<AgentList[\s\S]*?\/>/);
+  assert.doesNotMatch(agentChat.match(/<AgentList[\s\S]*?\/>/)[0], /onMarkAsUnread/);
+  const mount = agentChat.match(/<RailLifecycleHost[\s\S]*?\/>/)[0];
+  assert.match(mount, /onMarkAsUnread=\{handleMarkAsUnread\}/);
+  // The menu can only tell "already unread" from the chat's own status map.
+  assert.match(mount, /statuses=\{agentStatuses\}/);
+});
+
+test('the menu entry dispatches to the chat callback and issues no request (AC3/AC6)', () => {
+  assert.match(host, /case 'mark-unread':\s*if \(onMarkAsUnread\) onMarkAsUnread\(agent\.id\)/);
+  // The row's state has to reach the pure menu builder, or the entry could
+  // never be greyed out for an already-unread row (AC4).
+  assert.match(host, /railMenuItems\(\{[^}]*activityState[^}]*\}\)/);
+});
+
+test('the context menu can fence a group off without a pseudo-item (AC2)', () => {
+  // A separator entry in `items` would be an unfocusable hole in the flat list
+  // the pure keyboard helpers walk by index.
+  assert.match(menu, /item\.separated/);
+  assert.doesNotMatch(menu, /item\.kind === 'separator'/);
 });

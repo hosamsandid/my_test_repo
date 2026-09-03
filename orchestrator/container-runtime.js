@@ -15,6 +15,24 @@
 // requires this module. The in-container exec surface (context browse/write)
 // has its own selector, container-exec-runtime.js, with the same rule.
 //
+// THE SPAWN SIGNATURE CARRIES THE IMAGE (#1940). Until #1940 it did not, so
+// neither implementation could be told which image to use and both read a
+// process-wide `AGENT_IMAGE` constant — meaning a toolchain for one team could
+// only be given to EVERY agent of the installation. The seam is now
+//
+//   spawnContainer({ id, env, contextMounts, image, toolchain })
+//
+// where `image` is REQUIRED and resolved by the caller (orchestrator.js, via
+// the pure orchestrator/toolchain-registry.js `resolveAgentImage` — Working
+// Environment → toolchain id → image, falling back to the runtime's
+// DEFAULT_AGENT_IMAGE), and `toolchain` is the non-default image's
+// {toolchainId, environmentId, environmentName} context, used only to word the
+// "that toolchain's image is missing" refusal. Neither implementation may
+// re-derive the image: a silent fallback to the default would boot a build agent
+// without its toolchain and fail confusingly at the first build command. Both
+// therefore also export DEFAULT_AGENT_IMAGE so the resolver reads the default
+// from the active runtime rather than duplicating the env-var lookup.
+//
 // SEAM DISCIPLINE (#1319): Kubernetes is the target architecture; Podman is
 // the local dev runtime. A new spawn-path feature must land on BOTH
 // implementations in the same change — or be explicitly recorded as

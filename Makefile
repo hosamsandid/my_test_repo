@@ -197,9 +197,12 @@ toolchain-images: agent-image
 
 # Demonstrate a built variant end to end (#1941 AC5-AC9/AC12): a real container,
 # a real `mvn test`, a pin change with no rebuild, two projects on two versions,
-# and the measured cold/warm cost. Needs the images built first.
+# and the measured cold/warm cost. Needs the images built first. The harness is
+# Java/Maven-driven, so on `fullstack` it exercises that image's Java+Maven half
+# (its Node half is covered by the sample's package.json — see the sample dir).
 toolchain-verify:
 	./toolchains/_shared/verify-toolchain.sh as-agent-jvm:latest jvm
+	./toolchains/_shared/verify-toolchain.sh as-agent-fullstack:latest fullstack
 
 update:
 	@echo "Pulling latest changes from git..."

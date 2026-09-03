@@ -1,0 +1,10 @@
+{
+  "//": "The Node half of the fullstack toolchain sample (#1941). Dependency-free on purpose: the demonstration measures the TOOLCHAIN (that the pinned Node resolves and runs), not an npm dependency tree. Run it in an agent container with `aee-toolchain run npm test`, which resolves node from this project's .mise.toml.",
+  "name": "toolchain-sample-fullstack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}

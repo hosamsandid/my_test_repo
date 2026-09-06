@@ -407,7 +407,8 @@ const { spawnContainer, libpodRequest, removePerAgentVolume, removePerAgentNetwo
 const { normalizeRegistry, resolveAgentImage, normalizeRuntime } = require("./toolchain-registry");
 // Fast/background split of agent deletion (#1791): graceful-role decision +
 // the in-memory "teardown in progress" guard for same-id re-create safety.
-const { isGracefulDeleteRole, TeardownRegistry } = require("./agent-delete-plan");
+const { isGracefulDeleteRole, TeardownRegistry, cascadeChildIds } = require("./agent-delete-plan");
+const agentOrphans = require("./agent-orphans");
 // One process-wide registry: the delete fast phase arms it, the background
 // phase clears it, and every create/clone/import/materialise path consults it
 // (alongside loadAgentConfig) so a same-id re-create can't collide with an
@@ -3156,6 +3157,19 @@ function listAgentIds() {
   return fs.readdirSync(AGENTS_DIR).filter((f) =>
     fs.existsSync(path.join(AGENTS_DIR, f, "config.json"))
   );
+}
+
+// Every agent dir with its config, in the `{ id, cfg }` shape the pure
+// cascade/orphan planners take (#1960). A dir whose config.json is present but
+// unparseable yields `cfg: null` rather than being dropped — the planners treat
+// it as an id that is occupied but is not a resolvable parent, which is the
+// honest reading. (A dir with no config.json at all is already excluded by
+// listAgentIds(); a member naming one therefore reads as `parent-missing`.)
+//
+// Deliberately reads the same dirs as listAgentIds() so the delete route and
+// the orphan scan can never disagree about what is on disk.
+function listAgentConfigs() {
+  return listAgentIds().map((id) => ({ id, cfg: loadAgentConfig(id) }));
 }
 
 // All team-member configs belonging to teamId — shared by
@@ -10253,6 +10267,123 @@ async function main() {
       return;
     }
 
+    // ── Orphan scan + one-off cleanup (#1960) ─────────────────────────────
+    //
+    // The cascade above is what stops NEW orphans being created; these two
+    // routes are the one-off for an installation that already has some (from
+    // before the cascade covered every case, from a hand-edited config, or from
+    // a deletion that was interrupted after the team's own dir was gone — the
+    // one state the DELETE route can no longer reach, because it 404s on a
+    // parent that is not there).
+    //
+    // GET is the **dry run**: it lists exactly what a cleanup would act on and
+    // changes nothing. It is also what makes the POST safe to describe — the
+    // POST re-plans, logs the identical listing, and only then acts, so
+    // "lists before acting" holds even for a caller that skipped the GET.
+    //
+    // Operator-invoked, never automatic on startup: deleting agents is a
+    // destructive action and this codebase does not take those without an
+    // explicit human decision.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/agents/orphans') {
+      const plan = agentOrphans.planOrphanCleanup(listAgentConfigs());
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(plan));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url.split('?')[0] === '/internal/agents/orphans/cleanup') {
+      (async () => {
+        const plan = agentOrphans.planOrphanCleanup(listAgentConfigs());
+        // AC3 "lists what it would act on before acting" — the listing is
+        // written to the log BEFORE the first deletion, so an operator watching
+        // `podman logs -f orchestrator` sees the plan even if the run dies
+        // halfway. It is also returned as `planned` so the caller has it.
+        if (plan.orphans.length === 0) {
+          console.log('[Orchestrator] Orphan cleanup: no orphaned agents found');
+        } else {
+          console.log(
+            `[Orchestrator] Orphan cleanup: ${plan.orphans.length} orphaned agent(s) found, ` +
+            `${plan.removable.length} to remove:\n` +
+            plan.orphans.map(o => `  - ${agentOrphans.formatOrphanLine(o)}`).join('\n')
+          );
+        }
+
+        const deleted = [];
+        const warnings = [];
+        const bgTargets = [];
+        // Only the removable ones — a member whose named parent still exists as
+        // a live non-team agent is reported and left alone, because correcting
+        // the id is a human call and deleting it would be over-reach.
+        for (const orphan of plan.removable) {
+          const cfg = loadAgentConfig(orphan.id);
+          if (!cfg) continue; // removed by someone else between plan and act
+          agentTeardownRegistry.begin(orphan.id);
+          try {
+            // Same fast phase as the DELETE route, and in the same order: stop
+            // → reap plugin scopes while the config is still on disk (§4.9) →
+            // delete the files → drop the in-memory config.
+            stopAgentProcess(orphan.id);
+            await orchestrator.teardownAgentPluginScopes(orphan.id, cfg).catch(e =>
+              console.warn(`[Orchestrator] plugin teardown ${orphan.id}: ${e.message}`));
+            deleteAgentFiles(orphan.id);
+            orchestrator.agentConfigs.delete(orphan.id);
+            bgTargets.push({ id: orphan.id, deactivateMatrix: !!cfg.token });
+            deleted.push(orphan.id);
+          } catch (err) {
+            // Never abort the sweep on one failure — the point of the routine is
+            // that the NEXT run picks up whatever this one could not finish.
+            agentTeardownRegistry.finish(orphan.id);
+            console.error(`[Orchestrator] Orphan cleanup: '${orphan.id}' failed: ${err.message}`);
+            warnings.push({ id: orphan.id, kind: 'orphan', error: err.message });
+          }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          scanned: plan.scanned,
+          // The whole finding, then the subset the sweep acted on — so a caller
+          // that only reads `planned` is never surprised by a shorter `deleted`.
+          planned: plan.orphans,
+          removable: plan.removable.map(o => o.id),
+          reportOnly: plan.reportOnly,
+          deleted,
+          ...(warnings.length ? { warnings } : {}),
+        }));
+
+        // Slow reaping off the request path, exactly like the DELETE route —
+        // a large sweep must not time out the caller. No team-knowledge purge
+        // here: an orphan is never a `team` agent, so its KB scope belongs to
+        // the parent that is already gone.
+        (async () => {
+          for (const t of bgTargets) {
+            try {
+              if (PER_AGENT_VOLUME) await removePerAgentVolume(t.id).catch(e =>
+                console.warn(`[Orchestrator] volume teardown ${t.id}: ${e.message}`));
+              await removePerAgentNetwork(t.id, { graceful: false }).catch(e =>
+                console.warn(`[Orchestrator] network teardown ${t.id}: ${e.message}`));
+              if (t.deactivateMatrix) await orchestrator.deactivateMatrixUser(t.id).catch(e =>
+                console.warn(`[Orchestrator] matrix deactivate ${t.id}: ${e.message}`));
+            } catch (err) {
+              console.error(`[Orchestrator] Orphan cleanup background teardown for '${t.id}' failed: ${err.message}`);
+            } finally {
+              agentTeardownRegistry.finish(t.id);
+            }
+          }
+          if (deleted.length > 0) {
+            console.log(`[Orchestrator] Orphan cleanup: removed ${deleted.length} orphaned agent(s): ${deleted.join(', ')}`);
+          }
+        })().catch(err =>
+          console.error(`[Orchestrator] Orphan cleanup background sweep crashed: ${err.message}`));
+      })().catch(err => {
+        console.error(`[Orchestrator] Orphan cleanup failed: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/agents\/([^/]+)$/);
     if (deleteMatch) {
       const id = decodeURIComponent(deleteMatch[1]);
@@ -10279,8 +10410,20 @@ async function main() {
           // ids because the orphans still occupy them. (#1962 removed the
           // orchestrator → bp-instance arm of this cascade with the rest of the
           // BriefingPack model; `team` is the only parent construct left.)
+          //
+          // Which children (#1960) is the pure, unit-tested `cascadeChildIds`:
+          // materialized members and stubs alike, and — new here — the same set
+          // when the parent's own config is unreadable, so an interrupted
+          // deletion finishes the job on the retry instead of stranding the
+          // members it never reached.
           parentCfg = loadAgentConfig(id);
           const cascaded = [];
+          // A child that fails its fast steps used to be logged and dropped from
+          // the response, so the caller was told all was well while a
+          // half-deleted agent stayed on disk (#1960 AC2). Report it in the
+          // `{ id, kind, error }` shape the team fan-out's `rollbackWarnings`
+          // already uses, so a partial failure reads the same either way.
+          const cascadeWarnings = [];
 
           // ── FAST PHASE (#1791) ────────────────────────────────────────────
           // Do only the cheap steps that make the agent *logically gone* — stop
@@ -10331,35 +10474,40 @@ async function main() {
             });
           };
 
-          if (parentCfg) {
-            const childField = parentCfg.role === 'team' ? 'parentTeamId' : null;
-            if (childField) {
-              for (const childId of listAgentIds()) {
-                if (childId === id) continue;
-                const childCfg = loadAgentConfig(childId);
-                if (!childCfg) continue;
-                if (childCfg[childField] !== id) continue;
-                agentTeardownRegistry.begin(childId);
-                armed.push(childId);
-                try {
-                  // Materialized child (has a token) → best-effort Matrix
-                  // cleanup in the background phase; a stub has no Matrix user.
-                  await fastTeardown(childId, childCfg, !!childCfg.token);
-                  cascaded.push(childId);
-                } catch (err) {
-                  // Match the prior best-effort cascade: one child failing its
-                  // fast steps doesn't abort the rest (or the parent). It wasn't
-                  // recorded for background reaping, so release its guard.
-                  agentTeardownRegistry.finish(childId);
-                  console.error(`[Orchestrator] cascade-delete child '${childId}' failed: ${err.message}`);
-                }
-              }
-              if (cascaded.length > 0) {
-                console.log(
-                  `[Orchestrator] Cascade-deleted ${cascaded.length} team-member children of '${id}': ${cascaded.join(', ')}`
-                );
-              }
+          // Sequential on purpose: at `team` plugin-scope granularity only the
+          // last member torn down actually reaps, so the children must be
+          // processed one at a time with their siblings still on disk (§4.9).
+          const childIds = cascadeChildIds(id, parentCfg, listAgentConfigs());
+          for (const childId of childIds) {
+            const childCfg = loadAgentConfig(childId);
+            if (!childCfg) continue; // vanished between the scan and here
+            agentTeardownRegistry.begin(childId);
+            armed.push(childId);
+            try {
+              // Materialized child (has a token) → best-effort Matrix
+              // cleanup in the background phase; a stub has no Matrix user.
+              await fastTeardown(childId, childCfg, !!childCfg.token);
+              cascaded.push(childId);
+            } catch (err) {
+              // One child failing its fast steps doesn't abort the rest (or the
+              // parent) — but it is now reported, not just logged. It wasn't
+              // recorded for background reaping, so release its guard.
+              agentTeardownRegistry.finish(childId);
+              console.error(`[Orchestrator] cascade-delete child '${childId}' failed: ${err.message}`);
+              cascadeWarnings.push({ id: childId, kind: 'member', error: err.message });
             }
+          }
+          if (cascaded.length > 0) {
+            console.log(
+              `[Orchestrator] Cascade-deleted ${cascaded.length} team-member children of '${id}': ${cascaded.join(', ')}`
+            );
+          }
+          if (cascadeWarnings.length > 0) {
+            console.error(
+              `[Orchestrator] Cascade-delete of '${id}' left ${cascadeWarnings.length} member(s) behind: ` +
+              cascadeWarnings.map(w => `${w.id} (${w.error})`).join('; ') +
+              ` — run the orphan cleanup (GET/POST /internal/agents/orphans) to finish them off`
+            );
           }
 
           // Parent last. A parent fast-phase failure IS surfaced (below) — the
@@ -10367,7 +10515,12 @@ async function main() {
           await fastTeardown(id, parentCfg, true);
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, cascaded }));
+          res.end(JSON.stringify({
+            ok: true,
+            cascaded,
+            // Omitted when clean, so a healthy delete's body is unchanged.
+            ...(cascadeWarnings.length ? { cascadeWarnings } : {}),
+          }));
         } catch (err) {
           // Fast-phase failure — surface a hard error to the console (AC8: a
           // fast-phase failure still returns an error to the caller). We do NOT

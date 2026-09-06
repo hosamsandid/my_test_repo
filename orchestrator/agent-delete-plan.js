@@ -64,4 +64,52 @@ class TeardownRegistry {
   }
 }
 
-module.exports = { isGracefulDeleteRole, TeardownRegistry };
+// Which agents must be torn down together with `parentId` (#1960).
+//
+// The cascade exists so that deleting a team never leaves an **orphan** behind:
+// a `team-member` whose `parentTeamId` points at an agent that is gone. An
+// orphan is not a working agent — its prompt, skills and plugin grant are all
+// defined by inheritance from a team that no longer exists — and it also blocks
+// the deterministic member ids a same-name team would want to reuse.
+//
+// `configs` is an iterable of `{ id, cfg }` for every agent currently on disk
+// (a `cfg` of null = a config-less residue dir). Returns the child ids sorted,
+// so a cascade is deterministic and a test can assert the whole list.
+//
+// Two rules, and the second one is the reason this is a named function rather
+// than an inline filter:
+//
+//  1. `role: "team"` → every team-member naming it. Materialized members and
+//     **stubs** alike (#1955 members are config + triggers.json only, no Matrix
+//     user and no container) — a stub is exactly as orphaned as a materialized
+//     member once its parent is gone, and exactly as invisible afterwards,
+//     since `GET /api/matrix/agents` filters tokenless agents unless a caller
+//     opts in.
+//  2. An **unreadable/absent parent config** cascades the same set. That is the
+//     interrupted-delete case: `deleteAgentFiles` removes the whole agent dir,
+//     but a failed rmSync can leave a config-less residue dir (#1525 B2) that
+//     the DELETE route still admits (it 404s on the *dir*, not the config). Its
+//     members are already orphans in every practical sense, so re-issuing the
+//     delete must finish the job instead of walking away from them — this is
+//     what makes an interrupted team deletion safely repeatable.
+//
+// Any other role (a standalone `agent`, a `team-member`, an unknown legacy
+// role) cascades nothing: a member naming a non-team parent is a config error
+// to be *reported* by the orphan scan, not a licence to delete siblings.
+function cascadeChildIds(parentId, parentCfg, configs) {
+  if (!parentId) return [];
+  const role = parentCfg ? parentCfg.role : null;
+  if (parentCfg && role !== 'team') return [];
+  const ids = [];
+  for (const entry of configs || []) {
+    if (!entry) continue;
+    const { id, cfg } = entry;
+    if (!id || id === parentId || !cfg) continue;
+    if (cfg.role !== 'team-member') continue;
+    if (cfg.parentTeamId !== parentId) continue;
+    ids.push(id);
+  }
+  return ids.sort();
+}
+
+module.exports = { isGracefulDeleteRole, TeardownRegistry, cascadeChildIds };

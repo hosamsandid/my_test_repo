@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { Plus, Trash2, User } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import PageHelpButton from '../../components/PageHelpButton';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_HUMANS } from '../../context/page-help-view.js';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import { slugifyHumanId } from './humans-registry-ops';
 
 // Human-role registry editor (#987) — named, purely-declarative human flow
@@ -83,6 +86,8 @@ function HumanRow({ human, stages, onSave, onRemove, busy }) {
 }
 
 export default function HumanRegistryPanel({ humans = [], stages = [], ops, onClose, onChanged }) {
+  // Lifts the help panel above this SidePanel (60/61) — see LabelRegistryPanel.
+  useHelpSubject({ overlay: OVERLAY_FLOW_HUMANS });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [newName, setNewName] = useState('');
@@ -114,7 +119,12 @@ export default function HumanRegistryPanel({ humans = [], stages = [], ops, onCl
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
         Named people who act in the flow — an <strong>Issue Reviewer</strong>, a <strong>Tech Lead</strong>.
         A human role never runs anything; people act through GitHub labels.
-        <PageHelpButton label="How human roles act in a flow" size={13} style={{ padding: 0, verticalAlign: '-2px' }} />
+        <PageHelpButton
+          label="How human roles act in a flow"
+          size={13}
+          section={FLOWS_HELP_SECTIONS.humans}
+          style={{ padding: 0, verticalAlign: '-2px' }}
+        />
       </p>
       {error && (
         <div style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>{error}</div>

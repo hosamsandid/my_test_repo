@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Loader2, ArrowUpRight } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import PageHelpButton from '../../components/PageHelpButton';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_EDGE } from '../../context/page-help-view.js';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import { liveOps } from './edit-adapters';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { defaultListenerPrompt, handoffVerb, handoffTargetNoun } from './handoff-prompt';
@@ -259,6 +262,12 @@ export function CreateEdgeDialog({
   from, to, fromName, toName, labels, ops = liveOps, types, fromNode, toNode, humanOps,
   peers = [], humans = [], onClose, onDone,
 }) {
+  // Published before the branches below, not inside the chooser's JSX: every
+  // branch of this dialog is a SidePanel (60/61), and the hook has to run
+  // unconditionally anyway. Without it the "?" in the chooser's lead line opens
+  // the help panel at z-index 50 — BEHIND the dialog it explains. That is the
+  // latent bug #1990 found here and left flagged; this is the fix (#1984).
+  useHelpSubject({ overlay: OVERLAY_FLOW_EDGE });
   const common = { from, to, fromName, toName, ops, onClose, onDone };
   // Legacy token: 'github' expands to the two explicit channel tiles.
   const allowed = (Array.isArray(types) && types.length ? types : ['label', 'dependency', 'artifact'])
@@ -360,7 +369,12 @@ export function CreateEdgeDialog({
             lives in the `flows` help topic (#1876). */}
         <div style={{ ...small, display: 'flex', alignItems: 'center', gap: 4 }}>
           Pick how the hand-off travels.
-          <PageHelpButton label="What the hand-off kinds mean" size={13} style={{ padding: 0 }} />
+          <PageHelpButton
+            label="What the hand-off kinds mean"
+            size={13}
+            section={FLOWS_HELP_SECTIONS.handoffs}
+            style={{ padding: 0 }}
+          />
         </div>
         {outcomeTiles.length > 0 && (
           <>

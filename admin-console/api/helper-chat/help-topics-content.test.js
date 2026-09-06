@@ -55,6 +55,24 @@ const TOPIC_CONTENT = [
     // #1876 lifted these from the Flows page: the "Welcome to Flows" banner and
     // the page's own help drawer, plus the long concept prose out of the
     // hand-off chooser, the label registry and the human-role registry.
+    //
+    // #1984 (epic #1981) widened it into a per-surface reference. Each chapter
+    // below is the landing target of a "?" on the matching surface except
+    // `The flows left list`, whose surface IS the button that opens chapter 1
+    // (the flows-list header) — it is one heading further down, deliberately, so
+    // that button lands on the definition rather than above it.
+    chapters: [
+      'What Flows is',
+      'The flows left list',
+      'The canvas',
+      'Wiring hand-offs: the edge chooser',
+      'Human gates, brakes and named human roles',
+      'Outcomes and inputs, per agent',
+      'Stages',
+      'Anomalies',
+      'Improvements',
+      'Describe the flow: the Copilot',
+    ],
     concepts: [
       'flow graphs',
       'Drafts',
@@ -63,7 +81,12 @@ const TOPIC_CONTENT = [
       'Consumer',
       'Materialize',
       'Flow Copilot',
-      'Import / Export',
+      // #1876 wrote these as one "Import / Export" phrase. They are separate
+      // affordances in separate places — Import is a header create action,
+      // Export is on the canvas toolbar — so the topic now names them apart and
+      // the guard follows the prose rather than the other way round.
+      'Import',
+      'Export',
       'Label hand-off',
       'Issue channel',
       'Pull-request channel',
@@ -80,8 +103,21 @@ const TOPIC_CONTENT = [
       'Inputs',
       'Stages',
       'Anomalies',
+      // #1984: the two live-team panels the ticket added chapters for.
+      'Improvements',
+      'observe-only',
+      'improvement cards',
+      // Delivery: the third human touchpoint, which is neither gate nor brake.
+      'delivery',
+      // Internal vs poller delivery, the choice the label edge dialog offers.
+      'aee-emit',
+      'poller',
+      // #1984 corrections to what the page actually shows today — each of these
+      // contradicts a premise the ticket or an older doc still carried, so a
+      // reword must not quietly restore the old reading.
+      'no third section',
+      'depends on where you dragged from',
       'BriefingPack',
-      'Briefings Path',
     ],
   },
   {

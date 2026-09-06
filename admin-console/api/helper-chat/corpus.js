@@ -115,14 +115,17 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 //
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
-// corpus.test.js asserts. Measured on this branch: the worst context is the
-// **no-route fallback** (the Overview topic plus its seven `seeAlso`
-// neighbours) at 262 568 of 340 000 — 77.2% used, 77 432 left — against
-// 322 243 (94.8%) for the all-topics fold it replaced. #1996 is what moved the
-// crown off `/flows` (259 301, unchanged by that ticket): the two contexts had
-// converged to within 18 chars of each other on main, so widening any topic the
-// Overview links to was enough to overtake it. Re-measure rather than trust this
-// comment — measureWorstCaseSystemPrompt() sweeps both.
+// corpus.test.js asserts. Measured on this branch: the worst context is
+// **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
+// neighbours) at 274 479 of 340 000 — 80.7% used, 65 521 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
+// the crown here by removing the Agents page: `/flows` lost its `/agents`
+// `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
+// too, and `create.md` (which claims `/create` and `/quickstart`) links to
+// `/chats`, whose topic absorbed the deleted `agents.md` — so the biggest single
+// neighbourhood is now the one `/quickstart` sees. It had been the no-route
+// fallback at 262 568 since #1996. Re-measure rather than trust this comment —
+// measureWorstCaseSystemPrompt() sweeps every context.
 //
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth

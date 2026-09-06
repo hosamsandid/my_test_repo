@@ -26,7 +26,7 @@ Continuwuity homeserver, which the unit tests cannot.
 ## TC-1 — Delete then immediately re-create the same id (the race)
 
 1. Create an agent, e.g. id `recreate-probe`, and confirm it comes up (green dot).
-2. Delete it from its card.
+2. Delete it with **Delete…** in its Agent Chat row context menu.
 3. **Immediately** (within ~5 seconds) create a new agent with the **same id**
    `recreate-probe`.
 4. Expected:
@@ -60,7 +60,9 @@ ceiling so the loop gives up quickly, then force the race:
    login retry gives up after the first attempt).
 2. Delete `recreate-probe` and immediately re-create it with the same id.
 3. If the login hits `M_USER_DEACTIVATED` before the account settles, expected:
-   - The Agents page create form shows:
+   - The **Create a single agent** form (**+ Create** → *Create a single agent*, or **New
+     Agent** in Agent Chat's header — the same component; the Agents page that used to host
+     it was removed in #1930) shows:
      **"Matrix user is deactivated — wait a moment and try again, or use a
      different agent ID"** (not a raw `Login failed: {...}` stack).
    - The API response is `409` with `code: "matrix_user_deactivated"`.

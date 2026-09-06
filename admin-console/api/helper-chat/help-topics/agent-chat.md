@@ -493,6 +493,7 @@ drift apart. Old `/agents` links land here.
 | What it offered | Where it is now |
 |---|---|
 | Team, standalone and member cards | the **agent list**, grouped the same way |
+| A card's **Clone** / **Export (ZIP)** / **Save as template** icons | the row's context menu, same three entries |
 | The edit side panel | the **Settings** tab |
 | **New Agent** / **Import Agent** | this page's header, top right |
 | Stub visibility and **Activate** | *Not materialized yet*, where it is **Materialize** |

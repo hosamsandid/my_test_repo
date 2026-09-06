@@ -220,7 +220,7 @@ provisioned when you enable it. The Team-Setup wizard ticks it by default; the c
 Materialize dialog leaves it off, because a process can have dozens of members.
 The word also names the per-member action (#1957): a stub is listed in Agent Chat under
 its team's **Not materialized yet** section, and its **Materialize** entry runs exactly
-the provisioning the Agents page's **Activate** does.
+the provisioning the removed Agents page's **Activate** used to do (#1930).
 The same choice is offered for a single member added to a live team (#1958): Agent Chat's
 **Add member…** carries its own **Materialize now** checkbox — ticked by default here,
 because one member is not dozens — so a stub can also be created long after its team was.

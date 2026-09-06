@@ -31,9 +31,9 @@
 
 ## Extending the stack
 
-**Add a skill:** Drop a `SKILL.md` into the skill-pool volume under `skills/<name>/SKILL.md`. It becomes available to grant to a team or an agent immediately (on the Agents page, in the Team-Setup wizard, or on the Knowledge page).
+**Add a skill:** Drop a `SKILL.md` into the skill-pool volume under `skills/<name>/SKILL.md`. It becomes available to grant to a team or an agent immediately (in Agent Chat's **Settings** tab, in the Team-Setup wizard, or on the Knowledge page).
 
-**Add an agent:** Admin Console → **+ Create** → *Create a single agent* (or Agents → New Agent — the same form). Choose a role, pick a Working Environment, write a system prompt, save.
+**Add an agent:** Admin Console → **+ Create** → *Create a single agent* (or **New Agent** in Agent Chat's page-action header — the same form). Choose a role, pick a Working Environment, write a system prompt, save.
 
 **Schedule autonomous work:** Agent Chat → right rail → Triggers tab.
 

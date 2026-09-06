@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { ShieldCheck, OctagonPause } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import PageHelpButton from '../../components/PageHelpButton';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_LABELS } from '../../context/page-help-view.js';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 
 // Label registry editor (#981) — per routing label, WHO sets it and who reacts.
 // Gate/brake-ness is CONFIGURATION, not naming (#928), and the two flags encode
@@ -25,6 +28,11 @@ const KINDS = [
 const kindOf = (l) => (l.humanGate ? 'gate' : l.brake ? 'brake' : 'agent');
 
 export default function LabelRegistryPanel({ labels = [], ops, onClose, onChanged }) {
+  // The "?" below lives inside a SidePanel (backdrop 60 / panel 61). Without a
+  // published subject the help panel opens at z-index 50 — i.e. BEHIND the very
+  // panel it is explaining, which reads as "the button does nothing" (#1984,
+  // the bug #1990 flagged on this page and left for this ticket).
+  useHelpSubject({ overlay: OVERLAY_FLOW_LABELS });
   // graph.labels is the full known set with current flags — keep a local copy
   // so a change renders immediately while the write + refetch run.
   const [rows, setRows] = useState(() =>
@@ -58,7 +66,12 @@ export default function LabelRegistryPanel({ labels = [], ops, onClose, onChange
         <ShieldCheck size={13} style={{ verticalAlign: '-2px' }} /> <strong>gate</strong> is set only by a
         person, a <OctagonPause size={13} style={{ verticalAlign: '-2px' }} /> <strong>brake</strong> only by
         an agent.
-        <PageHelpButton label="How gates and brakes work" size={13} style={{ padding: 0, verticalAlign: '-2px' }} />
+        <PageHelpButton
+          label="How gates and brakes work"
+          size={13}
+          section={FLOWS_HELP_SECTIONS.humans}
+          style={{ padding: 0, verticalAlign: '-2px' }}
+        />
       </p>
       {error && (
         <div style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>{error}</div>

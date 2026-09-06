@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { isGracefulDeleteRole, TeardownRegistry } = require('./agent-delete-plan');
+const { isGracefulDeleteRole, TeardownRegistry, cascadeChildIds } = require('./agent-delete-plan');
 
 // #1962 removed the BriefingPack model. `bp-instance` was the only role that
 // ever took the graceful commit window, so the predicate is now constantly
@@ -61,4 +61,83 @@ test('TeardownRegistry: begin/finish return this for chaining', () => {
   const reg = new TeardownRegistry();
   assert.strictEqual(reg.begin('a1'), reg);
   assert.strictEqual(reg.finish('a1'), reg);
+});
+
+/* ── cascadeChildIds (#1960) ─────────────────────────────────────────────── */
+
+const team = (id, extra = {}) => ({ id, cfg: { role: 'team', ...extra } });
+const member = (id, parentTeamId, extra = {}) => ({
+  id,
+  cfg: { role: 'team-member', ...(parentTeamId === undefined ? {} : { parentTeamId }), ...extra },
+});
+
+test('cascadeChildIds: deleting a team takes every member with it', () => {
+  const configs = [
+    team('alpha'),
+    member('alpha-ba', 'alpha', { token: 't' }),
+    member('alpha-dev', 'alpha', { token: 't' }),
+    member('beta-dev', 'beta', { token: 't' }),
+    { id: 'solo', cfg: { role: 'agent' } },
+  ];
+  assert.deepStrictEqual(
+    cascadeChildIds('alpha', configs[0].cfg, configs),
+    ['alpha-ba', 'alpha-dev'],
+  );
+});
+
+test('cascadeChildIds: a STUB member cascades exactly like a materialized one', () => {
+  // A #1955 stub is config + triggers.json only (no token, no Matrix user, no
+  // container). Left behind it is an orphan that GET /api/matrix/agents filters
+  // out by default — the invisible case this cascade exists for.
+  const configs = [team('alpha'), member('alpha-mat', 'alpha', { token: 't' }), member('alpha-stub', 'alpha')];
+  assert.deepStrictEqual(
+    cascadeChildIds('alpha', configs[0].cfg, configs),
+    ['alpha-mat', 'alpha-stub'],
+  );
+});
+
+test('cascadeChildIds: a team with no members cascades nothing (AC6)', () => {
+  const configs = [team('alpha'), { id: 'solo', cfg: { role: 'agent' } }];
+  assert.deepStrictEqual(cascadeChildIds('alpha', configs[0].cfg, configs), []);
+});
+
+test('cascadeChildIds: a team whose members are ALL stubs still cascades them (AC6)', () => {
+  const configs = [team('alpha'), member('alpha-a', 'alpha'), member('alpha-b', 'alpha')];
+  assert.deepStrictEqual(cascadeChildIds('alpha', configs[0].cfg, configs), ['alpha-a', 'alpha-b']);
+});
+
+test('cascadeChildIds: an unreadable parent config cascades the same set (interrupted delete)', () => {
+  // deleteAgentFiles can leave a config-less residue dir (#1525 B2). Re-issuing
+  // the delete must finish the job rather than walk away from the members.
+  const configs = [{ id: 'alpha', cfg: null }, member('alpha-dev', 'alpha'), member('beta-dev', 'beta')];
+  assert.deepStrictEqual(cascadeChildIds('alpha', null, configs), ['alpha-dev']);
+});
+
+test('cascadeChildIds: a non-team parent never cascades siblings', () => {
+  const configs = [
+    { id: 'solo', cfg: { role: 'agent' } },
+    member('typo-member', 'solo'), // hand-edited config — reported by the orphan scan, not deleted here
+  ];
+  for (const role of ['agent', 'team-member', 'orchestrator', 'bp-instance', 'ephemeral']) {
+    assert.deepStrictEqual(cascadeChildIds('solo', { role }, configs), [], `role ${role}`);
+  }
+});
+
+test('cascadeChildIds: never includes the parent itself, and tolerates junk entries', () => {
+  const configs = [
+    team('alpha'),
+    member('alpha', 'alpha'), // pathological self-reference
+    null,
+    { id: null, cfg: { role: 'team-member', parentTeamId: 'alpha' } },
+    { id: 'ghost', cfg: null },
+    member('alpha-dev', 'alpha'),
+  ];
+  assert.deepStrictEqual(cascadeChildIds('alpha', { role: 'team' }, configs), ['alpha-dev']);
+});
+
+test('cascadeChildIds: deterministic order and a missing id/config list are safe', () => {
+  const configs = [member('z', 'alpha'), member('a', 'alpha'), member('m', 'alpha')];
+  assert.deepStrictEqual(cascadeChildIds('alpha', { role: 'team' }, configs), ['a', 'm', 'z']);
+  assert.deepStrictEqual(cascadeChildIds('alpha', { role: 'team' }, null), []);
+  assert.deepStrictEqual(cascadeChildIds('', { role: 'team' }, configs), []);
 });

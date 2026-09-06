@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_ANOMALIES } from '../../context/page-help-view.js';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import WhenCell from '../../components/WhenCell';
 import { apiCall } from '../../hooks/useApi';
 import { anomalyView, summarize, classInfo } from './flow-anomalies-view';
@@ -11,6 +15,8 @@ import { anomalyView, summarize, classInfo } from './flow-anomalies-view';
 // run state and lists anomalies with age + evidence links. No repair here —
 // that is a later phase (the reaction ladder).
 export default function FlowAnomaliesPanel({ teamId, onClose, onData }) {
+  // Lifts the help panel above this SidePanel (60/61) — see LabelRegistryPanel.
+  useHelpSubject({ overlay: OVERLAY_FLOW_ANOMALIES });
   const [state, setState] = useState({ loading: true, error: null, data: null });
 
   const load = useCallback(async () => {
@@ -37,6 +43,12 @@ export default function FlowAnomaliesPanel({ teamId, onClose, onData }) {
           Deterministic stall detection — the flow's intended label state machine compared against
           GitHub + run state. Observe-only; nothing is repaired here.
         </p>
+        <PageHelpButton
+          label="What Anomalies looks for"
+          size={13}
+          section={FLOWS_HELP_SECTIONS.anomalies}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
         <button
           onClick={load}
           disabled={state.loading}

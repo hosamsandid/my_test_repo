@@ -15,6 +15,7 @@ askPrompts:
   - "What is the difference between an Agent Team and a Team on the Access page?"
   - "What is the difference between Disable, Reset to stub and Delete?"
   - "Why does one of my agents show as not initialised?"
+  - "Where did the orphaned-agents list go?"
   - "Where do an agent's skills, prompt and plugins come from?"
 ---
 
@@ -70,6 +71,41 @@ Three card actions do different things, from reversible to destructive:
   local Knowledge Base copy, promotion suggestions, archive, review decisions
   and team skill pool. Knowledge shared through the team's repository is *not*
   affected.
+
+Deleting an Agent Team **takes its members with it**. Every member is removed
+first, then the team — materialized members and **not-initialised stubs** alike,
+and also when the team's own config is damaged, so a deletion that was
+interrupted finishes the job when you repeat it. If a member could not be removed
+(a busy container, a Matrix user that would not deactivate) the console says so
+and names it, rather than reporting a clean delete.
+
+### Where did the "Orphaned agents" list go?
+
+An **orphan** was a member whose parent team no longer existed. The page used to
+list them in an "Orphaned agents" warning block, because otherwise they were
+invisible and the only way to remove one was over SSH. Team members are **no
+longer listed there** — the block itself survives only for an Orchestrator's
+mission agents, whose orphans have a different cause and are handled with the
+rest of the BriefingPack model.
+
+That block was a safety net for a bug, not a feature: orphans existed because
+deleting a team did not reliably take its members with it. The cause is fixed —
+the delete cascades, and a member left behind is reported instead of silently
+dropped — so there is nothing left for the list to show, and there is
+**no replacement surface** anywhere else. Re-homing an orphan manager would mean
+keeping a permanent UI for a state the platform no longer produces.
+
+An orphan is not a working agent, which is why the cleanup deletes rather than
+adopts: a member's prompt, skills and plugins are all inherited from the team, so
+once the team is gone what remains cannot run as intended.
+
+If an installation still carries orphans from before the fix — or from a
+hand-edited parent id naming a team that never existed — a **System Admin**
+clears them with a one-off cleanup: `GET /api/agents/orphans` lists exactly what
+would be removed and changes nothing, `POST /api/agents/orphans/cleanup` removes
+them. It is idempotent, so running it twice is harmless, and it is
+operator-invoked rather than automatic — this platform does not delete agents
+without an explicit decision. See **Agent Roles** in the docs for the details.
 
 ## Creating and growing from here
 

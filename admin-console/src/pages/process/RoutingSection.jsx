@@ -4,6 +4,8 @@ import { Plus, X, Trash2, Sparkles, Save, Loader2, AlertTriangle,
   Clock, CalendarClock, Globe, Github, Pencil } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
@@ -235,6 +237,16 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
     <div ref={ref} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', ...(focus ? focusRing : {}) }}>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
         Inputs <span style={{ fontWeight: 'normal', color: 'var(--eb-text-muted)' }}>— what wakes this agent</span>
+        {/* #1984: the Routing tab's one "?", mounted on the FIRST of its three
+            sections rather than on Outcomes, because Inputs renders at the top
+            of the tab — a help affordance the reader has to scroll to find is
+            not one. The chapter covers both halves. */}
+        <PageHelpButton
+          label="How inputs and outcomes wire an agent"
+          size={13}
+          section={FLOWS_HELP_SECTIONS.routing}
+          style={{ padding: 0, verticalAlign: '-2px' }}
+        />
       </div>
       {!hasAny && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>

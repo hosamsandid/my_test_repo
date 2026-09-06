@@ -380,7 +380,7 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is `/flows` (seven
-neighbours, including the two largest topics) at **232,404 — 68.4% used, 107,596 left**, where the
+neighbours, including the two largest topics) at **244,687 — 72.0% used, 95,313 left**, where the
 all-topics fold it replaced stood at 322,243 (94.8%). Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,

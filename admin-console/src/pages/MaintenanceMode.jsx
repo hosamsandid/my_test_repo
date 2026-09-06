@@ -4,6 +4,7 @@ import { useApi, apiCall } from '../hooks/useApi';
 import FormInput from '../components/FormInput';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
+import { MAINTENANCE_HELP_SECTIONS } from './maintenance-mode-help-sections.js';
 import { countActiveSessions } from './active-sessions';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 
@@ -119,7 +120,12 @@ export default function MaintenanceMode() {
           Signals an upcoming platform restart so in-flight agent sessions can wind down — the
           restart itself stays a manual, external step.
         </span>
-        <PageHelpButton label="What maintenance mode changes while it is active" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="What maintenance mode changes while it is active"
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={MAINTENANCE_HELP_SECTIONS.page}
+        />
       </p>
 
       <div style={{
@@ -170,6 +176,17 @@ export default function MaintenanceMode() {
                 <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>
                   since <WhenCell iso={data.activatedAt} />
                 </span>
+                {/* #1996: the while-active half of the ticket's "Activate form vs
+                    While active" split. Until now the mode being ON was the one
+                    state of this page with no contextual "?" — the form that had
+                    one is not rendered here — so the question it answers ("what is
+                    this doing to my platform right now?") had no affordance. */}
+                <PageHelpButton
+                  label="What is being held back while maintenance mode is active"
+                  size={13}
+                  style={{ padding: 0, flexShrink: 0 }}
+                  section={MAINTENANCE_HELP_SECTIONS.whileActive}
+                />
               </div>
 
               <div>
@@ -240,7 +257,14 @@ export default function MaintenanceMode() {
               {/* The bordered "While active" box (the cron catch-up / event
                   queuing / nothing-force-stopped bullets) moved into the help
                   topic; a one-line lead plus a contextual "?" keeps the
-                  consequences reachable right where Activate is pressed. */}
+                  consequences reachable right where Activate is pressed.
+
+                  #1996 deep-links it to the *activating* chapter rather than the
+                  while-active one. The page's two states each get their own "?"
+                  (the ticket's "Activate form vs While active" split), and from
+                  here the unanswered question is what the grace period you are
+                  about to type actually does — the lead sentence beside it has
+                  already summarised the suppression. */}
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
                 fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
@@ -248,7 +272,12 @@ export default function MaintenanceMode() {
                 <span>
                   Scheduled triggers pause and events queue while it is active — nothing is force-stopped.
                 </span>
-                <PageHelpButton label="What happens while maintenance mode is active" size={13} style={{ padding: 0, flexShrink: 0 }} />
+                <PageHelpButton
+                  label="What the grace period does, and what it does not do"
+                  size={13}
+                  style={{ padding: 0, flexShrink: 0 }}
+                  section={MAINTENANCE_HELP_SECTIONS.activating}
+                />
               </div>
 
               {formError && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</span>}

@@ -14,6 +14,9 @@ import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
 import { groupAgentsForOwnership } from './teams-ownership';
+import { ACCESS_HELP_SECTIONS } from './access-help-sections.js';
+import { useHelpSubject } from '../context/HelperChatContext.jsx';
+import { OVERLAY_TEAM_MANAGE } from '../context/page-help-view.js';
 import { usePageActions } from '../context/PageActionsContext';
 
 const DEFAULT_TEAM_ID = 'default';
@@ -129,6 +132,15 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnl
   const [addRole, setAddRole] = useState('team-member');
   const [busy, setBusy] = useState(false);
 
+  // #1996: the Manage panel is a shared SidePanel (backdrop 60 / panel 61) and it
+  // now hosts a "?". Publishing an overlay subject is what lifts the help panel
+  // above that layer — without it the panel would open *behind* the very surface
+  // it explains (the bug #1990 named and #1984 fixed on /flows). The key claims no
+  // topic of its own: resolution falls through to `/teams`, whose chapters the "?"
+  // deep-links into. This component only mounts while the panel is open, so the
+  // subject comes and goes with it and `active` is unconditionally true.
+  useHelpSubject({ overlay: OVERLAY_TEAM_MANAGE, active: true });
+
   const teamMembers = useMemo(
     () => memberships.filter(m => m.teamId === team.id),
     [memberships, team.id],
@@ -186,7 +198,22 @@ function ManageTeamPanel({ team, users, memberships, onRefresh, onError, readOnl
         )}
       </Section>
 
-      <Section title={`Members (${teamMembers.length})`}>
+      {/* #1996: the Manage panel is the ticket's "second surface". Its "?" sits
+          on the Members heading rather than on Team details, because that is the
+          half with decisions in it — which role to grant, and what removing
+          somebody does and does not do (it drops a membership, never the person).
+          The chapter it opens covers both halves of the panel. */}
+      <Section
+        title={`Members (${teamMembers.length})`}
+        right={(
+          <PageHelpButton
+            label="What managing a scope's members does — and what it does not"
+            size={13}
+            style={{ padding: 0, flexShrink: 0 }}
+            section={ACCESS_HELP_SECTIONS.manage}
+          />
+        )}
+      >
         {teamMembers.length === 0 && (
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No members yet.</div>
         )}
@@ -475,7 +502,12 @@ export default function Teams() {
           Access scopes — internally <strong>Teams</strong> — are the human tenants that own your
           agents, environments and credentials, plus the people who may see and manage them.
         </span>
-        <PageHelpButton label="What is an access scope, and how does it differ from an Agent Team?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="What is an access scope, and how does it differ from an Agent Team?"
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={ACCESS_HELP_SECTIONS.page}
+        />
       </p>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />

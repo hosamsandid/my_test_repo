@@ -374,6 +374,13 @@ const TOPIC_CONTENT = [
   {
     id: 'access-users',
     routes: ['/teams'],
+    // #1996 deepened it and added deep-links for the page header and the Manage
+    // panel. Resource ownership got its own chapter but no "?" — the section
+    // renders no header for one to sit on (see access-help-sections.js).
+    chapters: [
+      'What this page manages',
+      'Managing a scope and its members',
+    ],
     // #1881 lifted the Access & Users intro box: the access-scope ("Team")
     // definition, the explicit *this is not an Agent Team* distinction and the
     // System-Admin / Team-Admin / Team-Member role list. The topic additionally
@@ -397,6 +404,13 @@ const TOPIC_CONTENT = [
       'Manage Users',
       'Resource ownership',
       'reassign',
+      // #1996 additions: the fourth principal the roles table cannot describe,
+      // the personal-credential carve-out from the scope model, and the two
+      // refusals that make Delete safe.
+      'built-in single admin',
+      'administrative break-glass',
+      'can never be deleted',
+      'still owns',
     ],
   },
   {
@@ -648,6 +662,13 @@ const TOPIC_CONTENT = [
   {
     id: 'maintenance-mode',
     routes: ['/maintenance-mode'],
+    // #1996 deepened it and split the page's two states across two chapters, so
+    // the Activate form and the while-active card deep-link to different places.
+    chapters: [
+      'What maintenance mode is',
+      'Activating it and the grace period',
+      'While active',
+    ],
     // #1887 lifted the page intro and the bordered "While active" box (the
     // cron catch-up, the durable http/github-event queue, nothing-force-stopped)
     // and adds what neither said: the console-wide chat lock, the skipped
@@ -676,6 +697,17 @@ const TOPIC_CONTENT = [
       'flow-anomaly history',
       'natural end',
       'End Maintenance Mode',
+      // #1996 additions. The first two are CORRECTIONS the code forced: the
+      // session controls are NOT maintenance-gated (only the composer and the
+      // quick replies are), and the countdown is never sent to an agent at all.
+      // The rest is what the advisory counter and the cooperative model mean in
+      // practice.
+      'Reset Session',
+      'never sent to the agent containers at all',
+      'soft, cooperative pause',
+      'never a security or safety boundary',
+      'counts agents, not requests',
+      'keep accepting',
     ],
   },
   {
@@ -754,6 +786,12 @@ const TOPIC_CONTENT = [
   {
     id: 'role-templates',
     routes: ['/role-templates'],
+    // #1996 deepened it and deep-linked the editor's two opaque fields.
+    chapters: [
+      'What an Agent Template is',
+      'Invocation mode',
+      'Prompt and Advanced',
+    ],
     // #1888 lifted the Agent Templates intro paragraph and the invocation-mode
     // field help, and adds the role-type / origin-badge / prompt-template
     // detail the page only ever hinted at.
@@ -775,6 +813,17 @@ const TOPIC_CONTENT = [
       'Advanced',
       'intrinsic',
       'System Admin',
+      // #1996 additions. 'Nothing filters on it' is a CORRECTION: the previous
+      // wording claimed pattern roles were 'kept out of the wizard's ordinary
+      // role offering', but no code anywhere narrows a list by `category` — the
+      // select's own option label still promises it, which is why the topic has
+      // to say the opposite plainly. The others are the override's real cost and
+      // the one-way direction of the autonomy implication.
+      'Nothing filters on it',
+      'permanently shadowed',
+      'full snapshot, not a patch',
+      'one way only',
+      'last-write-wins',
     ],
   },
   {
@@ -881,6 +930,14 @@ const TOPIC_CONTENT = [
   {
     id: 'users',
     routes: ['/users'],
+    // #1996 deepened it and split "Edit/offboarding dialog" into the two surfaces
+    // it actually is — the edit panel and the delete confirmation ask different
+    // questions, and one is asked over a destructive button.
+    chapters: [
+      'What this page manages',
+      'Creating and editing a user',
+      'Deleting a user is an offboarding',
+    ],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
     // page intro box (records vs memberships, the global System-Admin flag) and
     // adds what no surface said: the immutable subject, the user-store-then-env
@@ -900,6 +957,13 @@ const TOPIC_CONTENT = [
       'personal SSH keys',
       'best-effort',
       'Access',
+      // #1996 additions: why the subject is immutable rather than merely locked,
+      // the records-first rule as it applies to SSO, and the guard that does NOT
+      // exist — nothing stops you deleting the last System Admin.
+      'silently sever an existing person',
+      'guest list',
+      'last System Admin',
+      'own account',
     ],
   },
   {
@@ -926,6 +990,13 @@ const TOPIC_CONTENT = [
   {
     id: 'settings',
     routes: ['modal:settings'],
+    // #1996 deepened it and deep-linked the dialog's single "?" to whichever
+    // section is open (the ticket's "one ? per section").
+    chapters: [
+      'Behavior — how the composer sends',
+      'Model — which provider AI helpers bill against',
+      'Display — theme and transcript size',
+    ],
     // #1892 authored this from the dialog itself (the first topic keyed on a
     // non-route context). The load-bearing facts: assist model != agent model,
     // and which preferences are browser-local vs on the user record.
@@ -945,6 +1016,12 @@ const TOPIC_CONTENT = [
       'Chat font size',
       'in this browser only',
       'user record',
+      // #1996 additions: the modifier chord that works in BOTH presets, and the
+      // sharing consequence the storage table only implied — theme and send-key
+      // are not namespaced per user, so a shared browser shares them.
+      'sends in *both* presets',
+      'browser profile',
+      'High contrast',
     ],
   },
   // Append point — every Phase-3 extraction ticket adds its entry at this tail,

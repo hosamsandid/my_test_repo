@@ -396,9 +396,11 @@ only the **current context's** topic plus its `seeAlso` neighbours (§3.2), so t
 absorbs the growth of every page's help at once. What the number means changed with it: it is now
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
-`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is `/flows` (seven
-neighbours, including the two largest topics) at **251,408 — 73.9% used, 88,592 left**, where the
-all-topics fold it replaced stood at 322,243 (94.8%). Re-measure rather than trust this line:
+`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is the **no-route
+fallback** — the Overview topic plus its seven `seeAlso` neighbours — at **262,568 — 77.2% used,
+77,432 left**, where the all-topics fold it replaced stood at 322,243 (94.8%). It overtook
+`/flows` (259,301) on the #1996 child; the two had converged to within 18 chars on main, so the
+crown was one edit away from moving regardless of which topic grew. Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,
 which `/flows`' `seeAlso` names, so the worst case moved by exactly that topic's growth even
@@ -410,6 +412,16 @@ neighbourhood links to `/mcp`; `/mcp`'s own context sits at **207,122 — 60.9% 
 first child measured after #2006 landed, and it is what consequence 2 below looks like in
 practice: the growth is paid for by the expanded page's own neighbourhood, not by every page at
 once.
+
+The small-page collection child (#1996) is the first one to move the crown to a **different
+context**. It deepened six topics and moved `/flows` by **nothing** — none of the six is in that
+neighbourhood — but `access-users.md` (`/teams`) *is* named by the Overview topic's `seeAlso`, and
+on main the no-route fallback stood at 259,283 against `/flows`' 259,301: **18 characters apart**.
+Expanding Access by ~3.3k in that fold was therefore enough to overtake it, 259,301 → **262,568**.
+The lesson is not about Access: once two contexts converge, the worst case stops being a property
+of the busiest page, and a child that only ever checks `/flows` will report "unmoved" while having
+moved it. Sweep with `measureWorstCaseSystemPrompt()` and read the `context` it returns, not just
+the length.
 
 The Model Providers child (#1988) grew its topic from 5 426 to 11 512 chars and moved `/flows`
 by **nothing**, for the same reason — but its docs-sync commit moved it by 688, because two of

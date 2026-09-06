@@ -174,6 +174,10 @@ const OVERLAY_KEYS = {
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
   'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
   'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
+  'modal:team-manage': 'The Manage/View side panel on the Access page.',
+  'modal:user-edit': 'The Edit side panel on the Users page.',
+  'modal:user-delete': 'The delete/offboarding confirmation on the Users page.',
+  'modal:agent-template': 'The template editor side panel on the Agent Templates page.',
 };
 
 const CONTEXT_KEYS = {
@@ -223,6 +227,17 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The four small-page overlays (#1996). Same story once more: none claims a
+  // topic of its own — resolution falls through to `/teams`, `/users` and
+  // `/role-templates` respectively — they exist so the panel lifts above the
+  // surface hosting the "?". Three are shared `SidePanel`s (60/61); the fourth,
+  // `modal:user-delete`, is a `ConfirmDialog` at 9999, which is exactly why it
+  // needs the lift most: without it the help would open BEHIND the decision it
+  // is there to inform.
+  'modal:team-manage': { label: 'Access · manage scope' },
+  'modal:user-edit': { label: 'Users · edit user' },
+  'modal:user-delete': { label: 'Users · delete user' },
+  'modal:agent-template': { label: 'Agent Templates · editor' },
   // The Flow editor's seven overlay surfaces (#1984). Same story once more, and
   // this is the page #1990 flagged the latent bug on: EdgeDialogs already
   // rendered a "?" inside a `SidePanel` with no subject, so pressing it opened

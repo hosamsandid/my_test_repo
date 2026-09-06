@@ -110,6 +110,15 @@ export const CONTEXT_KEYS = {
   // above them (both are z-index 60/61).
   'modal:environment-form': { label: 'Working Environment form' },
   'modal:toolchains': { label: 'Agent toolchains' },
+  // The four small-page overlays (#1996) — same story once more: no topic of
+  // their own (resolution falls through to `/teams`, `/users`,
+  // `/role-templates`), registered so the panel lifts above the surface that
+  // hosts the "?". Three are SidePanels (60/61); `modal:user-delete` is a
+  // ConfirmDialog at 9999, so it needs the lift most.
+  'modal:team-manage': { label: 'Access · manage scope' },
+  'modal:user-edit': { label: 'Users · edit user' },
+  'modal:user-delete': { label: 'Users · delete user' },
+  'modal:agent-template': { label: 'Agent Templates · editor' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -133,6 +142,10 @@ export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
 export const OVERLAY_ENVIRONMENT_FORM = 'modal:environment-form';
 export const OVERLAY_TOOLCHAINS = 'modal:toolchains';
+export const OVERLAY_TEAM_MANAGE = 'modal:team-manage';
+export const OVERLAY_USER_EDIT = 'modal:user-edit';
+export const OVERLAY_USER_DELETE = 'modal:user-delete';
+export const OVERLAY_AGENT_TEMPLATE = 'modal:agent-template';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

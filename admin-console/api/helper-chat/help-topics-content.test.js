@@ -47,6 +47,14 @@ const TOPIC_CONTENT = [
       'Skills',
       'Plugins',
       'Host context folders',
+      // #1960: the members' half of the orphan block is gone, and the topic is
+      // where that decision (and its reason) is recorded, so the Helper Chat can
+      // answer "where did the orphaned-agents list go?".
+      'Orphaned agents',
+      'takes its members with it',
+      'no replacement surface',
+      '/api/agents/orphans',
+      'idempotent',
     ],
   },
   {

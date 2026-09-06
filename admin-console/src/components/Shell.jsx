@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
-  Boxes, Key, KeyRound, MessageCircle, Github, Layers, GitBranch,
+  Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
   Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
@@ -129,7 +129,11 @@ const NAV_GROUPS = [
     // removed here (#1665, AC8/AC10): the persistent "+ Create" control above the
     // nav is now the single front door. Those pages stay reachable as launcher
     // targets and via their existing deep links (/quickstart, /team-setup).
-    { path: '/agents',       label: 'Agents',              Icon: Layers },
+    // `Agents` was the first entry here until #1930 removed the page: managing
+    // the agents you already have is the Agent Chat rail's job now, and Agent
+    // Chat is already the group-less entry above this list. The group keeps its
+    // "build a team, then fill it in" reading order — Flows first, then the
+    // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },

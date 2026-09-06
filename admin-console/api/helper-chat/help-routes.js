@@ -41,9 +41,14 @@ const ALIASES = {
 // `/getting-started` joined them in G1 (#1874): the page is gone and its content
 // is the Overview face, so an old bookmark degrades to the app home — where the
 // topic-less route resolves to that very Overview.
+// `/agents` joined them in #1930 for the same reason, and took `/blueprints`
+// with it: that alias used to point AT `/agents`, so re-pointing it was part of
+// removing the page rather than a separate decision. Both now resolve to the
+// Agent Chat topic, which is where the page's capabilities went (#1928, #1929).
 const REDIRECTS = {
   '/': '/chats',
-  '/blueprints': '/agents',
+  '/agents': '/chats',
+  '/blueprints': '/chats',
   '/briefings': '/flows',
   '/getting-started': '/chats',
   '/process': '/flows',
@@ -68,8 +73,12 @@ const DYNAMIC = [
 // a structural route at all — it renders the whole Agent Team Wizard and shows
 // that page's help through the alias above, so classifying it as "no help of its
 // own" was the one place the topology mis-described what a user sees.
+// `/agents` left in #1930, the third route to do so: the page is gone, its
+// capabilities are the Agent Chat rail's, and its topic was folded into
+// `agent-chat.md` rather than retired — the concepts it carried (the roles, the
+// lifecycle states, Disable vs Reset to stub vs Delete, what the form fields
+// control) all describe surfaces that still exist, just elsewhere.
 const PAGE_ROUTES = new Set([
-  '/agents',
   '/chats',
   '/create',
   '/quickstart',
@@ -99,6 +108,7 @@ const PAGE_ROUTES = new Set([
 // classified as page-or-structural on purpose.
 const ALLOWLIST = new Set([
   '/',
+  '/agents',
   '/blueprints',
   '/briefings',
   '/getting-started',

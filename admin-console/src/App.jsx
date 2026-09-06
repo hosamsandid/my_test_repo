@@ -61,7 +61,6 @@ function CredentialRoute({ children }) {
   return children;
 }
 
-const Agents              = lazy(() => import('./pages/Agents'));
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
 const Create              = lazy(() => import('./pages/Create'));
@@ -157,8 +156,15 @@ export default function App() {
       <Suspense fallback={<div style={{ padding: 'var(--eb-space-6)', color: 'var(--eb-text-muted)' }}>Loading...</div>}>
         <Routes>
           <Route path="/"             element={<Navigate to="/chats" replace />} />
-          <Route path="/agents"       element={<Agents />} />
-          <Route path="/blueprints"   element={<Navigate to="/agents" replace />} />
+          {/* The Agents page was removed (#1930): everyday agent management is
+              the Agent Chat rail (#1928, #1929), creation is the `/create`
+              launcher (#1956), and the Orchestrator/BriefingPack half of the
+              page went with the model itself (#1961). Both the route and the
+              older `/blueprints` alias that used to land here stay as redirects
+              so a bookmark or an old link degrades to the surface that took the
+              page's job over, rather than to a blank route. */}
+          <Route path="/agents"       element={<Navigate to="/chats" replace />} />
+          <Route path="/blueprints"   element={<Navigate to="/chats" replace />} />
           <Route path="/chats"           element={<AgentChat />} />
           <Route path="/chats/:agentId"  element={<AgentChat />} />
           <Route path="/create"      element={<Create />} />

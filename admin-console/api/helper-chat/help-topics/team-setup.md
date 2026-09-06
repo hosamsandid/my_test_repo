@@ -6,7 +6,7 @@ summary: The five guided steps that turn a process template into a live squad of
 seeAlso:
   - { label: "Create", to: "/create" }
   - { label: "Flows", to: "/flows" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "Agent Templates", to: "/role-templates" }
   - { label: "Skills", to: "/skills" }

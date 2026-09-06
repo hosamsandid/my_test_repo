@@ -8,12 +8,18 @@ import { fileURLToPath } from 'node:url';
  * Drift guard for the #1956 shared create form (AC3/AC5).
  *
  * AC5 is a *structural* claim — one module serves `/create` and, while it
- * exists, the Agents page — and structure is precisely what a pure test cannot
- * see: `Agents.jsx`, `Create.jsx` and `AgentCreateForm.jsx` are JSX, which
- * `node --test` does not load (#651). A second, forked copy of the form would
- * leave `agent-create-submit-state.test.js` and every other pure test green
- * while the two surfaces quietly diverged — which is the exact failure the
- * Agents-page removal depends on not happening.
+ * existed, the Agents page — and structure is precisely what a pure test cannot
+ * see: `Create.jsx` and `AgentCreateForm.jsx` are JSX, which `node --test` does
+ * not load (#651). A second, forked copy of the form would leave
+ * `agent-create-submit-state.test.js` and every other pure test green while the
+ * two surfaces quietly diverged — which is the exact failure the Agents-page
+ * removal depended on not having happened.
+ *
+ * #1930 has since removed that second surface, and the removal is guarded in
+ * `agents-page-removal-guard.test.js`. What survives here is AC5's durable
+ * half: the launcher hosts the ONE shared form and sends the ONE request
+ * through the ONE gate — the properties that made the page droppable, and the
+ * ones a future second caller will depend on again.
  *
  * Same source-reading shape as `rail-lifecycle-wiring.test.js`: wiring only,
  * never copy, so a reworded label or restyled button is free to change.
@@ -37,42 +43,38 @@ function code(src) {
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-const agents = code(read('./Agents.jsx'));
 const create = code(read('./Create.jsx'));
 const form = code(read('./agent-lifecycle/AgentCreateForm.jsx'));
 
 test('the create form lives in one shared module (AC5)', () => {
   assert.ok(form, 'agent-lifecycle/AgentCreateForm.jsx exists');
   assert.match(form, /export default function AgentCreateForm/);
-  // Both surfaces import that module rather than defining a form of their own.
-  for (const [name, src] of [['Agents.jsx', agents], ['Create.jsx', create]]) {
-    assert.match(
-      src,
-      /import AgentCreateForm from '\.{1,2}(\/pages)?\/agent-lifecycle\/AgentCreateForm\.jsx'/,
-      `${name} imports the shared form`,
-    );
-    assert.doesNotMatch(src, /function AgentCreateForm/, `${name} defines no second copy`);
-  }
+  // The launcher imports that module rather than defining a form of its own.
+  assert.match(
+    create,
+    /import AgentCreateForm from '\.{1,2}(\/pages)?\/agent-lifecycle\/AgentCreateForm\.jsx'/,
+    'Create.jsx imports the shared form',
+  );
+  assert.doesNotMatch(create, /function AgentCreateForm/, 'Create.jsx defines no second copy');
 });
 
-test('the role picker moved with the form and was not left behind (AC5)', () => {
-  // `RoleCard` was only ever used by this form. A copy left on the Agents page
-  // is a fork waiting to be edited on one side only.
+test('the role picker stays inside the form module (AC5)', () => {
+  // `RoleCard` is only ever used by this form. A copy in the host page is a
+  // fork waiting to be edited on one side only — which is what happened while
+  // the Agents page rendered its own inline create form.
   assert.match(form, /function RoleCard/);
-  assert.doesNotMatch(agents, /function RoleCard/);
-  assert.doesNotMatch(agents, /<RoleCard/);
+  assert.doesNotMatch(create, /function RoleCard/);
+  assert.doesNotMatch(create, /<RoleCard/);
 });
 
-test('both surfaces send the same request through the same gate (AC3)', () => {
-  // The gate: one pure module decides submittability for whoever renders it.
+test('the request goes through the one gate, from the form itself (AC3)', () => {
+  // The gate: one pure module decides submittability for whoever renders it —
+  // so a host page cannot re-derive "is this submittable" and drift.
   assert.match(form, /describeAgentSubmitState\(form\)/);
-  assert.doesNotMatch(agents, /describeAgentSubmitState/);
   assert.doesNotMatch(create, /describeAgentSubmitState/);
-  // The request: the raw form object, POSTed to the same endpoint on both
-  // sides. A divergence here is AC3's "same result as today" quietly failing.
-  for (const [name, src] of [['Agents.jsx', agents], ['Create.jsx', create]]) {
-    assert.match(src, /apiCall\('POST', '\/api\/agents', form\)/, `${name} POSTs the raw form`);
-  }
+  // The request: the raw form object, POSTed by the shared module. Hoisting it
+  // into the host is AC3's "same result as today" quietly failing.
+  assert.match(create, /apiCall\('POST', '\/api\/agents', form\)/, 'Create.jsx POSTs the raw form');
 });
 
 test('the launcher hosts the form behind its own entry, not a new route (AC3)', () => {

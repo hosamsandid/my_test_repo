@@ -5,7 +5,7 @@ title: Skills
 summary: The reusable instruction packages your agents load — kept in a global and a per-team pool, granted to whoever needs them.
 seeAlso:
   - { label: "Knowledge", to: "/knowledge" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Role Templates", to: "/role-templates" }
 askPrompts:

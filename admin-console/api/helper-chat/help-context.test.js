@@ -103,7 +103,7 @@ test('every context key claimed by a shipped topic is registered', () => {
 
 test('AC4: classifyTopicKeys reports an invented key (the guard is not vacuous)', () => {
   const { unknown, contextKeys } = classifyTopicKeys([
-    { id: 'a', routes: ['/agents', 'modal:settings'] },
+    { id: 'a', routes: ['/skills', 'modal:settings'] },
     { id: 'b', routes: ['modal:typo', '/not-a-route'] },
   ]);
   assert.deepEqual(unknown, ['modal:typo', '/not-a-route']);
@@ -127,34 +127,37 @@ test('helpContextKeys expands an alias route into both spellings', () => {
 });
 
 test('helpContextKeys accepts a bare pathname and needs no subject', () => {
-  assert.deepEqual(helpContextKeys('/agents'), ['/agents']);
-  assert.deepEqual(helpContextKeys({ route: '/agents' }), ['/agents']);
+  // A plain page route, deliberately NOT a redirect source: `/agents` stood
+  // here until #1930 turned it into one, at which point it started expanding to
+  // two keys and stopped demonstrating the property this test is about.
+  assert.deepEqual(helpContextKeys('/skills'), ['/skills']);
+  assert.deepEqual(helpContextKeys({ route: '/skills' }), ['/skills']);
   assert.deepEqual(helpContextKeys({}), []);
   assert.deepEqual(helpContextKeys(null), []);
 });
 
 test('helpContextKeys never repeats a key', () => {
-  const keys = helpContextKeys({ route: '/agents', overlay: 'modal:settings', step: '' });
+  const keys = helpContextKeys({ route: '/skills', overlay: 'modal:settings', step: '' });
   assert.equal(new Set(keys).size, keys.length);
 });
 
 // ── resolution against the shipped topics ────────────────────────────────────
 
 test('AC1: the open Settings dialog resolves to the Settings topic', () => {
-  const hit = registry.resolveHelpContext({ route: '/agents', overlay: 'modal:settings' });
+  const hit = registry.resolveHelpContext({ route: '/skills', overlay: 'modal:settings' });
   assert.equal(hit?.topic?.id, 'settings');
   assert.equal(hit.key, 'modal:settings');
 });
 
 test('AC1: a Settings section with no topic of its own still lands on Settings', () => {
-  const hit = registry.resolveHelpContext({ route: '/agents', overlay: 'modal:settings', step: 'display' });
+  const hit = registry.resolveHelpContext({ route: '/skills', overlay: 'modal:settings', step: 'display' });
   assert.equal(hit?.topic?.id, 'settings');
   assert.equal(hit.key, 'modal:settings', 'the section key falls back to the dialog key');
 });
 
 test('AC1: closing the dialog returns help to the page underneath', () => {
-  const hit = registry.resolveHelpContext({ route: '/agents' });
-  assert.equal(hit?.topic?.id, 'agents');
+  const hit = registry.resolveHelpContext({ route: '/skills' });
+  assert.equal(hit?.topic?.id, 'skills');
 });
 
 test('AC3: a wizard step with no step topic falls back to the wizard route topic', () => {

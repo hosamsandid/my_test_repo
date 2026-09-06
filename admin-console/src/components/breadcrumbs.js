@@ -12,7 +12,6 @@ export const BREADCRUMBS = {
   // the raw path there, so the assistant was told the user is on "/wizard/team"
   // (#1891).
   '/wizard/team':  'Agent Team Wizard',
-  '/agents':       'Agents',
   '/flows':        'Flows',
   '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',

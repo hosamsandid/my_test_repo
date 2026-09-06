@@ -6,7 +6,7 @@ summary: The five ways to start — describe it, use a ready-made setup, build i
 seeAlso:
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Flows", to: "/flows" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "Model Providers", to: "/models" }
   - { label: "SSH Keys", to: "/ssh-keys" }

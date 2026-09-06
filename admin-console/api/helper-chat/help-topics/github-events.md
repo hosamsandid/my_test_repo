@@ -5,7 +5,7 @@ title: GitHub Event Log
 summary: A read-only timeline of every GitHub event the platform saw and what happened to it — Processed events is the history, Pending queue is the backlog still waiting to be delivered.
 seeAlso:
   - { label: "Flows", to: "/flows" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "Maintenance Mode", to: "/maintenance-mode" }
 askPrompts:

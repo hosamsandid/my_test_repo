@@ -139,7 +139,7 @@ test('topicForRoute resolves an alias route', () => {
 test('topicForRoute resolves a redirect source to its destination topic', () => {
   const reg = fixtureRegistry();
   assert.equal(reg.topicForRoute('/').id, 'chat');            // / → /chats
-  assert.equal(reg.topicForRoute('/blueprints').id, 'agents'); // /blueprints → /agents
+  assert.equal(reg.topicForRoute('/blueprints').id, 'chat'); // /blueprints → /chats (#1930)
   assert.equal(reg.topicForRoute('/process/team-x').id, 'flows'); // dynamic redirect → /flows
 });
 
@@ -337,7 +337,10 @@ test('the Overview topic carries the former Getting Started concepts and CTAs', 
     assert.match(body, new RegExp(`\\*\\*${concept}\\*\\*`), `Overview body must explain ${concept}`);
   }
   const linked = reg.overview.seeAlso.map((s) => s.to);
-  for (const to of ['/agents', '/teams', '/flows', '/environments', '/knowledge', '/models']) {
+  // `/agents` was in this list until #1930 removed the page; the **Agents**
+  // concept above still has to be explained (it is a thing, not a page), but
+  // the link now points at `/chats`, which is where you meet one.
+  for (const to of ['/chats', '/teams', '/flows', '/environments', '/knowledge', '/models']) {
     assert.ok(linked.includes(to), `Overview must link to ${to}`);
   }
   const ctas = reg.overview.actions;

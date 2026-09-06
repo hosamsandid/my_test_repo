@@ -9,7 +9,7 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 | **Repositories** | Zero or more Git repos to clone, each with an optional SSH key binding — see [Repository-less environments](#repository-less-environments) |
 | **GitHub Token** | PAT used by the GitHub poller for event-driven triggers; also authenticates HTTPS GitHub repository cloning and the real-time repo-check probe |
 | **MCP Servers** | Optional server/credential references (from the MCP registry) materialised into the agent's `.claude/settings.json` at creation |
-| **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default |
+| **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default, but only for the values the provider carries: an `api-key` provider saved without a token repoints the Base URL and leaves the global `ANTHROPIC_AUTH_TOKEN` in place, while an `oauth-token` provider clears both (see [Model Providers](model-providers.md)) |
 | **Agent Toolchain** | Optional — which container image the environment's agents are spawned from, chosen from the operator toolchain registry; absent means the default image (see [Agent toolchain](#agent-toolchain)) |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
 

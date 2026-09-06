@@ -37,7 +37,7 @@ orchestrator.js (control-plane container, no Matrix presence)
 - **Agents** are dynamically created Matrix users, each in its **own** Podman container (`as-agent:latest`), lifecycle-managed by the orchestrator. Configs persist in `/workspace/agents/<id>/` (`config.json` + `CLAUDE.md` + `AGENT-PROMPT.md`); DM room id in `dm-room.json` (created lazily by the console).
 - Each agent is bound to a **Working Environment** (below) defining what gets seeded into its workspace.
 - **Container-per-agent isolation** is three-way: per-agent **network**, per-agent **filesystem** via a SubPath mount of the pool volume (`AEE_WORKSPACE_ISOLATION`, default on), optional **dedicated volume** (`AEE_PER_AGENT_VOLUME`, opt-in). Optionally a fourth: an admin can bind-mount one or more **host folders** inside the container (podman/local only — see `docs/context-mount.md`), **read-only by default** or **read-write** per folder. A single legacy folder mounts at `/context` (`contextMount` + optional `contextMountRw` in `config.json`); multiple folders (#1290) persist as `contextMounts: [{ path, name, slug, readWrite? }]`, each at a distinct `/context/<slug>` target (`resolveContextMounts` reconciles either shape). The mounts exist **only in the agent's container**, so the console browses each *through* that container (#1286) and the agent is told about them by a gated CLAUDE.md section.
-- **Agent runtime**: the container entrypoint `agent-image/scripts/agent-entrypoint.py` (+ `sase_lib.py`) — Matrix client + Claude CLI invocations + trigger scheduler.
+- **Agent runtime**: the container entrypoint `agent-image/scripts/agent-entrypoint.py` — Matrix client + Claude CLI invocations + trigger scheduler.
 
 ### Teams (human collaboration & visibility scope)
 
@@ -379,7 +379,7 @@ The Admin Console embeds a Matrix client at `/chats` (+ `/chats/:agentId`). Unde
 | `orchestrator/flow-anomaly-detector.js` | Pure deterministic stall classifier: derives flow's expected label state machine from ports; classifies four anomaly classes with age |
 | `orchestrator/flow-anomaly-sweep.js` | GitHub/session-log → detector objects adapter; I/O helpers + per-team threshold merge |
 | `orchestrator/setup.sh` | Register the admin Matrix user, print the access token |
-| `agent-image/` | Per-agent image `as-agent:latest`; entrypoint `scripts/agent-entrypoint.py` (+ `sase_lib.py`) is the live runtime |
+| `agent-image/` | Per-agent image `as-agent:latest`; entrypoint `scripts/agent-entrypoint.py` is the live runtime |
 | `admin-console/api/api.js` | Express API: agents, environments, ssh-keys, skills, models, mcp, `POST /api/teams`, agent-templates |
 | `admin-console/api/team-residue.js` | Pure residue classifier + routing decision for team-create (`classifyMemberResidue` / `decideTeamCreate`); shared by both `POST /api/teams` handlers so their collision/orphan routing can't drift (#1525) |
 | `admin-console/api/team-repo-resolve.js` | Pure repo helpers for team materialization (#1623): `reposFromEnv` (normalize legacy + modern shapes), `primaryRepo`, `isRepoLessEnv`, `repoVars` (builds `{{repoFullName}}`/`{{repoOwner}}`/`{{repoName}}`/`{{repoUrl}}`, empty strings for repo-less) |

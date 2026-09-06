@@ -139,7 +139,7 @@ reviewer will (rightly) flag mismatch:
 
 There are **two** per-agent runners, and they must stay behaviourally identical:
 
-- **`agent-image/scripts/agent-entrypoint.py`** (+ `sase_lib.py`) is the **live**
+- **`agent-image/scripts/agent-entrypoint.py`** is the **live**
   runtime — this is what actually runs inside agent containers.
 - **`orchestrator/agent-runner.js`** is the **legacy Node reference** — *not
   executed*, but deliberately kept in structural parity as documentation.

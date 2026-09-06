@@ -152,7 +152,7 @@ Deliverables:
   durable facts/entities and calls `knowledge add`. Event-driven, once per session.
 - Autonomy dial levels **0/1**; default 1. Level 0 = skip harvest (today's behaviour).
 
-Key files: `agent-image/scripts/knowledge`, `agent-image/scripts/agent-entrypoint.py` (+ `sase_lib.py`),
+Key files: `agent-image/scripts/knowledge`, `agent-image/scripts/agent-entrypoint.py`,
 `agent-image/CLAUDE.md`.
 
 Verification: pure-core tests for the distiller/provenance stamping; manual — run the three developers,

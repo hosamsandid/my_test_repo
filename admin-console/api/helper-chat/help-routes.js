@@ -162,6 +162,8 @@ const OVERLAY_KEYS = {
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
   'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
   'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
+  'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
+  'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
 };
 
 const CONTEXT_KEYS = {
@@ -211,6 +213,16 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Working Environments page's two side panels (#1987) — the create/edit
+  // form and the System-Admin toolchain registry. Registered for the same
+  // reason as the MCP pair: both are shared `SidePanel`s (z-index 60/61) and
+  // both host a "?" that deep-links into the `/environments` chapters, so
+  // without the lift the help panel would open *behind* the surface it
+  // explains. Neither claims a topic of its own — resolution falls through to
+  // `/environments`. This page keeps THREE of its four "?" inside the form
+  // panel (repositories, token, Sync), which is why one subject covers them.
+  'modal:environment-form': { label: 'Working Environment form' },
+  'modal:toolchains': { label: 'Agent toolchains' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

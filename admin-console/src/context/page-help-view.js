@@ -80,6 +80,12 @@ export const CONTEXT_KEYS = {
   // and the panel lifts above them (both are z-index 60/61).
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Working Environments page's create/edit form and its System-Admin
+  // toolchain registry (#1987) — same story again: no topic of their own,
+  // registered so their published subject is a known key and the panel lifts
+  // above them (both are z-index 60/61).
+  'modal:environment-form': { label: 'Working Environment form' },
+  'modal:toolchains': { label: 'Agent toolchains' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -91,6 +97,8 @@ export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
 export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
 export const OVERLAY_MCP_SERVER = 'modal:mcp-server';
 export const OVERLAY_MCP_CREDENTIAL = 'modal:mcp-credential';
+export const OVERLAY_ENVIRONMENT_FORM = 'modal:environment-form';
+export const OVERLAY_TOOLCHAINS = 'modal:toolchains';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

@@ -252,6 +252,20 @@ const TOPIC_CONTENT = [
     // additional instructions), the shared-recipe-but-own-workspace point, the
     // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
     // Sync-all-agents caveat.
+    //
+    // #1987 (epic #1981) widened it into a per-surface reference: the seven
+    // areas below are each a chapter, and four of them are the landing target of
+    // a "?" on the matching surface, so the headings are load-bearing rather
+    // than decorative.
+    chapters: [
+      'What a Working Environment is',
+      'Repositories',
+      'Credentials',
+      'MCP server references',
+      'Model provider binding',
+      'Additional context',
+      'Toolchains',
+    ],
     concepts: [
       'reusable workspace recipe',
       'own isolated workspace',
@@ -266,6 +280,26 @@ const TOPIC_CONTENT = [
       'Read-only',
       'newly created agents',
       'Sync all agents',
+      // #1987 additions. The first is a CORRECTION of the page, guarded here
+      // because the form's own hint said the opposite: prompt-assembly.js writes
+      // the environment name AND description into the agent's CLAUDE.md, so the
+      // description is not console-only.
+      'read by the agent',
+      // The form has no MCP picker at all — E9 (#1989) flagged it from the MCP
+      // side; a "?" on THIS page must not imply a control that does not exist.
+      'form has no MCP picker',
+      // What an environment edit does and does not reach — the page's most
+      // surprising behaviour, and the reason the Sync action exists.
+      'What an edit reaches',
+      'recreates its running agents',
+      'never re-clones',
+      // Two honest limits of surfaces that look stricter than they are.
+      'advice, not a gate',
+      'an instruction, not a file permission',
+      'refuses the clone',
+      // The toolchain half: the panel, and the pin-file-not-image story.
+      'Toolchains panel',
+      'version manager',
     ],
   },
   {

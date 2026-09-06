@@ -1,11 +1,13 @@
 import React from 'react';
 import { Users, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
+import PageHelpButton from './PageHelpButton';
 import {
   pluginAssignmentState,
   assignmentGranularity,
   assignmentGate,
 } from '../pages/plugin-team-assign-view.js';
+import { PLUGINS_HELP_SECTIONS } from '../pages/plugins-help-sections.js';
 
 // Team-assignment control for an installed plugin's card on the Plugins page
 // (#1691). It reuses the existing activation path
@@ -56,11 +58,21 @@ export default function PluginTeamAssign({ row, teams, stackRuntime, onChanged }
 
   return (
     <div style={{ marginTop: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+      {/* The control's "?" (#1986) sits in this header row, ABOVE the no-team
+          branch below — the reader who is told they have no team to assign to is
+          exactly the one who needs the chapter explaining why, so the affordance
+          must not live inside the branch it would then be missing from. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
         <Users size={14} style={{ color: 'var(--eb-text-muted)', flex: '0 0 auto' }} />
         <span style={{ fontSize: 'var(--eb-text-xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--eb-text-muted)' }}>
           Team assignment
         </span>
+        <PageHelpButton
+          label="How assigning a plugin to a team works"
+          size={14}
+          style={{ flex: '0 0 auto' }}
+          section={PLUGINS_HELP_SECTIONS.teamAssignment}
+        />
       </div>
 
       {/* AC8: no team the caller may grant to — an explanatory hint, not an error. */}

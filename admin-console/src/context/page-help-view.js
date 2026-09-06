@@ -91,6 +91,12 @@ export const CONTEXT_KEYS = {
   'modal:flow-node': { label: 'Flows · agent inspector' },
   'modal:flow-anomalies': { label: 'Flows · anomalies' },
   'modal:flow-improvements': { label: 'Flows · improvements' },
+  // The Plugins page's two confirm dialogs (#1986) — same story again, one layer
+  // higher: a ConfirmDialog is the shared Modal at z-index 9999, so a "?" inside
+  // one needs the lift to open beside the decision it explains rather than
+  // behind it. Neither claims a topic — resolution falls through to `/plugins`.
+  'modal:plugin-install': { label: 'Install plugin' },
+  'modal:plugin-uninstall': { label: 'Uninstall plugin' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -109,6 +115,8 @@ export const OVERLAY_FLOW_STAGES = 'modal:flow-stages';
 export const OVERLAY_FLOW_NODE = 'modal:flow-node';
 export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
 export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
+export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
+export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

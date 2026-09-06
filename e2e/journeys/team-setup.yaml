@@ -159,7 +159,7 @@ steps:
 
   # Verify the materialised team is real (UI + API) — no capture, pure assertion.
   - assert:
-      do: agents.expectTeamCard
+      do: agents.expectTeamInRail
       teamId: agentic-demos
       roleIds: [business-analyst, developer, code-reviewer, reworker]
   - assert:

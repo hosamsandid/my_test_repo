@@ -23,7 +23,13 @@ const NAMESPACE_TO_NAV = {
   wizard: ['Agent Team Wizard'],
   templates: ['Agent Templates'],
   chat: ['Agent Chat'],
-  agents: ['Agents'],
+  // agents.* asserts a materialised team in the Agent Chat left rail since
+  // #1930 removed the Agents page (its nav entry is gone from NAV_PAGES, so
+  // mapping to it would silently contribute nothing). Several namespaces may
+  // map to one nav page — navLabelsForJourney returns a SET of labels, so a
+  // journey using both chat.* and agents.* is still counted once (context.*
+  // already shared 'Agent Chat' this way).
+  agents: ['Agent Chat'],
   knowledge: ['Knowledge'],
   flows: ['Flows'],
   triggers: ['Triggers'],

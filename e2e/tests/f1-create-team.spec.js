@@ -93,8 +93,8 @@ test.describe('F1: create a team through the wizard', () => {
       expect(complete[0].result.created).toEqual(expect.arrayContaining(memberIds));
     });
 
-    await test.step('assert the team + members on the Agents page and running (UI + API)', async () => {
-      await agents.expectTeamCard(ctx, { teamId, memberIds });
+    await test.step('assert the team + members in the Agent Chat rail and running (UI + API)', async () => {
+      await agents.expectTeamInRail(ctx, { teamId, memberIds });
       await agents.expectMembersRunning(ctx, { memberIds });
       await agents.expectDmRooms(ctx, { memberIds });
     });

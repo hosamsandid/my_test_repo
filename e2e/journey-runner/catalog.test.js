@@ -63,7 +63,7 @@ test('docsBeforeFunctions tolerates a // comment between JSDoc and the function'
 test('buildCatalog covers the registered step namespaces + the teamEnv fixture', () => {
   const cat = buildCatalog();
   const names = new Set(cat.steps.map((s) => s.name));
-  for (const n of ['wizard.open', 'wizard.selectProcessTemplate', 'env.createFixtureEnv', 'agents.expectTeamCard', 'teardown.teardownTeam']) {
+  for (const n of ['wizard.open', 'wizard.selectProcessTemplate', 'env.createFixtureEnv', 'agents.expectTeamInRail', 'teardown.teardownTeam']) {
     assert.ok(names.has(n), `catalog contains ${n}`);
   }
   // Re-exported step borrows the declaring module's JSDoc.

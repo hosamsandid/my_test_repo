@@ -11,7 +11,10 @@ const { test, expect } = require('@playwright/test');
 test.use({ storageState: { cookies: [], origins: [] } });
 
 test('F0: unauthenticated visit shows the login screen, not the app', async ({ page }) => {
-  await page.goto('/agents');
+  // Any protected deep route will do. Deliberately NOT the app home (/chats):
+  // a probe that lands where an unauthenticated user would be redirected anyway
+  // proves less. It was /agents until #1930 removed that page.
+  await page.goto('/skills');
 
   // Login screen is rendered in place of the whole console.
   await expect(page.locator('#login-username')).toBeVisible();

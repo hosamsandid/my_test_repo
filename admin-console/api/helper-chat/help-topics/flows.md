@@ -18,118 +18,340 @@ askPrompts:
   - "How do I make the flow wait for a person to approve?"
   - "Why is the Materialize button greyed out?"
   - "Why are my agents 'Not initialised' after I materialized the draft?"
+  - "What do the Anomalies and Improvements panels tell me?"
 ---
 
-## What can I do here?
+## What Flows is
 
 Flows is where you design and run **flow graphs**: teams of agents wired
-together so work hands off from one to the next automatically. Pick an item in
-the left list:
+together so work hands off from one to the next automatically. Nothing here
+calls an agent directly — you describe *who reacts to what*, and the platform
+derives the wiring.
 
-- **Teams** — a live flow graph you can inspect and edit in place.
-- **Drafts** — editable flows you're still designing; click **New flow** to
-  start one from scratch.
+There are two kinds of thing in the left list, and the difference matters:
 
-## How agents are wired
+- A **Draft** is a design. It is a document, not a team: no agent exists, no
+  repository is cloned, nothing runs. You can rewrite it freely.
+- A **Team** is live. Its agents exist, and an edit to its wiring re-derives
+  triggers on the running agents as soon as you save — which is why a live
+  canvas wears an amber **Live team** badge and a warning strip, and why
+  **Edit as draft** exists: it copies the team into a draft you can experiment
+  in safely.
 
-Agents don't call each other directly. Instead:
+**Materialize** is the one-way step between them. It reads the draft and
+creates the real thing: one Working Environment, one team agent, and one member
+per role with its own prompt and triggers. The dialog's **Materialize agents
+now** checkbox is **off** by default, so members are created as **stubs** —
+they appear in the team with their prompts and triggers, but no repository is
+cloned and nothing is running until you start one. A stub is listed on the
+Agents page as *Not initialised*, and in Agent Chat under its team's collapsed
+*Not materialized yet* section; starting it from either place does the same
+thing. Tick the box and every member is provisioned right away — slower,
+because each materialisation clones the repository, and a flow can have dozens
+of members.
 
-- An agent finishes with an **Outcome**, which sets a **Label**.
-- A **Consumer** agent is waiting on that label and wakes up when it appears.
-
-Every arrow you see on the canvas is one of these *Outcome → Label → Consumer*
-hand-offs. Wiring the flow means deciding who sets which label and who reacts
-to it.
-
-## Building a flow
-
-You always edit a **Draft** first — a live **Team** keeps running while you
-design. Add agents, draw the hand-offs between them, then **Materialize** the
-draft to turn it into a real team. The Materialize dialog decides how far each
-agent is taken: **Materialize agents now** is off here by default, so the members
-are created as **stubs** — they appear in the team with their prompts and
-triggers, but no repository is cloned and nothing is running until you enable
-one (a process can have dozens of members, and each materialisation clones the
-repository). Such a member is listed on the Agents page as *Not initialised*,
-and in Agent Chat under its team's collapsed *Not materialized yet* section —
-starting it from either place does the same thing. Tick it and every member is
-provisioned right away. Materialize
-needs at least one agent before it can turn a design into a team, and while a
-Copilot proposal is on screen the structural buttons pause, because the canvas
-is previewing the proposal rather than the draft underneath.
-
-- **Flow Copilot** — describe the process in plain language (roles, hand-offs,
-  human approval gates) and it proposes a complete flow on the canvas; you
-  review and apply it, then keep iterating with follow-up instructions.
-- **Import / Export** — save a flow to a portable JSON bundle, or bring one in
-  to reuse or share.
-- The draft toolbar covers the rest: **Add agent**, **Add human role**, group
-  the agents into ordered **Stages**, manage the hand-off **Labels**, then
-  **Materialize**.
+Two things gate the **Materialize** button: a draft needs at least one agent,
+and while a Copilot proposal is on screen the structural buttons pause, because
+the canvas is previewing the proposal rather than the draft underneath.
 
 An environment with no repository still works — the team's agents can chat and
-use their skills, but GitHub hand-offs (PR / issue channels) are not available
-to them.
+use their skills — but GitHub hand-offs (pull-request and issue channels) are
+not available to them.
 
-## The hand-off kinds
+## The flows left list
 
-When you draw an edge, the chooser asks *how does the downstream agent learn
-about the upstream agent's work?* If the upstream agent already has a matching
-outcome, that one is recommended.
+The left list is how you choose what the canvas shows. It has two sections:
+
+- **Teams** — the live flow graphs, one row per Agent Team, with its Working
+  Environment underneath. Selecting one opens it in live mode.
+- **Drafts** — the designs you are still working on, with the number of agents
+  in each. A draft can be deleted from its row; a team cannot (a team is
+  deleted from the Agents page, because that removes running agents).
+
+The list can be collapsed to give the canvas the full width, and the divider
+between it and the canvas can be dragged; both are remembered.
+
+There is no third section. Earlier versions listed a read-only **Role
+templates** blueprint and a **BriefingPack flows** source; both are gone, and a
+bookmark pointing at either falls back silently to no selection rather than to
+an empty pane. The shipped role templates are still browsable — on the
+**Agent Templates** page, not here.
+
+The actions that *create* something live in the page header at the top right,
+not in the list, so they stay reachable while the list is collapsed:
+
+- **New flow** — an empty draft, opened straight in the canvas.
+- **Describe flow…** — hand the Flow Copilot a plain-language description and
+  let it propose the whole graph (see the last chapter).
+- **Import** — read a flow back from a portable JSON bundle. An imported bundle
+  opens as a **read-only preview** first; *Continue as draft* turns it into
+  something editable, *Materialize as team…* creates the team directly.
+- **Import packs** — a migration aid, not a create action. It reads a legacy
+  BriefingPack directory out of an agent's workspace and lays it out as an
+  editable draft. If you have never used BriefingPacks, skip past it.
+
+**Export** (on the canvas toolbar) is the other half of Import: it writes the
+current flow to a portable bundle with no repositories and no secrets in it, so
+a design can be shared or version-controlled.
+
+Your last selection is remembered per user and restored when you come back. A
+flow that has since been deleted falls back silently to no selection rather
+than to an error.
+
+## The canvas
+
+The canvas is the flow itself. It draws these kinds of node:
+
+- **Agents** — the members of the team. Click one to open its inspector.
+- **Human roles** — named people who act in the flow (see the gates chapter).
+- **Labels** — the tokens work hands off on, drawn between the agent that sets
+  one and the agent waiting for it.
+- **Gates and brakes** — the two places a person is in the loop. A gate is
+  drawn on the edge in red: the flow stops there until someone acts.
+- **GitHub** and **External system** — two source nodes standing for the world
+  outside the flow. Nothing runs in them; they are where a repository event or
+  an inbound webhook enters the graph, and dragging from one is how you wire
+  those (see the next chapter).
+
+**Every edge is clickable**, and what opens depends on what the edge is — a
+label hand-off opens its own editor, a channel opens the channel form, a
+parent/child edge opens the hierarchy form. Dragging from one node onto another
+is how you create an edge; the chooser that opens is the next chapter.
+
+The layout is computed, not hand-placed: a layered DAG that breaks rework
+cycles, puts each node as late as its dependencies allow, reduces crossings and
+aligns nodes into columns. Parent/child groups are drawn as a fan of siblings.
+You cannot drag a node to a new position — you change the *layout* by changing
+the flow (or by assigning stages, below).
+
+The small control row over the canvas is view-only and changes nothing about
+the flow: **Fit** the whole graph to the view, **Expand all** / **Collapse all**
+agent nodes, flip the flow direction between top-down and left-right, show or
+hide **archived** agents, and turn **stage** banding on or off.
+
+The rest of the toolbar is the editing surface: **Add agent**, **Add human**,
+**Stages**, **Labels**, **Copilot**, **Export**, and then either
+**Materialize…** (on a draft) or **Anomalies** / **Improvements** /
+**Edit as draft** (on a live team). Buttons that do not apply to the current
+scope are not shown at all, and a button that is disabled says why on hover.
+
+## Wiring hand-offs: the edge chooser
+
+Agents do not call each other. An agent finishes with an **Outcome**, the
+outcome sets a **Label**, and a **Consumer** agent that was waiting on that
+label wakes up. That *Outcome → Label → Consumer* chain is what most arrows on
+the canvas are.
+
+When you draw an edge between two agents the chooser asks the question in those
+terms — *how does the downstream agent learn about the upstream agent's work?*
+If the upstream agent already has an outcome that fits, that one is offered
+first and marked **recommended**, and picking it pre-fills the form instead of
+asking a second question.
+
+Dragging from one agent to another offers these:
 
 | Kind | What it does |
 |---|---|
 | **Label hand-off** | An outcome of A sets a label that wakes B. The default, and what most arrows are. |
 | **Issue channel** | A opens an issue that wakes B (optionally routed via a label / human approval). |
 | **Pull-request channel** | A opens a pull request that wakes B (optionally routed via a label / human approval). |
-| **File artifact** | A produces an artifact that B consumes, matched by logical name rather than file path. Leave the name empty for a plain dependency. |
-| **GitHub trigger** | B wakes on a repo event (issue opened, PR opened, push, …) or on a label — including labels a human sets. |
-| **Webhook** | An external system (CI, tooling) wakes B via an HTTP call. |
-| **Dependency** | B is woken when A pushes to the repo. |
-| **Parent / child** | A groups B as a child — it inherits its parent's stage. |
+| **File artifact** | A produces an artifact that B consumes, matched by logical name rather than file path. Leave the name empty for a plain **dependency** — B is then simply woken when A pushes. |
 
-## Labels: gates and brakes
+One more sits under a collapsed **Structure** group, because it is placement
+rather than hand-off: **Parent / child**, where A groups B as a child and B
+inherits its parent's stage.
 
-The **Label registry** lists, per label, **who sets it and who reacts**. Two
-label kinds involve a person, and they are the two directions of a hand-off:
+**Which tiles you see depends on where you dragged from.** The list above is
+what an *agent* source offers. Two more kinds hang off the pseudo-nodes on the
+canvas rather than off an agent:
 
-- **Human gate** (👤 → flow) — only a person applies it, to admit or approve
-  work. An agent setting it is a hard error, and a gate is drawn as a red gate
-  on the edge: the flow pauses there until someone approves.
+- **GitHub trigger** (from the **GitHub** source) — B wakes on a repo event
+  (issue opened, PR opened, push, …) or on a label, including labels a human
+  sets. This is the one dialog that covers both raw events and approval gates.
+- **Webhook** (from the **External** source) — an outside system such as CI
+  wakes B with an HTTP call.
+
+The chooser is direction-aware. Drawing an edge **to** a human role opens *"P
+reviews A's work"*; drawing one **from** a human role opens *"P approves → B
+wakes"*, and offers to wire the rejection path back in the same step. You never
+have to translate a person into a GitHub channel by hand.
+
+You do not have to drag at all: the Routing tab's **+ Add input** offers the
+same vocabulary from the consumer's side, plus two kinds that only make sense
+there — **Label applied** (B wakes when a given label is set, by an agent or a
+person) and **Schedule** (a recurring cron or a one-shot time).
+
+**An artifact is matched by name, not by path.** The producer records it, the
+consumer looks it up — so a re-instantiable agent writing to a different
+directory still hands over correctly. And an artifact hand-off is a *wake*, not
+a start-gate: nothing blocks a downstream agent from running, it is simply told
+there is something to read.
+
+### Internal delivery vs the poller
+
+A label hand-off between two agents carries a **Delivery** choice:
+
+- **Via GitHub events** — the wake rides the GitHub Events API and is delivered
+  by the poller, roughly every 30 seconds.
+- **Direct (internal)** — the orchestrator delivers the wake itself. The
+  producing agent announces the label with `aee-emit`, the consumer is queued
+  immediately, and the label is *still* stamped onto GitHub as visible status.
+
+Internal delivery has no polling latency and cannot lose an event to the API's
+event window, so it is the better default for agent-to-agent hand-offs, and the
+generated flows use it. It is deliberately **not** offered for human gates and
+brakes: a person applies those on GitHub, so only the poller can see them. A
+pull-request or issue channel may go internal only when it is labelled and
+agent-set — the channel *opening* an artifact always stays poller-delivered.
+
+## Human gates, brakes and named human roles
+
+The **Label registry** lists, per label, **who sets it and who reacts**. Each
+label is exactly one of three kinds — it is a single choice, not two
+checkboxes, because a label cannot be both:
+
+- **Agent label** — set and consumed by agents. The default; most labels are
+  this and need no registry entry at all.
+- **Human gate** (👤 → flow) — only a *person* applies it, to admit or approve
+  work. An agent setting one is a hard error, and the canvas draws it as a red
+  gate: the flow pauses there until someone acts.
 - **Brake** (flow → 👤) — an *agent* applies it to pause the flow and hand the
-  decision to a person.
+  decision to a person. Agent-set by design, so it is never an error.
 
-## Named human roles
+Gate-ness is **configuration, not a naming convention**. A label called
+`approved-for-dispatch` is a gate because the registry says so, not because of
+how it is spelled — which is what lets human-applied labels have ordinary names.
 
-**Human roles** are named people who act in the flow — an *Issue Reviewer*, a
-*Tech Lead*. A human role never runs anything; people keep acting through GitHub
-labels. Labels a person *applies* become gates; artifacts and brakes wired to a
-role show under it. Wiring a gate to a named role beats wiring it to an
-anonymous "human", because the canvas then says who is expected to act.
+There is a third, quieter human touchpoint: **delivery**. A person can be wired
+to *consume* a label without the flow stopping — they are notified when it is
+set, and the flow carries on. Gate blocks, brake pauses, delivery only informs.
+
+**Human roles** are the named people themselves — an *Issue Reviewer*, a *Tech
+Lead*. Add them in the **Human roles** panel. A human role never runs anything:
+it has no agent, no container and no triggers, and people keep acting through
+GitHub labels and pull-request reviews exactly as before. What the role buys you
+is that the canvas can say *who* is expected to act.
+
+Wiring a gate to a named role beats leaving it anonymous. A gate, brake or
+delivery with nobody wired to it stays **unbound** — it still works, but the
+canvas draws no endpoint for it and the flow raises an advisory note that a
+human touchpoint has no owner.
 
 ## Outcomes and inputs, per agent
 
-Selecting an agent on the canvas shows both sides of its wiring:
+Selecting an agent and opening its **Routing** tab shows both sides of its
+wiring.
 
-- **Outcomes** — how a run of this agent ends, so downstream agents can react.
-  The mode decides how many apply: *exactly one* means the agent picks exactly
-  one outcome per run (a switch); *any of* means zero or more may apply. If you
-  have no outcomes yet, the assistant can suggest them from the agent's prompt.
-- **Inputs** — what wakes this agent. Nothing wakes an agent until you add an
-  input or drag a hand-off onto it on the canvas.
+**Inputs — what wakes this agent.** One list of everything that can start a run:
+label listeners, pull-request and issue channels, artifact and dependency
+inputs, GitHub events, webhooks and schedules. Nothing wakes an agent until
+something is in this list, so a new agent with an empty Inputs list will never
+run, however well it is described. Each row can be edited or removed here, and
+**+ Add input** offers the same vocabulary the canvas drag does — so you can
+wire from the inspector without dragging. Rows the platform derived for you
+(from channels and data-flow ports) are shown but not editable raw; you change
+them by changing the port they came from.
 
-## Other concepts you'll meet in the editor
+**Outcomes — how a run of this agent ends**, so downstream agents can react.
+The **mode** decides how many apply:
 
-- **Stages** — optional columns that group the flow into phases (e.g. build →
-  review → release) so a big graph stays readable.
-- **Anomalies** — on a live team, a check that surfaces stalls (a wake that was
-  never picked up, a gate sitting idle) so you can spot a stuck flow.
+- **exactly one** — the agent picks exactly one outcome per run. A switch.
+- **any of** — zero or more outcomes may apply on the same run.
 
-## Special solution: BriefingPack flows
+Each outcome carries the actions it performs (setting a label, opening a pull
+request, opening an issue), and the panel shows which agents currently consume
+it — an outcome nobody listens to is a dead end worth noticing. If an agent has
+no outcomes yet, **Suggest outcomes…** proposes a set from the agent's own
+prompt; the suggestion is a *draft* highlighted for review and nothing is stored
+until you press **Save outcomes**.
 
-An advanced, niche mode also lives here: a **BriefingPack flow** is an
-**Orchestrator** agent that monitors a directory of BriefingPacks (discrete
-units of work) and renders their dependency graph. Most teams don't need it. To
-set one up, create an Orchestrator agent on the **Agents** page and point its
-**Briefings Path** at the directory — the flow then appears under **BriefingPack
-flows** in the left list.
+## Stages
+
+Stages partition the flow into ordered phases — build → review → release — and
+are purely about readability and placement. An agent belongs to at most one
+stage, assigned in its inspector, and snaps to that stage's column; a child
+agent inherits its parent's stage.
+
+The **Stages** panel is the ordered list itself: add, rename inline, drag to
+reorder, remove. The order *is* the axis, so reordering the list relays the
+canvas.
+
+Stages are optional. With none defined, the flow is laid out automatically from
+its hand-off edges, which is fine for a small graph — they earn their keep once
+a flow is big enough that the automatic layout stops telling a story.
+
+Stages travel with the flow: they are carried through Materialize, exported in
+the bundle and restored by *Edit as draft*.
+
+## Anomalies
+
+**Anomalies** is a stall detector for a **live team** — it does not appear on a
+draft, because there is no run history to look at. It compares what the flow
+*intends* (which label should follow which, and who should have picked it up)
+against what actually happened in GitHub and in the agents' run state, and
+lists what looks stuck, newest and most severe first, with links to the evidence.
+
+It looks for four things: a wake that was never claimed, a claim that has been
+sitting in progress too long, an expected output that never appeared, and a gate
+nobody has acted on. Each is reported with its age, because age is what
+separates *working* from *stuck* — the thresholds default to about 15 minutes,
+2 hours and 24 hours respectively and can be tuned per team.
+
+**It is observe-only. Nothing here repairs anything**, and nothing is changed by
+opening it. **Refresh** re-runs the sweep on demand; affected agents also carry
+a count badge on the canvas.
+
+Two honest limits: the sweep is paused while platform Maintenance Mode is
+active, and a team whose environment has no GitHub repository has nothing to
+sweep, so the panel says so rather than reporting a clean bill of health. If one
+repository cannot be read the panel reports a partial result with the error
+rather than failing entirely.
+
+## Improvements
+
+**Improvements** is the other live-team-only panel, and it looks at how the team
+*runs* rather than at how it is wired. It folds the team's own logs — session
+transcripts, the anomaly sweeps, the event log — into a set of run metrics: how
+often runs succeed, how much work is redone, how long work takes to finish, which
+anomalies keep recurring, where tokens are wasted, and which triggers and
+outcomes never fire at all.
+
+Below the metrics it lists **improvement cards**: concrete proposals, each with
+the evidence it was derived from and the single metric it claims to move.
+**Cards are proposals — nothing changes until you apply one**, and an apply runs
+through exactly the same audited endpoint you would have used by hand, as you.
+An applied card is then *measured*: if the metric got worse, the card comes back
+as regressed with a **Roll back** button that undoes it through the same path.
+
+Two things to expect. Below a minimum number of runs in the window the ratio
+metrics honestly report **Insufficient data** instead of a number computed from
+three runs. And the panel is governed by the team's autonomy level: at level 0 it
+collects metrics and raises no cards, at level 1 the cards are read-only, and
+only at level 2 are Apply and Roll back available — the buttons say which it is
+rather than silently doing nothing.
+
+**Run now** runs a pass immediately instead of waiting for the daily one. A pass
+already in progress, or Maintenance Mode, is reported as a notice rather than an
+error.
+
+## Describe the flow: the Copilot
+
+The **Flow Copilot** is the plain-language way in. Describe the process you want
+— the roles, who hands work to whom, where a person has to approve — and it
+proposes a complete flow.
+
+It is a chat, docked beside the canvas rather than over it, because the canvas
+*is* the preview: each turn produces a **proposal** you can see drawn before you
+accept it. A proposal is read-only until you **Apply** it, and applying is an
+ordinary draft write — from then on it simply *is* the draft. **Discard** leaves
+the draft exactly as it was. The same Apply and Discard also appear in a banner
+over the canvas, so whichever one you reach for does the same thing.
+
+You keep steering it: follow-up messages refine the proposal rather than
+starting over. Each proposal is checked before you can accept it, and one with
+error-level findings cannot be applied — steer with another message instead.
+
+On a **live team** the Copilot still works, but it never edits the team
+directly: it opens the team as a draft and continues the conversation there.
+That is deliberate — a chat turn is not something that should reach running
+agents.

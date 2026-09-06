@@ -8,9 +8,9 @@ Flows is the visual design surface of the Agent Studio — a canvas where you la
 
 ## The empty draft (slide 23)
 
-Screenshot: Flows editor — left list showing Teams ("Agentic Demos"), Drafts, BriefingPack flows; a fresh empty draft "Simple SDLC" on the canvas; toolbar (Add agent, Stages, Materialize, Export) and the edge-type legend at the bottom.
+Screenshot: Flows editor — left list showing Teams ("Agentic Demos") and Drafts; a fresh empty draft "Simple SDLC" on the canvas; toolbar (Add agent, Stages, Materialize, Export) and the edge-type legend at the bottom.
 
-This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams — here our "Agentic Demos" team from earlier — a Drafts section, and the BriefingPack flows. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
+This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams — here our "Agentic Demos" team from earlier — and a Drafts section. (Older builds listed a third, BriefingPack section here; it is gone.) A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
 
 I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you materialise. Along the top are the actions I'll use: Add agent, Stages, Materialize, Export. And down at the bottom is the legend — this is the vocabulary of a flow: label hand-offs, issue and pull-request channels, reviews, human approvals, GitHub events. Every connection I draw will be one of these. Let's add our first agent.
 

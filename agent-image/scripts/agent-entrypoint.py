@@ -2,22 +2,20 @@
 """
 Agent Execution Environment entrypoint.
 
-Runs inside a Podman container. Two modes:
+Runs inside a Podman container in a single mode: the **Matrix DM listener**
+(P4). Invoked with no CLI args by the orchestrator's `spawnContainer`, it
+connects to Matrix as the agent's user, listens for direct messages, and
+replies via the Claude Code CLI with per-room session continuity. Required env
+vars: AGENT_ID, MATRIX_ACCESS_TOKEN, MATRIX_BOT_USER_ID, MATRIX_HOMESERVER.
 
-1. **Matrix DM listener (default, P4)** — invoked with no CLI args by the
-   orchestrator's `spawnContainer`. Connects to Matrix as the agent's user,
-   listens for direct messages, and replies via the Claude Code CLI with
-   per-room session continuity. Required env vars: AGENT_ID,
-   MATRIX_ACCESS_TOKEN, MATRIX_BOT_USER_ID, MATRIX_HOMESERVER.
-
-2. **BriefingPack dispatch (legacy, P2)** — invoked with `--bp-hash <hash>`
-   by `dispatch-bp.py`. Loads dispatch context (brief.md, LoopScript,
-   MentorScripts), builds the agent prompt, and invokes Claude once.
+The second mode this file used to carry — BriefingPack dispatch, entered with
+`--bp-hash` from `dispatch-bp.py` — was removed with the BriefingPack model
+(#1967, epic #1961 Phase 6). The container now has exactly one operating mode.
 
 Exit codes:
-    0    Agent completed successfully (BP mode) / DM listener stopped cleanly
+    0    DM listener stopped cleanly
     1    Setup or execution error
-    124  Graceful SIGTERM shutdown (BP mode: partial work committed)
+    124  Graceful SIGTERM shutdown
 """
 from __future__ import annotations
 
@@ -55,60 +53,12 @@ SCRIPTS_DIR = ACE_DIR / "scripts"
 # when AEE_FAKE_CLAUDE=1 (see _maybe_enable_fake_claude), so with the flag unset
 # the real Claude Code CLI wins and production behaviour is unchanged (#666).
 FAKE_CLAUDE_DIR = ACE_DIR / "e2e"
-SKILLS_DIR = ACE_DIR / "skills"
-MENTORSCRIPTS_DIR = ACE_DIR / "mentorscripts"
-CLAUDE_MD = ACE_DIR / "CLAUDE.md"
-
-# Import sase_lib from container scripts path
-sys.path.insert(0, str(SCRIPTS_DIR))
 
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
 
 _shutdown = threading.Event()
-_git_lock = threading.Lock()
-
-
-# ---------------------------------------------------------------------------
-# Workspace verification
-# ---------------------------------------------------------------------------
-
-def verify_workspace(mode: str) -> None:
-    """Verify the workspace is ready for the given execution mode."""
-    if mode == "bind":
-        if not REPO_DIR.exists():
-            print("ERROR: /repo not found. Bind-mount the worktree.", file=sys.stderr)
-            sys.exit(1)
-        git_marker = REPO_DIR / ".git"
-        # In a worktree, .git is a file (not a directory) containing a gitdir pointer
-        if not git_marker.exists():
-            print("ERROR: /repo is not a git repository.", file=sys.stderr)
-            sys.exit(1)
-    elif mode == "clone":
-        # Clone mode: workspace is set up by git clone (handled separately)
-        pass
-    elif mode == "image":
-        # Image mode: repo is baked into the image, just verify
-        if not REPO_DIR.exists():
-            print("ERROR: /repo not found in image.", file=sys.stderr)
-            sys.exit(1)
-
-
-def configure_git_identity(agent_id: str) -> None:
-    """Set git user.name and user.email inside the container.
-
-    Uses --global because worktree .git is a file pointing to the parent
-    repo's worktree metadata, which may not be accessible inside the container.
-    """
-    subprocess.run(
-        ["git", "config", "--global", "user.name", f"agent-{agent_id}"],
-        check=True, capture_output=True, text=True,
-    )
-    subprocess.run(
-        ["git", "config", "--global", "user.email", f"agent-{agent_id}@ace.local"],
-        check=True, capture_output=True, text=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -130,311 +80,20 @@ def _git_run(
 
 
 # ---------------------------------------------------------------------------
-# Context loading
-# ---------------------------------------------------------------------------
-
-DIR_PATTERN = re.compile(r"^([0-9a-f]{12})-(.+)$")
-
-
-def _find_brief(bp_hash: str) -> Path | None:
-    """Find brief.md by BP hash in the repo's artifacts/briefings tree."""
-    briefings_dir = REPO_DIR / "artifacts" / "briefings"
-    if not briefings_dir.exists():
-        return None
-    for candidate in briefings_dir.rglob("*/brief.md"):
-        if ".archive" in candidate.parts:
-            continue
-        if bp_hash in candidate.parent.name:
-            return candidate
-    return None
-
-
-def _parse_frontmatter(text: str) -> dict:
-    """Minimal frontmatter parser (scalar fields only, sufficient for context loading)."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}
-    result = {}
-    current_key = None
-    current_list = None
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        # List item
-        if stripped.startswith("- ") and current_key:
-            if current_list is None:
-                current_list = []
-            current_list.append(stripped[2:].strip())
-            result[current_key] = current_list
-            continue
-        # Key: value
-        m = re.match(r"^(\S[\w-]*)\s*:\s*(.*)", line)
-        if m:
-            if current_key and current_list is not None:
-                result[current_key] = current_list
-            current_key = m.group(1)
-            val = m.group(2).strip().strip('"').strip("'")
-            current_list = None
-            if val:
-                result[current_key] = val
-            else:
-                current_list = []
-    if current_key and current_list is not None:
-        result[current_key] = current_list
-    return result
-
-
-def load_context(bp_hash: str) -> dict:
-    """Load dispatch context: brief.md, LoopScript, MentorScripts.
-
-    Returns dict with keys: brief_path, brief_text, frontmatter,
-    loopscript_content, mentorscript_contents, mission.
-    """
-    brief_path = _find_brief(bp_hash)
-    if not brief_path:
-        print(f"ERROR: brief.md not found for bp:{bp_hash[:6]}", file=sys.stderr)
-        sys.exit(1)
-
-    brief_text = brief_path.read_text(encoding="utf-8")
-    fm = _parse_frontmatter(brief_text)
-
-    # Resolve LoopScript
-    loopscript_content = ""
-    ls_ref = fm.get("loop-script") or fm.get("loopscript")
-    rigor = fm.get("rigor", "standard")
-    ls_path = _resolve_loopscript(ls_ref, rigor)
-    if ls_path and ls_path.exists():
-        loopscript_content = ls_path.read_text(encoding="utf-8")
-
-    # Resolve MentorScripts
-    ms_refs = fm.get("mentor-scripts") or fm.get("mentorscripts") or []
-    if isinstance(ms_refs, str):
-        ms_refs = [ms_refs]
-    if not ms_refs:
-        ms_refs = ["mentorscripts/global.md"]
-
-    mentorscript_contents = {}
-    for ref in ms_refs:
-        # Check bind-mounted mentorscripts, then repo path
-        for base in [MENTORSCRIPTS_DIR, REPO_DIR]:
-            path = base / ref if not ref.startswith("/") else Path(ref)
-            if path.exists():
-                mentorscript_contents[ref] = path.read_text(encoding="utf-8")
-                break
-
-    return {
-        "brief_path": str(brief_path),
-        "brief_text": brief_text,
-        "frontmatter": fm,
-        "loopscript_content": loopscript_content,
-        "mentorscript_contents": mentorscript_contents,
-        "mission": fm.get("mission") or fm.get("title", ""),
-    }
-
-
-def _resolve_loopscript(value: str | None, rigor: str | None) -> Path | None:
-    """Resolve LoopScript path. Checks skills dir, then repo."""
-    if not value:
-        filename = (
-            "high-rigor.yaml" if rigor in ("high", "critical")
-            else "standard.yaml"
-        )
-    else:
-        # Try as relative path from repo
-        full = REPO_DIR / value
-        if full.exists():
-            return full
-        filename = value
-
-    # Search: bind-mounted skills, then repo-local
-    search_dirs = [
-        SKILLS_DIR / "ale" / "loops",
-        REPO_DIR / "skills" / "ale" / "loops",
-    ]
-    for d in search_dirs:
-        candidate = d / filename
-        if candidate.exists():
-            return candidate
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Prompt assembly
-# ---------------------------------------------------------------------------
-
-def _expand_claude_imports(text: str, base_dir: Path, _depth: int = 0) -> str:
-    """Inline Claude Code `@path` imports the way cwd-discovery would.
-
-    The DM / trigger path runs `claude` with cwd set to the agent workspace, so
-    the CLI auto-discovers CLAUDE.md and expands its `@AGENT-PROMPT.md` import
-    natively. The BP dispatch path instead reads CLAUDE.md and passes it via
-    `--system-prompt`, where no import expansion happens — so we replicate it
-    here (#510). A `@path` token (line-leading or preceded by whitespace, and
-    not email-like — the char before `@` must be start-of-line or whitespace) is
-    replaced by the referenced file's content, resolved relative to the file that
-    contains it. Recurses up to 5 hops like the CLI; a missing target is left
-    verbatim.
-
-    Note: unlike the real CLI, this does NOT skip `@path` tokens inside fenced
-    code spans — it has no fence awareness. That is safe for the #510 use here
-    (the `## Agent Role` reference lives in prose, and incidental `@token`s that
-    would need skipping — e.g. `@cobol-agent:local` — don't resolve to a real
-    file and are therefore left verbatim anyway).
-    """
-    if _depth >= 5:
-        return text
-
-    def _replace(match: "re.Match[str]") -> str:
-        rel = match.group("path")
-        target = (base_dir / rel).resolve()
-        try:
-            body = target.read_text(encoding="utf-8")
-        except OSError:
-            return match.group(0)  # unresolved — leave the token as written
-        return match.group("lead") + _expand_claude_imports(body, target.parent, _depth + 1)
-
-    # Leading whitespace/start-of-line, then @<relative-path> (no scheme, not an
-    # email — require the char before @ to be start or whitespace).
-    pattern = re.compile(r"(?P<lead>^|\s)@(?P<path>[^\s@`]+)", re.MULTILINE)
-    return pattern.sub(_replace, text)
-
-
-def build_agent_prompt(context: dict, agent_id: str, bp_hash: str) -> tuple[str, str]:
-    """Build system prompt and user prompt from loaded context.
-
-    Returns (system_prompt, user_prompt).
-    """
-    system_parts: list[str] = []
-
-    # CLAUDE.md — expand `@`-imports (e.g. `@AGENT-PROMPT.md`) up front because
-    # this path feeds the text to `--system-prompt`, which does not expand them.
-    if CLAUDE_MD.exists():
-        claude_md = _expand_claude_imports(
-            CLAUDE_MD.read_text(encoding="utf-8"), CLAUDE_MD.parent
-        )
-        system_parts.append(
-            f"# Project Instructions (CLAUDE.md)\n\n{claude_md}"
-        )
-
-    # LoopScript
-    if context["loopscript_content"]:
-        system_parts.append(
-            f"# LoopScript (execution protocol)\n\n"
-            f"{context['loopscript_content']}"
-        )
-
-    # MentorScripts
-    for ref, content in context["mentorscript_contents"].items():
-        system_parts.append(
-            f"# MentorScript: {ref}\n\n{content}"
-        )
-
-    system_prompt = "\n\n---\n\n".join(system_parts) if system_parts else ""
-
-    # User prompt: the briefing content
-    user_prompt = (
-        f"You are agent {agent_id} dispatched to work on bp:{bp_hash[:6]}.\n\n"
-        f"## Briefing\n\n{context['brief_text']}\n\n"
-        f"Begin working on this briefing pack. Follow the LoopScript phases "
-        f"and commit your work regularly."
-    )
-
-    return system_prompt, user_prompt
-
-
-# ---------------------------------------------------------------------------
-# Agent execution
-# ---------------------------------------------------------------------------
-
-def run_agent(system_prompt: str, user_prompt: str) -> int:
-    """Invoke Claude Code CLI and return its exit code."""
-    # Write system prompt to a temp file (avoids shell quoting issues)
-    sys_prompt_path = REPO_DIR / ".agent-system-prompt.md"
-    sys_prompt_path.write_text(system_prompt, encoding="utf-8")
-
-    cmd = [
-        "claude",
-        "--print",
-        "--system-prompt", str(sys_prompt_path),
-    ]
-    allowed = "Bash(*) Write(*) Edit(*) Read(*) Glob(*) Grep(*) Agent(*)"
-    if not _ASK_MCP_DISABLED:
-        # Offer AskUserQuestion headlessly via the bundled MCP server (#1712) —
-        # merged with any env MCP servers (no --strict-mcp-config).
-        cmd += ["--mcp-config", _ask_user_mcp_config()]
-        allowed += " " + _ASK_USER_MCP_TOOL
-    cmd += ["--allowedTools", allowed]
-
-    # Credential check — any of the auth mechanisms the Claude CLI understands:
-    # direct API key, proxy bearer token (ANTHROPIC_AUTH_TOKEN), subscription
-    # OAuth token (CLAUDE_CODE_OAUTH_TOKEN, injected by the orchestrator for
-    # oauth-token Model Providers), or Azure Foundry.
-    has_key = (
-        os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-        or os.environ.get("ANTHROPIC_FOUNDRY_API_KEY")
-    )
-    if not has_key:
-        print("ERROR: No credential set. Need ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, "
-              "CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_FOUNDRY_API_KEY.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    proc = subprocess.run(
-        cmd,
-        input=user_prompt,
-        text=True,
-        cwd=str(REPO_DIR),
-        timeout=None,  # Podman --stop-timeout handles the deadline
-    )
-
-    # Clean up temp file
-    sys_prompt_path.unlink(missing_ok=True)
-
-    return proc.returncode
-
-
-# ---------------------------------------------------------------------------
 # Graceful shutdown
 # ---------------------------------------------------------------------------
 
 def _handle_sigterm(signum: int, frame) -> None:
-    """SIGTERM handler.
+    """SIGTERM handler: signal the asyncio loop to wind down and exit 0.
 
-    BP-dispatch mode: commit partial work + exit 124.
-    DM listener mode: signal the asyncio loop to wind down + exit 0
-    (no bp_hash means there's no bound /repo to commit to).
+    The BriefingPack branch that used to commit and push partial work to a
+    bound /repo before exiting 124 went with the dispatch mode (#1967). There
+    is no bound repository in the surviving mode, so there is nothing to
+    commit: setting `_shutdown` is the whole contract.
     """
     print("\n[agent] SIGTERM received", file=sys.stderr)
     _shutdown.set()
 
-    if getattr(_args, "bp_hash", None):
-        print("[agent] Committing partial work...", file=sys.stderr)
-        with _git_lock:
-            try:
-                _git_run(["add", "-A"])
-                _git_run(
-                    ["commit", "-m",
-                     f"interrupted(bp:{_args.bp_hash[:6]}): SIGTERM "
-                     f"[agent:{_args.agent_id}]"],
-                    check=False,
-                )
-                push_result = _git_run(["push", "origin", "HEAD"], check=False)
-                if push_result.returncode != 0:
-                    print(
-                        f"[agent] WARN: git push failed (rc={push_result.returncode}): "
-                        f"{push_result.stderr.strip()} "
-                        f"— expected in dev when no SSH key is mounted into the container.",
-                        file=sys.stderr,
-                    )
-            except Exception as exc:
-                print(f"[agent] shutdown commit failed: {exc}", file=sys.stderr)
-        sys.exit(124)
-    # DM listener mode: setting _shutdown is enough; main loop exits cleanly.
     # If we're not yet inside the async loop, exit directly.
     if not _DM_LOOP_RUNNING:
         sys.exit(0)
@@ -2705,7 +2364,7 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
     # own option parser, so a message that *begins* with an option-like character
     # (`-`, en-dash `–`, German quote `„`, `--help`, …) is mistaken for an unknown
     # flag and the whole turn crashes with a non-zero exit. `--print` (boolean,
-    # the same flag the already-immune Briefing-Pack `run_agent` path uses) reads
+    # a boolean flag, not one that takes a value) reads
     # the prompt from stdin, so no leading character can ever be read as an option.
     # `prompt` is kept in the signature as the builder's documented contract even
     # though it deliberately no longer appears in argv.
@@ -6406,222 +6065,16 @@ class TriggerScheduler:
         )
 
 
-# ---- Claim loop (P10 port from agent-runner.js ClaimLoopScheduler) ----
-#
-# Polls /internal/orchestrators/{AGENT_ID}/claim-tick every 30 s and, when the
-# tick response reports newly-dispatched BPs, asks Claude to post a friendly
-# DM nudge so the user can confirm the claim. Orchestrator-role only. Disable
-# with CLAIM_LOOP_ENABLED=0. Mirrors orchestrator/agent-runner.js:1024-1133.
-#
-# The label-based bid/assign workflow (.github/workflows/coordinator.yml,
-# */5 min) covers the GitHub-hosted distribution slice; this Python loop is
-# what keeps non-GitHub orchestrator workflows alive.
-
+# Base address of the orchestrator's internal API, used by the flow-emit and
+# wake helpers above. The BriefingPack claim loop that also lived here — a
+# 30 s poll of /internal/orchestrators/{AGENT_ID}/claim-tick that DM'd a nudge
+# when a pack transitioned to `status: dispatched` — was removed in #1967:
+# the route went with epic #1961 Phase 1, and `role: "orchestrator"` is a
+# retired role the orchestrator refuses to spawn, so the loop's own gate could
+# never be true.
 ORCHESTRATOR_INTERNAL_URL = os.environ.get(
     "ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002"
 )
-CLAIM_LOOP_INTERVAL_SEC = int(os.environ.get("CLAIM_LOOP_INTERVAL_SEC", "30"))
-
-
-class ClaimLoopScheduler:
-    """Periodic claim-tick poller for orchestrator-role agents."""
-
-    def __init__(
-        self,
-        *,
-        client,
-        agent_id: str,
-        send_formatted,
-        blueprint_id: str | None,
-        interval_sec: int = CLAIM_LOOP_INTERVAL_SEC,
-    ) -> None:
-        self._client = client
-        self._agent_id = agent_id
-        self._send_formatted = send_formatted
-        self._blueprint_id = blueprint_id
-        self._interval_sec = max(5, interval_sec)
-        self._task: asyncio.Task | None = None
-        self._running = False
-        self._stopping = False
-
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._task = asyncio.create_task(self._run_forever())
-        print(
-            f"[Runner:{self._agent_id}] Claim loop started "
-            f"(every {self._interval_sec}s -> {ORCHESTRATOR_INTERNAL_URL})",
-            file=sys.stderr,
-        )
-
-    async def stop(self) -> None:
-        self._stopping = True
-        if self._task is None:
-            return
-        self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
-        self._task = None
-
-    async def _run_forever(self) -> None:
-        try:
-            await asyncio.sleep(5)  # stagger first tick — match Node behaviour
-            while not self._stopping:
-                await self._tick()
-                await asyncio.sleep(self._interval_sec)
-        except asyncio.CancelledError:
-            return
-
-    async def _tick(self) -> None:
-        # Overlap guard: skip a tick if the previous one is still running.
-        if self._running:
-            return
-        self._running = True
-        try:
-            url = (
-                f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}"
-                f"/internal/orchestrators/{urllib.parse.quote(self._agent_id, safe='')}"
-                f"/claim-tick"
-            )
-            status_code, body = await asyncio.to_thread(self._http_post, url)
-            if status_code != 200:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick HTTP {status_code}: "
-                    f"{body[:200]}",
-                    file=sys.stderr,
-                )
-                return
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick returned non-JSON: "
-                    f"{body[:200]}",
-                    file=sys.stderr,
-                )
-                return
-            newly_dispatched = data.get("newlyDispatched") or []
-            new_stubs = data.get("newStubs") or 0
-            if new_stubs or newly_dispatched:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick: "
-                    f"{new_stubs} new stub(s), "
-                    f"{len(newly_dispatched)} newly dispatched",
-                    file=sys.stderr,
-                )
-            if newly_dispatched:
-                await self._post_suggestion(newly_dispatched)
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim tick failed: {exc}",
-                file=sys.stderr,
-            )
-        finally:
-            self._running = False
-
-    @staticmethod
-    def _http_post(url: str) -> tuple[int, str]:
-        """Blocking POST; runs on a worker thread via asyncio.to_thread."""
-        req = urllib.request.Request(url, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-                return resp.status, body
-        except urllib.error.HTTPError as exc:
-            try:
-                body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = str(exc)
-            return exc.code, body
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            return 0, str(exc)
-
-    async def _post_suggestion(self, items: list[dict]) -> None:
-        dm_room = _load_dm_room_id()
-        if not dm_room:
-            print(
-                f"[Runner:{self._agent_id}] {len(items)} new dispatch(es) detected "
-                f"but no DM room exists yet — the user must open the chat once "
-                f"before suggestions can be posted.",
-                file=sys.stderr,
-            )
-            return
-
-        list_md = "\n".join(
-            f"- **{bp.get('bpTitle', 'Untitled')}** "
-            f"(slug `{bp.get('bpSlug') or '—'}`, id `{bp.get('bpId', '')}`)\n"
-            f"  Stub agent id: `{bp.get('stubId', '')}`\n"
-            f"  Claim with: `curl -s -X POST "
-            f"{ORCHESTRATOR_INTERNAL_URL}/internal/agents/{bp.get('stubId', '')}/claim`"
-            for bp in items
-        )
-        plural_has = " has" if len(items) == 1 else "s have"
-        plural_is = " is" if len(items) == 1 else " are"
-        plural_this = "this BP" if len(items) == 1 else "these BPs"
-        prompt = (
-            "SYSTEM NOTICE — claim loop tick.\n\n"
-            f"{len(items)} Briefing Pack{plural_has} just transitioned to "
-            f"`status: dispatched` and{plural_is} awaiting a claim:\n\n"
-            f"{list_md}\n\n"
-            "Your task: post a brief, friendly message to the user in this chat "
-            f"asking whether they want you to claim {plural_this}. Keep it short. "
-            "Don't run any commands yet — wait for the user's reply. If the user "
-            "agrees, run the curl command shown above for the BP(s) they "
-            "confirmed. If the user declines, just acknowledge."
-        )
-
-        correlation_id = f"claim-suggest:{int(time.time() * 1000)}"
-        try:
-            _append_event(dm_room, {
-                "type": "claude.invoke",
-                "correlationId": correlation_id,
-                "promptChars": len(prompt),
-            })
-        except Exception:
-            pass
-
-        try:
-            # _call_claude is the same helper TriggerScheduler uses.
-            result = await asyncio.to_thread(
-                _call_claude, prompt, dm_room, correlation_id, self._blueprint_id,
-            )
-        except subprocess.CalledProcessError as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim suggestion Claude call failed: "
-                f"{exc}",
-                file=sys.stderr,
-            )
-            return
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim suggestion Claude call failed: "
-                f"{exc}",
-                file=sys.stderr,
-            )
-            return
-
-        if not result or not result.strip():
-            return
-
-        try:
-            event_id = await self._send_formatted(dm_room, result)
-            try:
-                _append_event(dm_room, {
-                    "type": "message.posted",
-                    "correlationId": correlation_id,
-                    "eventId": event_id,
-                })
-            except Exception:
-                pass
-            _write_last_response_at()
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Could not post claim suggestion: "
-                f"{exc}",
-                file=sys.stderr,
-            )
 
 
 # ---- The async DM listener itself ----
@@ -6982,26 +6435,6 @@ async def run_dm_listener() -> None:
             )
             scheduler = None
 
-    # P10: orchestrator-role agents additionally run the claim loop. Disable
-    # via CLAIM_LOOP_ENABLED=0. Mirrors the role gate in agent-runner.js:1322.
-    claim_loop: ClaimLoopScheduler | None = None
-    if role == "orchestrator" and os.environ.get("CLAIM_LOOP_ENABLED", "1") != "0":
-        try:
-            claim_loop = ClaimLoopScheduler(
-                client=client,
-                agent_id=agent_id,
-                send_formatted=send_formatted,
-                blueprint_id=blueprint_id,
-            )
-            await claim_loop.start()
-        except Exception as exc:
-            print(
-                f"[Runner:{agent_id}] Claim loop failed to start: {exc} "
-                f"— continuing without orchestrator claim suggestions",
-                file=sys.stderr,
-            )
-            claim_loop = None
-
     _DM_LOOP_RUNNING = True
     sync_fail_streak = 0
     try:
@@ -7036,12 +6469,6 @@ async def run_dm_listener() -> None:
             except Exception as exc:
                 print(f"[Runner:{agent_id}] scheduler.stop error: {exc}",
                       file=sys.stderr)
-        if claim_loop is not None:
-            try:
-                await claim_loop.stop()
-            except Exception as exc:
-                print(f"[Runner:{agent_id}] claim_loop.stop error: {exc}",
-                      file=sys.stderr)
         try:
             await client.close()
         except Exception:
@@ -7052,64 +6479,7 @@ async def run_dm_listener() -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-_args = argparse.Namespace()  # populated in main(), used by signal handler
-_DM_LOOP_RUNNING = False      # set True while the async DM loop is alive
-
-
-def _run_bp_dispatch(args) -> None:
-    """Legacy P2 flow: load BP, build prompt, invoke claude once, commit+push."""
-    if not args.branch:
-        args.branch = f"agent/{args.agent_id}/{args.bp_hash}"
-
-    print(f"[agent] BP dispatch: agent={args.agent_id} bp={args.bp_hash[:6]} mode={args.mode}",
-          file=sys.stderr)
-
-    verify_workspace(args.mode)
-
-    if args.mode == "clone" and args.repo_url:
-        print(f"[agent] Cloning {args.repo_url} branch {args.branch}...", file=sys.stderr)
-        subprocess.run(
-            ["git", "clone", "--depth=1", "--branch", args.branch,
-             args.repo_url, str(REPO_DIR)],
-            check=True,
-        )
-
-    configure_git_identity(args.agent_id)
-
-    context = load_context(args.bp_hash)
-    print(f"[agent] Loaded context: mission={context['mission'][:80]}",
-          file=sys.stderr)
-
-    system_prompt, user_prompt = build_agent_prompt(context, args.agent_id, args.bp_hash)
-
-    print(f"[agent] Invoking Claude Code CLI...", file=sys.stderr)
-    exit_code = run_agent(system_prompt, user_prompt)
-
-    _shutdown.set()
-
-    push_failed = False
-    with _git_lock:
-        _git_run(["add", "-A"], check=False)
-        _git_run(
-            ["commit", "-m",
-             f"agent-complete(bp:{args.bp_hash[:6]}): exit={exit_code} "
-             f"[agent:{args.agent_id}]"],
-            check=False,
-        )
-        push_result = _git_run(["push", "origin", "HEAD"], check=False)
-        if push_result.returncode != 0:
-            push_failed = True
-            print(
-                f"[agent] WARN: git push failed (rc={push_result.returncode}): "
-                f"{push_result.stderr.strip()} "
-                f"— expected in dev when no SSH key is mounted into the container.",
-                file=sys.stderr,
-            )
-
-    if push_failed and exit_code == 0:
-        exit_code = 1
-    print(f"[agent] Done: exit_code={exit_code} push_failed={push_failed}", file=sys.stderr)
-    sys.exit(exit_code)
+_DM_LOOP_RUNNING = False  # set True while the async DM loop is alive
 
 
 def _maybe_enable_fake_claude() -> None:
@@ -7208,38 +6578,21 @@ def _setup_plugin_cli_env() -> None:
 
 
 def main() -> None:
-    global _args
-
     _maybe_enable_fake_claude()
     _setup_plugin_cli_env()
 
-    parser = argparse.ArgumentParser(
-        description="Agent Execution Environment entrypoint",
-    )
-    # All optional: present-with-bp-hash → BP dispatch; absent → DM listener.
-    parser.add_argument("--agent-id", default=None, help="8-char hex agent ID (BP mode)")
-    parser.add_argument("--bp-hash", default=None, help="12-char hex BP hash (BP mode)")
-    parser.add_argument(
-        "--mode", choices=("bind", "clone", "image"), default="bind",
-        help="Execution tier (default: bind)",
-    )
-    parser.add_argument("--repo-url", default=None, help="Git remote URL (clone mode)")
-    parser.add_argument("--branch", default=None, help="Git branch name")
+    # Every argument this parser used to accept (--agent-id, --bp-hash, --mode,
+    # --repo-url, --branch) belonged to the removed BriefingPack dispatch mode
+    # (#1967). The parser is kept — argument-less — deliberately: the
+    # orchestrator invokes this entrypoint with no arguments, so an empty parser
+    # is the exact contract, and `--bp-hash` now fails loudly with "unrecognized
+    # arguments" instead of being silently accepted and ignored.
+    argparse.ArgumentParser(
+        description="Agent Execution Environment entrypoint (Matrix DM listener)",
+    ).parse_args()
 
-    _args = parser.parse_args()
-    args = _args
-
-    # Install SIGTERM handler shared by both modes.
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    if args.bp_hash:
-        if not args.agent_id:
-            print("ERROR: --agent-id is required when --bp-hash is given.", file=sys.stderr)
-            sys.exit(1)
-        _run_bp_dispatch(args)
-        return
-
-    # DM listener mode (P4 default).
     asyncio.run(run_dm_listener())
 
 

@@ -43,7 +43,7 @@ done. References are `agent-image/scripts/agent-entrypoint.py` unless noted.
 | Anti-runaway budget (global) | ⚠️ partial | Backstop `try_acquire` — concurrency ceiling + spawn-rate window, "so a self-triggering loop can't grow unbounded" (#611, `_execute` ~3805). Plus conversation throttle + burst digest (github-poller). Not a *purposeful* per-loop budget with a clean done/exhausted outcome |
 | Overlap protection | ✅ agent-wide serialization (#1157) | `WorkspaceGate` — every run (loop iteration, any trigger, chat/DM) passes one gate; a loop holds it across all iterations. Per-trigger-id `if tid in self._running: … skipping` remains a backstop. |
 | Self-managed, file-synced triggers | ✅ | `triggers.json`, `_load_triggers`/`_save_triggers` (~2650), SIGUSR2 re-sync |
-| ACE LoopScript | ✅ but ≠ loop | Phase protocol *within one invocation*: "Follow the LoopScript phases strictly and sequentially" (`agent-image/CLAUDE.md:207`); resolved by `sase_lib.resolve_loopscript` |
+| ACE LoopScript | ✅ but ≠ loop | Phase protocol *within one invocation*: "Follow the LoopScript phases strictly and sequentially" (`agent-image/CLAUDE.md`). The resolver (`sase_lib.resolve_loopscript`) went with the BriefingPack dispatch mode in #1967 — nothing in the image reads a LoopScript any more |
 
 ## 3. The gap (what a real continuation loop needs and we lack)
 

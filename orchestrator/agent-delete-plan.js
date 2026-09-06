@@ -18,7 +18,9 @@
 //
 // #1962 removed the BriefingPack model, and with it `bp-instance`. **No
 // supported role is graceful any more**, so this predicate is now constantly
-// false. It is kept as the single named place that decision lives (rather than
+// false. #1967 then removed the handler branch itself — the entrypoint's
+// SIGTERM path no longer commits anything, so even a hand-restored
+// `bp-instance` config would have nothing to flush. It is kept as the single named place that decision lives (rather than
 // inlining `false` at the call site) because the seam it feeds —
 // `removePerAgentNetwork`/`ensureAgentContainerGone`'s `graceful` flag in
 // spawn-container.js — is still there for the next role that needs a flush

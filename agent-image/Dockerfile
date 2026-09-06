@@ -52,7 +52,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 COPY requirements.txt /opt/ace/requirements.txt
 RUN pip install --no-cache-dir -r /opt/ace/requirements.txt
 
-# Copy ACE scripts (entrypoint + sase_lib + supporting scripts).
+# Copy the agent scripts (entrypoint + supporting CLIs).
 COPY scripts/ /opt/ace/scripts/
 COPY CLAUDE.md /opt/ace/CLAUDE.md
 
@@ -63,7 +63,7 @@ COPY CLAUDE.md /opt/ace/CLAUDE.md
 COPY e2e/ /opt/ace/e2e/
 RUN chmod +x /opt/ace/e2e/claude
 
-# `aee-artifact` — register/resolve mission artifacts by logical name via the
+# `aee-artifact` — register/resolve flow artifacts by logical name via the
 # git-committed manifest (.agent-studio/artifacts.jsonl). On PATH so agents call it
 # directly to record what they produced and to resolve an upstream's outputs
 # whose physical path varies per run.

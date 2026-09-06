@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aee-artifact — register / resolve mission artifacts via a git-committed manifest.
+"""aee-artifact — register / resolve flow artifacts via a git-committed manifest.
 
 Why: agents produce artifacts at paths that vary per run (a Functional Design
 lands somewhere slightly different each time, a whole directory of generated Java,

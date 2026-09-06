@@ -57,11 +57,11 @@ COMPOSE_FILE = docker-compose.yml
 SERVICES     = conduwuit orchestrator admin-console stt
 
 # Skill pool seed sources — copied into the skill-pool volume by `make seed-pool`.
-# Two inputs combine into the pool: the ACE engineering skill (host-side, from
-# the user's i-sase plugin install) and the pool CLAUDE.md (repo-side, in
-# orchestrator/skill-pool/). Without the engineering skill, bp-instance agents
-# only have a brief.md to read; without the CLAUDE.md, agents lose the curated
-# skill index they reference.
+# Two inputs combine into the pool: the i-sase engineering skill (host-side, from
+# the user's plugin install) and the pool CLAUDE.md (repo-side, in
+# orchestrator/skill-pool/). The engineering skill is an ordinary optional grant
+# — its former BriefingPack consumer was removed in #1967 — and without the
+# CLAUDE.md, agents lose the curated skill index they reference.
 ACE_PLUGIN_SKILLS_DIR ?= $(HOME)/.claude/plugins/marketplaces/i-sase-marketplace/skills
 SKILL_POOL_DEFAULTS    = $(CURDIR)/orchestrator/skill-pool
 
@@ -245,10 +245,11 @@ seed-memory:
 	@podman run --rm -v $(SKILL_POOL_VOLUME):/pool:ro alpine ls /pool/memory/
 
 # Skip (don't fail) when the host-side i-sase engineering skill is absent, so
-# `make seed-pool` still completes the repo-side seeds. Only ACE/BP agents need it.
+# `make seed-pool` still completes the repo-side seeds. It is an optional skill
+# nothing on the platform requires; grant it to an agent that wants it.
 seed-skills:
 	@if [ ! -d "$(ACE_PLUGIN_SKILLS_DIR)/engineering" ]; then \
-	  echo "WARNING: i-sase engineering skill not found - skipping (only ACE/BriefingPack agents need it)." >&2; \
+	  echo "WARNING: i-sase engineering skill not found - skipping (optional)." >&2; \
 	else \
 	  echo "Seeding engineering skill into volume $(SKILL_POOL_VOLUME)..."; \
 	  podman run --rm --security-opt label=disable \

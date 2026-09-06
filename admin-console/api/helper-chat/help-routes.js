@@ -162,6 +162,13 @@ const OVERLAY_KEYS = {
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
   'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
   'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
+  'modal:flow-edge': 'The hand-off chooser and the edge dialogs on the Flows canvas.',
+  'modal:flow-labels': 'The Label registry side panel in the Flow editor.',
+  'modal:flow-humans': 'The Human roles side panel in the Flow editor.',
+  'modal:flow-stages': 'The Stages side panel in the Flow editor.',
+  'modal:flow-node': 'The agent inspector side panel in the Flow editor (Details / Routing).',
+  'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
+  'modal:flow-improvements': 'The Improvements side panel of a live team.',
   'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
   'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
 };
@@ -213,14 +220,27 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Flow editor's seven overlay surfaces (#1984). Same story once more, and
+  // this is the page #1990 flagged the latent bug on: EdgeDialogs already
+  // rendered a "?" inside a `SidePanel` with no subject, so pressing it opened
+  // the help panel BEHIND the dialog it explains. None of these claims a topic
+  // of its own — resolution falls through to `/flows`, which is the point: they
+  // exist so the panel lifts above the surface, not to say anything new.
+  'modal:flow-edge': { label: 'Flows · hand-off chooser' },
+  'modal:flow-labels': { label: 'Flows · label registry' },
+  'modal:flow-humans': { label: 'Flows · human roles' },
+  'modal:flow-stages': { label: 'Flows · stages' },
+  'modal:flow-node': { label: 'Flows · agent inspector' },
+  'modal:flow-anomalies': { label: 'Flows · anomalies' },
+  'modal:flow-improvements': { label: 'Flows · improvements' },
   // The Working Environments page's two side panels (#1987) — the create/edit
   // form and the System-Admin toolchain registry. Registered for the same
   // reason as the MCP pair: both are shared `SidePanel`s (z-index 60/61) and
   // both host a "?" that deep-links into the `/environments` chapters, so
   // without the lift the help panel would open *behind* the surface it
   // explains. Neither claims a topic of its own — resolution falls through to
-  // `/environments`. This page keeps THREE of its four "?" inside the form
-  // panel (repositories, token, Sync), which is why one subject covers them.
+  // `/environments`. This page keeps THREE of its five "?" inside the form
+  // panel (repositories, Sync, token), which is why one subject covers them.
   'modal:environment-form': { label: 'Working Environment form' },
   'modal:toolchains': { label: 'Agent toolchains' },
 };

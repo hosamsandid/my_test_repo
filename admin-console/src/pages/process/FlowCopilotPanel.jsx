@@ -4,6 +4,8 @@ import { Sparkles, X, Send, Loader2, Check, AlertTriangle, Boxes, RefreshCw } fr
 import { apiCall } from '../../hooks/useApi';
 import { UNAUTHORIZED_EVENT } from '../../auth/AuthContext';
 import { assistHeaders, notifyAssistError } from '../../context/assist-transport.js';
+import PageHelpButton from '../../components/PageHelpButton';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import {
   STARTER_PROMPTS,
   toApiMessages,
@@ -232,6 +234,17 @@ export default function FlowCopilotPanel({
         <span style={{ flex: 1, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)' }}>
           Flow Copilot
         </span>
+        {/* #1984: the one Flows surface with a real header slot, so the "?" sits
+            in the header rather than in a body lead. No help subject is
+            published here — unlike every other panel on this page the Copilot
+            is a flex CHILD of the canvas, not a SidePanel, so the help panel at
+            z-index 50 already opens in front of it. */}
+        <PageHelpButton
+          label="How the Flow Copilot works"
+          size={14}
+          section={FLOWS_HELP_SECTIONS.copilot}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
         {model && (
           <span title="Model used for generation" style={{
             fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',

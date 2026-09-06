@@ -80,6 +80,11 @@ export const CONTEXT_KEYS = {
   // and the panel lifts above them (both are z-index 60/61).
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Model Providers create/edit form (#1988) — same story again: a shared
+  // `SidePanel` (z-index 60/61) hosting three of this page's four deep-linked
+  // "?" buttons, so without the lift the panel would open *behind* the form it
+  // explains. No topic of its own — resolution falls through to `/models`.
+  'modal:model-provider': { label: 'Model provider form' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -91,6 +96,7 @@ export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
 export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
 export const OVERLAY_MCP_SERVER = 'modal:mcp-server';
 export const OVERLAY_MCP_CREDENTIAL = 'modal:mcp-credential';
+export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

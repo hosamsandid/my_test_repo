@@ -318,6 +318,27 @@ const TOPIC_CONTENT = [
       'Health',
       'when it starts',
       'detach it there first',
+      // #1988 widened the topic into a per-surface reference. These are the
+      // claims the new chapters add that the page no longer states anywhere:
+      // what a probe's credential line is *for*, and that `Unknown` is an
+      // honest never-measured status rather than a warning.
+      'names the credential it used',
+      'honest, not a warning',
+      'signal, not a gate',
+    ],
+    // #1988: chapters 1–5 are the landing targets of this page's five "?"
+    // buttons (the auth-type one follows the selection, so it addresses 2 or 3).
+    // Chapter 6 carries no "?" of its own — the restart-agents dialog and the
+    // delete refusal already state their own rules at the point of decision, and
+    // the panel renders the whole topic, so it is one scroll from wherever a
+    // deep link lands.
+    chapters: [
+      'What a Model Provider is',
+      'API key / proxy authentication',
+      'Anthropic subscription authentication',
+      'Test connection and Discover models',
+      'Health: the poller and the Health column',
+      'Changing credentials and deleting',
     ],
   },
   {

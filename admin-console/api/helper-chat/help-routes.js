@@ -162,6 +162,7 @@ const OVERLAY_KEYS = {
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
   'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
   'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
+  'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
 };
 
 const CONTEXT_KEYS = {
@@ -211,6 +212,12 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Model Providers create/edit form (#1988), registered for the same
+  // reason: it is a shared `SidePanel` (z-index 60/61) hosting the auth-type,
+  // OAuth-box and probe "?" buttons that deep-link into the `/models` chapters,
+  // so without the lift the help panel would open *behind* the form it
+  // explains. No topic of its own — resolution falls through to `/models`.
+  'modal:model-provider': { label: 'Model provider form' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

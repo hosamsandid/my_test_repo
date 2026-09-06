@@ -152,9 +152,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r agent-image/requirements.txt pytest
+      # The job names its files individually rather than globbing test_*.py —
+      # test_usage.py is deliberately not in the list — so a NEW test file must
+      # be added here or CI never runs it.
       - name: Run unit tests
         working-directory: agent-image/scripts
-        run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py -q
+        run: python -m pytest test_agent_entrypoint.py test_knowledge.py test_cli_contract.py test_bp_removal_guard.py -q
 
       # The toolchain bootstrap (#1941) is python and lives outside agent-image/,
       # but it is the same KIND of test — a pure unit suite over an agent-runtime

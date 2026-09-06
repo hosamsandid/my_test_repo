@@ -263,3 +263,27 @@ export function deleteDialogCopy(target) {
     maxWidth: 560,
   };
 }
+
+/**
+ * Message for a team delete whose cascade could not remove every member (#1960).
+ *
+ * `DELETE /api/agents/:id` answers 204 with no body when the cascade was clean,
+ * so `apiCall` hands us `null` and this returns `null` too — the overwhelmingly
+ * common path stays silent. It is only when the server reports residue
+ * (`cascadeWarnings`, the `{ id, kind, error }` shape the team fan-out uses)
+ * that the caller gets a sentence, because a member left half-deleted is
+ * exactly what nobody must be told "all done" about.
+ *
+ * Names the ids: the whole point of reporting residue is that an operator can
+ * go and finish it (the orphan cleanup, or deleting the member on its own).
+ */
+export function cascadeResidueNotice(response) {
+  const warnings = response && Array.isArray(response.cascadeWarnings)
+    ? response.cascadeWarnings.filter(w => w && w.id)
+    : [];
+  if (warnings.length === 0) return null;
+  const ids = warnings.map(w => w.id).join(', ');
+  const noun = warnings.length === 1 ? 'member' : 'members';
+  return `The team was deleted, but ${warnings.length} ${noun} could not be removed: ${ids}. `
+    + 'They are left behind as orphaned agents — a System Admin can clear them with the orphan cleanup.';
+}

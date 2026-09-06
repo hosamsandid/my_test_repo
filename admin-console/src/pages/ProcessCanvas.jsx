@@ -21,6 +21,8 @@ import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
 import { toolbarTitle, STATUS_TITLES } from './process-toolbar-hints';
+import PageHelpButton from '../components/PageHelpButton';
+import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import Tooltip from '../components/Tooltip';
 import { shouldWrapTooltip } from '../components/tooltip-wrap';
 
@@ -688,6 +690,18 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         <ToolbarButton onClick={exportBundle} icon={Download} disabled={!!imported || !!proposal}
           title={toolbarTitle('export', { hasProposal: !!proposal, imported: !!imported })}>Export</ToolbarButton>
         </div>
+        {/* #1984: the canvas is the busiest surface on the page and was the one
+            with no help affordance at all. It sits OUTSIDE the flex-1 group
+            above so it pins to the far right and the buttons never shift as the
+            toolbar reflows, and it is deliberately unconditional — the toolbar
+            differs per mode, but "what am I looking at" is the same question on
+            a draft and on a live team. */}
+        <PageHelpButton
+          label="What the canvas shows"
+          size={15}
+          section={FLOWS_HELP_SECTIONS.canvas}
+          style={{ padding: 2, flexShrink: 0 }}
+        />
       </div>
 
       {/* Imported-bundle banner */}

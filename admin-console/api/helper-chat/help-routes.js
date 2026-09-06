@@ -162,6 +162,13 @@ const OVERLAY_KEYS = {
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
   'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
   'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
+  'modal:flow-edge': 'The hand-off chooser and the edge dialogs on the Flows canvas.',
+  'modal:flow-labels': 'The Label registry side panel in the Flow editor.',
+  'modal:flow-humans': 'The Human roles side panel in the Flow editor.',
+  'modal:flow-stages': 'The Stages side panel in the Flow editor.',
+  'modal:flow-node': 'The agent inspector side panel in the Flow editor (Details / Routing).',
+  'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
+  'modal:flow-improvements': 'The Improvements side panel of a live team.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
 };
 
@@ -212,6 +219,19 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Flow editor's seven overlay surfaces (#1984). Same story once more, and
+  // this is the page #1990 flagged the latent bug on: EdgeDialogs already
+  // rendered a "?" inside a `SidePanel` with no subject, so pressing it opened
+  // the help panel BEHIND the dialog it explains. None of these claims a topic
+  // of its own — resolution falls through to `/flows`, which is the point: they
+  // exist so the panel lifts above the surface, not to say anything new.
+  'modal:flow-edge': { label: 'Flows · hand-off chooser' },
+  'modal:flow-labels': { label: 'Flows · label registry' },
+  'modal:flow-humans': { label: 'Flows · human roles' },
+  'modal:flow-stages': { label: 'Flows · stages' },
+  'modal:flow-node': { label: 'Flows · agent inspector' },
+  'modal:flow-anomalies': { label: 'Flows · anomalies' },
+  'modal:flow-improvements': { label: 'Flows · improvements' },
   // The Model Providers create/edit form (#1988), registered for the same
   // reason: it is a shared `SidePanel` (z-index 60/61) hosting the auth-type,
   // OAuth-box and probe "?" buttons that deep-link into the `/models` chapters,

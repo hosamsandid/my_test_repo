@@ -30,7 +30,7 @@ import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
   ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
 } from './agent-lifecycle/AgentLifecycleDialogs.jsx';
-import { agentState, deleteDialogCopy } from './agent-lifecycle/agent-lifecycle-menu.js';
+import { agentState, deleteDialogCopy, cascadeResidueNotice } from './agent-lifecycle/agent-lifecycle-menu.js';
 // The edit form itself followed the same route (#1929): Agent Chat's right rail
 // hosts it as a Settings tab, so it — and the role catalogue / mission-directory
 // field the create form shares with it — live in `agent-lifecycle/` and both
@@ -976,10 +976,9 @@ function LeafAgentCard({ agent, onEdit, onDelete, onToggleEnabled, onDeactivate,
 }
 
 function OrphanCard({ agent, onDelete }) {
+  // team-member is deliberately absent — see the `orphans` derivation (#1960).
   const reason =
-    agent.role === 'team-member'
-      ? `parent team "${agent.parentTeamId}" is gone`
-      : agent.role === 'bp-instance'
+    agent.role === 'bp-instance'
       ? `parent orchestrator "${agent.parentOrchestratorId}" is gone`
       : 'parent agent is gone';
 
@@ -1042,7 +1041,6 @@ export default function Agents() {
   const bpInstances = agents.filter(a => a.role === 'bp-instance');
   const teamMembers = agents.filter(a => a.role === 'team-member');
   const orchestratorIds = new Set(agents.filter(a => a.role === 'orchestrator').map(a => a.id));
-  const teamIds = new Set(agents.filter(a => a.role === 'team').map(a => a.id));
   const orchestrators = agents
     .filter(a => a.role === 'orchestrator')
     .sort(byName)
@@ -1054,13 +1052,27 @@ export default function Agents() {
   const leaves = agents
     .filter(a => !['orchestrator', 'bp-instance', 'team', 'team-member'].includes(a.role))
     .sort(byName);
-  // Orphans: members/instances whose parent is gone. Must be rendered explicitly,
-  // otherwise they vanish from the UI entirely (filtered out of leaves above and
-  // not nested under any parent card) and the only way to delete them is via SSH.
-  const orphans = [
-    ...teamMembers.filter(m => !m.parentTeamId || !teamIds.has(m.parentTeamId)),
-    ...bpInstances.filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId)),
-  ].sort(byName);
+  // Orphans: agents whose parent is gone. Rendered explicitly, otherwise they
+  // vanish from the UI entirely (filtered out of leaves above and not nested
+  // under any parent card) and the only way to delete them is via SSH.
+  //
+  // TEAM MEMBERS ARE NO LONGER LISTED HERE (#1960). Deleting a team now
+  // cascades to every member — materialized and stub alike — and a member the
+  // cascade could not remove is reported to the caller instead of being dropped
+  // silently, so the platform no longer produces this state. The block was a
+  // safety net for that bug, not a feature, and the requester decided against
+  // re-homing it: a permanent UI for a state that no longer occurs would be a
+  // standing invitation to read it as normal. An installation upgraded from
+  // before the fix clears its leftovers with the System-Admin-only one-off
+  // cleanup (`GET`/`POST /api/agents/orphans[/cleanup]`) — see the Agents help
+  // topic and docs/agent-roles.md, which record why there is no replacement
+  // surface.
+  //
+  // The bp-instance arm stays: those orphans have a different cause and belong
+  // to the separate BriefingPack removal, which this ticket does not touch.
+  const orphans = bpInstances
+    .filter(b => !b.parentOrchestratorId || !orchestratorIds.has(b.parentOrchestratorId))
+    .sort(byName);
 
   function openPanel(mode, agent) {
     setSaveError(null);
@@ -1325,8 +1337,14 @@ export default function Agents() {
   async function handleDelete() {
     setDeleteBusy(true);
     try {
-      await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
+      // A team delete cascades to its members; a member the cascade could not
+      // remove comes back as `cascadeWarnings` on a 200 (a clean delete is still
+      // a bodyless 204). Surfacing it is the point — residue must never be
+      // reported as success (#1960 AC2).
+      const result = await apiCall('DELETE', `/api/agents/${deleteTarget.id}`);
       setDeleteTarget(null);
+      const residue = cascadeResidueNotice(result);
+      if (residue) setActionError(residue);
       refetch();
     } catch (e) {
       setActionError(e.message);

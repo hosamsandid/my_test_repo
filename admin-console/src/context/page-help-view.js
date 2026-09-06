@@ -80,6 +80,17 @@ export const CONTEXT_KEYS = {
   // and the panel lifts above them (both are z-index 60/61).
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Flow editor's seven overlay surfaces (#1984) — same story once more, on
+  // the page #1990 flagged the latent bug on. None claims a topic of its own;
+  // resolution falls through to `/flows`. They exist so the panel lifts above
+  // the side panel that hosts the "?", not to say anything new.
+  'modal:flow-edge': { label: 'Flows · hand-off chooser' },
+  'modal:flow-labels': { label: 'Flows · label registry' },
+  'modal:flow-humans': { label: 'Flows · human roles' },
+  'modal:flow-stages': { label: 'Flows · stages' },
+  'modal:flow-node': { label: 'Flows · agent inspector' },
+  'modal:flow-anomalies': { label: 'Flows · anomalies' },
+  'modal:flow-improvements': { label: 'Flows · improvements' },
   // The Model Providers create/edit form (#1988) — same story again: a shared
   // `SidePanel` (z-index 60/61) hosting the auth-type, OAuth-box and probe "?"
   // buttons that deep-link into the `/models` chapters, so without the lift the
@@ -98,6 +109,13 @@ export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
 export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
 export const OVERLAY_MCP_SERVER = 'modal:mcp-server';
 export const OVERLAY_MCP_CREDENTIAL = 'modal:mcp-credential';
+export const OVERLAY_FLOW_EDGE = 'modal:flow-edge';
+export const OVERLAY_FLOW_LABELS = 'modal:flow-labels';
+export const OVERLAY_FLOW_HUMANS = 'modal:flow-humans';
+export const OVERLAY_FLOW_STAGES = 'modal:flow-stages';
+export const OVERLAY_FLOW_NODE = 'modal:flow-node';
+export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
+export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
 export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.

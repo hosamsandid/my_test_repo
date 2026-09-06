@@ -1684,6 +1684,53 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
   res.json(statuses);
 });
 
+/* ─── Orphaned agents — scan + one-off cleanup (#1960) ──────────────────
+   An ORPHAN is a `team-member` whose parent team cannot be resolved. Team
+   deletion cascades to its members, so orphans are no longer created; these two
+   routes clean up an installation that already has some.
+
+   MUST stay registered ABOVE `/api/agents/:id` — Express matches in
+   registration order, and `orphans` would otherwise be read as an agent id
+   (the same reason `/api/agents/statuses` sits where it does).
+
+   System-Admin-only, deliberately: the scan is installation-wide (an orphan has
+   no resolvable team, so there is no team to scope it to) and the cleanup
+   deletes agents across every team. Neither is expressible as a team-scoped
+   permission. */
+
+// Dry run: what a cleanup WOULD remove. Changes nothing.
+app.get('/api/agents/orphans', apiLimiter, async (req, res) => {
+  if (!getScope(req).all) {
+    return res.status(403).json({ error: 'forbidden: the orphan scan requires System Admin' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/orphans`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Act. Idempotent: a second call over an already-clean workspace removes
+// nothing and reports an empty plan. The response repeats the plan it acted on
+// (`planned`) next to what it managed to remove (`deleted`) and what it could
+// not (`warnings`), so a partial sweep is never reported as a clean one.
+app.post('/api/agents/orphans/cleanup', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) {
+    return res.status(403).json({ error: 'forbidden: the orphan cleanup requires System Admin' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/orphans/cleanup`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.get('/api/agents/:id', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -3303,9 +3350,21 @@ app.delete('/api/agents/:id', heavyLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
+    const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
       return res.status(resp.status).json(data);
+    }
+    // A team delete cascades to its members. A member the cascade could not
+    // remove is residue the caller has to know about (#1960 AC2) — reported in
+    // the `{ id, kind, error }` shape the team fan-out's `rollbackWarnings`
+    // uses. Only then do we answer with a body: a clean delete still returns a
+    // bare 204, so every existing caller is unaffected.
+    if (Array.isArray(data.cascadeWarnings) && data.cascadeWarnings.length) {
+      return res.status(200).json({
+        ok: true,
+        cascaded: Array.isArray(data.cascaded) ? data.cascaded : [],
+        cascadeWarnings: data.cascadeWarnings,
+      });
     }
     res.status(204).end();
   } catch (err) {

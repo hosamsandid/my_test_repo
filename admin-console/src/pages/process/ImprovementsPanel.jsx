@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { TrendingUp, Play, AlertTriangle, Info, Clock, Lightbulb, Undo2, Check, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import PageHelpButton from '../../components/PageHelpButton';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_IMPROVEMENTS } from '../../context/page-help-view.js';
+import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import WhenCell from '../../components/WhenCell';
 import { apiCall } from '../../hooks/useApi';
 import {
@@ -17,6 +21,8 @@ import {
 // and rollback (#1226) actions, the closed-card ledger, and a manual pass
 // (`POST .../hill-climb/run`).
 export default function ImprovementsPanel({ teamId, onClose }) {
+  // Lifts the help panel above this SidePanel (60/61) — see LabelRegistryPanel.
+  useHelpSubject({ overlay: OVERLAY_FLOW_IMPROVEMENTS });
   const [state, setState] = useState({ loading: true, error: null, resp: null });
   const [cardState, setCardState] = useState({ loading: true, error: null, autonomy: null, cards: [] });
   const [running, setRunning] = useState(false);
@@ -106,6 +112,12 @@ export default function ImprovementsPanel({ teamId, onClose }) {
           the event log. Cards are proposals with cited evidence — nothing changes until you apply one,
           and every apply runs through the same audited endpoints you would use by hand.
         </p>
+        <PageHelpButton
+          label="What Improvements measures"
+          size={13}
+          section={FLOWS_HELP_SECTIONS.improvements}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
         <button
           onClick={runNow}
           disabled={running}

@@ -16,7 +16,7 @@ import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
   ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
-import { deleteDialogCopy } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
 import RowContextMenu from './RowContextMenu.jsx';
 import {
   deleteTargetFor,
@@ -279,8 +279,13 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   async function confirmDelete() {
     setDeleteBusy(true);
     try {
-      await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteTarget.id)}`);
+      // See Agents.jsx: `cascadeWarnings` names the members a team delete could
+      // not remove. Same helper on both surfaces so the two never word the same
+      // residue differently (#1960 AC2).
+      const result = await apiCall('DELETE', `/api/agents/${encodeURIComponent(deleteTarget.id)}`);
       setDeleteTarget(null);
+      const residue = cascadeResidueNotice(result);
+      if (residue) setActionError(residue);
       refresh();
     } catch (e) {
       setActionError(e.message);

@@ -9,6 +9,7 @@ import { usePageActions } from '../context/PageActionsContext';
 import Tooltip from '../components/Tooltip';
 import { shouldWrapTooltip } from '../components/tooltip-wrap';
 import { PAGE_ACTION_TITLES } from './process-toolbar-hints';
+import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import {
   IMPORT_BRIEFINGS_COPY, importCandidates, importSubmitState, importRequestBody, importErrorText,
 } from './process/import-briefings-view';
@@ -648,8 +649,20 @@ export default function Briefings() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', minWidth: 0 }}>
                 {/* The Welcome banner and this page's own help drawer moved into
                     the `flows` help topic (#1876) — the "?" opens the Help panel
-                    on its "This page" face. */}
-                <PageHelpButton label="Help for Flows" size={15} style={{ padding: 2, flexShrink: 0 }} />
+                    on its "This page" face.
+
+                    #1984: it now names its chapter. It opens at "What Flows is"
+                    rather than at "The flows left list" it literally sits in —
+                    that chapter is the very next heading, so landing on the
+                    first one gives the reader the definition AND the list,
+                    while landing on the second hides the definition above the
+                    fold, and scrolling UP is the direction nobody tries. */}
+                <PageHelpButton
+                  label="Help for Flows"
+                  size={15}
+                  section={FLOWS_HELP_SECTIONS.overview}
+                  style={{ padding: 2, flexShrink: 0 }}
+                />
               </div>
               <button
                 onClick={() => setNavCollapsed(true)}

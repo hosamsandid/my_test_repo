@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Save, Trash2, Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import { useHelpSubject } from '../../context/HelperChatContext';
+import { OVERLAY_FLOW_NODE } from '../../context/page-help-view.js';
 import { apiCall } from '../../hooks/useApi';
 import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
@@ -56,6 +58,10 @@ export default function NodeInspector({
   onDeleted,        // draft
   onRenamedId,      // draft
 }) {
+  // The Routing tab's "?" (RoutingSection) renders inside this SidePanel
+  // (60/61), so the subject is published here — by the component that owns the
+  // panel body — to lift the help panel in front of it (#1984).
+  useHelpSubject({ overlay: OVERLAY_FLOW_NODE });
   const isLive = mode === 'live';
   const structureFocus = focus?.section === 'structure' && (focus?.tab || 'details') === 'details';
   const [tab, setTab] = useState(focus?.tab || 'details');

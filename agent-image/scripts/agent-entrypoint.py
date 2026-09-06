@@ -6065,222 +6065,16 @@ class TriggerScheduler:
         )
 
 
-# ---- Claim loop (P10 port from agent-runner.js ClaimLoopScheduler) ----
-#
-# Polls /internal/orchestrators/{AGENT_ID}/claim-tick every 30 s and, when the
-# tick response reports newly-dispatched BPs, asks Claude to post a friendly
-# DM nudge so the user can confirm the claim. Orchestrator-role only. Disable
-# with CLAIM_LOOP_ENABLED=0. Mirrors orchestrator/agent-runner.js:1024-1133.
-#
-# The label-based bid/assign workflow (.github/workflows/coordinator.yml,
-# */5 min) covers the GitHub-hosted distribution slice; this Python loop is
-# what keeps non-GitHub orchestrator workflows alive.
-
+# Base address of the orchestrator's internal API, used by the flow-emit and
+# wake helpers above. The BriefingPack claim loop that also lived here — a
+# 30 s poll of /internal/orchestrators/{AGENT_ID}/claim-tick that DM'd a nudge
+# when a pack transitioned to `status: dispatched` — was removed in #1967:
+# the route went with epic #1961 Phase 1, and `role: "orchestrator"` is a
+# retired role the orchestrator refuses to spawn, so the loop's own gate could
+# never be true.
 ORCHESTRATOR_INTERNAL_URL = os.environ.get(
     "ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002"
 )
-CLAIM_LOOP_INTERVAL_SEC = int(os.environ.get("CLAIM_LOOP_INTERVAL_SEC", "30"))
-
-
-class ClaimLoopScheduler:
-    """Periodic claim-tick poller for orchestrator-role agents."""
-
-    def __init__(
-        self,
-        *,
-        client,
-        agent_id: str,
-        send_formatted,
-        blueprint_id: str | None,
-        interval_sec: int = CLAIM_LOOP_INTERVAL_SEC,
-    ) -> None:
-        self._client = client
-        self._agent_id = agent_id
-        self._send_formatted = send_formatted
-        self._blueprint_id = blueprint_id
-        self._interval_sec = max(5, interval_sec)
-        self._task: asyncio.Task | None = None
-        self._running = False
-        self._stopping = False
-
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._task = asyncio.create_task(self._run_forever())
-        print(
-            f"[Runner:{self._agent_id}] Claim loop started "
-            f"(every {self._interval_sec}s -> {ORCHESTRATOR_INTERNAL_URL})",
-            file=sys.stderr,
-        )
-
-    async def stop(self) -> None:
-        self._stopping = True
-        if self._task is None:
-            return
-        self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
-        self._task = None
-
-    async def _run_forever(self) -> None:
-        try:
-            await asyncio.sleep(5)  # stagger first tick — match Node behaviour
-            while not self._stopping:
-                await self._tick()
-                await asyncio.sleep(self._interval_sec)
-        except asyncio.CancelledError:
-            return
-
-    async def _tick(self) -> None:
-        # Overlap guard: skip a tick if the previous one is still running.
-        if self._running:
-            return
-        self._running = True
-        try:
-            url = (
-                f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}"
-                f"/internal/orchestrators/{urllib.parse.quote(self._agent_id, safe='')}"
-                f"/claim-tick"
-            )
-            status_code, body = await asyncio.to_thread(self._http_post, url)
-            if status_code != 200:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick HTTP {status_code}: "
-                    f"{body[:200]}",
-                    file=sys.stderr,
-                )
-                return
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick returned non-JSON: "
-                    f"{body[:200]}",
-                    file=sys.stderr,
-                )
-                return
-            newly_dispatched = data.get("newlyDispatched") or []
-            new_stubs = data.get("newStubs") or 0
-            if new_stubs or newly_dispatched:
-                print(
-                    f"[Runner:{self._agent_id}] Claim tick: "
-                    f"{new_stubs} new stub(s), "
-                    f"{len(newly_dispatched)} newly dispatched",
-                    file=sys.stderr,
-                )
-            if newly_dispatched:
-                await self._post_suggestion(newly_dispatched)
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim tick failed: {exc}",
-                file=sys.stderr,
-            )
-        finally:
-            self._running = False
-
-    @staticmethod
-    def _http_post(url: str) -> tuple[int, str]:
-        """Blocking POST; runs on a worker thread via asyncio.to_thread."""
-        req = urllib.request.Request(url, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-                return resp.status, body
-        except urllib.error.HTTPError as exc:
-            try:
-                body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = str(exc)
-            return exc.code, body
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            return 0, str(exc)
-
-    async def _post_suggestion(self, items: list[dict]) -> None:
-        dm_room = _load_dm_room_id()
-        if not dm_room:
-            print(
-                f"[Runner:{self._agent_id}] {len(items)} new dispatch(es) detected "
-                f"but no DM room exists yet — the user must open the chat once "
-                f"before suggestions can be posted.",
-                file=sys.stderr,
-            )
-            return
-
-        list_md = "\n".join(
-            f"- **{bp.get('bpTitle', 'Untitled')}** "
-            f"(slug `{bp.get('bpSlug') or '—'}`, id `{bp.get('bpId', '')}`)\n"
-            f"  Stub agent id: `{bp.get('stubId', '')}`\n"
-            f"  Claim with: `curl -s -X POST "
-            f"{ORCHESTRATOR_INTERNAL_URL}/internal/agents/{bp.get('stubId', '')}/claim`"
-            for bp in items
-        )
-        plural_has = " has" if len(items) == 1 else "s have"
-        plural_is = " is" if len(items) == 1 else " are"
-        plural_this = "this BP" if len(items) == 1 else "these BPs"
-        prompt = (
-            "SYSTEM NOTICE — claim loop tick.\n\n"
-            f"{len(items)} Briefing Pack{plural_has} just transitioned to "
-            f"`status: dispatched` and{plural_is} awaiting a claim:\n\n"
-            f"{list_md}\n\n"
-            "Your task: post a brief, friendly message to the user in this chat "
-            f"asking whether they want you to claim {plural_this}. Keep it short. "
-            "Don't run any commands yet — wait for the user's reply. If the user "
-            "agrees, run the curl command shown above for the BP(s) they "
-            "confirmed. If the user declines, just acknowledge."
-        )
-
-        correlation_id = f"claim-suggest:{int(time.time() * 1000)}"
-        try:
-            _append_event(dm_room, {
-                "type": "claude.invoke",
-                "correlationId": correlation_id,
-                "promptChars": len(prompt),
-            })
-        except Exception:
-            pass
-
-        try:
-            # _call_claude is the same helper TriggerScheduler uses.
-            result = await asyncio.to_thread(
-                _call_claude, prompt, dm_room, correlation_id, self._blueprint_id,
-            )
-        except subprocess.CalledProcessError as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim suggestion Claude call failed: "
-                f"{exc}",
-                file=sys.stderr,
-            )
-            return
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Claim suggestion Claude call failed: "
-                f"{exc}",
-                file=sys.stderr,
-            )
-            return
-
-        if not result or not result.strip():
-            return
-
-        try:
-            event_id = await self._send_formatted(dm_room, result)
-            try:
-                _append_event(dm_room, {
-                    "type": "message.posted",
-                    "correlationId": correlation_id,
-                    "eventId": event_id,
-                })
-            except Exception:
-                pass
-            _write_last_response_at()
-        except Exception as exc:
-            print(
-                f"[Runner:{self._agent_id}] Could not post claim suggestion: "
-                f"{exc}",
-                file=sys.stderr,
-            )
 
 
 # ---- The async DM listener itself ----
@@ -6641,26 +6435,6 @@ async def run_dm_listener() -> None:
             )
             scheduler = None
 
-    # P10: orchestrator-role agents additionally run the claim loop. Disable
-    # via CLAIM_LOOP_ENABLED=0. Mirrors the role gate in agent-runner.js:1322.
-    claim_loop: ClaimLoopScheduler | None = None
-    if role == "orchestrator" and os.environ.get("CLAIM_LOOP_ENABLED", "1") != "0":
-        try:
-            claim_loop = ClaimLoopScheduler(
-                client=client,
-                agent_id=agent_id,
-                send_formatted=send_formatted,
-                blueprint_id=blueprint_id,
-            )
-            await claim_loop.start()
-        except Exception as exc:
-            print(
-                f"[Runner:{agent_id}] Claim loop failed to start: {exc} "
-                f"— continuing without orchestrator claim suggestions",
-                file=sys.stderr,
-            )
-            claim_loop = None
-
     _DM_LOOP_RUNNING = True
     sync_fail_streak = 0
     try:
@@ -6694,12 +6468,6 @@ async def run_dm_listener() -> None:
                 await scheduler.stop()
             except Exception as exc:
                 print(f"[Runner:{agent_id}] scheduler.stop error: {exc}",
-                      file=sys.stderr)
-        if claim_loop is not None:
-            try:
-                await claim_loop.stop()
-            except Exception as exc:
-                print(f"[Runner:{agent_id}] claim_loop.stop error: {exc}",
                       file=sys.stderr)
         try:
             await client.close()

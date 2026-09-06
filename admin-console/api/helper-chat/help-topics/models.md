@@ -36,10 +36,9 @@ team; a *System* provider is assigned to the teams listed beside it, or reads
 *Unassigned*), the **Base URL** — replaced by a *Subscription (OAuth)* badge
 when the provider uses subscription auth, which is also why it has no URL to
 show — a short preview under **Token** (the full fingerprint is in the
-provider's own editor), how many
-**Models** the catalog holds and which one is the default, the **Health** of the
-endpoint, and when it was **Added**. Click any row you can manage to open its
-editor.
+provider's own editor), how many **Models** the catalog holds and which one is
+the default, the **Health** of the endpoint, and when it was **Added**. Click
+any row you can manage to open its editor.
 
 Two rows are not editable and say so with a padlock rather than failing on
 click. A **`.env` fallback** row is a synthetic record reflecting the global

@@ -80,6 +80,12 @@ export const CONTEXT_KEYS = {
   // and the panel lifts above them (both are z-index 60/61).
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Plugins page's two confirm dialogs (#1986) — same story again, one layer
+  // higher: a ConfirmDialog is the shared Modal at z-index 9999, so a "?" inside
+  // one needs the lift to open beside the decision it explains rather than
+  // behind it. Neither claims a topic — resolution falls through to `/plugins`.
+  'modal:plugin-install': { label: 'Install plugin' },
+  'modal:plugin-uninstall': { label: 'Uninstall plugin' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -91,6 +97,8 @@ export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
 export const OVERLAY_KNOWLEDGE_SKILL = 'modal:knowledge-skill';
 export const OVERLAY_MCP_SERVER = 'modal:mcp-server';
 export const OVERLAY_MCP_CREDENTIAL = 'modal:mcp-credential';
+export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
+export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

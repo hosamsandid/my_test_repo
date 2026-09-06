@@ -162,6 +162,8 @@ const OVERLAY_KEYS = {
   'modal:knowledge-skill': 'The skill inspector side panel in the Knowledge page\'s Skills column.',
   'modal:mcp-server': 'The New MCP server side panel on the MCP Servers page.',
   'modal:mcp-credential': 'The New MCP credential side panel on the MCP Servers page.',
+  'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
+  'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
 };
 
 const CONTEXT_KEYS = {
@@ -211,6 +213,13 @@ const CONTEXT_KEYS = {
   // its own — resolution falls through to `/mcp`.
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
+  // The Plugins page's install and uninstall confirms (#1986). Same reason as
+  // every overlay above, one layer higher: a ConfirmDialog is the shared Modal
+  // at z-index 9999, so a "?" inside one has to lift the help panel to 10000 to
+  // be visible beside the decision it explains. Neither claims a topic —
+  // resolution falls through to `/plugins`, whose chapters they deep-link into.
+  'modal:plugin-install': { label: 'Install plugin' },
+  'modal:plugin-uninstall': { label: 'Uninstall plugin' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

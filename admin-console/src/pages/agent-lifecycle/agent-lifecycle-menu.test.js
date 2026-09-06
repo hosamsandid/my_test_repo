@@ -8,6 +8,7 @@ import {
   buildTeamMenu,
   isChatOpenable,
   deleteDialogCopy,
+  cascadeResidueNotice,
   NO_RIGHTS_HINT,
   TEAM_LOCKED_HINT,
 } from './agent-lifecycle-menu.js';
@@ -271,4 +272,34 @@ test('#1964 — a team is the only cascading delete confirm', () => {
   });
   assert.deepEqual(orch, { title: 'Delete agent?', confirmLabel: 'Delete', maxWidth: 440 });
   assert.doesNotMatch(orch.confirmLabel, /mission/i);
+});
+
+/* ── cascadeResidueNotice (#1960) ────────────────────────────────────────── */
+
+test('cascadeResidueNotice: a clean delete (204 → null body) says nothing', () => {
+  assert.strictEqual(cascadeResidueNotice(null), null);
+  assert.strictEqual(cascadeResidueNotice(undefined), null);
+  assert.strictEqual(cascadeResidueNotice({ ok: true, cascaded: ['a', 'b'] }), null);
+  assert.strictEqual(cascadeResidueNotice({ cascadeWarnings: [] }), null);
+});
+
+test('cascadeResidueNotice: names every member the cascade left behind', () => {
+  const msg = cascadeResidueNotice({
+    ok: true,
+    cascaded: ['alpha-ba'],
+    cascadeWarnings: [
+      { id: 'alpha-dev', kind: 'member', error: 'container busy' },
+      { id: 'alpha-qs', kind: 'member', error: 'EBUSY' },
+    ],
+  });
+  assert.match(msg, /2 members could not be removed/);
+  assert.match(msg, /alpha-dev, alpha-qs/);
+  assert.match(msg, /orphan/i);
+});
+
+test('cascadeResidueNotice: singular for one leftover, and junk entries are ignored', () => {
+  const msg = cascadeResidueNotice({
+    cascadeWarnings: [null, { kind: 'member' }, { id: 'alpha-dev', error: 'x' }],
+  });
+  assert.match(msg, /1 member could not be removed: alpha-dev\./);
 });

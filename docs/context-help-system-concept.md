@@ -335,7 +335,19 @@ left the two **create forms** — the page's only real decision surfaces — rea
 explanation from the top; the topic is now five chapters — the three-part model · the server
 registry and its transports · the credential store and `${credential}` substitution ·
 environment pairing and the seed-time merge · deleting — with a "?" on the page header, each
-create panel and the *required* column marker).
+create panel and the *required* column marker),
+and **E2 → #1984** (Flows: the console's busiest page — a canvas, six side panels, a docked
+Copilot rail and a family of edge dialogs — behind one page-level "?"; the topic is now ten
+chapters with ten deep-linked affordances, and the seven Flow-editor `SidePanel`s finally
+publish a help subject),
+and **E8 → #1988** (Model Providers: E8 left the page's two real decision surfaces — the
+auth-type choice and the probe buttons — a whole document away from their own subject; the
+topic is now six chapters — what a Model Provider is · API key / proxy authentication ·
+Anthropic subscription authentication · Test connection and Discover models · Health ·
+changing credentials and deleting — with a "?" on the page header, the *Authentication* row,
+the OAuth box, the Test/Discover row and the **Health** column header. The auth-type row is
+**one** control serving two chapters, so its "?" follows the selection rather than naming a
+fixed chapter — the first child where a surface is not one-to-one with a chapter).
 
 **Rolled out to every page (epic #1981).** #1972 was liked enough to become the pattern for
 the rest of the console: epic #1981 replicates it page by page (13 children, Tier 1 = the
@@ -351,8 +363,13 @@ generic, so there is no shared plumbing left to build. Two things every child in
    **behind** the very surface it explains unless that surface calls `useHelpSubject()`. The
    Skills child (#1990) registers `modal:skill-detail` + `modal:skills-merge` for exactly
    this — neither claims a topic, so resolution still falls through to `/skills` and the
-   registration buys only the z-index lift. `/flows`' `EdgeDialogs` "?" (added by E2) has the
-   same latent problem and is still unfixed.
+   registration buys only the z-index lift. Two latent instances of the same bug have since
+   been found and fixed by the child that touched the page rather than by a sweep: `/flows`'
+   `EdgeDialogs` "?" (added by E2) by #1984, which registered all seven Flow-editor panels,
+   and the OAuth box's "?" on `/models` (added by E8, behind the form since it shipped) by
+   #1988. The lesson for a remaining child is that an *existing* "?" inside an overlay is as
+   suspect as one it adds — check the surfaces the E-ticket already left behind, not only the
+   new ones.
 
 **A multi-route topic is the strongest case for chapters, not an exception to them.** The
 Credentials child (#1993) is the first where one topic file is claimed by *three* routes
@@ -380,7 +397,7 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is `/flows` (seven
-neighbours, including the two largest topics) at **244,687 — 72.0% used, 95,313 left**, where the
+neighbours, including the two largest topics) at **251,408 — 73.9% used, 88,592 left**, where the
 all-topics fold it replaced stood at 322,243 (94.8%). Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,
@@ -393,6 +410,14 @@ neighbourhood links to `/mcp`; `/mcp`'s own context sits at **207,122 — 60.9% 
 first child measured after #2006 landed, and it is what consequence 2 below looks like in
 practice: the growth is paid for by the expanded page's own neighbourhood, not by every page at
 once.
+
+The Model Providers child (#1988) grew its topic from 5 426 to 11 512 chars and moved `/flows`
+by **nothing**, for the same reason — but its docs-sync commit moved it by 688, because two of
+the docs it corrected (`model-providers.md`, `working-environments.md`) are `CORPUS_FILES` and
+that half still counts in full on *every* context. Worth knowing while reading the three
+consequences below: they are about the *topic* half. A one-paragraph correction to a corpus doc
+is charged to every page at once, which is the asymmetry that makes the corpus the next
+structural step if this ever gets tight again.
 
 Three consequences a remaining #1981 child should know:
 

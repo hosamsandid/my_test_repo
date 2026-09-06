@@ -97,6 +97,13 @@ export const CONTEXT_KEYS = {
   // behind it. Neither claims a topic — resolution falls through to `/plugins`.
   'modal:plugin-install': { label: 'Install plugin' },
   'modal:plugin-uninstall': { label: 'Uninstall plugin' },
+  // The Model Providers create/edit form (#1988) — same story again: a shared
+  // `SidePanel` (z-index 60/61) hosting the auth-type, OAuth-box and probe "?"
+  // buttons that deep-link into the `/models` chapters, so without the lift the
+  // panel would open *behind* the form it explains. Named rather than counted,
+  // matching the `help-routes.js` mirror — a total in a comment is exactly what
+  // drifts. No topic of its own — resolution falls through to `/models`.
+  'modal:model-provider': { label: 'Model provider form' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -117,6 +124,7 @@ export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
 export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
 export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
 export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
+export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

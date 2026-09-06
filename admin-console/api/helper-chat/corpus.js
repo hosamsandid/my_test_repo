@@ -116,8 +116,8 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
-// **/flows** (seven neighbours, incl. the two largest topics) at 229 272 of
-// 340 000 — 67.4% used, 110 728 left — against 322 243 (94.8%) for the all-topics
+// **/flows** (seven neighbours, incl. the two largest topics) at 251 408 of
+// 340 000 — 73.9% used, 88 592 left — against 322 243 (94.8%) for the all-topics
 // fold it replaced. The all-topics fold is not the no-route fallback either — see
 // measureWorstCaseSystemPrompt().
 //

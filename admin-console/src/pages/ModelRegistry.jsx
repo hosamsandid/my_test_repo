@@ -31,6 +31,9 @@ import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { healthCellModel, healthCellDetail } from './provider-health-view.js';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_MODEL_PROVIDER } from '../context/page-help-view.js';
+import { MODELS_HELP_SECTIONS } from './models-help-sections.js';
 
 /* ───────────────────────── auth types ───────────────────────── */
 
@@ -233,6 +236,13 @@ function ModelEditor({ models, defaultModelId, onChange, onDefaultChange }) {
 
 function EndpointForm({ endpoint, onSave, onCancel, saving, error,
                         teams = [], isSysAdmin = false, adminTeamIds = [] }) {
+  // Rendered only while the side panel is slid out, so the subject needs no
+  // `active` flag. Registering it is what lifts the help panel above this
+  // SidePanel (z-index 60/61) — without it the three "?" buttons below would
+  // open help *behind* the form they explain (#1988, same reason as the
+  // MCP/Skills/Knowledge panels).
+  useHelpSubject({ overlay: OVERLAY_MODEL_PROVIDER });
+
   const isEdit = Boolean(endpoint?.id);
   const [name, setName] = useState(endpoint?.name ?? '');
   const [id, setId] = useState(endpoint?.id ?? '');
@@ -462,12 +472,26 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
         <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
           fontSize: 'var(--eb-text-sm)',
           fontWeight: 'var(--eb-font-medium)',
           color: 'var(--eb-text-secondary)',
           marginBottom: 'var(--eb-space-1)',
         }}>
           Authentication
+          {/* #1988: the two auth types are two chapters, and this is one "?" —
+              so it follows the selection. Asking about the choice you are
+              currently looking at is the only reading that is never wrong; the
+              other chapter is one scroll away, since the panel renders the whole
+              topic and merely scrolls to the requested chapter. */}
+          <PageHelpButton
+            label={isOauth
+              ? 'How Anthropic subscription authentication works'
+              : 'How API key / proxy authentication works'}
+            size={13}
+            section={isOauth ? MODELS_HELP_SECTIONS.oauthAuth : MODELS_HELP_SECTIONS.apiKeyAuth}
+            style={{ padding: 0 }}
+          />
         </div>
         <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
           {AUTH_TYPE_OPTIONS.map(opt => (
@@ -533,13 +557,22 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
               {/* This warning guards a REQUIRED confirmation, so the rule itself
                   stays here; the rationale and its consequences (per-seat
                   Enterprise tokens for a team, shared rate limits, assist calls
-                  skipping this auth type) moved to the help topic (#1882). */}
+                  skipping this auth type) moved to the help topic (#1882).
+                  #1988 pointed the "?" at those consequences directly — the
+                  `###` inside the subscription chapter, not the chapter's top —
+                  because that is what this button's label promises and what left
+                  this box. The chapter itself is reachable from the auth-type
+                  "?" above. */}
               <span>
                 <strong>Single-user operation only.</strong> Anthropic's Consumer Terms permit OAuth tokens from
                 Free/Pro/Max subscriptions solely for the subscription owner's own use — they must not serve
                 other users or third parties.
-                {' '}<PageHelpButton label="What this means for a team" size={13} style={{ padding: 0, verticalAlign: '-2px' }} />
-              </span>
+                {' '}<PageHelpButton
+                  label="What this means for a team"
+                  size={13}
+                  section={MODELS_HELP_SECTIONS.oauthSingleUser}
+                  style={{ padding: 0, verticalAlign: '-2px' }}
+                /></span>
             </div>
             {requireCompliance ? (
               // AC2: the confirmation is a REQUIRED input, not part of the
@@ -748,6 +781,14 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         >
           <RefreshCw size={13} /> {probing === 'discover' ? 'Loading…' : 'Discover models'}
         </button>
+        {/* #1988: what each probe does, and — the part the note below can only
+            state, never explain — why it always names the credential it used. */}
+        <PageHelpButton
+          label="What Test connection and Discover models do"
+          size={13}
+          section={MODELS_HELP_SECTIONS.probes}
+          style={{ padding: 0 }}
+        />
         {probeMsg && (
           <span style={{
             fontSize: 'var(--eb-text-xs)',
@@ -1141,7 +1182,26 @@ export default function ModelRegistry() {
       // probe-on-save. Current on page load from the persisted status — no click
       // (AC3). Honest 'Unknown' when never probed (AC6).
       key: 'health',
-      label: 'Health',
+      label: (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+          Health
+          {/* #1988: `Unknown` is the state that reads as a problem and is not
+              one, so the column needs somewhere to say so. DataTable attaches
+              an onClick to every header cell and lets `sortable: false` no-op it
+              inside, so the "?" is inert-by-luck today; it keeps the
+              stopPropagation wrapper the MCP/Token-Usage headers use so that
+              making this column sortable later cannot turn asking what a status
+              means into a re-sort. */}
+          <span onClick={e => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+            <PageHelpButton
+              label="What the Health column means"
+              size={13}
+              section={MODELS_HELP_SECTIONS.health}
+              style={{ padding: 0 }}
+            />
+          </span>
+        </span>
+      ),
       sortable: false,
       render: (v, row) => {
         if (row.readOnly) return '—'; // the .env fallback row is not a probed endpoint
@@ -1321,7 +1381,14 @@ export default function ModelRegistry() {
           (api/helper-chat/help-topics/models.md, #1882), together with the
           model-precedence chain, what the probe/health poller actually do, and
           the Consumer-Terms single-user constraint. Field-level hints inside the
-          form stay where the decision is made. */}
+          form stay where the decision is made.
+
+          #1988 split that topic into chapters and pointed each surface at its
+          own: this button opens chapter 1 (what a provider is, what the table
+          shows, the model-precedence chain), the auth-type row chapters 2/3, the
+          probe row chapter 4 and the Health column chapter 5. The slugs live in
+          models-help-sections.js — never inline — so
+          models-help-extraction.test.js can see them. */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -1331,7 +1398,12 @@ export default function ModelRegistry() {
           The LLM endpoints Agent Studio routes model traffic to — each with a URL, a credential
           and a catalog of models your agents can pick from.
         </span>
-        <PageHelpButton label="How providers and auth types work" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="How providers and auth types work"
+          size={14}
+          section={MODELS_HELP_SECTIONS.page}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
       </p>
 
       {actionError && (

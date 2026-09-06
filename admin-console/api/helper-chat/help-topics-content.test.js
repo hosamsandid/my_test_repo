@@ -252,6 +252,31 @@ const TOPIC_CONTENT = [
     // standalone /plugin-system page, which the same ticket REMOVED outright
     // (concept §9) — so for the build-a-plugin material this topic is not just
     // the best home, it is the only one left in the product.
+    //
+    // #1986 (epic #1981) widened it into a per-surface reference. Chapters
+    // 1/3/5/7/8 are the deep-link targets of the five surfaces the ticket names
+    // (page header → 1, install dialog → 3 of its 2/3/4 span, uninstall dialog
+    // → 5, the team-assign control → 7, the deep-dive pointer → 8). Chapters
+    // 2/4/6 carry no "?" of their own: install-vs-grant and scope granularity
+    // are the story the header and the dialogs land next to, and the UI-bearing
+    // chapter has no surface on this page at all (a plugin's own pages are in
+    // the sidebar). All three stay separately addressable because the panel
+    // renders the WHOLE topic — they are one scroll from wherever a link lands.
+    //
+    // Open question 1, answered: the deep dive stays ONE chapter with `###`
+    // sub-headings rather than splitting into "how it works" + "how to build
+    // one". The ticket's own surface table names exactly one deep-dive
+    // affordance, so a split would leave a chapter no "?" could reach.
+    chapters: [
+      'What a plugin is',
+      'Install and grant are two different steps',
+      'Capabilities and the platform gate',
+      'Scope granularity and quota',
+      'What activating does — and what uninstalling undoes',
+      'Plugins with their own UI',
+      'Assigning a plugin to a team on this page',
+      'Deep dive: how a plugin works, and how to build one',
+    ],
     concepts: [
       'broker',
       'Install',
@@ -278,6 +303,14 @@ const TOPIC_CONTENT = [
       'broker unreachable',
       'submit → poll',
       'Broker SDK',
+      // #1986 additions. Each is a statement the PAGE cannot make for itself —
+      // a reword that loses one leaves a surface with a "?" that no longer
+      // answers the question it was put there for.
+      'uninstalling revokes nothing',
+      'Requests no host privileges',
+      'Team assignment',
+      'team scope only',
+      'Global UI',
     ],
   },
   {

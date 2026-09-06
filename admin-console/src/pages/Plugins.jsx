@@ -1,10 +1,14 @@
 import React, { useMemo, useState } from 'react';
-import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw } from 'lucide-react';
+import { Puzzle, ShieldAlert, Download, Trash2, RefreshCw, BookOpen } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
+import PageHelpButton from '../components/PageHelpButton';
 import PluginTeamAssign from '../components/PluginTeamAssign';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_PLUGIN_INSTALL, OVERLAY_PLUGIN_UNINSTALL } from '../context/page-help-view.js';
 import { pluginRegistryRow } from './plugin-registry-view.js';
+import { PLUGINS_HELP_SECTIONS } from './plugins-help-sections.js';
 import { notifyPluginsChanged } from '../components/plugin-nav';
 import { grantableTeams } from './plugin-team-assign-view.js';
 import { usePageActions } from '../context/PageActionsContext';
@@ -76,6 +80,64 @@ function CapabilityCard({ cap }) {
         <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: tone.fg }}>{cap.title}</div>
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>{cap.detail}</div>
       </div>
+    </div>
+  );
+}
+
+// The install confirm's body (#1986). Its own component for two reasons: it has
+// to publish a help subject while it is on screen — a ConfirmDialog is the
+// shared Modal at z-index 9999, so without the lift the "?" would open the help
+// panel BEHIND the decision it explains — and a hook cannot live in the inline
+// JSX the `message` prop used to be. ConfirmDialog renders nothing while closed,
+// so the subject comes and goes with the dialog, which is also what makes the
+// System-Admin-only edge case fall out for free: no dialog, no "?".
+//
+// The "?" lands on the capabilities chapter deliberately. The ticket names
+// chapters 2/3/4 for this surface and this is the middle one, so install-vs-grant
+// sits one chapter above and the quota one chapter below — the whole topic is
+// rendered, so a deep link into the middle puts all three within one scroll.
+function InstallDialogBody({ row }) {
+  useHelpSubject({ overlay: OVERLAY_PLUGIN_INSTALL });
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
+        <p style={{ fontSize: 'var(--eb-text-sm)', marginTop: 0, flex: 1 }}>
+          Starts a broker with the privileges below — it grants the plugin to no agent.
+        </p>
+        <PageHelpButton
+          label="What these privileges mean"
+          size={14}
+          style={{ flex: '0 0 auto', marginTop: -2 }}
+          section={PLUGINS_HELP_SECTIONS.capabilities}
+        />
+      </div>
+      {row.capabilities.length === 0
+        ? <p style={{ fontSize: 'var(--eb-text-sm)' }}>This plugin requests no host privileges.</p>
+        : row.capabilities.map((c) => <CapabilityCard key={c.id} cap={c} />)}
+      <p style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 0 }}>
+        {row.quota}
+      </p>
+    </div>
+  );
+}
+
+// The uninstall confirm's body (#1986), same construction. Its "?" lands on the
+// activate/uninstall chapter — the one that says what the broker stopping
+// actually costs a running agent — rather than on the grant model, because the
+// dialog's own sentence already states the grant half.
+function UninstallDialogBody() {
+  useHelpSubject({ overlay: OVERLAY_PLUGIN_UNINSTALL });
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
+      <p style={{ fontSize: 'var(--eb-text-sm)', marginTop: 0, marginBottom: 0, flex: 1 }}>
+        The broker stops. Existing grants stay in place and seed nothing until you reinstall.
+      </p>
+      <PageHelpButton
+        label="What uninstalling undoes"
+        size={14}
+        style={{ flex: '0 0 auto', marginTop: -2 }}
+        section={PLUGINS_HELP_SECTIONS.activating}
+      />
     </div>
   );
 }
@@ -252,9 +314,21 @@ export default function Plugins() {
   // E5 (#1879) removed /plugin-system outright, so the former "Learn about
   // plugins" link is gone from here — the deep dive lives in the Plugins topic,
   // reachable via the header Help button.
+  //
+  // #1986: that header Help button was not actually here. E5's page header was
+  // dropped when the #1847 page-actions unification took over the header, so
+  // /plugins reached main with no page-level "?" at all — the same silent loss
+  // #1990 found on /skills. It is restored into the page-action slot, which
+  // since that change IS this page's only header, and names its chapter rather
+  // than relying on chapter 1 happening to be first.
   const headerAction = usePageActions(
     <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
       <IconButton icon={RefreshCw} label="Refresh" onClick={() => { refetch(); refetchAgents(); }} disabled={loading} />
+      <PageHelpButton
+        label="What a plugin is"
+        size={16}
+        section={PLUGINS_HELP_SECTIONS.what}
+      />
     </div>
   );
 
@@ -312,6 +386,31 @@ export default function Plugins() {
         <PluginCard key={row.id} row={row} busy={busy} onInstall={setPending} onUninstall={setRemoving} />
       ))}
 
+      {/* Deep-dive entry point (#1986). E5 removed the standalone /plugin-system
+          page and its "Learn about plugins" link, which left the build-a-plugin
+          reference reachable only by scrolling the whole topic. This is that
+          entry point back — a pointer, not a second copy of the prose, and the
+          only affordance on the page that deep-links into chapter 8. */}
+      <div style={{
+        marginTop: 'var(--eb-space-6)', paddingTop: 'var(--eb-space-4)',
+        borderTop: '1px solid var(--eb-border-default)',
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+      }}>
+        <BookOpen size={16} style={{ flex: '0 0 auto', marginTop: 2, color: 'var(--eb-text-muted)' }} />
+        <span style={{ flex: 1 }}>
+          Building your own plugin? The deep dive covers the broker and CLI pair, the
+          {' '}<code style={{ fontFamily: 'var(--eb-font-mono)' }}>plugin.json</code> fields, the
+          broker&rsquo;s per-call obligations and the Broker SDK.
+        </span>
+        <PageHelpButton
+          label="Read the plugin deep dive"
+          size={16}
+          style={{ flex: '0 0 auto' }}
+          section={PLUGINS_HELP_SECTIONS.deepDive}
+        />
+      </div>
+
       <ConfirmDialog
         open={!!pending}
         title={pending ? `Install ${pending.name}?` : ''}
@@ -322,19 +421,7 @@ export default function Plugins() {
         variant={pending && pending.capabilities.some((c) => c.risk === 'high') ? 'danger' : 'warning'}
         onConfirm={() => pending && doInstall(pending)}
         onCancel={() => setPending(null)}
-        message={pending ? (
-          <div>
-            <p style={{ fontSize: 'var(--eb-text-sm)', marginTop: 0 }}>
-              Starts a broker with the privileges below — it grants the plugin to no agent.
-            </p>
-            {pending.capabilities.length === 0
-              ? <p style={{ fontSize: 'var(--eb-text-sm)' }}>This plugin requests no host privileges.</p>
-              : pending.capabilities.map((c) => <CapabilityCard key={c.id} cap={c} />)}
-            <p style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 0 }}>
-              {pending.quota}
-            </p>
-          </div>
-        ) : ''}
+        message={pending ? <InstallDialogBody row={pending} /> : ''}
       />
 
       <ConfirmDialog
@@ -345,9 +432,7 @@ export default function Plugins() {
         busy={busy}
         onConfirm={() => removing && doUninstall(removing)}
         onCancel={() => setRemoving(null)}
-        message={
-          'The broker stops. Existing grants stay in place and seed nothing until you reinstall.'
-        }
+        message={removing ? <UninstallDialogBody /> : ''}
       />
     </div>
     </>

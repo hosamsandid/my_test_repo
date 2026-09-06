@@ -169,6 +169,8 @@ const OVERLAY_KEYS = {
   'modal:flow-node': 'The agent inspector side panel in the Flow editor (Details / Routing).',
   'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
   'modal:flow-improvements': 'The Improvements side panel of a live team.',
+  'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
+  'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
   'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
 };
@@ -233,6 +235,13 @@ const CONTEXT_KEYS = {
   'modal:flow-node': { label: 'Flows · agent inspector' },
   'modal:flow-anomalies': { label: 'Flows · anomalies' },
   'modal:flow-improvements': { label: 'Flows · improvements' },
+  // The Plugins page's install and uninstall confirms (#1986). Same reason as
+  // every overlay above, one layer higher: a ConfirmDialog is the shared Modal
+  // at z-index 9999, so a "?" inside one has to lift the help panel to 10000 to
+  // be visible beside the decision it explains. Neither claims a topic —
+  // resolution falls through to `/plugins`, whose chapters they deep-link into.
+  'modal:plugin-install': { label: 'Install plugin' },
+  'modal:plugin-uninstall': { label: 'Uninstall plugin' },
   // The Working Environments page's two side panels (#1987) — the create/edit
   // form and the System-Admin toolchain registry. Registered for the same
   // reason as the MCP pair: both are shared `SidePanel`s (z-index 60/61) and

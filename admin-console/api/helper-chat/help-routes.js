@@ -172,6 +172,8 @@ const OVERLAY_KEYS = {
   'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
   'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
+  'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
+  'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
 };
 
 const CONTEXT_KEYS = {
@@ -247,6 +249,16 @@ const CONTEXT_KEYS = {
   // so without the lift the help panel would open *behind* the form it
   // explains. No topic of its own — resolution falls through to `/models`.
   'modal:model-provider': { label: 'Model provider form' },
+  // The Working Environments page's two side panels (#1987) — the create/edit
+  // form and the System-Admin toolchain registry. Registered for the same
+  // reason as the MCP pair: both are shared `SidePanel`s (z-index 60/61) and
+  // both host a "?" that deep-links into the `/environments` chapters, so
+  // without the lift the help panel would open *behind* the surface it
+  // explains. Neither claims a topic of its own — resolution falls through to
+  // `/environments`. This page keeps THREE of its five "?" inside the form
+  // panel (repositories, Sync, token), which is why one subject covers them.
+  'modal:environment-form': { label: 'Working Environment form' },
+  'modal:toolchains': { label: 'Agent toolchains' },
 };
 
 // `/quickstart` deliberately has NO step keys: it is a single-page form, not a

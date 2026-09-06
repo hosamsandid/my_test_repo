@@ -14,6 +14,7 @@ askPrompts:
   - "Why can't I delete this team?"
   - "I added a user but they still see nothing — what is missing?"
   - "How do I move an agent or a Working Environment to another team?"
+  - "Why can't I see a colleague's personal credential as a System Admin?"
 ---
 
 ## What this page manages
@@ -28,6 +29,10 @@ what decides who sees a resource and who may change it.
 A fresh stack starts with a single scope whose id is `default`, and anything
 created before scopes existed was adopted into it. That is why a single-operator
 installation never has to think about this page at all.
+
+The page has three surfaces, and each carries its own "?": the scope table you
+are looking at, the **Manage** panel a row opens, and the **Resource ownership**
+section at the bottom (System Admins only).
 
 ## This is *not* an Agent Team
 
@@ -60,6 +65,12 @@ simply **updates their role in place**.
 Membership is fail-closed: a user with no membership anywhere and no System-Admin
 flag can log in but sees nothing until a scope is granted.
 
+There is a fourth principal that never appears in any list here: the
+environment's **built-in single admin** (the deployment's `ADMIN_USERNAME`). It
+has full visibility but no user record, so it belongs to no scope, cannot be
+given a role, and cannot be managed on the **Users** page. It exists so a fresh
+stack can be administered before the first user does.
+
 ## What a scope actually gates
 
 Scoping is enforced by the API, not just hidden in the UI:
@@ -74,21 +85,76 @@ Scoping is enforced by the API, not just hidden in the UI:
   refusal happens server-side.
 - An agent spawned from an Agent Team inherits its tenant from that parent, so
   moving the parent moves the whole squad's visibility with it.
+- A resource carrying **no** scope at all is treated as belonging to `default` —
+  which is what makes the pre-scope adoption above work without a migration.
 
-## Working with this page
+Two things a scope deliberately does **not** gate. **Personal credentials** are
+outside the model entirely: they belong to one human by name, and neither a
+System Admin nor the built-in admin can see or manage them — there is no
+administrative break-glass. And **choosing a Model Provider for the console's**
+**own AI helpers**
+needs only membership, not the Team-Admin role, so an ordinary Team Member can
+run the Flow Copilot billed against a provider their scope is entitled to.
 
-- **New Team** creates a scope. Its id is a lowercase slug you cannot change
-  later, so pick it the way you would pick a Working Environment id.
-- **Manage** (or **View**, when you may only look) opens a panel with the
-  scope's name and description plus its member list, where roles are set and
-  members removed.
-- **Manage Users** jumps to the **Users** page. Human user *records* — display
-  name, e-mail, System-Admin flag, login password — are created and edited
-  there; this page only decides which scope they belong to and with what role.
-- **Resource ownership** at the bottom reassigns an individual agent or Working
-  Environment to a different scope. Moving resources across tenants is a global
-  operation, so it is reserved for System Admins.
-- **Delete** removes a scope. The `default` scope is protected and cannot be
-  deleted, and any other scope is refused while it still owns agents or
-  environments — reassign them first. Deleting a scope drops its members'
-  memberships, not the user records themselves.
+## Managing a scope and its members
+
+Clicking a row opens the **Manage** panel — or **View**, when you may only look.
+The two are the same panel: with read-only access the fields and the member
+controls are simply inert, and the panel says so rather than hiding itself. That
+is deliberate, so a Team Member can *see* who is in a scope and go ask one of its
+admins.
+
+The panel has two halves:
+
+- **Team details** — the display name and description. The scope's **id** is not
+  among them: it is fixed at creation and there is no rename, because everything
+  that belongs to the scope refers to it by that id.
+- **Members** — one row per human, each with a role dropdown and a remove
+  button, plus a row to add someone. The dropdown writes the membership
+  immediately; there is no separate save for it.
+
+Two things the panel cannot do, by design. It cannot **create a human** — the
+add-member list only offers people who already have a user record, which is what
+the **Manage Users** button in the page header jumps to. And removing someone
+here removes only their **membership**: the person, their password and their own
+credentials are untouched, and they keep any other scope they belong to. Removing
+a user entirely is an offboarding, and it happens on the **Users** page.
+
+## Resource ownership
+
+The section at the bottom of the page reassigns an individual agent or Working
+Environment to a different scope. Moving resources across tenants is a global
+operation — you are, in effect, handing something to another group of people — so
+it is reserved for **System Admins** and does not render at all for anyone else.
+
+Two details make it behave differently from the rest of the page:
+
+- **An Agent Team moves as one unit.** It gets a single dropdown for the whole
+  squad and its members are listed beneath it read-only, because they inherit the
+  tenant from their parent rather than carrying one of their own.
+- **A partial move is reported, not hidden.** If the parent is reassigned but a
+  member cannot be, the error says so explicitly and names how many were left
+  behind — the squad is briefly split across two tenants, and retrying is what
+  resolves it.
+
+Reassigning changes **who may see and manage** the resource. It does not restart
+an agent, move a repository, or alter what the resource does.
+
+## Creating and deleting a scope
+
+**New Team** creates a scope. Its id is a lowercase slug you cannot change
+later, so pick it the way you would pick a Working Environment id.
+
+**Delete** removes a scope, and it is refused in two cases rather than
+cascading:
+
+- The `default` scope **can never be deleted** — the button is disabled and says
+  so. It is where unowned resources land, so it has to exist.
+- Any other scope is refused while it **still owns** agents, Working Environments
+  or team-scoped credentials. Reassign them first, in the Resource ownership
+  section above. The refusal is what stops a delete from quietly orphaning a
+  running squad.
+
+Once it is empty, deleting a scope drops its **memberships** and nothing else —
+the user records themselves stay, and so does everything those people own
+elsewhere.

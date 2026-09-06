@@ -4,6 +4,9 @@ import { useApi } from '../hooks/useApi';
 import SidePanel from '../components/SidePanel';
 import PageHelpButton from '../components/PageHelpButton';
 import { usePageActions } from '../context/PageActionsContext';
+import { ROLE_TEMPLATES_HELP_SECTIONS } from './role-templates-help-sections.js';
+import { useHelpSubject } from '../context/HelperChatContext.jsx';
+import { OVERLAY_AGENT_TEMPLATE } from '../context/page-help-view.js';
 
 // Keys the structured form owns directly; everything else on a template
 // (triggers, ports, patternRole, stageAffinity, github, skills, …) is edited
@@ -66,10 +69,16 @@ function OriginBadge({ origin }) {
   );
 }
 
-function Field({ label, children }) {
+// `right` (#1996) is an optional slot beside the label — used for the two "?"
+// affordances in the editor. Without it a PageHelpButton would have to sit inside
+// the field body, above the control it is explaining.
+function Field({ label, children, right }) {
   return (
     <div style={{ marginBottom: 'var(--eb-space-4)' }}>
-      <label style={labelStyle}>{label}</label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)' }}>
+        <label style={labelStyle}>{label}</label>
+        {right}
+      </div>
       {children}
     </div>
   );
@@ -89,6 +98,12 @@ function splitTemplate(t) {
 }
 
 function Editor({ initial, origin, onSaved, onClose }) {
+  // #1996: the editor is a shared SidePanel (backdrop 60 / panel 61) and now hosts
+  // two "?". Publishing an overlay subject is what lifts the help panel above that
+  // layer — this page had no useHelpSubject at all, which was harmless only while
+  // the panel hosted no affordance. The key claims no topic of its own; resolution
+  // falls through to `/role-templates`. Editor only mounts while the panel is open.
+  useHelpSubject({ overlay: OVERLAY_AGENT_TEMPLATE, active: true });
   const creating = origin === 'new';
   const split = initial ? splitTemplate(initial) : { form: {}, promptText: '', isTemplate: true, advancedJson: '{}' };
   const [form, setForm] = useState(split.form);
@@ -187,7 +202,17 @@ function Editor({ initial, origin, onSaved, onClose }) {
           <option value="pattern">pattern — scaffold role; excluded from the Team Setup "extra" slot</option>
         </select>
       </Field>
-      <Field label="Invocation mode">
+      <Field
+        label="Invocation mode"
+        right={(
+          <PageHelpButton
+            label="What per-invocation changes, and why it also marks the agent autonomous"
+            size={13}
+            style={{ padding: 0, flexShrink: 0 }}
+            section={ROLE_TEMPLATES_HELP_SECTIONS.invocation}
+          />
+        )}
+      >
         <select style={inputStyle} value={form.sessionPolicy || ''} onChange={e => setField('sessionPolicy', e.target.value)}>
           <option value="">(default: persistent)</option>
           <option value="persistent">persistent — triggered runs resume the last conversation</option>
@@ -212,7 +237,17 @@ function Editor({ initial, origin, onSaved, onClose }) {
         />
       </Field>
 
-      <Field label="Advanced (triggers, ports, github, skills, …) — raw JSON">
+      <Field
+        label="Advanced (triggers, ports, github, skills, …) — raw JSON"
+        right={(
+          <PageHelpButton
+            label="What belongs in the Advanced JSON, and how it merges with the fields above"
+            size={13}
+            style={{ padding: 0, flexShrink: 0 }}
+            section={ROLE_TEMPLATES_HELP_SECTIONS.advanced}
+          />
+        )}
+      >
         <textarea
           style={{ ...inputStyle, minHeight: 200, fontFamily: 'var(--eb-font-mono, monospace)', resize: 'vertical' }}
           value={advancedJson}
@@ -290,7 +325,12 @@ export default function RoleTemplates() {
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
       }}>
         <span>Reusable agent definitions the Team-Setup wizard and the Flow editor build agents from.</span>
-        <PageHelpButton label="What is an Agent Template?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="What is an Agent Template?"
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={ROLE_TEMPLATES_HELP_SECTIONS.page}
+        />
       </p>
 
       {actionError && (

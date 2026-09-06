@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../auth/AuthContext.jsx';
 import { useHelpSubject } from '../context/HelperChatContext.jsx';
 import PageHelpButton from './PageHelpButton.jsx';
+import { SETTINGS_HELP_SECTIONS } from './settings-help-sections.js';
 import { OVERLAY_SETTINGS } from '../context/page-help-view.js';
 import useTheme from '../hooks/useTheme.js';
 import { apiCall } from '../hooks/useApi.js';
@@ -116,8 +117,19 @@ export default function SettingsModal({ open, onClose, requestedSectionId = null
             <h3 style={paneTitleStyle}>{active.label}</h3>
             {/* Opens the Help panel on the Settings topic rather than the page
                 behind the dialog — the panel is lifted above the modal layer while
-                this overlay subject is published. */}
-            <PageHelpButton label="What these settings do" size={14} style={{ padding: 0 }} />
+                this overlay subject is published.
+
+                #1996: this single "?" lives inside the section pane, so it already
+                re-renders per section — deep-linking it by `active.id` gives the
+                ticket's "one ? per section" without a second affordance. A section
+                with no chapter in the registry resolves to '' and opens the topic
+                from the top, which is the same behaviour it had before. */}
+            <PageHelpButton
+              label={`What the ${active.label} settings do`}
+              size={14}
+              style={{ padding: 0 }}
+              section={SETTINGS_HELP_SECTIONS[active.id] || ''}
+            />
           </div>
           <p style={paneBlurbStyle}>{active.blurb}</p>
           {active.id === 'behavior' ? (

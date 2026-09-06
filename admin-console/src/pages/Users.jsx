@@ -4,6 +4,9 @@ import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import PageHelpButton from '../components/PageHelpButton';
+import { USERS_HELP_SECTIONS } from './users-help-sections.js';
+import { useHelpSubject } from '../context/HelperChatContext.jsx';
+import { OVERLAY_USER_EDIT, OVERLAY_USER_DELETE } from '../context/page-help-view.js';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
@@ -143,13 +146,33 @@ function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) 
     finally { setPwSaving(false); }
   }
 
+  // #1996: the edit panel is a shared SidePanel (backdrop 60 / panel 61) and now
+  // hosts a "?". Publishing an overlay subject is what lifts the help panel above
+  // that layer — without it it would open *behind* the panel it explains. The key
+  // claims no topic of its own; resolution falls through to `/users`. This
+  // component only mounts while the panel is open, so the subject is scoped to it.
+  useHelpSubject({ overlay: OVERLAY_USER_EDIT, active: true });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-5)' }}>
       <ErrorBar error={error} />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-        {/* Subject is the stable identity — shown for context but never editable (AC8). */}
-        <FormInput label="Subject (stable identity)" value={user.subject} onChange={() => {}} disabled />
+        {/* Subject is the stable identity — shown for context but never editable (AC8).
+            The "?" rides this row because the disabled field is the panel's most-asked
+            question ("why can I not change this?"), and the chapter it opens answers
+            that plus the panel's two independent halves. */}
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 'var(--eb-space-1)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <FormInput label="Subject (stable identity)" value={user.subject} onChange={() => {}} disabled />
+          </div>
+          <PageHelpButton
+            label="Why the Subject cannot be changed, and how the password section works"
+            size={13}
+            style={{ padding: 0, flexShrink: 0, marginBottom: 'var(--eb-space-2)' }}
+            section={USERS_HELP_SECTIONS.edit}
+          />
+        </div>
         <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={validation || undefined} />
         <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
         <SysAdminField checked={systemAdmin} onChange={setSystemAdmin} />
@@ -203,6 +226,41 @@ function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) 
         {pwMsg && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-success)' }}>{pwMsg}</span>}
       </div>
     </div>
+  );
+}
+
+/* ── Delete confirmation body (#1996) ─────────────────────────────────── */
+//
+// The confirmation's message is its own component for two reasons. A hook cannot
+// live inside a prop expression, and this body needs one: ConfirmDialog is the
+// shared Modal at z-index 9999, so without an overlay subject the help panel
+// (50) would open BEHIND the decision it is there to inform — the worst place
+// for it, given this is the page's only irreversible action. And because
+// ConfirmDialog renders null while closed, the subject is mounted exactly when
+// the dialog is, with no `active` flag to keep in step.
+//
+// The dialog's own sentence stays verbatim: it is point-of-decision copy. The
+// "?" is an addition beside it, opening the chapter that spells out what the
+// sentence summarises — the agents that get paused (which the sentence does not
+// mention), the personal-credential deletion, and that nothing checks whether
+// this is the last System Admin.
+function DeleteUserMessage({ target, warning }) {
+  useHelpSubject({ overlay: OVERLAY_USER_DELETE, active: true });
+  return (
+    <>
+      <p style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-1)' }}>
+        <span>
+          Delete "{target?.displayName || target?.subject}"? Their team memberships and personal credentials will be removed too.
+        </span>
+        <PageHelpButton
+          label="What deleting a user does to their agents and credentials"
+          size={13}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={USERS_HELP_SECTIONS.offboarding}
+        />
+      </p>
+      {warning && <p style={{ color: 'var(--eb-status-warning)' }}>{warning}</p>}
+    </>
   );
 }
 
@@ -316,7 +374,12 @@ export default function Users() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         {PAGE_DESCRIPTION}
-        <PageHelpButton label="What a user record is" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="What a user record is"
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={USERS_HELP_SECTIONS.page}
+        />
       </p>
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />
@@ -351,12 +414,7 @@ export default function Users() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete user"
-        message={
-          <>
-            <p>Delete "{deleteTarget?.displayName || deleteTarget?.subject}"? Their team memberships and personal credentials will be removed too.</p>
-            {deleteWarn && <p style={{ color: 'var(--eb-status-warning)' }}>{deleteWarn}</p>}
-          </>
-        }
+        message={<DeleteUserMessage target={deleteTarget} warning={deleteWarn} />}
         variant="danger" confirmLabel="Delete" busy={deleting}
         onConfirm={handleDelete} onCancel={() => setDeleteTarget(null)}
       />

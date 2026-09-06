@@ -399,7 +399,7 @@ over every context a topic claims *and* the no-route fallback, and asserted by `
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is the **no-route
 fallback** — the Overview topic plus its seven `seeAlso` neighbours — at **262,568 — 77.2% used,
 77,432 left**, where the all-topics fold it replaced stood at 322,243 (94.8%). It overtook
-`/flows` (259,253) on the #1996 child; the two had converged to within 18 chars on main, so the
+`/flows` (259,301) on the #1996 child; the two had converged to within 18 chars on main, so the
 crown was one edit away from moving regardless of which topic grew. Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,

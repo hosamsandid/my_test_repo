@@ -119,7 +119,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // **no-route fallback** (the Overview topic plus its seven `seeAlso`
 // neighbours) at 262 568 of 340 000 — 77.2% used, 77 432 left — against
 // 322 243 (94.8%) for the all-topics fold it replaced. #1996 is what moved the
-// crown off `/flows` (259 253, unchanged by that ticket): the two contexts had
+// crown off `/flows` (259 301, unchanged by that ticket): the two contexts had
 // converged to within 18 chars of each other on main, so widening any topic the
 // Overview links to was enough to overtake it. Re-measure rather than trust this
 // comment — measureWorstCaseSystemPrompt() sweeps both.

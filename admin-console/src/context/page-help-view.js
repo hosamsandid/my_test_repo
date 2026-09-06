@@ -91,6 +91,25 @@ export const CONTEXT_KEYS = {
   'modal:flow-node': { label: 'Flows · agent inspector' },
   'modal:flow-anomalies': { label: 'Flows · anomalies' },
   'modal:flow-improvements': { label: 'Flows · improvements' },
+  // The Plugins page's two confirm dialogs (#1986) — same story again, one layer
+  // higher: a ConfirmDialog is the shared Modal at z-index 9999, so a "?" inside
+  // one needs the lift to open beside the decision it explains rather than
+  // behind it. Neither claims a topic — resolution falls through to `/plugins`.
+  'modal:plugin-install': { label: 'Install plugin' },
+  'modal:plugin-uninstall': { label: 'Uninstall plugin' },
+  // The Model Providers create/edit form (#1988) — same story again: a shared
+  // `SidePanel` (z-index 60/61) hosting the auth-type, OAuth-box and probe "?"
+  // buttons that deep-link into the `/models` chapters, so without the lift the
+  // panel would open *behind* the form it explains. Named rather than counted,
+  // matching the `help-routes.js` mirror — a total in a comment is exactly what
+  // drifts. No topic of its own — resolution falls through to `/models`.
+  'modal:model-provider': { label: 'Model provider form' },
+  // The Working Environments page's create/edit form and its System-Admin
+  // toolchain registry (#1987) — same story again: no topic of their own,
+  // registered so their published subject is a known key and the panel lifts
+  // above them (both are z-index 60/61).
+  'modal:environment-form': { label: 'Working Environment form' },
+  'modal:toolchains': { label: 'Agent toolchains' },
   // The four small-page overlays (#1996) — same story once more: no topic of
   // their own (resolution falls through to `/teams`, `/users`,
   // `/role-templates`), registered so the panel lifts above the surface that
@@ -118,6 +137,11 @@ export const OVERLAY_FLOW_STAGES = 'modal:flow-stages';
 export const OVERLAY_FLOW_NODE = 'modal:flow-node';
 export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
 export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
+export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
+export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
+export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
+export const OVERLAY_ENVIRONMENT_FORM = 'modal:environment-form';
+export const OVERLAY_TOOLCHAINS = 'modal:toolchains';
 export const OVERLAY_TEAM_MANAGE = 'modal:team-manage';
 export const OVERLAY_USER_EDIT = 'modal:user-edit';
 export const OVERLAY_USER_DELETE = 'modal:user-delete';

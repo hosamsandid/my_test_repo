@@ -252,6 +252,31 @@ const TOPIC_CONTENT = [
     // standalone /plugin-system page, which the same ticket REMOVED outright
     // (concept §9) — so for the build-a-plugin material this topic is not just
     // the best home, it is the only one left in the product.
+    //
+    // #1986 (epic #1981) widened it into a per-surface reference. Chapters
+    // 1/3/5/7/8 are the deep-link targets of the five surfaces the ticket names
+    // (page header → 1, install dialog → 3 of its 2/3/4 span, uninstall dialog
+    // → 5, the team-assign control → 7, the deep-dive pointer → 8). Chapters
+    // 2/4/6 carry no "?" of their own: install-vs-grant and scope granularity
+    // are the story the header and the dialogs land next to, and the UI-bearing
+    // chapter has no surface on this page at all (a plugin's own pages are in
+    // the sidebar). All three stay separately addressable because the panel
+    // renders the WHOLE topic — they are one scroll from wherever a link lands.
+    //
+    // Open question 1, answered: the deep dive stays ONE chapter with `###`
+    // sub-headings rather than splitting into "how it works" + "how to build
+    // one". The ticket's own surface table names exactly one deep-dive
+    // affordance, so a split would leave a chapter no "?" could reach.
+    chapters: [
+      'What a plugin is',
+      'Install and grant are two different steps',
+      'Capabilities and the platform gate',
+      'Scope granularity and quota',
+      'What activating does — and what uninstalling undoes',
+      'Plugins with their own UI',
+      'Assigning a plugin to a team on this page',
+      'Deep dive: how a plugin works, and how to build one',
+    ],
     concepts: [
       'broker',
       'Install',
@@ -278,6 +303,14 @@ const TOPIC_CONTENT = [
       'broker unreachable',
       'submit → poll',
       'Broker SDK',
+      // #1986 additions. Each is a statement the PAGE cannot make for itself —
+      // a reword that loses one leaves a surface with a "?" that no longer
+      // answers the question it was put there for.
+      'uninstalling revokes nothing',
+      'Requests no host privileges',
+      'Team assignment',
+      'team scope only',
+      'Global UI',
     ],
   },
   {
@@ -288,6 +321,20 @@ const TOPIC_CONTENT = [
     // additional instructions), the shared-recipe-but-own-workspace point, the
     // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
     // Sync-all-agents caveat.
+    //
+    // #1987 (epic #1981) widened it into a per-surface reference: the seven
+    // areas below are each a chapter, and four of them are the landing target of
+    // a "?" on the matching surface, so the headings are load-bearing rather
+    // than decorative.
+    chapters: [
+      'What a Working Environment is',
+      'Repositories',
+      'Credentials',
+      'MCP server references',
+      'Model provider binding',
+      'Additional context',
+      'Toolchains',
+    ],
     concepts: [
       'reusable workspace recipe',
       'own isolated workspace',
@@ -302,6 +349,26 @@ const TOPIC_CONTENT = [
       'Read-only',
       'newly created agents',
       'Sync all agents',
+      // #1987 additions. The first is a CORRECTION of the page, guarded here
+      // because the form's own hint said the opposite: prompt-assembly.js writes
+      // the environment name AND description into the agent's CLAUDE.md, so the
+      // description is not console-only.
+      'read by the agent',
+      // The form has no MCP picker at all — E9 (#1989) flagged it from the MCP
+      // side; a "?" on THIS page must not imply a control that does not exist.
+      'form has no MCP picker',
+      // What an environment edit does and does not reach — the page's most
+      // surprising behaviour, and the reason the Sync action exists.
+      'What an edit reaches',
+      'recreates its running agents',
+      'never re-clones',
+      // Two honest limits of surfaces that look stricter than they are.
+      'advice, not a gate',
+      'an instruction, not a file permission',
+      'refuses the clone',
+      // The toolchain half: the panel, and the pin-file-not-image story.
+      'Toolchains panel',
+      'version manager',
     ],
   },
   {
@@ -376,6 +443,27 @@ const TOPIC_CONTENT = [
       'Health',
       'when it starts',
       'detach it there first',
+      // #1988 widened the topic into a per-surface reference. These are the
+      // claims the new chapters add that the page no longer states anywhere:
+      // what a probe's credential line is *for*, and that `Unknown` is an
+      // honest never-measured status rather than a warning.
+      'names the credential it used',
+      'honest, not a warning',
+      'signal, not a gate',
+    ],
+    // #1988: chapters 1–5 are the landing targets of this page's five "?"
+    // buttons (the auth-type one follows the selection, so it addresses 2 or 3).
+    // Chapter 6 carries no "?" of its own — the restart-agents dialog and the
+    // delete refusal already state their own rules at the point of decision, and
+    // the panel renders the whole topic, so it is one scroll from wherever a
+    // deep link lands.
+    chapters: [
+      'What a Model Provider is',
+      'API key / proxy authentication',
+      'Anthropic subscription authentication',
+      'Test connection and Discover models',
+      'Health: the poller and the Health column',
+      'Changing credentials and deleting',
     ],
   },
   {

@@ -13,7 +13,10 @@ import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
+import { ENVIRONMENTS_HELP_SECTIONS } from './environments-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_ENVIRONMENT_FORM, OVERLAY_TOOLCHAINS } from '../context/page-help-view.js';
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',
@@ -244,6 +247,12 @@ function initialRepositories(initial) {
 }
 
 function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
+  // Rendered only while the side panel is slid out, so the subject needs no
+  // `active` flag. Registering it is what lifts the help panel above this
+  // SidePanel (z-index 60/61) — without it the three "?" below would open help
+  // *behind* the form they explain (#1987, same reason as the MCP/Skills panels).
+  useHelpSubject({ overlay: OVERLAY_ENVIRONMENT_FORM });
+
   const [form, setForm] = useState(() => ({
     id: initial?.id || '',
     name: initial?.name || '',
@@ -433,8 +442,14 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           rows={2}
           style={{ ...inputStyle, resize: 'vertical' }}
         />
+        {/* Correction (#1987): this used to say "not passed to the agent",
+            which is the opposite of what happens — prompt-assembly.js writes
+            both the environment name and its description into the agent's
+            CLAUDE.md, right above the repository list. A reader who trusted the
+            old sentence could put a private note here. */}
         <div style={helpTextStyle}>
-          Optional. Shown only in this console — not passed to the agent.
+          Optional. Shown in this console — and written into the agent's CLAUDE.md next to the
+          environment name, so keep anything private out of it.
         </div>
       </div>
 
@@ -457,6 +472,15 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             ({form.repositories.length})
           </span>
+          {/* Chapter 2: cloned at creation, the branch, read-only, a repo-less
+              environment — and why an added repository does not reach an agent
+              that already exists. The per-field hints below stay put. */}
+          <PageHelpButton
+            label="About repositories in a Working Environment"
+            size={14}
+            style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
+            section={ENVIRONMENTS_HELP_SECTIONS.repositories}
+          />
         </div>
 
         <div style={helpTextStyle}>
@@ -499,6 +523,19 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
 
         {isEdit && initial?.id && form.repositories.length > 0 && (initial.agents || []).length > 0 && (
           <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px dashed var(--eb-border-default)' }}>
+            {/* The Sync action's own sub-section inside chapter 2 — what it
+                clones, what it deliberately leaves alone, and which agents it
+                reaches. Mounted here rather than inside SyncReposPanel: that
+                component is shared with the agent settings form, where
+                openHelpFor() would resolve against a different route. */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'calc(-1 * var(--eb-space-1))' }}>
+              <PageHelpButton
+                label="What Sync all agents does"
+                size={14}
+                style={{ padding: 0 }}
+                section={ENVIRONMENTS_HELP_SECTIONS.sync}
+              />
+            </div>
             <SyncReposPanel
               endpoint={`/api/environments/${encodeURIComponent(initial.id)}/sync-agents`}
               actionLabel="Sync all agents"
@@ -523,6 +560,16 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             (optional)
           </span>
+          {/* Chapter 3. The credentials chapter answers the question this
+              select raises — an SSH URL needs a key on its repository row, an
+              HTTPS URL needs THIS token — plus what changing it does to the
+              agents already running. */}
+          <PageHelpButton
+            label="SSH key or GitHub token?"
+            size={14}
+            style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
+            section={ENVIRONMENTS_HELP_SECTIONS.credentials}
+          />
         </div>
         <div style={helpTextStyle}>
           A GitHub personal access token that allows agents to interact with the GitHub API — for example to open pull requests, create issues, or push via HTTPS.
@@ -738,6 +785,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
 // button is hidden for a Team Admin AND the route answers 403, so hiding it is
 // convenience, not the control.
 function ToolchainRegistryPanel({ data, onChanged }) {
+  // Rendered only while its side panel is open, so no `active` flag — and the
+  // lift is what keeps the help panel in front of the panel it explains (#1987).
+  useHelpSubject({ overlay: OVERLAY_TOOLCHAINS });
+
   const [form, setForm] = useState({ id: '', name: '', image: '', description: '', platforms: ['podman', 'kubernetes'] });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -796,6 +847,19 @@ function ToolchainRegistryPanel({ data, onChanged }) {
           background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
         }}>{err}</div>
       )}
+
+      {/* Chapter 7: why the image is a list and not a text field, the two doors
+          onto the registry, what changing a selection does to running agents,
+          and the refuse-rather-than-degrade rule. The per-field hints below
+          (the image tag, the platforms) stay at the decision. */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'calc(-1 * var(--eb-space-3))' }}>
+        <PageHelpButton
+          label="About agent toolchains"
+          size={14}
+          style={{ padding: 0 }}
+          section={ENVIRONMENTS_HELP_SECTIONS.toolchains}
+        />
+      </div>
 
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         A toolchain is a container image derived from the default agent image, adding one language
@@ -1105,7 +1169,12 @@ export default function WorkingEnvironments() {
           (api/helper-chat/help-topics/environments.md, #1880), together with the
           SSH-vs-token rule, read-only repositories and the
           repositories-are-cloned-once / Sync-all-agents caveat. Per-field help
-          inside the form stays where the decision is made. */}
+          inside the form stays where the decision is made.
+
+          #1987 widened that topic into seven chapters and pointed each surface
+          at its own one: this button opens chapter 1, and the repositories
+          area, the token select, the Sync action and the Toolchains panel each
+          carry their own "?" (see environments-help-sections.js). */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -1115,7 +1184,12 @@ export default function WorkingEnvironments() {
           A reusable workspace recipe — the repositories, credentials, model provider and extra
           context every agent created from it inherits.
         </span>
-        <PageHelpButton label="What is a Working Environment?" size={14} style={{ padding: 0, flexShrink: 0 }} />
+        <PageHelpButton
+          label="What is a Working Environment?"
+          size={14}
+          style={{ padding: 0, flexShrink: 0 }}
+          section={ENVIRONMENTS_HELP_SECTIONS.whatIs}
+        />
       </p>
 
       {actionError && (

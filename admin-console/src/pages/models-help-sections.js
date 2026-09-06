@@ -31,6 +31,14 @@ export const MODELS_HELP_SECTIONS = {
   probes: 'test-connection-and-discover-models',
   // 5 — the background poller and the Health column
   health: 'health-the-poller-and-the-health-column',
+  // 6 — rotating a credential, the restart-agents dialog, the delete refusal.
+  // Carries NO "?" on purpose: the restart dialog and the delete refusal state
+  // their own rules at the point of decision, and the panel renders the whole
+  // topic anyway. Exported regardless so the chapter stays addressable and the
+  // page-side guard covers its heading — the same call mcp-help-sections.js
+  // (#1989) and credentials-help-sections.js (#1993) make for their own
+  // affordance-less chapters.
+  changingAndDeleting: 'changing-credentials-and-deleting',
 };
 
 export default MODELS_HELP_SECTIONS;

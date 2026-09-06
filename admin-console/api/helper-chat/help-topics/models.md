@@ -33,8 +33,10 @@ gateway.
 The table on this page is that list of providers, one row each: its **ID** and
 **Name**, the **Scope / Teams** that owns it (a *Team* provider belongs to one
 team; a *System* provider is assigned to the teams listed beside it, or reads
-*Unassigned*), the **Base URL** — replaced by a *Subscription (OAuth)* badge for
-a provider that has none — a preview and fingerprint under **Token**, how many
+*Unassigned*), the **Base URL** — replaced by a *Subscription (OAuth)* badge
+when the provider uses subscription auth, which is also why it has no URL to
+show — a short preview under **Token** (the full fingerprint is in the
+provider's own editor), how many
 **Models** the catalog holds and which one is the default, the **Health** of the
 endpoint, and when it was **Added**. Click any row you can manage to open its
 editor.
@@ -81,10 +83,17 @@ Two properties worth knowing:
   by the API after creation — the page shows a short preview and a fingerprint so
   you can tell two tokens apart, and you can replace it, but you can never read
   it back.
-- **The token is optional.** An endpoint saved without one is probed and used
-  *unauthenticated*, which is a legitimate setup for a proxy that authenticates
-  by network position. The form says so when it applies rather than pretending
-  the field is required.
+- **The token is optional, but "no token" does not mean "no credential".** An
+  endpoint saved without one is *probed* unauthenticated — **Test connection**
+  and **Discover models** send no `Authorization` header, which is a legitimate
+  setup for a proxy that authenticates by network position, and the form says so
+  rather than pretending the field is required. A **running agent is a different
+  story**: the agent container inherits the platform's own
+  `ANTHROPIC_AUTH_TOKEN` from the stack's `.env`, and a provider without a token
+  of its own only overrides the *Base URL*. So the agent still sends a
+  credential — the platform-wide one — to whatever endpoint you named. Only
+  subscription auth clears those inherited variables. Worth knowing before you
+  point a tokenless provider at a third party: it will receive the shared token.
 
 A legacy provider saved before this choice existed behaves exactly like
 `api-key`.
@@ -133,8 +142,8 @@ who confirmed it and when on the provider entry. Consequences worth knowing:
 
 Both buttons probe the provider *before* you commit to it, from the values
 currently in the form. Both send the same request — a `GET` of the endpoint's
-**`/models`** route (for a subscription provider, of `api.anthropic.com`, since
-there is no Base URL to ask) — and differ in what they do with the answer:
+**`/v1/models`** route (for a subscription provider, of `api.anthropic.com`,
+since there is no Base URL to ask) — and differ in what they do with the answer:
 
 - **Test connection** reports the HTTP result and nothing else. It is the fastest
   way to separate "wrong URL" from "wrong token", and it works even against an
@@ -155,10 +164,13 @@ was. There are three cases:
 | the **stored** token | the one already on file for this provider | the saved credential has gone stale — re-key it |
 | **no** token | nothing — the probe runs unauthenticated | fine for a proxy that authenticates by network position; a `401` here means it does not |
 
-The probe is also blocked outright in the states where it would be misleading:
-while a subscription login is pending (see above), and for an `api-key` provider
-with no Base URL to probe. The line then says why rather than leaving a dead
-button.
+The probe is also blocked outright in the three states where it would be
+misleading: while a subscription login is pending (see above); for a
+subscription provider that has **no token at all** — the state a fresh create
+sits in from the moment you pick *Anthropic subscription* until you either log
+in or paste one, where there is simply nothing to send; and for an `api-key`
+provider with no Base URL to probe. The line then says why rather than leaving a
+dead button.
 
 ## Health: the poller and the Health column
 

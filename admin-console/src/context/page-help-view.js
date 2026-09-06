@@ -81,9 +81,11 @@ export const CONTEXT_KEYS = {
   'modal:mcp-server': { label: 'New MCP server' },
   'modal:mcp-credential': { label: 'New MCP credential' },
   // The Model Providers create/edit form (#1988) — same story again: a shared
-  // `SidePanel` (z-index 60/61) hosting three of this page's four deep-linked
-  // "?" buttons, so without the lift the panel would open *behind* the form it
-  // explains. No topic of its own — resolution falls through to `/models`.
+  // `SidePanel` (z-index 60/61) hosting the auth-type, OAuth-box and probe "?"
+  // buttons that deep-link into the `/models` chapters, so without the lift the
+  // panel would open *behind* the form it explains. Named rather than counted,
+  // matching the `help-routes.js` mirror — a total in a comment is exactly what
+  // drifts. No topic of its own — resolution falls through to `/models`.
   'modal:model-provider': { label: 'Model provider form' },
 };
 

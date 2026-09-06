@@ -4,7 +4,6 @@ routes: ["/flows"]
 title: Flows
 summary: Design and run flow graphs — teams of agents wired together so work hands off automatically through outcomes, labels and human gates.
 seeAlso:
-  - { label: "Agents", to: "/agents" }
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Create something new", to: "/create" }
   - { label: "Agent Team Wizard", to: "/team-setup" }

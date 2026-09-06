@@ -4,7 +4,6 @@ routes: []
 title: Welcome to Agent Studio
 summary: A quick tour of the core concepts — the home base of the Help panel.
 seeAlso:
-  - { label: "Agents", to: "/agents" }
   - { label: "Access", to: "/teams" }
   - { label: "Flows", to: "/flows" }
   - { label: "Working Environments", to: "/environments" }

@@ -4,7 +4,6 @@ routes: ["/knowledge"]
 title: Knowledge
 summary: Watch what your agents learn become shared team knowledge — and decide how much of it turns into reusable skills on its own.
 seeAlso:
-  - { label: "Agents", to: "/agents" }
   - { label: "Skills", to: "/skills" }
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Agent Team Wizard", to: "/team-setup" }

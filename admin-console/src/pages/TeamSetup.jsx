@@ -930,7 +930,8 @@ export default function TeamSetup() {
   }
 
   // Land on the Business Analyst chat when it was created, else the first
-  // created agent. Falls through to /agents if nothing was created.
+  // created agent. Falls through to /chats if nothing was created (it was
+  // /agents until #1930 removed that page).
   function landingAgent(created) {
     const ba = (created || []).find(id => id.endsWith('-business-analyst'));
     return ba || (created || [])[0] || null;
@@ -967,7 +968,7 @@ export default function TeamSetup() {
     const land = landingAgent(result?.created);
     setTimeout(() => {
       if (land) navigate(`/chats/${land}`);
-      else navigate('/agents');
+      else navigate('/chats');
     }, 1500);
   }
 

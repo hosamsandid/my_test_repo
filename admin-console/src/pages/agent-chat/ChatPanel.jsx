@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2 } from 'lucide-react';
-import { Link } from 'react-router';
 import { apiCall } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
@@ -1258,7 +1257,7 @@ export default function ChatPanel({
           color: 'var(--eb-text-primary)',
           flexShrink: 0,
         }}>
-          This agent is disabled. Enable it in <Link to="/agents" style={{ color: 'var(--eb-accent-primary)' }}>Agents</Link> to chat.
+          This agent is disabled. Enable it from its row's menu in the agent list to chat — turn on <b>show disabled agents</b> there if you cannot see it.
         </div>
       )}
 

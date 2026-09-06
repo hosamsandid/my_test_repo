@@ -5,7 +5,7 @@ title: Model Providers
 summary: The LLM endpoints Agent Studio routes model traffic to — each with a URL, a credential and a catalog of models your agents can pick from.
 seeAlso:
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Token Usage", to: "/token-usage" }
 askPrompts:
   - "What is the difference between API key / proxy and Anthropic subscription auth?"

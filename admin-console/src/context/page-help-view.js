@@ -21,9 +21,13 @@ export const ALIASES = {
 // Redirect sources → their destination (App.jsx <Navigate to=…>). `/getting-started`
 // is one since G1 (#1874) retired the page — an old bookmark lands on the app home,
 // whose topic-less route resolves to the Overview that now carries its content.
+// `/agents` joined them in #1930, and took `/blueprints` with it — that alias
+// used to point AT `/agents`. Both resolve to the Agent Chat topic, which
+// absorbed the removed page's content.
 export const REDIRECTS = {
   '/': '/chats',
-  '/blueprints': '/agents',
+  '/agents': '/chats',
+  '/blueprints': '/chats',
   '/briefings': '/flows',
   '/getting-started': '/chats',
   '/process': '/flows',

@@ -66,10 +66,10 @@ test('the page-help topics are folded into the grounding prompt (#1872 single so
 test('a currentRoute with a topic adds a page-grounding pointer', () => {
   // The Overview topic has no route, so use a label + route pair that resolves
   // to nothing → no pointer; and confirm the label sentence is independent.
-  const withLabel = buildSystemPrompt('Agents', '/agents');
-  assert.ok(withLabel.includes('currently on the **Agents** page'));
+  const withLabel = buildSystemPrompt('Skills', '/skills');
+  assert.ok(withLabel.includes('currently on the **Skills** page'));
   // No route argument → no page-topic pointer sentence.
-  assert.ok(!buildSystemPrompt('Agents').includes('maps to the help topic'));
+  assert.ok(!buildSystemPrompt('Skills').includes('maps to the help topic'));
 });
 
 test('measured system prompt is below the char limit', () => {
@@ -103,12 +103,13 @@ test('the WORST assembled prompt the mechanism can produce is below the char lim
 });
 
 test('a route with a topic grounds on that topic and its seeAlso neighbours only', () => {
-  // /models links to /environments, /agents and /token-usage — and to nothing
-  // else, so the unrelated topics must be absent (AC1).
+  // /models links to /environments, /chats and /token-usage — and to nothing
+  // else, so the unrelated topics must be absent (AC1). The middle link was
+  // /agents until #1930 removed that page and its topic.
   const prompt = buildSystemPrompt('Model Providers', '/models');
   const registry = helpRegistry.loadRegistry();
   const included = helpRegistry.contextTopics(registry, '/models').map(t => t.id);
-  assert.deepEqual(included, ['models', 'environments', 'agents', 'token-usage']);
+  assert.deepEqual(included, ['models', 'environments', 'agent-chat', 'token-usage']);
   // Assert inside the help-topics block: a topic *title* can legitimately also be
   // a heading in the docs corpus (which is unchanged and always folded in full),
   // so scanning the whole prompt would report a false presence.
@@ -164,7 +165,7 @@ test('one more page topic of typical size does not move the worst case by its si
     routes: ['/synthetic-new-page'],
     title: 'A New Page',
     summary: 'A new page of typical topic size.',
-    seeAlso: [{ label: 'Agents', to: '/agents' }],
+    seeAlso: [{ label: 'Agent Chat', to: '/chats' }],
     askPrompts: ['What is this?'],
     actions: [],
     body: 'x'.repeat(10_000),

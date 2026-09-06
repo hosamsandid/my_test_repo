@@ -20,7 +20,6 @@ export const APP_NAME = 'Agent Studio';
 // nav. Keep this in step with the sidebar when a route is renamed or added.
 export const ROUTE_TITLES = {
   '/chats': 'Agent Chat',
-  '/agents': 'Agents',
   '/flows': 'Flows',
   '/role-templates': 'Agent Templates',
   '/skills': 'Skills',

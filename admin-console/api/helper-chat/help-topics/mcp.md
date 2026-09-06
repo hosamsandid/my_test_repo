@@ -5,7 +5,7 @@ title: MCP Servers
 summary: A catalog of Model Context Protocol backends, a separate store for their secrets, and a Working Environment that pairs the two — substituted into each agent's own config at seed time.
 seeAlso:
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Plugins", to: "/plugins" }
 askPrompts:

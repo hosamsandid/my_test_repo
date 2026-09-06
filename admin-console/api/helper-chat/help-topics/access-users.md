@@ -5,7 +5,7 @@ title: Access
 summary: Human access scopes — internally called Teams — are the tenants that own your agents, environments and credentials, plus the people who may see and manage them.
 seeAlso:
   - { label: "Users", to: "/users" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Working Environments", to: "/environments" }
   - { label: "My Credentials", to: "/my-credentials" }
 askPrompts:

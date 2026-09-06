@@ -6,8 +6,9 @@ summary: The page where you talk to an agent — the agent list, the chat header
 seeAlso:
   - { label: "Flows", to: "/flows" }
   - { label: "Knowledge", to: "/knowledge" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Create something new", to: "/create" }
   - { label: "Working Environments", to: "/environments" }
+  - { label: "Access", to: "/teams" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "What is the difference between a loop trigger and a cron trigger?"
@@ -17,6 +18,12 @@ askPrompts:
   - "What exactly happens when I retire a learning?"
   - "Why does switching the model provider restart the agent?"
   - "How do I point the agent at a file in its workspace?"
+  - "What is the difference between an Agent Team and a Team on the Access page?"
+  - "What is the difference between Disable, Reset to stub and Delete?"
+  - "Why does one of my agents show as not initialised?"
+  - "Where did the Agents page go?"
+  - "Where did the orphaned-agents list go?"
+  - "Where do an agent's skills, prompt and plugins come from?"
 ---
 
 This page has four areas, and each of them has a **?** that opens this help at
@@ -40,6 +47,30 @@ agent is busy you can still type; your message waits its turn.
 Everything on this page is scoped to the agent you have selected. Switching
 agents switches the room, the workspace, the triggers, the outcomes — the page
 keeps its shape, the contents all change.
+
+## The agent roles
+
+An **Agent** is a **long-running Claude Code instance** with its own workspace
+and session history. There are three roles, and the one an agent has decides
+where its prompt and skills come from:
+
+| Role | What it is | When to use it |
+|---|---|---|
+| **Agent** (standalone) | A single chat agent with its own system prompt. The prompt shapes its persona — a COBOL specialist, a code-review buddy, a release manager. Add cron / GitHub triggers later to make it run autonomously as well as answer messages. | One-of-a-kind agents that act on their own. |
+| **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and Working Environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
+| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation and shown read-only. | You do not pick this role — it is assigned when you add a member to a team. |
+
+> An **Agent Team** is *not* the same thing as a **Team** on the **Access**
+> page. That Team is the human tenant / **access scope** every agent,
+> environment and credential belongs to; an Agent Team is a squad of agents.
+
+**The three states a row can be in.** *Active* — running and ready to chat.
+*Paused* — the workspace is kept, the process is stopped (this is what **Disable**
+produces). *Not initialised* — a **stub**: it has its configuration and triggers,
+but no workspace, no cloned repository and no running process. You get a stub
+from a team materialized with **Materialize agents now** left off, or from a
+member added later with **Materialize now** unticked. **Materialize** in the
+team's *Not materialized yet* section brings it to life.
 
 ## The agent list
 
@@ -114,7 +145,7 @@ bottom of their team group under a collapsed **Not materialized yet (N)**
 section; the count is on the header, so you can see how many are waiting without
 opening it. A stub row is marked **Not initialised** and cannot be opened as a
 chat, because there is no chat account to open yet. Its menu offers
-**Materialize**, which is the same operation as *Activate* on the Agents page:
+**Materialize**, which is the operation the removed Agents page called *Activate*:
 it creates the chat account, seeds the workspace with the agent's skills, prompt
 and MCP configuration, clones the environment's repositories and starts the
 agent. Expect it to take a moment when repositories are involved — the row shows
@@ -411,10 +442,11 @@ validity window on the Knowledge page records *why* it stopped applying instead.
 
 ## Settings — configuring the agent
 
-The **Settings** tab is the agent's own edit form, the same one the Agents page
-shows — name, role, system prompt, Working Environment, skills, plugin grants,
-host context folders. Saving goes through the same call, so the two surfaces can
-never drift into two different forms.
+The **Settings** tab is the agent's own edit form — name, role, system prompt,
+Working Environment, skills, plugin grants, host context folders. It is the only
+place an existing agent is configured: the Agents page that used to host a second
+copy of this form was removed once the tab covered it (see *Where the Agents page
+went* below).
 
 Three things behave differently from an ordinary form:
 
@@ -429,3 +461,75 @@ Three things behave differently from an ordinary form:
   agent — which is how a *team*'s settings, or a *disabled* agent's, are
   reachable at all. It is hidden entirely when you may not manage the agent, so
   the tab is never a control the server would refuse.
+
+### What the form fields control
+
+- **System Prompt** — the persona Claude reads at startup: role, expertise,
+  communication style, constraints. Markdown is fine. On an **Agent Team** it is
+  a *template* stored once and reused by every member that inherits it; leave it
+  blank to give members an empty default and set a prompt per member instead.
+- **Skills** — copied into the agent's workspace at seed time. A team's skill
+  set is copied into every member's workspace and members inherit it unless they
+  set their own override. On the create form only global-pool skills are offered;
+  team-tier skills become available once the agent belongs to a team.
+- **Working Environment** — where the agent runs, which repositories it clones
+  and which credentials it uses.
+- **Plugins** — governed capabilities beyond the container, reached through a
+  broker that holds the privilege so the agent never does. Changes apply
+  immediately, with no save and no restart. On a team agent the grant covers the
+  whole squad; setting it on a member creates a per-member override.
+- **Host context folders** — expose folders from the host machine to the agent as
+  live context, mounted **read-only** by default; tick read-write to let the
+  agent change files on the host. Saving re-provisions the agent's container.
+  Offered only on the local / self-hosted stack.
+
+## Where the Agents page went
+
+There used to be a separate **Agents** page for managing the agents you already
+had. Everything it did is on this page now, so it was removed rather than kept
+as a second way to do the same things — two surfaces for one job is how they
+drift apart. Old `/agents` links land here.
+
+| What it offered | Where it is now |
+|---|---|
+| Team, standalone and member cards | the **agent list**, grouped the same way |
+| A card's **Clone** / **Export (ZIP)** / **Save as template** icons | the row's context menu, same three entries |
+| The edit side panel | the **Settings** tab |
+| **New Agent** / **Import Agent** | this page's header, top right |
+| Stub visibility and **Activate** | *Not materialized yet*, where it is **Materialize** |
+| **Add Member** | **Add member…** on the team's group header, now with the *Materialize now* choice |
+| **Orphaned agents** | nothing — see below |
+| **Add `<role>` role** | nothing — see below |
+| Orchestrator cards, missions and Sync | nothing — the BriefingPack model itself was removed |
+
+Two things were **not** re-homed, deliberately:
+
+**The "Orphaned agents" list.** An **orphan** was a member whose parent team no
+longer existed. The page listed them in a warning block because otherwise they
+were invisible and the only way to remove one was over SSH. That block was a
+safety net for a bug, not a feature: orphans existed because deleting a team did
+not reliably take its members with it. The cause is fixed — a team delete now
+**takes its members with it**, materialized members and *not-initialised* stubs
+alike, and a member that could **not** be removed (a busy container, a Matrix
+user that would not deactivate) is named in the result instead of being silently
+dropped. So there is nothing left for the list to show, and there is
+**no replacement surface** anywhere. An orphan is not a working agent, which is why
+the cleanup deletes rather than adopts: a member's prompt, skills and plugins are
+all inherited from the team, so once the team is gone what remains cannot run as
+intended. If an installation still carries orphans from before the fix, a
+**System Admin** clears them with a one-off cleanup: `GET /api/agents/orphans`
+lists exactly what would be removed and changes nothing,
+`POST /api/agents/orphans/cleanup` removes them. It is **idempotent**, so running
+it twice is harmless, and it is operator-invoked rather than automatic — this
+platform does not delete agents without an explicit decision.
+
+**The "Add `<role>` role" suggestion.** The platform used to guess which
+loop-closing role a team was missing, by comparing the team against the process
+templates, and offer a one-click add. The guess rested on an inference — a team
+never records which template it came from — so it stayed silent on many teams
+that really did have a gap, and where it did fire it called a role "missing"
+that the team may have dropped on purpose. A suggestion you cannot check is
+worse than none, so it is gone rather than re-homed. Grow a team with **Add
+member…** above, and read the real gaps off the **Flow editor**, where an
+unconsumed label or an idle gate is visible instead of inferred. Roles added
+through the old button are unaffected and keep working.

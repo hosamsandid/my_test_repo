@@ -70,15 +70,15 @@
       "example": "- assert:\n    do: agents.expectMembersRunning\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
     },
     {
-      "name": "agents.expectTeamCard",
+      "name": "agents.expectTeamInRail",
       "module": "agents",
-      "description": "UI: the team card and every member row are present on the Agents page. Member ids follow `<teamId>-<roleId>` and are unique text, so we assert on them directly (the team card is expanded by default).",
+      "description": "UI: the team's group header and every member row are present in the Agent Chat left rail (`/chats`) — the surface that replaced the Agents page's team card in #1930.",
       "params": [
         {
           "name": "teamId",
           "required": true,
           "type": "string",
-          "description": "Team slug id shown on the team card."
+          "description": "Team slug id rendered as the rail's group header."
         },
         {
           "name": "roleIds",
@@ -93,7 +93,7 @@
           "description": "Explicit member ids (alternative to roleIds)."
         }
       ],
-      "example": "- assert:\n    do: agents.expectTeamCard\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
+      "example": "- assert:\n    do: agents.expectTeamInRail\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
     },
     {
       "name": "chat.ensureDmRoom",
@@ -2263,7 +2263,7 @@
     {
       "name": "wizard.submitAndCaptureProgress",
       "module": "wizard",
-      "description": "Review step: submit and capture the NDJSON progress stream the wizard renders. Returns the parsed event list (plan/step/complete) so the spec can assert the per-step progress, and waits for the wizard to consume `complete` (it redirects to the BA chat, or /agents).",
+      "description": "Review step: submit and capture the NDJSON progress stream the wizard renders. Returns the parsed event list (plan/step/complete) so the spec can assert the per-step progress, and waits for the wizard to consume `complete` (it redirects to the BA chat, or /chats).",
       "params": [],
       "example": "- action:\n    do: wizard.submitAndCaptureProgress"
     }

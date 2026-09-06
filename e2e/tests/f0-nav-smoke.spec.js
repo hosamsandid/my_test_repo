@@ -20,7 +20,9 @@ const NAV_PAGES = [
   // Wizard sidebar entries (AC8/AC10). Those pages stay reachable via /quickstart
   // and /team-setup deep links and as launcher targets.
   { label: 'Create',               breadcrumb: 'Create' },
-  { label: 'Agents',               breadcrumb: 'Agents' },
+  // No 'Agents' entry: #1930 removed the page and its sidebar entry entirely
+  // (/agents now redirects to /chats). Agent management lives in the Agent Chat
+  // left rail.
   { label: 'Flows',                breadcrumb: 'Flows' },
   { label: 'Knowledge',            breadcrumb: 'Knowledge' },
   { label: 'SSH Keys',             breadcrumb: 'SSH Keys' },

@@ -8,7 +8,7 @@ seeAlso:
   - { label: "GitHub Tokens", to: "/github-tokens" }
   - { label: "MCP Servers", to: "/mcp" }
   - { label: "Model Providers", to: "/models" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
 askPrompts:
   - "What does an agent inherit from its Working Environment?"
   - "When are the repositories cloned into an agent's workspace?"

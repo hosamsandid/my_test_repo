@@ -219,7 +219,7 @@ async function expectReviewStep(ctx, { teamName, teamId }) {
  * Review step: submit and capture the NDJSON progress stream the wizard renders.
  * Returns the parsed event list (plan/step/complete) so the spec can assert the
  * per-step progress, and waits for the wizard to consume `complete` (it redirects
- * to the BA chat, or /agents).
+ * to the BA chat, or /chats).
  *
  * @example
  * - action:
@@ -256,9 +256,10 @@ async function submitAndCaptureProgress(ctx) {
     // `plan` and `complete` in one React batch, so the transient "Materializing
     // team…" progress card may never paint — we assert on the durable outcome
     // instead: the wizard consumes `complete` and navigates away ~1.5s later, to
-    // the BA chat (else /agents). The NDJSON assertions verify every per-step
-    // transition the card would have shown.
-    await page.waitForURL(/\/(chats\/.*business-analyst|agents)\b/, { timeout: 60_000 });
+    // the BA chat (else /chats — the fallback was /agents until #1930 removed
+    // that page). The NDJSON assertions verify every per-step transition the
+    // card would have shown.
+    await page.waitForURL(/\/chats(\/.*business-analyst)?$/, { timeout: 60_000 });
   } finally {
     await page.unroute(STREAM_GLOB);
   }

@@ -23,40 +23,13 @@ const { KNOWN_ROUTE_PATHS, isKnownHelpKey } = require('./help-routes');
 // rendered topic text (front-matter summary + body). Deliberately phrased as
 // short, stable fragments — a reword is fine, dropping the concept is not.
 const TOPIC_CONTENT = [
-  {
-    id: 'agents',
-    routes: ['/agents'],
-    // #1875 lifted these from the Agents page: the "what is an agent" box, the
-    // role catalogue (incl. the Agent-Team-vs-Team warning), the lifecycle
-    // states, and the Disable / Reset-to-stub / Delete distinction.
-    concepts: [
-      'long-running Claude Code instance',
-      'Agent Chat',
-      'Agent Team',
-      'Team Member',
-      'Orchestrator',
-      'BriefingPack',
-      'access scope',
-      'Active',
-      'paused',
-      'not initialised',
-      'Disable',
-      'Reset to stub',
-      'Delete',
-      'System Prompt',
-      'Skills',
-      'Plugins',
-      'Host context folders',
-      // #1960: the members' half of the orphan block is gone, and the topic is
-      // where that decision (and its reason) is recorded, so the Helper Chat can
-      // answer "where did the orphaned-agents list go?".
-      'Orphaned agents',
-      'takes its members with it',
-      'no replacement surface',
-      '/api/agents/orphans',
-      'idempotent',
-    ],
-  },
+  // The `agents` topic (`/agents`) was retired with the page in #1930. Its
+  // concepts were NOT retired — every one of them describes a surface that
+  // still exists, just in Agent Chat — so they moved into the `agent-chat`
+  // entry below rather than being deleted here. Two did not travel:
+  // `Orchestrator` and `BriefingPack`, because #1961 removed that model
+  // outright; carrying them forward would have pinned the topic to prose about
+  // a role the console can no longer create.
   {
     id: 'flows',
     routes: ['/flows'],
@@ -842,8 +815,13 @@ const TOPIC_CONTENT = [
     // and each chapter is the landing target of a "?" on that surface. The
     // `chapters` list below is therefore load-bearing, not decorative — the
     // heading is what the deep-link resolves against.
+    //
+    // #1930 removed the Agents page and folded its topic in here, adding two
+    // chapters: the role catalogue and lifecycle states the page owned, and the
+    // where-did-it-go table that answers for the page itself.
     chapters: [
       'What the Agent Chat page is',
+      'The agent roles',
       'The agent list',
       'The chat header',
       'The message composer',
@@ -852,6 +830,7 @@ const TOPIC_CONTENT = [
       'Outcomes — what the agent signals when a run ends',
       'Knowledge — what this agent has learned',
       'Settings — configuring the agent',
+      'Where the Agents page went',
     ],
     concepts: [
       'one long-running Claude session',
@@ -925,6 +904,28 @@ const TOPIC_CONTENT = [
       'ticked by default',
       'assembling a team over several sittings',
       'already cloned',
+      // #1930 — inherited from the retired `agents` topic. These are the
+      // concepts the Agents page owned and this page now answers for: the role
+      // catalogue with its Agent-Team-vs-access-scope warning, the three
+      // lifecycle states, what the edit form's fields control, and the two
+      // capabilities that were deliberately NOT re-homed. The Helper Chat has
+      // to keep answering "where did the orphaned-agents list go?" now that
+      // even the page that recorded the answer is gone.
+      'long-running Claude Code instance',
+      'Agent Team',
+      'Team Member',
+      'access scope',
+      'Active',
+      'System Prompt',
+      'Skills',
+      'Plugins',
+      'Host context folders',
+      'Orphaned agents',
+      'takes its members with it',
+      'no replacement surface',
+      '/api/agents/orphans',
+      'idempotent',
+      'Add `<role>` role',
     ],
   },
   {

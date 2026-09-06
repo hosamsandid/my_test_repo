@@ -14,9 +14,12 @@ Covers issue #207. Run against a local stack (`make up`).
 
 ## TC-1 — Disable toggle stops cron trigger
 
-1. In the Admin Console, open the Agents page.
+1. In the Admin Console, open **Agent Chat** (`/chats`) — the Agents page these steps used to
+   start from was removed in #1930 and its lifecycle actions moved into the left rail's row
+   context menu.
 2. Identify an active team-member agent that has a cron trigger configured in its `triggers.json`.
-3. Click the **enable/disable toggle** to disable the agent. Expected:
+3. Open that row's context menu (kebab on hover, right-click, or `Menu`/`Shift+F10`) and choose
+   **Disable**. Expected:
    - If the agent has active triggers or a running session → the **"Disable agent"** warning dialog appears, listing the active triggers / session.
 4. Click **Hard stop**. Expected:
    - The agent flips to "paused" (grey indicator).
@@ -31,7 +34,7 @@ Covers issue #207. Run against a local stack (`make up`).
 ## TC-2 — Drain mode lets current execution finish
 
 1. Trigger an agent manually (send a DM) so it is in `state: busy` (check `status.json`).
-2. While it is running, click the **disable toggle**. Expected:
+2. While it is running, choose **Disable** from its row context menu. Expected:
    - Warning dialog appears with "a session is currently running".
 3. Click **Let run**. Expected:
    - Agent is marked `enabled: false` in config.json immediately.
@@ -45,7 +48,8 @@ Covers issue #207. Run against a local stack (`make up`).
 
 ## TC-3 — Re-enabling resumes trigger behaviour
 
-1. Re-enable the agent from TC-1 by clicking the toggle again.
+1. Re-enable the agent from TC-1 with **Enable** in its row context menu (turn on the rail's
+   **show disabled agents** toggle first, so the paused agent is listed).
 2. Wait for the next cron tick.
 3. Verify in the orchestrator logs that the trigger **fires** normally (`[Runner:<id>] Trigger fired`).
 
@@ -81,7 +85,7 @@ Covers issue #207. Run against a local stack (`make up`).
 ## TC-6 — Full deactivate (stub reset) with active session
 
 1. Ensure an agent is active and busy (as in TC-2 step 1).
-2. Click the **Reset to stub** (red power) button on that agent's card.
+2. Choose **Reset to stub…** from that agent's row context menu.
 3. In the simple confirm dialog, click **Reset to stub** to confirm.
 4. Expected: the orchestrator returns 409 and the **"Reset … to stub"** warning dialog appears.
 5. Click **Hard stop + reset**. Expected:

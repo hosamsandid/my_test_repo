@@ -8,7 +8,7 @@ The **Model Providers** page (`/models`) manages the LLM endpoints Agent Studio 
 - **Test connection** before saving to verify the provider is reachable and the credentials are valid
 - **Monitor provider health continuously** — a background poller probes each provider on a schedule (default every ~5 minutes) and the **Health** column shows the last-known status (OK, or Error with the reason, or Unknown when never probed) and when it was last checked, so a broken endpoint is visible before an agent runs against it. Saving a provider re-probes it immediately, and an agent whose bound provider is currently unreachable shows a non-blocking warning in its chat.
 - **Discover models** — the console probes the provider's `/v1/models` route and populates the model catalog automatically
-- **Set a default model** per provider; agents can override this on a per-agent basis via the Agents page
+- **Set a default model** per provider; agents can override this on a per-agent basis from the model selector in the agent's chat header (Agent Chat, `/chats`)
 - **Re-point a group of agents** — Working Environments bind to a provider, so editing one environment redirects all agents in it to a new model without touching each agent individually
 
 ## Configuration
@@ -57,4 +57,4 @@ For `oauth-token` providers the orchestrator:
 
 ## Model overrides
 
-An individual agent's model can be overridden in the Agents page (Edit → Model). This takes precedence over the Working Environment's default, which in turn takes precedence over the global `.env` setting.
+An individual agent's model can be overridden from the model/provider selector in that agent's chat header in **Agent Chat** (`/chats`) — it is a runtime control, not a form field, so the change applies live rather than on save (switching the *provider* restarts the agent container; switching only the model does not). The Agents page that used to host this was removed in #1930. The per-agent override takes precedence over the Working Environment's default, which in turn takes precedence over the global `.env` setting.

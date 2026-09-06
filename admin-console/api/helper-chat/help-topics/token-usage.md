@@ -6,7 +6,7 @@ summary: How many tokens your agents used against the model provider — the raw
 seeAlso:
   - { label: "Model Providers", to: "/models" }
   - { label: "GitHub Event Log", to: "/github-events" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Access", to: "/teams" }
 askPrompts:
   - "What is the difference between the Statistics and Work items tabs?"

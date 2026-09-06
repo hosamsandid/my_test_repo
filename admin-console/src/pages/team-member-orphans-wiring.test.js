@@ -6,15 +6,16 @@ import { fileURLToPath } from 'node:url';
 
 // Source-reading drift guard for the team-member half of #1960.
 //
-// Two properties live only in JSX, which the pure tests cannot load (#651):
+// Two properties lived only in JSX, which the pure tests cannot load (#651):
 //
-//  1. The Agents page no longer lists team-member orphans. That is a *deletion*
-//     guard — the risk is a later change reviving the block piecemeal, which
-//     would put back a permanent UI for a state the cascade no longer produces
-//     and quietly contradict the help topic that says there is no such surface.
-//  2. Both delete surfaces run the shared `cascadeResidueNotice`. A team delete
-//     that could not remove every member must not be reported as a clean one, and
-//     the two surfaces must word the same residue identically.
+//  1. The Agents page no longer lists team-member orphans. #1930 has since
+//     removed the page itself, so this half is now covered — more strongly —
+//     by `agents-page-removal-guard.test.js`, and what remains to guard is that
+//     the block did not migrate: no SURVIVING surface may list orphans, because
+//     that would put back a permanent UI for a state the cascade no longer
+//     produces and quietly contradict the help topic saying there is none.
+//  2. The delete surface runs the shared `cascadeResidueNotice`. A team delete
+//     that could not remove every member must not be reported as a clean one.
 //
 // Each assertion is paired with a POSITIVE one over the same file, so a renamed
 // or moved file cannot make the absence checks pass vacuously.
@@ -35,63 +36,49 @@ function code(src) {
     .join('\n');
 }
 
-test('the Agents page derives orphans from bp-instances only', () => {
-  const src = code(read('Agents.jsx'));
-  const derivation = src.slice(src.indexOf('const orphans ='), src.indexOf('function openPanel'));
-  assert.ok(derivation.length > 0, 'the orphans derivation must still exist (for bp-instances)');
-  assert.ok(
-    derivation.includes('bpInstances'),
-    'the bp-instance arm stays — those orphans belong to the separate BriefingPack removal',
-  );
-  assert.ok(
-    !derivation.includes('teamMembers'),
-    'team-member orphans must not be listed on the page any more (#1960)',
-  );
-  assert.ok(
-    !derivation.includes('parentTeamId'),
-    'no parentTeamId-based orphan filter may come back',
-  );
-});
-
-test('OrphanCard has no team-member branch left', () => {
-  const src = code(read('Agents.jsx'));
-  // Bound the slice on CODE, not on a section banner — `code()` strips those.
-  const start = src.indexOf('function OrphanCard');
-  const end = src.indexOf('export default function Agents');
-  assert.ok(start >= 0 && end > start, 'OrphanCard must still exist, above the page component');
-  const card = src.slice(start, end);
-  assert.ok(card.includes('parentOrchestratorId'), 'the bp-instance reason must survive');
-  assert.ok(
-    !card.includes("'team-member'"),
-    'OrphanCard must not describe a team-member orphan any more (#1960)',
-  );
-  assert.ok(
-    !card.includes('parent team'),
-    'the "parent team is gone" wording must be gone with the branch',
-  );
-});
-
-test('both delete surfaces report cascade residue through the one shared helper', () => {
-  for (const rel of ['Agents.jsx', 'agent-chat/RailLifecycleHost.jsx']) {
+test('the orphan block did not migrate to the surviving agent surfaces', () => {
+  // The page that hosted it is gone (#1930). The failure this now guards is the
+  // block reappearing on whichever surface inherited the page's job, which is
+  // where a future author would naturally put it back.
+  for (const rel of [
+    'agent-chat/RailLifecycleHost.jsx',
+    'agent-chat/AgentList.jsx',
+    'agent-chat/rail-lifecycle.js',
+    'AgentChat.jsx',
+  ]) {
     const src = code(read(rel));
-    assert.ok(
-      src.includes('cascadeResidueNotice'),
-      `${rel} must run the shared residue helper on a delete response`,
-    );
-    assert.ok(
-      /agent-lifecycle-menu\.js/.test(src),
-      `${rel} must import it from the shared lifecycle module, not re-implement it`,
-    );
-    // The helper only ever sees the response if the delete's result is captured
-    // — a bare `await apiCall('DELETE', …)` would discard it and silently
-    // restore the pre-#1960 "always looks clean" behaviour.
-    assert.ok(
-      /=\s*await apiCall\('DELETE', `\/api\/agents\//.test(src),
-      `${rel} must capture the DELETE response, not discard it`,
-    );
-    assert.ok(
-      src.includes('setActionError(residue)'),
-      `${rel} must surface the residue instead of swallowing it`,
-    );
+    // Positive first: the file is real and still does its job, so the three
+    // absence checks below cannot pass by reading an empty string.
+    assert.ok(src.length > 200, `${rel} must exist and be non-trivial`);
+    assert.ok(!/\bOrphanCard\b/.test(src), `${rel} must not render an orphan card`);
+    assert.ok(!/\borphans?\b/i.test(src), `${rel} must not derive or list orphans (#1960)`);
+    // The page's guard also banned a bare `parentTeamId`. That token cannot be
+    // the signal on these surfaces: the rail's Clone and Import dialogs both
+    // carry a legitimate `parentTeamId` field. The two above are orphan-specific
+    // and are what an actual revival would have to reintroduce.
   }
+});
+
+test('the delete surface reports cascade residue through the one shared helper', () => {
+  const rel = 'agent-chat/RailLifecycleHost.jsx';
+  const src = code(read(rel));
+  assert.ok(
+    src.includes('cascadeResidueNotice'),
+    `${rel} must run the shared residue helper on a delete response`,
+  );
+  assert.ok(
+    /agent-lifecycle-menu\.js/.test(src),
+    `${rel} must import it from the shared lifecycle module, not re-implement it`,
+  );
+  // The helper only ever sees the response if the delete's result is captured
+  // — a bare `await apiCall('DELETE', …)` would discard it and silently
+  // restore the pre-#1960 "always looks clean" behaviour.
+  assert.ok(
+    /=\s*await apiCall\('DELETE', `\/api\/agents\//.test(src),
+    `${rel} must capture the DELETE response, not discard it`,
+  );
+  assert.ok(
+    src.includes('setActionError(residue)'),
+    `${rel} must surface the residue instead of swallowing it`,
+  );
 });

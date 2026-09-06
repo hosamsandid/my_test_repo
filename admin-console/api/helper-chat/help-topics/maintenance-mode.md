@@ -6,7 +6,6 @@ summary: A platform-wide flag you raise before restarting the stack — it quiet
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "GitHub Event Log", to: "/github-events" }
-  - { label: "Agents", to: "/agents" }
 askPrompts:
   - "What actually happens while maintenance mode is active?"
   - "Do my scheduled triggers run again after I end maintenance?"

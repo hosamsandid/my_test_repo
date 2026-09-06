@@ -10,10 +10,18 @@ import { fileURLToPath } from 'node:url';
  * The decisions themselves are covered by `agent-settings-view.test.js` and
  * `agent-lifecycle/agent-edit-form-model.test.js`. What those cannot see is
  * whether anything still *calls* them, or whether the form is still the shared
- * one: `AgentChat.jsx`, `RightRail.jsx`, `AgentSettingsPanel.jsx`, `Agents.jsx`
- * and `AgentEditForm.jsx` are JSX, which `node --test` does not load (#651), so
+ * one: `AgentChat.jsx`, `RightRail.jsx`, `AgentSettingsPanel.jsx` and
+ * `AgentEditForm.jsx` are JSX, which `node --test` does not load (#651), so
  * a re-implemented form, a dropped prop or a lost tab would leave every pure
  * test green while the feature silently died.
+ *
+ * #1929 wrote this guard as a *parity* check between two surfaces: the Agents
+ * page and the new Settings tab had to render one shared form. #1930 removed
+ * the Agents page, so the parity half is gone with it and the remaining claim is
+ * the stronger one — the tab is now the ONLY surface, and the shared modules
+ * must still be shared modules rather than being folded back into it. The
+ * Agents-page absence itself is guarded once, in
+ * `pages/agents-page-removal-guard.test.js`.
  *
  * Same spirit (and same helpers) as `rail-lifecycle-wiring.test.js`: these
  * assertions read the sources and check *wiring*, never copy — a reworded hint
@@ -34,17 +42,16 @@ function code(src) {
 const agentChat = code(read('../AgentChat.jsx'));
 const rail = code(read('./RightRail.jsx'));
 const panel = code(read('./AgentSettingsPanel.jsx'));
-const agentsPage = code(read('../Agents.jsx'));
 const editForm = code(read('../agent-lifecycle/AgentEditForm.jsx'));
 const createForm = code(read('../agent-lifecycle/AgentCreateForm.jsx'));
 
-/* ── AC7: one form, two surfaces ─────────────────────────────────── */
+/* ── AC7: one form, now one surface ──────────────────────────────── */
 
-test('both surfaces import the same edit form instead of defining one', () => {
-  assert.match(agentsPage, /import AgentEditForm from '\.\/agent-lifecycle\/AgentEditForm\.jsx'/);
+test('the panel imports the shared edit form instead of defining one', () => {
   assert.match(panel, /import AgentEditForm from '\.\.\/agent-lifecycle\/AgentEditForm\.jsx'/);
-  // A second definition anywhere is the failure this whole ticket is about.
-  assert.doesNotMatch(agentsPage, /function AgentEditForm\s*\(/);
+  // A second definition anywhere is the failure this whole ticket is about —
+  // and with the Agents page gone (#1930) the temptation is the opposite one:
+  // inlining the now-single-consumer form back into its only caller.
   assert.doesNotMatch(panel, /function AgentEditForm\s*\(/);
 });
 
@@ -54,8 +61,8 @@ test('the form and its sub-controls live in exactly one place', () => {
     'PromptModeControl', 'InheritOrCustom',
   ]) {
     assert.doesNotMatch(
-      agentsPage, new RegExp(`function ${symbol}\\s*\\(`),
-      `${symbol} must not be redefined on the Agents page`,
+      panel, new RegExp(`function ${symbol}\\s*\\(`),
+      `${symbol} must not be redefined in the Settings panel`,
     );
     assert.match(
       editForm, new RegExp(`function ${symbol}\\s*\\(`),
@@ -75,12 +82,10 @@ test('the shared field controls are imported back, not re-typed', () => {
   // itself (#1964) — see the removal guard in `bp-removal-ui.test.js`, which
   // asserts neither is re-typed anywhere rather than merely not duplicated here.
   for (const symbol of ['ROLE_INFO', 'RoleDetailBanner']) {
-    for (const [name, src] of [['the Agents page', agentsPage], ['the create form', createForm]]) {
-      assert.doesNotMatch(
-        src, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
-        `${symbol} must not be redefined in ${name}`,
-      );
-    }
+    assert.doesNotMatch(
+      createForm, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
+      `${symbol} must not be redefined in the create form`,
+    );
   }
 });
 
@@ -90,16 +95,21 @@ test('the shape logic is the pure module, not inlined in the form again', () => 
   assert.match(editForm, /onSave\(buildEditSubmit\(agent, form\)\)/);
 });
 
-/* ── AC9: the Agents page keeps its behaviour ────────────────────── */
+/* ── AC9: the chat-only props stay optional ──────────────────────── */
 
-test('the Agents page passes none of the chat-only props (no regression)', () => {
-  const call = agentsPage.match(/<AgentEditForm[\s\S]*?\/>/);
-  assert.ok(call, 'the Agents page still renders the form');
-  for (const prop of ['initialForm', 'onFormChange', 'confirmRestart', 'onImmediateApply']) {
-    assert.doesNotMatch(call[0], new RegExp(prop), `${prop} must stay off the Agents page call`);
-  }
-  // Its Cancel button closes the side panel, so onCancel must still be given.
-  assert.match(call[0], /onCancel=\{closePanel\}/);
+test('every chat-only prop is optional, so the form works without one', () => {
+  // #1929 proved this by pointing at a second caller — the Agents page — that
+  // passed none of them. #1930 removed that caller, so the claim is asserted
+  // where it actually lives: each prop is read defensively in the shared form,
+  // which is what let the two surfaces share it in the first place and what
+  // keeps a third caller cheap.
+  assert.match(editForm, /initialForm = null, onFormChange = null,/);
+  assert.match(editForm, /confirmRestart = false, onImmediateApply = null,/);
+  // …and each default is actually honoured rather than merely declared.
+  assert.match(editForm, /initialForm \|\| buildInitialForm\(agent\)/);
+  assert.match(editForm, /if \(onFormChange\) onFormChange\(next\)/);
+  assert.match(editForm, /if \(confirmRestart\) setPending\(nextRows\)/);
+  assert.match(editForm, /onImmediateApply \?/);
 });
 
 /* ── the tab itself ──────────────────────────────────────────────── */
@@ -150,7 +160,7 @@ test('the override clears when the conversation moves on', () => {
 
 /* ── AC4: a restart is confirmed and reported ────────────────────── */
 
-test('the chat asks before a re-provision; the Agents page still does not', () => {
+test('the chat asks before a re-provision, through one gate', () => {
   assert.match(panel, /confirmRestart/);
   // Every route to a persist goes through one gate, so no button bypasses it.
   assert.match(editForm, /function request\(nextRows\) \{[\s\S]*?if \(confirmRestart\) setPending\(nextRows\)/);
@@ -161,7 +171,7 @@ test('the chat asks before a re-provision; the Agents page still does not', () =
 
 /* ── AC2 / AC6: the panel's own contract ─────────────────────────── */
 
-test('the panel saves through the same PUT the Agents page uses', () => {
+test('the panel saves through the ordinary agent PUT', () => {
   assert.match(panel, /apiCall\('PUT', `\/api\/agents\/\$\{encodeURIComponent\(agent\.id\)\}`, body\)/);
   assert.match(panel, /apiCall\('GET', `\/api\/agents\/\$\{encodeURIComponent\(id\)\}`\)/);
 });

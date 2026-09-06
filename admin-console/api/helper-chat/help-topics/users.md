@@ -6,7 +6,7 @@ summary: The human user *records* — who can sign in, under which name, with a 
 seeAlso:
   - { label: "Access", to: "/teams" }
   - { label: "My Credentials", to: "/my-credentials" }
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "SSH Keys", to: "/ssh-keys" }
 askPrompts:
   - "What is the Subject and can I change it later?"

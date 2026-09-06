@@ -396,11 +396,14 @@ only the **current context's** topic plus its `seeAlso` neighbours (§3.2), so t
 absorbs the growth of every page's help at once. What the number means changed with it: it is now
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
-`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is the **no-route
-fallback** — the Overview topic plus its seven `seeAlso` neighbours — at **262,568 — 77.2% used,
-77,432 left**, where the all-topics fold it replaced stood at 322,243 (94.8%). It overtook
-`/flows` (259,301) on the #1996 child; the two had converged to within 18 chars on main, so the
-crown was one edit away from moving regardless of which topic grew. Re-measure rather than trust this line:
+`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **274,479 — 80.7% used,
+65,521 left**, where the all-topics fold route-scoping replaced stood at 322,243 (94.8%). #1930
+moved the crown here by removing the Agents page: `/flows` lost its `/agents` `seeAlso` neighbour
+and fell to 258,761, the no-route Overview fold dropped too, and `create.md` (which claims
+`/create` and `/quickstart`) links to `/chats`, whose topic absorbed the deleted `agents.md` — so
+the biggest single neighbourhood is the one `/quickstart` sees. It had held the no-route fallback
+at 262,568 since the #1996 child. Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,
 which `/flows`' `seeAlso` names, so the worst case moved by exactly that topic's growth even

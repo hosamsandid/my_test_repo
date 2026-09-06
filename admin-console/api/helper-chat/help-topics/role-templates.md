@@ -4,7 +4,7 @@ routes: ["/role-templates"]
 title: Agent Templates
 summary: The reusable role definitions the Team Setup wizard and the Flow editor build agents from — what the fields mean, and why an edit never touches a running agent.
 seeAlso:
-  - { label: "Agents", to: "/agents" }
+  - { label: "Agent Chat", to: "/chats" }
   - { label: "Flows", to: "/flows" }
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Skills", to: "/skills" }

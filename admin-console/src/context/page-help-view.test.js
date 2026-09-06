@@ -41,8 +41,8 @@ import {
 const PAYLOAD = {
   overviewId: 'overview',
   topics: [
-    { id: 'overview', routes: [], title: 'Overview', summary: 'home', seeAlso: [{ label: 'Agents', to: '/agents' }], askPrompts: ['hi', 'hi', ' '], body: 'ov' },
-    { id: 'agents', routes: ['/agents'], title: 'Agents', summary: 'a', seeAlso: [{ label: 'x' }, { to: '/teams' }], askPrompts: ['qa'], body: 'ab' },
+    { id: 'overview', routes: [], title: 'Overview', summary: 'home', seeAlso: [{ label: 'Knowledge', to: '/knowledge' }], askPrompts: ['hi', 'hi', ' '], body: 'ov' },
+    { id: 'knowledge', routes: ['/knowledge'], title: 'Knowledge', summary: 'a', seeAlso: [{ label: 'x' }, { to: '/teams' }], askPrompts: ['qa'], body: 'ab' },
     { id: 'flows', routes: ['/flows'], title: 'Flows', summary: 'f', seeAlso: [], askPrompts: ['qf'], body: 'fb' },
   ],
 };
@@ -55,7 +55,7 @@ test('canonicalRoute collapses dynamic, alias and redirect routes', () => {
   assert.equal(canonicalRoute('/'), '/chats');
   assert.equal(canonicalRoute('/process/team-x'), '/flows');
   assert.equal(canonicalRoute('/plugins/foo/view'), null); // allowlisted viewer → no topic
-  assert.equal(canonicalRoute('/agents'), '/agents');      // plain route unchanged
+  assert.equal(canonicalRoute('/knowledge'), '/knowledge');      // plain route unchanged
 });
 
 test('canonicalRoute sends the retired /getting-started bookmark to the app home', () => {
@@ -110,15 +110,15 @@ test('overviewTopic returns the Overview topic by id', () => {
 // ── resolution + fallback ──────────────────────────────────────────────────────
 
 test('resolvePageTopic resolves a route, its dynamic child, and null for no-topic', () => {
-  assert.equal(resolvePageTopic(PAYLOAD, '/agents').id, 'agents');
+  assert.equal(resolvePageTopic(PAYLOAD, '/knowledge').id, 'knowledge');
   assert.equal(resolvePageTopic(PAYLOAD, '/flows').id, 'flows');
   assert.equal(resolvePageTopic(PAYLOAD, '/skills'), null);
 });
 
 test('pageHelpState falls back to Overview when a route has no topic', () => {
-  const onAgents = pageHelpState(PAYLOAD, '/agents');
-  assert.equal(onAgents.topic.id, 'agents');
-  assert.equal(onAgents.isOverview, false);
+  const onKnowledge = pageHelpState(PAYLOAD, '/knowledge');
+  assert.equal(onKnowledge.topic.id, 'knowledge');
+  assert.equal(onKnowledge.isOverview, false);
 
   const onSkills = pageHelpState(PAYLOAD, '/skills');
   assert.equal(onSkills.topic.id, 'overview');
@@ -136,7 +136,7 @@ test('pageHelpState marks the overview route itself as isOverview', () => {
 });
 
 test('hasDedicatedTopic drives first-run auto-open eligibility', () => {
-  assert.equal(hasDedicatedTopic(PAYLOAD, '/agents'), true);
+  assert.equal(hasDedicatedTopic(PAYLOAD, '/knowledge'), true);
   assert.equal(hasDedicatedTopic(PAYLOAD, '/skills'), false);
 });
 
@@ -148,7 +148,7 @@ test('askHandoff shapes the Ask hand-off with a trimmed question', () => {
 });
 
 test('seeAlsoLinks drops entries without a destination', () => {
-  const links = seeAlsoLinks(PAYLOAD.topics[1]); // agents: [{label:x}, {to:/teams}]
+  const links = seeAlsoLinks(PAYLOAD.topics[1]); // knowledge: [{label:x}, {to:/teams}]
   assert.deepEqual(links, [{ label: '/teams', to: '/teams' }]);
 });
 
@@ -167,7 +167,7 @@ test('seenRoutesKey is per-user and collapses blank usernames to anon', () => {
 });
 
 test('autoOpenRouteKey returns the canonical key for a topic route, null otherwise', () => {
-  assert.equal(autoOpenRouteKey(PAYLOAD, '/agents'), '/agents');
+  assert.equal(autoOpenRouteKey(PAYLOAD, '/knowledge'), '/knowledge');
   // dynamic child collapses to its canonical parent (which has a topic here? no —
   // /chats has no topic in PAYLOAD), so a route with no dedicated topic is null.
   assert.equal(autoOpenRouteKey(PAYLOAD, '/skills'), null);
@@ -187,11 +187,11 @@ test('autoOpenRouteKey collapses a dynamic child to its topic-bearing parent', (
 });
 
 test('autoOpenPlan opens once for an unseen topic route, then never again', () => {
-  const first = autoOpenPlan(PAYLOAD, '/agents', []);
-  assert.deepEqual(first, { open: true, routeKey: '/agents' });
+  const first = autoOpenPlan(PAYLOAD, '/knowledge', []);
+  assert.deepEqual(first, { open: true, routeKey: '/knowledge' });
   // Once seen, the same route no longer opens but still reports its key.
   const seen = markSeen([], first.routeKey);
-  assert.deepEqual(autoOpenPlan(PAYLOAD, '/agents', seen), { open: false, routeKey: '/agents' });
+  assert.deepEqual(autoOpenPlan(PAYLOAD, '/knowledge', seen), { open: false, routeKey: '/knowledge' });
 });
 
 test('autoOpenPlan never opens a route with no dedicated topic', () => {
@@ -199,11 +199,11 @@ test('autoOpenPlan never opens a route with no dedicated topic', () => {
 });
 
 test('markSeen appends without mutating and de-duplicates', () => {
-  const base = ['/agents'];
+  const base = ['/knowledge'];
   const next = markSeen(base, '/flows');
-  assert.deepEqual(next, ['/agents', '/flows']);
-  assert.deepEqual(base, ['/agents']); // input untouched
-  assert.deepEqual(markSeen(next, '/flows'), ['/agents', '/flows']); // idempotent
+  assert.deepEqual(next, ['/knowledge', '/flows']);
+  assert.deepEqual(base, ['/knowledge']); // input untouched
+  assert.deepEqual(markSeen(next, '/flows'), ['/knowledge', '/flows']); // idempotent
   assert.deepEqual(markSeen(['/x'], ''), ['/x']); // blank key is a no-op
   assert.deepEqual(markSeen(null, '/a'), ['/a']); // tolerates a non-array input
 });
@@ -257,7 +257,7 @@ const CTX_PAYLOAD = {
   overviewId: 'overview',
   topics: [
     { id: 'overview', routes: [], title: 'Overview', summary: 'home', seeAlso: [], askPrompts: ['hi'], body: 'ov' },
-    { id: 'agents', routes: ['/agents'], title: 'Agents', summary: 'a', seeAlso: [], askPrompts: ['qa'], body: 'ab' },
+    { id: 'knowledge', routes: ['/knowledge'], title: 'Knowledge', summary: 'a', seeAlso: [], askPrompts: ['qa'], body: 'ab' },
     { id: 'settings', routes: ['modal:settings'], title: 'Settings', summary: 's', seeAlso: [], askPrompts: ['qs'], body: 'sb' },
     { id: 'team-setup', routes: ['/team-setup'], title: 'Wizard', summary: 'w', seeAlso: [], askPrompts: ['qw'], body: 'wb' },
     { id: 'step-process', routes: ['/team-setup#process'], title: 'Step: Process', summary: 'p', seeAlso: [], askPrompts: ['qp'], body: 'pb' },
@@ -270,20 +270,20 @@ test('helpContextKeys orders candidates most-specific-first', () => {
     helpContextKeys({ route: '/team-setup', overlay: OVERLAY_SETTINGS, step: 'model' }),
     ['modal:settings#model', 'modal:settings', '/team-setup#model', '/team-setup'],
   );
-  assert.deepEqual(helpContextKeys('/agents'), ['/agents']);
+  assert.deepEqual(helpContextKeys('/knowledge'), ['/knowledge']);
   assert.deepEqual(helpContextKeys({}), []);
 });
 
 test('AC1: an open overlay resolves to its own topic, closing it returns to the page', () => {
-  const open = resolveHelpContext(CTX_PAYLOAD, { route: '/agents', overlay: OVERLAY_SETTINGS });
+  const open = resolveHelpContext(CTX_PAYLOAD, { route: '/knowledge', overlay: OVERLAY_SETTINGS });
   assert.equal(open.topic.id, 'settings');
   assert.equal(open.key, 'modal:settings');
-  assert.equal(resolveHelpContext(CTX_PAYLOAD, { route: '/agents' }).topic.id, 'agents');
+  assert.equal(resolveHelpContext(CTX_PAYLOAD, { route: '/knowledge' }).topic.id, 'knowledge');
 });
 
 test('AC1: an overlay with no topic of its own falls through to the page underneath', () => {
-  const hit = resolveHelpContext(CTX_PAYLOAD, { route: '/agents', overlay: 'modal:unclaimed' });
-  assert.equal(hit.topic.id, 'agents');
+  const hit = resolveHelpContext(CTX_PAYLOAD, { route: '/knowledge', overlay: 'modal:unclaimed' });
+  assert.equal(hit.topic.id, 'knowledge');
 });
 
 test('AC3: the active wizard step wins, and falls back to the wizard topic', () => {
@@ -302,13 +302,13 @@ test('AC2: a first-run wizard step resolves through its alias, with no duplicate
 });
 
 test('pageHelpState takes a context object as well as a pathname, and reports the key', () => {
-  const s = pageHelpState(CTX_PAYLOAD, { route: '/agents', overlay: OVERLAY_SETTINGS });
+  const s = pageHelpState(CTX_PAYLOAD, { route: '/knowledge', overlay: OVERLAY_SETTINGS });
   assert.equal(s.topic.id, 'settings');
   assert.equal(s.isOverview, false);
   assert.equal(s.contextKey, 'modal:settings');
-  const bare = pageHelpState(CTX_PAYLOAD, '/agents');
-  assert.equal(bare.topic.id, 'agents');
-  assert.equal(bare.contextKey, '/agents');
+  const bare = pageHelpState(CTX_PAYLOAD, '/knowledge');
+  assert.equal(bare.topic.id, 'knowledge');
+  assert.equal(bare.contextKey, '/knowledge');
   const none = pageHelpState(CTX_PAYLOAD, '/nowhere');
   assert.equal(none.topic.id, 'overview');
   assert.equal(none.isOverview, true);
@@ -317,15 +317,15 @@ test('pageHelpState takes a context object as well as a pathname, and reports th
 
 test('contextLabel names a registered context and stays silent for a plain route', () => {
   assert.equal(contextLabel('modal:settings'), CONTEXT_KEYS['modal:settings'].label);
-  assert.equal(contextLabel('/agents'), '');
+  assert.equal(contextLabel('/knowledge'), '');
   assert.equal(contextLabel('modal:invented'), '');
   assert.equal(contextLabel(''), '');
 });
 
 test('the panel is lifted above the modal layer only while an overlay is active', () => {
-  assert.equal(panelZIndex({ route: '/agents' }), PANEL_Z_INDEX);
-  assert.equal(panelZIndex({ route: '/agents', step: 'process' }), PANEL_Z_INDEX);
-  assert.equal(panelZIndex({ route: '/agents', overlay: OVERLAY_SETTINGS }), PANEL_Z_INDEX_OVER_MODAL);
+  assert.equal(panelZIndex({ route: '/knowledge' }), PANEL_Z_INDEX);
+  assert.equal(panelZIndex({ route: '/knowledge', step: 'process' }), PANEL_Z_INDEX);
+  assert.equal(panelZIndex({ route: '/knowledge', overlay: OVERLAY_SETTINGS }), PANEL_Z_INDEX_OVER_MODAL);
   assert.ok(PANEL_Z_INDEX_OVER_MODAL > 9999, 'a Modal sits at 9999 — help for it has to be above');
 });
 
@@ -362,8 +362,8 @@ test('client CONTEXT_KEYS mirror the server help-routes.js copy', () => {
 
 test('both copies build the same candidate list for every registered context', () => {
   const contexts = [
-    { route: '/agents' },
-    { route: '/agents', overlay: OVERLAY_SETTINGS, step: 'model' },
+    { route: '/knowledge' },
+    { route: '/knowledge', overlay: OVERLAY_SETTINGS, step: 'model' },
     { route: '/team-setup', step: 'process' },
     { route: '/wizard/team', step: 'process' },
     { route: '/', overlay: OVERLAY_SETUP_WIZARD, step: 'ssh-key' },

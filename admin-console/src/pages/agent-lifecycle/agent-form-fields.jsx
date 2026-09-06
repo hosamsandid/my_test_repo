@@ -17,10 +17,13 @@ import { User, Users, Info } from 'lucide-react';
 import PageHelpButton from '../../components/PageHelpButton';
 
 /* ── Role catalogue (single source of truth for labels + descriptions) ─
-   The long per-role explanation lives in the page's help topic
-   (api/helper-chat/help-topics/agents.md, #1875) — here we keep only the
-   one-line card label and the one-line "when to use", so the form stays lean
-   and the concept text has a single home the "?" affordance opens. */
+   The long per-role explanation lives in the help topic of whichever page is
+   rendering this form — the `?` resolves against the live route, so it is
+   `create.md` on `/create` and `agent-chat.md` on `/chats`. It was
+   `help-topics/agents.md` until #1930 retired that topic into `agent-chat.md`
+   (*The agent roles* chapter). Here we keep only the one-line card label and
+   the one-line "when to use", so the form stays lean and the concept text has a
+   single home the "?" affordance opens. */
 export const ROLE_INFO = {
   'agent': {
     icon: User,

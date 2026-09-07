@@ -260,13 +260,19 @@ test('no point-of-decision microcopy was traded for a "?"', () => {
   assert.ok(page.includes('{ID_FORMAT_HINT}'), 'the id help stopped using ID_FORMAT_HINT');
 });
 
-test('the topic states the Working Environments form has no MCP picker', () => {
-  // The ticket's edge case: a "?" on this page must not imply a control that
-  // does not exist. E9 flagged it; a reword must not quietly drop it.
+test('the topic points at the Working Environments form for the pairing', () => {
+  // E9 flagged the missing picker from this side; #2051 built it, so the guard
+  // is inverted rather than dropped — this topic's job is now to send the reader
+  // to the form that owns the pairing instead of denying a control exists.
+  assert.doesNotMatch(
+    topicBody,
+    /form exposes no MCP picker/,
+    'the topic still says the Working Environments form has no MCP picker — #2051 added one',
+  );
   assert.match(
     topicBody,
-    /Working Environments \*\*form exposes no MCP picker\*\*/,
-    'the topic must keep saying the Working Environments form exposes no MCP picker',
+    /Working Environments \*\*form pairs them directly\*\*/,
+    'the topic must point at the Working Environments form as where pairs are set',
   );
 });
 

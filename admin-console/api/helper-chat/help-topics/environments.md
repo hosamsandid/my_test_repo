@@ -33,7 +33,7 @@ separately from that point on.
 |---|---|
 | **Git repositories** | Zero or more repos, cloned into the agent's workspace when the agent is created. Add several — e.g. the main codebase plus a separate documentation repo. Each row can bind its own SSH key. |
 | **GitHub token** | Optional personal access token, injected as `GH_TOKEN` / `GITHUB_TOKEN`. Needed for the `gh` CLI, HTTPS pushes and the GitHub poller behind event-driven triggers. |
-| **MCP servers** | Optional server + credential references from the MCP registry, materialised into the agent's `.claude/settings.json` at creation. Set elsewhere — this page's form has no MCP picker. |
+| **MCP servers** | Optional server + credential references from the MCP registry, materialised into the agent's `.claude/settings.json` at creation. Paired on this form — see *MCP server references* below for the seed-time caveat. |
 | **Model provider** | Optional override — agents start on this provider and its default model instead of the global `ANTHROPIC_BASE_URL` from `.env`. |
 | **Agent toolchain** | Optional — which container image the agents are spawned from, picked from the operator registry. Absent means the default image. |
 | **Additional instructions** | Markdown appended to the agent's `CLAUDE.md`: project context, coding conventions, domain terminology, constraints every agent here should follow. |
@@ -155,18 +155,32 @@ server from the MCP registry with a credential from the separate MCP credential
 store, and at agent-creation time that pair is substituted per agent and merged
 into the agent's own `.claude/settings.json`.
 
-**This form has no MCP picker**, so an environment's pairs cannot be chosen or
-changed here. They are written by the Agent Team Wizard (its Knowledge step
-shows them read-only) or through the API, and are visible per agent as an MCP
-override on the Agents page. Saving this form does not disturb an existing set —
-it simply never sends that field — so an environment paired by the wizard keeps
-its pairs when you edit its repositories.
+**Pair them on this form.** *Add MCP server* appends a row; each row picks a
+server from the registry and, optionally, a credential to substitute into its
+template. Removing a row unpairs it. An environment that has never been paired
+starts with no rows, and a form you do not touch **never sends the field at
+all** — so an environment paired by the Agent Team Wizard or through the API
+keeps its pairs when you edit only its repositories.
 
-Two consequences worth knowing: the substitution happens once, at seeding, so
-changing a server or its credential reaches only agents created afterwards; and
-the MCP Servers page refuses to delete a server or credential an environment
-still references, which is why detaching it here (through the wizard or the API)
-comes first.
+Two rows the picker will warn you about, because both are knowable when you
+choose the pair rather than at seed time: a server whose template needs a
+`${credential}` but has none bound (the keys referencing it are **dropped** and
+the server is seeded unauthenticated), and a credential bound to a server whose
+template has no placeholder (it is substituted nowhere and **ignored**). A row
+naming a server that is no longer registered stays visible so you can remove it,
+and is skipped when an agent is created.
+
+**A change here reaches only agents created afterwards.** MCP configuration is
+written into an agent's own `.claude/settings.json` when that agent is first
+created, and no edit or respawn path re-applies it — so agents already using the
+environment keep the set they were created with, and the form says so, naming
+how many they are, as soon as your selection differs from what is stored. To
+give an existing agent a new pairing, recreate it. (A single `team-member` can
+also override the inherited list on its own agent form.)
+
+One more consequence: the MCP Servers page refuses to delete a server or
+credential while an environment still references it, which is why unpairing it
+here comes first.
 
 ## Model provider binding
 

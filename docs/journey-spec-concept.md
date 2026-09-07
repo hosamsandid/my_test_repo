@@ -3,6 +3,10 @@
 **Status:** concept / plan of record — v1 (2026-07-17).
 **Relates to:** `docs/e2e-testing-concept.md` (#651/#666 — the E2E harness this builds on), #262 (Playwright visual-regression agent), `2026-07-14-Agent-Studio-IBAN-Demo.pptx` (the hand-authored deck this concept makes reproducible).
 
+![Journey spec overview: one YAML source of user journeys fans into a test lane (generated E2E tests → Playwright run → timing-marked screenshots) and a narration lane (per-step narrative texts → text-to-speech → audio stream), which together feed three consumers — PowerPoint (notes = narration), an interactive in-app tour, and a video with audio and shots synced.](images/journey-spec-overview.png)
+
+*One journey source (YAML), two derivation lanes — screenshots from a green E2E run and audio narration via TTS — feeding three consumers: PowerPoint, the interactive tour, and a synced video.*
+
 ## 0. The core idea (TL;DR)
 
 Today the walkthrough of the Agent Studio exists twice, disconnected: as hand-authored

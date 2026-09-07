@@ -399,8 +399,12 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **283,284 — 83.3% used,
-56,716 left** (#2045 removed the one-assistant form's team-of-one footer and its repo-URL help
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **284,200 — 83.6% used,
+55,800 left** (#2051 gave the Working Environments form an MCP server/credential picker and
+rewrote the two topics that documented its absence: +916 in `environments.md`, which `create.md`
+names as a neighbour, and +147 in `mcp.md`, which it does not — so this context moved by the
+former alone while `/environments` and `/mcp`, which name each other, each moved by both, to
+255,315 and 255,298. It stood at 283,284 after #2045 removed the one-assistant form's team-of-one footer and its repo-URL help
 text and the figure went UP by 593: a page-copy removal is not a grounding saving, because the
 facts the copy carried still have to be answerable — +249 in `create.md`, which IS this context's
 topic, and +348 in `walkthrough/01-team-setup.md`, which lands on every context. It stood at

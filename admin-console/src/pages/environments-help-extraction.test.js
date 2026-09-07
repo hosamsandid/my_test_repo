@@ -119,21 +119,23 @@ test('the Sync sub-section lives inside the repositories chapter', () => {
   assert.ok(syncAt < nextChapterAt, 'the Sync sub-section drifted out of the Repositories chapter');
 });
 
-test('the three chapters with no "?" keep their own heading', () => {
-  // The MCP pairing has no surface on this page at all (the form exposes no MCP
-  // picker), and the provider / additional-context sections keep their existing
-  // point-of-decision hints instead. Nothing else would notice if any of the
-  // three were folded into a neighbour — they are reached by scrolling the
-  // rendered topic, which is why they must stay separately addressable.
+test('the two chapters with no "?" keep their own heading', () => {
+  // #2051 moved `mcp` out of this set: the form now HAS an MCP picker, so a "?"
+  // naming that chapter finally sits honestly on a real control. The provider /
+  // additional-context sections keep their existing point-of-decision hints
+  // instead. Nothing else would notice if either were folded into a neighbour —
+  // they are reached by scrolling the rendered topic, which is why they must
+  // stay separately addressable. (All seven headings, `mcp` included, are
+  // asserted by the exactly-seven-chapters test above.)
   const slugs = topicSections(topicBody).filter(s => s.level === 2).map(s => s.slug);
-  for (const key of ['mcp', 'provider', 'context']) {
+  for (const key of ['provider', 'context']) {
     assert.ok(slugs.includes(ENVIRONMENTS_HELP_SECTIONS[key]), `${key} chapter is gone`);
   }
-  for (const key of ['mcp', 'provider', 'context']) {
+  for (const key of ['provider', 'context']) {
     assert.ok(
       !page.includes(`ENVIRONMENTS_HELP_SECTIONS.${key}`),
-      `${key} has no surface on this page — a "?" naming it would imply a control `
-      + 'that does not exist (the MCP case) or duplicate a field hint',
+      `${key} has no surface on this page — a "?" naming it would duplicate a `
+      + 'field hint that is already at the point of decision',
     );
   }
 });
@@ -149,12 +151,12 @@ test('the page imports the shared registry and the shared button', () => {
   );
 });
 
-test('all four surfaces from the ticket table render a deep-linked "?"', () => {
+test('all five surfaces from the ticket table render a deep-linked "?"', () => {
   const buttons = page.match(/<PageHelpButton[\s\S]*?\/>/g) || [];
   assert.equal(
-    buttons.length, 5,
-    'expected five PageHelpButtons (repositories area, Sync action, GitHub token, '
-    + `Toolchains panel, page header), found ${buttons.length}`,
+    buttons.length, 6,
+    'expected six PageHelpButtons (repositories area, Sync action, GitHub token, '
+    + `MCP servers section, Toolchains panel, page header), found ${buttons.length}`,
   );
   const sections = buttons.map((b) => {
     const m = /section=\{ENVIRONMENTS_HELP_SECTIONS\.(\w+)\}/.exec(b);
@@ -168,10 +170,11 @@ test('all four surfaces from the ticket table render a deep-linked "?"', () => {
   // Source order, not reading order: EnvironmentForm and ToolchainRegistryPanel
   // are declared before the page component that renders the header paragraph.
   assert.deepEqual(
-    sections, ['repositories', 'sync', 'credentials', 'toolchains', 'whatIs'],
+    sections, ['repositories', 'sync', 'credentials', 'mcp', 'toolchains', 'whatIs'],
     "the surfaces must map to the ticket's table: repositories area → the "
     + 'Repositories chapter, Sync all agents → its sub-section inside that '
-    + 'chapter, GitHub token → Credentials, the Toolchains panel → Toolchains, '
+    + 'chapter, GitHub token → Credentials, the MCP servers section → MCP '
+    + 'server references (#2051), the Toolchains panel → Toolchains, '
     + 'page header → what a Working Environment is',
   );
 });
@@ -309,13 +312,26 @@ test('the Description hint no longer claims the agent never sees it', () => {
   );
 });
 
-test('the topic states this form has no MCP picker', () => {
-  // A "?" on this page must not imply a control that does not exist: an
-  // environment's MCP pairs are written by the Agent Team Wizard or the API.
+test('the topic states the form pairs MCP servers, with the seed-time caveat', () => {
+  // #2051 inverted this guard's subject rather than deleting it. The form now
+  // HAS an MCP picker, so "no picker" would be a lie; the load-bearing claim is
+  // the seed-time one, because a reader who expects an edit to reach agents that
+  // already exist is the one this page misleads. Both halves are asserted so a
+  // reword cannot restore the absence OR quietly drop the caveat.
+  assert.doesNotMatch(
+    topicBody,
+    /no MCP picker/,
+    'the topic still claims this form has no MCP picker — #2051 added one',
+  );
   assert.match(
     topicBody,
-    /\*\*This form has no MCP picker\*\*/,
-    'the topic must keep saying this form exposes no MCP picker',
+    /\*\*Pair them on this form\.\*\*/,
+    'the topic must say the pairs are chosen on this form',
+  );
+  assert.match(
+    topicBody,
+    /\*\*A change here reaches only agents created afterwards\.\*\*/,
+    'the topic must keep the seed-time caveat — an edit does not reach existing agents',
   );
 });
 

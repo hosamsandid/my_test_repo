@@ -119,3 +119,73 @@ test('canSubmit matches the legacy inline gate across cases', () => {
     assert.equal(s.reasons.length === 0, legacyGate(c));
   }
 });
+
+/* ── MCP picker rows (#2051) ─────────────────────────────────────────── */
+
+test('an environment with no MCP rows is valid — the picker is optional', () => {
+  const s = describeWorkingEnvSubmitState({ ...readyEnv, mcpServers: [] });
+  assert.equal(s.canSubmit, true);
+  assert.deepEqual(s.reasons, []);
+});
+
+test('a complete MCP row can submit, with or without a credential', () => {
+  const withCred = describeWorkingEnvSubmitState({
+    ...readyEnv,
+    mcpServers: [{ serverId: 'wiki', credentialId: 'wiki-token' }],
+  });
+  assert.equal(withCred.canSubmit, true);
+  // A credential-less pair is legitimate: the server is still seeded, just
+  // unauthenticated. That is a hint on the row, never a submit block.
+  const withoutCred = describeWorkingEnvSubmitState({
+    ...readyEnv,
+    mcpServers: [{ serverId: 'wiki', credentialId: '' }],
+  });
+  assert.equal(withoutCred.canSubmit, true);
+});
+
+test('an MCP row with no server chosen blocks submit', () => {
+  const s = describeWorkingEnvSubmitState({
+    ...readyEnv,
+    mcpServers: [{ serverId: '', credentialId: 'wiki-token' }],
+  });
+  assert.equal(s.canSubmit, false);
+  assert.deepEqual(fieldsOf(s), ['mcpServers']);
+  assert.match(s.reasons[0].message, /remove the empty row/);
+});
+
+test('the same MCP server listed twice blocks submit and names it', () => {
+  const s = describeWorkingEnvSubmitState({
+    ...readyEnv,
+    mcpServers: [{ serverId: 'wiki', credentialId: 'a' }, { serverId: 'wiki', credentialId: 'b' }],
+  });
+  assert.equal(s.canSubmit, false);
+  assert.deepEqual(fieldsOf(s), ['mcpServersDuplicate']);
+  assert.match(s.reasons[0].message, /'wiki'/);
+});
+
+test('two blank MCP rows are one blank complaint, not a duplicate complaint', () => {
+  // The duplicate check must run over CHOSEN servers only, or two fresh rows
+  // would report "listed twice" about the empty string.
+  const s = describeWorkingEnvSubmitState({
+    ...readyEnv,
+    mcpServers: [{ serverId: '' }, { serverId: '' }],
+  });
+  assert.deepEqual(fieldsOf(s), ['mcpServers']);
+});
+
+test('the MCP reasons come last and each field key is unique', () => {
+  // The form renders the reasons as <li key={r.field}> in form order, so the
+  // ordering is the top-to-bottom reading and the keys must not collide.
+  const s = describeWorkingEnvSubmitState({
+    name: '', id: '',
+    repositories: [{ url: '' }],
+    mcpServers: [{ serverId: '' }, { serverId: 'wiki' }, { serverId: 'wiki' }],
+  });
+  assert.deepEqual(fieldsOf(s), ['name', 'id', 'repositories', 'mcpServers', 'mcpServersDuplicate']);
+  assert.equal(new Set(fieldsOf(s)).size, fieldsOf(s).length);
+});
+
+test('a non-array mcpServers is treated as no rows, not a block', () => {
+  assert.equal(describeWorkingEnvSubmitState({ ...readyEnv, mcpServers: null }).canSubmit, true);
+  assert.equal(describeWorkingEnvSubmitState({ ...readyEnv, mcpServers: 'wiki' }).canSubmit, true);
+});

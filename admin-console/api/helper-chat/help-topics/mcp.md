@@ -147,13 +147,15 @@ not inside a session that is already running.
 
 Note where the pairing is visible today:
 
-- The Working Environments **form exposes no MCP picker**, so an environment's
-  pairs are set through the API or when a team is created — opening this page's
-  help from there will not show you a control that does not exist.
+- The Working Environments **form pairs them directly**: an *MCP servers*
+  section on the create/edit form adds, edits and removes `{server, credential}`
+  rows, and warns about a missing-credential or unused-credential pair as you
+  choose it. Because the pair is substituted at seed time, that form also states
+  that a change reaches only agents created afterwards.
 - The **Agent Team wizard** shows the inherited pairs read-only in its Knowledge
   step ("Knowledge sources") and again on the review step.
-- A single `team-member` agent can **override** the inherited list on the Agents
-  page (*MCP Servers* → Custom, one `serverId[:credentialId]` per line).
+- A single `team-member` agent can **override** the inherited list on its own
+  agent form (*MCP Servers* → Custom, one `serverId[:credentialId]` per line).
 
 ## Deleting a server or a credential
 

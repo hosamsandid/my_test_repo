@@ -16,10 +16,11 @@
 // the topic from the top, which still *looks* like the "?" worked, so the guard
 // is the only thing that notices.
 //
-// All seven chapters are exported, including the three with no "?" of their own
-// (`mcp`, `provider`, `context`) — the sibling registries (mcp 5/5, credentials
-// 6/6) do the same, it keeps every chapter addressable, and the export is what
-// puts its heading under the page-side guard.
+// All seven chapters are exported, including the two with no "?" of their own
+// (`provider`, `context`) — the sibling registries (mcp 5/5, credentials 6/6)
+// do the same, it keeps every chapter addressable, and the export is what puts
+// its heading under the page-side guard. (`mcp` joined the addressed set in
+// #2051, when the form gained the picker its chapter describes.)
 //
 // It lives flat beside the page's other pure modules (working-env-submit-state.js,
 // toolchain-select-view.js) rather than in the `pages/environments/` directory
@@ -40,8 +41,9 @@ export const ENVIRONMENTS_HELP_SECTIONS = {
   sync: 'sync-all-agents',
   // 3 — SSH-URL-needs-a-key vs HTTPS-URL-needs-the-token, and what rotation does
   credentials: 'credentials',
-  // 4 — no "?": this form has no MCP picker, so there is no surface here where a
-  // "?" about the pairing would sit honestly (the topic says so explicitly)
+  // 4 — the MCP server/credential picker (#2051). Until then this form had no
+  // MCP surface at all, so the chapter deliberately carried no "?"; the picker
+  // is the control that finally makes one sit honestly here.
   mcp: 'mcp-server-references',
   // 5 — no "?": the provider select carries its own point-of-decision hint, and
   // the precedence story belongs to the Model Providers page

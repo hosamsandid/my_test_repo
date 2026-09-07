@@ -327,9 +327,12 @@ const TOPIC_CONTENT = [
       // the environment name AND description into the agent's CLAUDE.md, so the
       // description is not console-only.
       'read by the agent',
-      // The form has no MCP picker at all — E9 (#1989) flagged it from the MCP
-      // side; a "?" on THIS page must not imply a control that does not exist.
-      'form has no MCP picker',
+      // #2051 gave the form an MCP server/credential picker, so the old
+      // "form has no MCP picker" concept is retired rather than reworded — the
+      // load-bearing claim is now the seed-time caveat, which is what stops a
+      // reader expecting an edit to reach agents that already exist.
+      'Pair them on this form',
+      'reaches only agents created afterwards',
       // What an environment edit does and does not reach — the page's most
       // surprising behaviour, and the reason the Sync action exists.
       'What an edit reaches',
@@ -452,11 +455,12 @@ const TOPIC_CONTENT = [
     // #1989 (epic #1981) widened it into a per-surface reference. Chapters 1/2/3
     // are the deep-link targets of the four surfaces the ticket names (page
     // header → 1, server panel → 2, credential panel and the *required* column
-    // marker → 3). Chapters 4 and 5 carry no "?" of their own: the pairing has
-    // no surface on this page at all (the Working Environments form exposes no
-    // MCP picker) and deleting happens in a ConfirmDialog that already states
-    // the rule. Both stay separately addressable because the panel renders the
-    // whole topic — they are one scroll from wherever a deep link lands.
+    // marker → 3). Chapters 4 and 5 carry no "?" of their own: the pairing's
+    // own surface is the Working Environments form (which since #2051 has an
+    // MCP picker, and carries the "?" for it on that page) and deleting happens
+    // in a ConfirmDialog that already states the rule. Both stay separately
+    // addressable because the panel renders the whole topic — they are one
+    // scroll from wherever a deep link lands.
     chapters: [
       'The three-part model',
       'The server registry and its transports',

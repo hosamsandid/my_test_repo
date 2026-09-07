@@ -21,6 +21,17 @@ const { PLUGIN_ID_LABEL } = require('./plugin-scope');
 
 const SIDECAR_NAME_PREFIX = 'aee-plugin-';
 
+// Instance-ownership label (shared-store isolation). Parallel stacks share one
+// rootful Podman store, so a plugin sidecar must be stamped with the instance
+// that owns it — otherwise another stack's reconcile lists it (by the plugin-id
+// label alone) and reaps it as an orphan of an uninstalled plugin. This is the
+// same `aee.instance` scoping the agent-container eviction already uses
+// (spawn-container.js). The container NAME is left unscoped on purpose: it is
+// the endpoint agents already carry in .agent-studio/plugins/<id>.json, so
+// changing it would strand live grants — ownership is expressed by the label,
+// which reconcile filters on.
+const INSTANCE_LABEL_KEY = 'aee.instance';
+
 // Deterministic container name for a plugin's sidecar. Podman names are
 // alnum + _.- ; plugin ids are already a-z0-9- (validator), so this is a
 // straight prefix but we sanitise defensively.
@@ -29,8 +40,13 @@ function sidecarContainerName(pluginId) {
   return `${SIDECAR_NAME_PREFIX}${safe}`;
 }
 
-function sidecarLabels(pluginId) {
-  return { [PLUGIN_ID_LABEL]: String(pluginId) };
+// `instanceId` (optional) stamps `aee.instance` so a stack owns its sidecars.
+// Default '' keeps the pre-isolation shape (plugin-id label only) so existing
+// callers/tests are byte-identical.
+function sidecarLabels(pluginId, instanceId = '') {
+  const labels = { [PLUGIN_ID_LABEL]: String(pluginId) };
+  if (instanceId) labels[INSTANCE_LABEL_KEY] = String(instanceId);
+  return labels;
 }
 
 // Extract the plugin id a live sidecar belongs to, from its labels.
@@ -151,6 +167,7 @@ function brokerEnvContract(manifest, { signingSecret, auditDir, stateDir }) {
 
 module.exports = {
   SIDECAR_NAME_PREFIX,
+  INSTANCE_LABEL_KEY,
   sidecarContainerName,
   sidecarLabels,
   sidecarPluginId,

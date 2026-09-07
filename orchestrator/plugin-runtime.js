@@ -52,6 +52,7 @@ const UNSUPPORTED = { supported: false, reason: 'plugin sidecars require the pod
 const {
   sidecarContainerName,
   sidecarLabels,
+  INSTANCE_LABEL_KEY,
   reconcileSidecars,
   sidecarPluginIds,
   reconcileAttachments,
@@ -71,6 +72,13 @@ const http = require('http');
 // makes. Compose passes it through as PODMAN_HOST_SOCKET.
 const PODMAN_HOST_SOCKET = process.env.PODMAN_HOST_SOCKET || '/run/user/501/podman/podman.sock';
 const COMPOSE_PROJECT = process.env.COMPOSE_PROJECT_NAME || 'agent-studio';
+// Instance identity for shared-store isolation (mirrors spawn-container.js).
+// Sidecars are stamped with it and the sidecar list is filtered by it, so this
+// stack only ever starts/stops/reaps its OWN plugin sidecars — a parallel stack
+// with different (or no) plugins installed can never reap these. Empty only if
+// neither AEE_INSTANCE_ID nor COMPOSE_PROJECT_NAME is set, in which case the
+// behaviour degrades to the pre-isolation global view.
+const INSTANCE_ID = process.env.AEE_INSTANCE_ID || process.env.COMPOSE_PROJECT_NAME || '';
 
 // Per-plugin audit volume (§4.7): a broker appends one JSONL line per call. It
 // gets its OWN volume rather than a slice of /workspace — a sidecar has no
@@ -131,7 +139,16 @@ function brokerBaseUrl(manifest) {
 // Every container carrying the plugin label, RUNNING OR NOT. The distinction
 // matters — see splitByRunning.
 async function listSidecarContainers() {
-  const filters = encodeURIComponent(JSON.stringify({ label: [PLUGIN_ID_LABEL] }));
+  // Scope the query to THIS stack's sidecars (aee.instance). Without the
+  // instance filter a parallel stack's reconcile sees every stack's sidecars
+  // and — having those plugins "not installed" — reaps them as orphans, which
+  // is exactly how starting one stack tore down another's plugin brokers. A
+  // pre-isolation sidecar (no instance label) simply doesn't match, so this
+  // stack leaves it untouched rather than clobbering it.
+  const labelFilter = INSTANCE_ID
+    ? [PLUGIN_ID_LABEL, `${INSTANCE_LABEL_KEY}=${INSTANCE_ID}`]
+    : [PLUGIN_ID_LABEL];
+  const filters = encodeURIComponent(JSON.stringify({ label: labelFilter }));
   const r = await libpodRequest('GET', `/containers/json?all=true&filters=${filters}`);
   if (r.status >= 300 || !Array.isArray(r.body)) return [];
   return r.body;
@@ -235,7 +252,7 @@ function sidecarCreateBody(manifest, { signingSecret: secret, hostSocket = PODMA
     // compose network has — the `egress` capability is validated but not yet
     // enforced as a restriction (no shipped plugin declares it).
     Networks: { [AGENT_NETWORK]: {} },
-    labels: sidecarLabels(manifest.id),
+    labels: sidecarLabels(manifest.id, INSTANCE_ID),
     // SELinux relabelling must be off for the mounted host socket, exactly as
     // the orchestrator's own compose service does it (`security_opt:
     // label=disable`). The libpod create API spells this `selinux_opts`, NOT

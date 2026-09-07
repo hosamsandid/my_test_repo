@@ -26,6 +26,9 @@ import { summarizeLoopEdge, summarizeClaimEdge, claimTooltip } from '../agent-ch
 import { clampPan } from './pan-clamp';
 import { attachTooltip } from '../../components/tooltip-dom';
 import { CANVAS_TITLES, orientationTitle, archivedTitle, stagesTitle } from './flow-canvas-hints';
+import {
+  WAKE_EDGE_COLOR, WAKE_EDGE_LEGEND, wakeChipText, wakeEdgeIsAmbiguous,
+} from './wake-edge-view';
 
 // Single source of truth for edge colours and legend names (#402, #1009).
 // Every drawer, the canvas legend AND the Team-Setup wizard's mini preview
@@ -53,6 +56,12 @@ export const EDGE_STYLES = {
   // decision. Rose + dashed so "waiting on a person" never reads as a
   // gate listener (solid red) or a plain label hand-off (blue).
   handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
+  // Direct agent-to-agent hand-off (#2031): a `wakeAgent` outcome wakes a wired
+  // same-team role inside the platform. Indigo + SOLID — dotted already means
+  // "internal transport of a label", and this is not a label at all. The hue
+  // sits close to label-blue on purpose-of-necessity, so the chip's `↪` glyph is
+  // what carries the distinction. See wake-edge-view.js for the full rationale.
+  wake:       { color: WAKE_EDGE_COLOR, label: WAKE_EDGE_LEGEND },
 };
 
 export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutcome, onSelectEdge, actorSources, expandChildrenByDefault } = {}) {
@@ -310,7 +319,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
       legendEl.innerHTML = _legendToggleBtn(true);
       return;
     }
-    const keys = ['label', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
+    // A FIXED key list, not derived from EDGE_STYLES — so an edge type absent
+    // here draws with no legend entry at all. `wake` (#2031) sits next to
+    // `label`: they are the two agent→agent hand-off mechanisms and read as a
+    // pair (one carries a label a human can see, the other does not).
+    const keys = ['label', 'wake', 'issue', 'pr', 'review', 'gate', 'handoff', 'event', 'webhook', 'artifact', 'dependency', 'hierarchy'];
     const actorToggles = ['github', 'external'].map(kind => {
       const off = state.hiddenActorKinds.has(kind);
       return `<button data-actor-toggle="${kind}" title="Show/hide edges from this source" style="`
@@ -514,7 +527,10 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // (human-set labels come from @github). Timer edges are NOT drawn as lines
     // any more — schedules render inside the agent card. True orphans
     // (from: null) are still dropped here.
-    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'webhook']);
+    // `wake` (#2031) is agent→agent and always has both endpoints resolved (the
+    // graph builder withholds the edge otherwise), so it needs no special case
+    // beyond admission here — an `on` missing from this set never gets a line.
+    const EXTRA = new Set(['label', 'review', 'manual', 'github', 'event', 'webhook', 'wake']);
     state.extraEdges = (Array.isArray(g.edges) ? g.edges : [])
       .filter(e => EXTRA.has(e.on) && e.from && e.to && e.from !== e.to);
 
@@ -1982,15 +1998,30 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         // the wake bypasses the GitHub poller (orchestrator queue), and the dot
         // pattern is distinct from the 6-4 dash of actor edges.
         const isInternal = (e.on === 'label' || e.on === 'github') && e.transport === 'internal';
+        // Direct hand-off (#2031). Checked BEFORE `isOutcome` in every arm
+        // below: a wake edge always carries an `outcome` (that is what edgeId
+        // keys on), so the amber outcome-keyed styling would otherwise swallow
+        // it and every direct hand-off would render as a generic ◇ switch edge.
+        const isWake = e.on === 'wake';
         list.push({
           from: e.from, to: e.to,
-          color: isGithub ? GH_COLOR[artifact] : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color)),
+          color: isGithub ? GH_COLOR[artifact]
+            : (isWake ? EDGE_STYLES.wake.color
+              : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color))),
           width: isGithub ? 2 : 1.5,
+          // Solid: dotted means "internal transport of a label" (#1174), and a
+          // direct hand-off carries no label to transport.
           dash: isInternal ? '2 3' : '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
-            : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || ''))),
-          chip: isGithub,
+            : (isWake ? wakeChipText(e, nodeDisplayName, outcomeOptionTitle,
+              wakeEdgeIsAmbiguous(state.extraEdges, e))
+              : (isOutcome ? outcomeEdgeText(e) : (e.on === 'label' ? labelChipText(e) : (e.label || '')))),
+          // A filled pill, like a GitHub-channel edge: the `↪ <Target>` text is
+          // the whole content of the edge (there is no label token to read), so
+          // it must stay legible over crossing lines rather than sit as bare
+          // haloed text.
+          chip: isGithub || isWake,
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
             artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
@@ -2007,6 +2038,11 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
             // still distinguished from a plain-label delivery downstream.
             ...(e.handoff ? { handoff: e.handoff } : {}),
             ...(e.brake ? { brake: true } : {}),
+            // #2031: the producer's hand-off note. The Edit-hand-off dialog
+            // edits it in place, so it must survive the click — there is no
+            // trigger behind a wake edge to re-read it from (the consumer's
+            // listener is derived from the action, not the authoring point).
+            ...(e.note ? { note: e.note } : {}),
             ...(e.outcome ? { outcome: e.outcome } : {}) },
         });
       });
@@ -2234,11 +2270,29 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // option's title from the source node so the edge reads `◇ Accepted` rather
   // than the raw label. Falls back to the option id, then the label.
   function outcomeEdgeText(e) {
-    const src = state.byId[e.from];
-    const opt = src && src.outcomes && Array.isArray(src.outcomes.options)
-      ? src.outcomes.options.find(o => o.id === e.outcome) : null;
-    const title = (opt && (opt.title || opt.id)) || e.outcome || e.label || '';
+    const title = outcomeOptionTitle(e.from, e.outcome) || e.label || '';
     return `◇ ${title}`;
+  }
+
+  // A node's display name, and a producer's title for one of its outcome
+  // options. Both are id fallbacks, never blank for a resolvable node/option, so
+  // a chip built from them always says something. Shared by outcomeEdgeText and
+  // the #2031 wake chip — the same lookup, previously inline in the former.
+  function nodeDisplayName(id) {
+    // `title`, NOT `displayName`: a `state.byId` entry is a *briefing* object
+    // (built in setData as `{ id, title: n.displayName || n.id, … }`), so the
+    // unified node's `displayName` does not survive into it — reading it would
+    // silently fall through to the raw id on every single chip, which is the
+    // one failure mode a name lookup can have and never report. The node cards
+    // read `bp.title` for the same reason.
+    const n = state.byId[id];
+    return (n && (n.title || n.id)) || id || '';
+  }
+  function outcomeOptionTitle(fromId, outcomeId) {
+    const src = state.byId[fromId];
+    const opt = src && src.outcomes && Array.isArray(src.outcomes.options)
+      ? src.outcomes.options.find(o => o.id === outcomeId) : null;
+    return (opt && (opt.title || opt.id)) || outcomeId || '';
   }
 
   // The chip text for a GitHub-channel edge (#380): artifact + optional human-gate

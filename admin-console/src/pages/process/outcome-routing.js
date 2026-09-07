@@ -48,7 +48,14 @@ export function rowArtifact(option) {
 // picker / delivery, never as signal consumers here).
 export function consumerCandidates(node, peers) {
   return (Array.isArray(peers) ? peers : [])
-    .filter(p => p && p.id && p.id !== node?.id && p.kind !== 'human')
+    // Positively `agent`, not merely `!== 'human'` (#2031). On a LIVE team
+    // `peers` is the graph's node list, which also carries the actor
+    // pseudo-nodes (`kind: 'actor'` — @github "GitHub", @external "External
+    // system", @timer "Schedule"), so the exclusion list offered all three as
+    // pickable consumers. An actor can be neither a label consumer nor a
+    // hand-off target, and the server refuses one either way; a draft's `roles`
+    // carry no `kind` at all, hence the default.
+    .filter(p => p && p.id && p.id !== node?.id && (p.kind || 'agent') === 'agent')
     .map(p => ({ id: p.id, name: p.displayName || p.id }));
 }
 
@@ -127,8 +134,16 @@ export function currentConsumers(option, node, peers) {
 // already exposes Delivery). That dialog links back to the producing outcome
 // for the richer when/action editing. Non-label outcome edges (opens-PR/issue)
 // keep focusing the Outcomes directly. Pure so the routing rule is unit-tested.
+//
+// #2031 adds the second exception, for the same reason as the first: a direct
+// hand-off ALWAYS carries an `outcome` (it is what edgeId keys on), so without
+// this a wake edge could never open its own Edit-hand-off dialog — every click
+// would jump to the Routing tab and the dialog would be unreachable code. And
+// unlike an opens-PR/issue edge, a hand-off has per-edge state to edit (its
+// target and its note), which is exactly what that dialog is for.
+const OWN_EDIT_DIALOG = new Set(['label', 'wake']);
 export function edgeOpensProducerOutcome(edge) {
-  return !!(edge && edge.outcome && edge.from && edge.on !== 'label');
+  return !!(edge && edge.outcome && edge.from && !OWN_EDIT_DIALOG.has(edge.on));
 }
 
 // #1195: does a label edge have its own backing consumer listener trigger? A

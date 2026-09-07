@@ -25,7 +25,10 @@ test('live and draft are fully editable with the process type set', () => {
     assert.equal(caps.edgeClick, true);
     assert.equal(caps.actorSources, true);
     assert.equal(caps.readOnlyHint, null);
-    assert.deepEqual(createTypesFor(caps, 'agent'), ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy']);
+    // #2031 added 'wake' (the direct agent-to-agent hand-off) next to 'label' —
+    // the two ways one agent wakes another. Agent-source only: `wakeAgent`
+    // addresses a same-team ROLE, and neither @github nor @external is one.
+    assert.deepEqual(createTypesFor(caps, 'agent'), ['github-pr', 'github-issue', 'label', 'wake', 'artifact', 'hierarchy']);
     assert.deepEqual(createTypesFor(caps, 'github'), ['event']);
     assert.deepEqual(createTypesFor(caps, 'external'), ['webhook']);
     // @human and @timer are no longer drag sources: human actions are GitHub
@@ -103,5 +106,21 @@ test('#1965 — no surviving mode offers the BP-only dependency tile', () => {
         `${mode}/${kind} still offers the BP dependency tile`,
       );
     }
+  }
+});
+
+test('#2031: the direct-hand-off tile is offered from an agent only, and never read-only', () => {
+  for (const mode of ['live', 'draft']) {
+    assert.ok(createTypesFor(capabilitiesFor(mode), 'agent').includes('wake'));
+    // Not from an actor: a hand-off names a same-team role, and @github /
+    // @external are not roles. Offering it there would open a dialog whose
+    // target picker could only be empty.
+    for (const src of ['github', 'external', 'human', 'timer']) {
+      assert.ok(!createTypesFor(capabilitiesFor(mode), src).includes('wake'), `${mode}/${src}`);
+    }
+  }
+  // A blueprint / imported preview offers no create types at all.
+  for (const mode of ['blueprint', 'viewer']) {
+    assert.deepEqual(createTypesFor(capabilitiesFor(mode), 'agent'), []);
   }
 });

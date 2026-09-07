@@ -814,3 +814,78 @@ test('#1004: a marked output artifact is an endpoint — no unconsumed-output li
   assert.ok(!lintCodes(mk({ name: 'report', terminal: true })).includes('unconsumed-output'));
   assert.ok(!lintCodes(mk({ name: 'report', external: { note: 'org dashboard' } })).includes('unconsumed-output'));
 });
+
+// ─── #2031: on:'wake' — the direct agent-to-agent hand-off discriminator ─────
+
+const wakeGraph = (options) => buildUnifiedGraph([
+  { id: 'dev', displayName: 'Developer', triggers: [], outcomes: { mode: 'anyOf', options } },
+  { id: 'rev', displayName: 'Reviewer', triggers: [] },
+], undefined, {});
+
+test('#2031: a wakeAgent action becomes an on:\'wake\' edge, not a label edge', () => {
+  const g = wakeGraph([{ id: 'handed-off', actions: [{ type: 'wakeAgent', to: 'rev', note: 'mind step 3' }] }]);
+  const e = g.edges.find(x => x.on === 'wake');
+  assert.ok(e, 'the hand-off is drawn');
+  assert.equal(e.from, 'dev');
+  assert.equal(e.to, 'rev');
+  assert.equal(e.outcome, 'handed-off');
+  assert.equal(e.note, 'mind step 3');
+  // The three things a direct hand-off deliberately does NOT carry: it is not a
+  // label hand-off, it has no listening trigger to edit (the consumer's listener
+  // is derived from this action), and it is internal by construction so there is
+  // no transport to select.
+  assert.equal(e.label, undefined, 'no label token');
+  assert.equal(e.triggerId, undefined, 'no listening trigger — the action is the authoring point');
+  assert.equal(e.transport, undefined, 'internal by construction — nothing to toggle');
+  assert.equal(e.gate, undefined);
+  assert.equal(e.handoff, undefined, '`handoff` means human decision / brake — never reused here');
+  assert.equal(g.edges.filter(x => x.on === 'label').length, 0);
+});
+
+test('#2031: edgeId keys a wake edge on its outcome so two hand-offs cannot collide', () => {
+  const g = wakeGraph([
+    { id: 'approved', actions: [{ type: 'wakeAgent', to: 'rev' }] },
+    { id: 'second-look', actions: [{ type: 'wakeAgent', to: 'rev' }] },
+  ]);
+  const wake = g.edges.filter(x => x.on === 'wake');
+  assert.equal(wake.length, 2, 'both hand-offs survive de-duplication');
+  assert.deepEqual(wake.map(e => e.id), ['wake|dev→rev|approved', 'wake|dev→rev|second-look']);
+
+  // Mutation proof that the `on === 'wake'` arm of edgeId is load-bearing, not
+  // decoration: a wake edge has no label, no events and no paths, so WITHOUT it
+  // the generic tail is '' for every hand-off and both ids are the same string —
+  // the second edge would be silently dropped by the `seen` set. Recomputing the
+  // pre-change id here would be a lie unless it actually collides, so assert it.
+  const legacyId = (e) => {
+    const tail = e.label != null ? e.label
+      : (Array.isArray(e.events) ? e.events.join(',')
+        : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
+    return `${e.on}|${e.from}→${e.to}|${tail}`;
+  };
+  assert.equal(legacyId(wake[0]), legacyId(wake[1]),
+    'the un-keyed id collides — which is exactly what the outcome tail prevents');
+  assert.notEqual(wake[0].id, wake[1].id);
+});
+
+test('#2031: a wake edge to a DIFFERENT target needs no outcome to stay distinct', () => {
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'h', actions: [{ type: 'wakeAgent', to: 'rev' }, { type: 'wakeAgent', to: 'docs' }] },
+    ] } },
+    { id: 'rev', triggers: [] },
+    { id: 'docs', triggers: [] },
+  ], undefined, {});
+  assert.deepEqual(g.edges.filter(e => e.on === 'wake').map(e => e.to).sort(), ['docs', 'rev']);
+});
+
+test('#2031: a wakeAgent alongside a setLabel in ONE option draws both edges', () => {
+  // Concept §11: the two mechanisms coexist and may sit in the same outcome.
+  const g = buildUnifiedGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'h', actions: [{ type: 'setLabel', label: 'ready-for-review' }, { type: 'wakeAgent', to: 'rev' }] },
+    ] } },
+    { id: 'rev', triggers: [{ id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ], undefined, {});
+  assert.ok(g.edges.some(e => e.on === 'wake' && e.from === 'dev' && e.to === 'rev'));
+  assert.ok(g.edges.some(e => e.on === 'label' && e.from === 'dev' && e.to === 'rev'));
+});

@@ -17,7 +17,9 @@ import {
   wireLabelHandoff, updateLabelHandoff, unwireLabelHandoff,
   updateChannel as engineUpdateChannel, unwireChannel,
   wireArtifactFlow,
+  wireWakeHandoff, updateWakeHandoff, unwireWakeHandoff,
 } from './wiring-engine';
+import { WAKE_GLYPH, WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view';
 import {
   submitChannelWithApproval, submitAgentToPerson, submitPersonToAgent,
   findReviewGate, setGateClaim, addRejectionPath, removeRejectionPath,
@@ -293,6 +295,9 @@ export function CreateEdgeDialog({
   if (type === 'label') {
     return <CreateHandoffDialog {...common} labels={labels} onBack={back} initialLabel={prefill?.label || ''} />;
   }
+  if (type === 'wake') {
+    return <CreateWakeHandoffDialog {...common} onBack={back} initialNote={prefill?.note || ''} />;
+  }
   if (type === 'dependency') return <DependencyEdgeForm {...common} onBack={back} />;
   if (type === 'artifact') return <ArtifactEdgeForm {...common} onBack={back} />;
   if (type === 'hierarchy') return <HierarchyEdgeForm {...common} onBack={back} />;
@@ -330,12 +335,26 @@ export function CreateEdgeDialog({
           desc: `Outcome “${o.title || o.id}” — ${B} reacts to the issue.`,
           open: () => setType('github-issue') };
       }
+      // Direct hand-off (#2031). Offered as a one-click tile only when the
+      // outcome already hands off TO THIS TARGET: unlike a label (which the
+      // consumer opts into by listening) a `wakeAgent` names its consumer, so an
+      // outcome pointed at a third agent tells you nothing about wiring B.
+      const wake = (o.actions || []).find(a => a && a.type === 'wakeAgent' && a.to === to);
+      if (wake && allowed.includes('wake')) {
+        return { id: `oc:${o.id}`, title: `${A} already hands off to ${B}`,
+          desc: `Outcome “${o.title || o.id}” — edit the note it hands over.`,
+          open: () => { setPrefill({ note: wake.note || '' }); setType('wake'); } };
+      }
       return null;
     })
     .filter(Boolean);
 
   const createTiles = [
     { id: 'label', title: 'Label hand-off', desc: `An outcome of ${A} sets a label that wakes ${B}.` },
+    // #2031 — sits next to the label tile: they are the two ways one agent wakes
+    // another, and the wording is deliberately about what a HUMAN can see
+    // afterwards (concept §11), not about the transport.
+    { id: 'wake', title: 'Hand off directly', desc: `${A} wakes ${B} inside the platform — no label, no issue, no PR. Use it for pure coordination that has no natural home on a work item.` },
     { id: 'github-issue', title: 'Issue channel', desc: `${A} opens an issue that wakes ${B} (optionally routed via a label / human approval).` },
     { id: 'github-pr', title: 'Pull-request channel', desc: `${A} opens a pull request that wakes ${B} (optionally routed via a label / human approval).` },
     { id: 'artifact', title: 'File artifact', desc: `${A} produces an artifact that ${B} consumes. Leave the name empty for a plain dependency.` },
@@ -953,6 +972,9 @@ export function EditHandoffDialog(props) {
   if (on === 'artifact') {
     return ops.removeArtifact ? <RemoveArtifactEdgeDialog {...props} /> : <ReadonlyEdgeDialog {...props} />;
   }
+  // Direct hand-off (#2031) — its own dialog: target role + note, no label
+  // field and no Delivery selector (see the block comment above the component).
+  if (on === 'wake') return <EditWakeHandoffDialog {...props} ops={ops} />;
   if (on === 'github') return <EditChannelDialog {...props} />;
   if (on === 'timer') return <EditTimerDialog {...props} />;
   if (on === 'loop') return <EditLoopDialog {...props} />;
@@ -1006,6 +1028,195 @@ function EditLabelDeliveryDialog({ edge, fromName, toName, humanOps, onClose, on
         </button>
         <button onClick={onClose} disabled={saving} style={ghost}>Close</button>
       </div>
+    </SidePanel>
+  );
+}
+
+/* ── Direct hand-off (#2031, concept §10) ──────────────────────────────────
+ *
+ * Two dialogs over one action. What they DON'T have is the point:
+ *
+ *   - no label field. A direct hand-off carries no label token; that is the
+ *     whole difference from `EditLabelHandoff`.
+ *   - no Delivery selector. A hand-off is internal by construction — it goes
+ *     through the orchestrator's pending queue and leaves no GitHub trace at
+ *     all. Offering the internal/github toggle that `EditLabelHandoff` carries
+ *     for label edges would imply a GitHub path that does not exist.
+ *   - no wake-instruction field. The instruction belongs to the CONSUMER (one
+ *     per agent, derived by `expandWakeHandoffs`), not to this edge; a producer
+ *     editing it here would be editing every other producer's hand-off too.
+ *
+ * What is left is exactly the target role and the note.
+ */
+
+// The note field, shared by both dialogs so the cap, the counter and the
+// untrusted-context warning cannot drift between create and edit.
+function WakeNoteField({ value, onChange, toLabel }) {
+  const used = Array.from(value || '').length;
+  const over = used > WAKE_NOTE_MAX;
+  return (
+    <Field label="Note (optional)">
+      <textarea value={value} rows={3} onChange={e => onChange(e.target.value)}
+        placeholder="What are you handing over? e.g. “migration in step 3 needs a second pair of eyes”"
+        style={{ ...input, resize: 'vertical' }} />
+      <small style={{ ...small, color: over ? 'var(--eb-status-error)' : 'var(--eb-text-muted)' }}>
+        {used}/{WAKE_NOTE_MAX} characters.{' '}
+        {/* Concept §5.3: the note is the producer's own text and reaches the
+            consumer as untrusted CONTEXT, never as its instruction. Saying so
+            here is what stops an author writing orders into it. */}
+        It reaches <strong>{toLabel}</strong> as context to check, not as its instructions —
+        what it actually does on a hand-off is set by its own wake instruction.
+      </small>
+    </Field>
+  );
+}
+
+/* Create: the target is the node the drag landed on, so there is nothing to
+ * pick — this is a note field and a confirm. */
+function CreateWakeHandoffDialog({ from, to, fromName, toName, ops = liveOps, initialNote = '', onBack, onClose, onDone }) {
+  const [note, setNote] = useState(initialNote || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const A = fromName || from;
+  const B = toName || to;
+
+  async function submit() {
+    setSaving(true); setError(null);
+    try {
+      await wireWakeHandoff({ ops }, { from, to, note: clampWakeNote(note) });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Hand off directly" width="520px">
+      <p style={hint}>
+        <strong>{A}</strong> {WAKE_GLYPH} <strong>{B}</strong> — an outcome of {A} wakes {B} inside
+        the platform. No label, no issue, no pull request: the hand-off itself is the signal, and the
+        event log carries the audit.
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+        <WakeNoteField value={note} onChange={setNote} toLabel={B} />
+        <div style={{ ...small, padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', lineHeight: 1.6, color: 'var(--eb-text-secondary)' }}>
+          {/* Concept §11 — the one thing worth deciding before confirming. */}
+          Use this for coordination with no natural home on a work item. If a human should be able to
+          see the state on the issue or PR, use a <strong>label hand-off</strong> instead — the label is
+          what makes the step visible to them.
+        </div>
+      </div>
+      {error && <span style={errStyle}>{error}</span>}
+      <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+        {onBack && <button onClick={onBack} disabled={saving} style={{ ...ghost, marginRight: 'auto' }}>Back</button>}
+        <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={primary}>
+          {saving ? 'Saving…' : 'Hand off directly'}
+        </button>
+      </div>
+    </SidePanel>
+  );
+}
+
+/* Edit: target role + note, and a remove. The target IS re-pointable here (the
+ * canvas has no drag gesture for "move this edge's endpoint"), which is why this
+ * dialog carries the picker the create side does not need. */
+function EditWakeHandoffDialog({ edge, fromName, toName, graph, ops = liveOps, onClose, onDone, onOpenRouting }) {
+  const { from, to, outcome } = edge;
+  const [target, setTarget] = useState(to);
+  const [note, setNote] = useState(typeof edge.note === 'string' ? edge.note : '');
+  const [saving, setSaving] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [error, setError] = useState(null);
+  const A = fromName || from;
+
+  // Candidate targets: every OTHER agent in the flow. Positively filtered on
+  // `kind === 'agent'`, not merely `!== 'human'`: `graph.nodes` also carries the
+  // actor pseudo-nodes (`kind: 'actor'` — @github "GitHub", @external "External
+  // system", @timer "Schedule"), and an exclusion list would have listed all
+  // three as pickable targets that the server then refuses with "not a role in
+  // this flow". A person is excluded for the real reason — a hand-off is
+  // delivered to the target's pending queue and a human role has none.
+  const candidates = (graph && Array.isArray(graph.nodes) ? graph.nodes : [])
+    .filter(n => n && n.id && n.id !== from && (n.kind || 'agent') === 'agent');
+  const nameOf = (id) => candidates.find(n => n.id === id)?.displayName || toName || id;
+
+  async function save() {
+    setSaving(true); setError(null);
+    try {
+      // `outcome` scopes the write to THIS hand-off: the producer may hand off
+      // to the same target from another option, drawn as its own edge, and
+      // without it one click would rewrite both.
+      await updateWakeHandoff({ ops }, { from, to, outcome, newTo: target, note: clampWakeNote(note) });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError(null);
+    try {
+      await unwireWakeHandoff({ ops }, { from, to, outcome });
+      onDone?.();
+    } catch (e) { setError(e.message); setSaving(false); setConfirmDel(false); }
+  }
+
+  return (
+    <SidePanel open onClose={onClose} title="Edit hand-off" width="520px">
+      <p style={hint}>
+        <strong>{A}</strong> {WAKE_GLYPH} <strong>{nameOf(target)}</strong> — a direct hand-off.
+        It carries no label and leaves no GitHub trace, so there is no delivery to choose:
+        it always goes through the platform queue.
+      </p>
+      {onOpenRouting && (
+        <OpenRoutingLink onOpenRouting={onOpenRouting} nodeId={from} section="outcomes"
+          outcome={outcome} label={`Open ${A}'s outcome`} />
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', marginTop: 'var(--eb-space-3)' }}>
+        <Field label="Hands off to">
+          {candidates.length === 0 ? (
+            <span style={small}>No other agent in this flow to hand off to.</span>
+          ) : (
+            <select value={target} onChange={e => setTarget(e.target.value)} style={input}>
+              {/* The current target is listed even if it is not a candidate
+                  (a stale id from an import), so re-pointing never silently
+                  reassigns the hand-off to whichever agent sorts first. */}
+              {!candidates.some(n => n.id === target) && <option value={target}>{target} (not in this flow)</option>}
+              {candidates.map(n => <option key={n.id} value={n.id}>{n.displayName || n.id}</option>)}
+            </select>
+          )}
+          {target !== to && (
+            <small style={small}>
+              Re-points this hand-off. <strong>{nameOf(to)}</strong> keeps its wake instruction — it
+              just stops being woken by {A}.
+            </small>
+          )}
+        </Field>
+        <WakeNoteField value={note} onChange={setNote} toLabel={nameOf(target)} />
+      </div>
+      {error && <span style={errStyle}>{error}</span>}
+      {confirmDel ? (
+        <div style={{ ...small, marginTop: 'var(--eb-space-4)', padding: 'var(--eb-space-3)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', lineHeight: 1.6 }}>
+          Remove this hand-off? {A} stops waking <strong>{nameOf(to)}</strong>.
+          {/* Honest about the derived half: the listener is not this edge's to
+              delete, and it goes on its own once nothing hands off to it. */}
+          {' '}Its wake instruction is removed too, once no teammate hands off to it any more.
+          <div style={{ ...actions, marginTop: 'var(--eb-space-3)' }}>
+            <button onClick={() => setConfirmDel(false)} disabled={saving} style={ghost}>Keep it</button>
+            <button onClick={remove} disabled={saving}
+              style={{ ...primary, background: 'var(--eb-status-error)' }}>
+              {saving ? 'Removing…' : 'Remove hand-off'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ ...actions, marginTop: 'var(--eb-space-4)' }}>
+          <button onClick={() => setConfirmDel(true)} disabled={saving}
+            style={{ ...ghost, color: 'var(--eb-status-error)', borderColor: 'var(--eb-status-error)', marginRight: 'auto' }}>
+            Remove
+          </button>
+          <button onClick={onClose} disabled={saving} style={ghost}>Cancel</button>
+          <button onClick={save} disabled={saving || !target} style={primary}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      )}
     </SidePanel>
   );
 }

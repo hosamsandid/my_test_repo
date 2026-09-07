@@ -17,10 +17,14 @@
 //                     dialog offers (the source dimension, #411)
 //
 // Type tokens (per source, #411):
-//   agent:    'github-pr' | 'github-issue' | 'label' | 'artifact' | 'hierarchy'
+//   agent:    'github-pr' | 'github-issue' | 'label' | 'wake' | 'artifact'
+//             | 'hierarchy'
 //             ('artifact' with no name/path degrades to a plain dependency —
 //             the only view that offered 'dependency' as an explicit tile was
-//             the BriefingPack one, removed in #1965)
+//             the BriefingPack one, removed in #1965; 'wake' is the direct
+//             agent-to-agent hand-off, #2031 — agent-source only, because
+//             `wakeAgent` addresses a same-team ROLE and neither @github nor
+//             @external is one)
 //   github:   'event'  (one unified GitHub-trigger dialog: raw events AND
 //             label-based triggers incl. human-set labels / approval gates —
 //             the former @human source is folded into GitHub)
@@ -43,7 +47,7 @@
 // BriefingPack source.
 
 const PROCESS_CREATE_TYPES = {
-  agent: ['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy'],
+  agent: ['github-pr', 'github-issue', 'label', 'wake', 'artifact', 'hierarchy'],
   github: ['event'],
   external: ['webhook'],
 };

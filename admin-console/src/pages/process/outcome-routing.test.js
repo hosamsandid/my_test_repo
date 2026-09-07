@@ -157,3 +157,34 @@ test('labelEdgeHasListener: true only when the edge carries a triggerId', () => 
   assert.equal(labelEdgeHasListener(null), false);
   assert.equal(labelEdgeHasListener(undefined), false);
 });
+
+test('#2031: a direct hand-off edge opens its OWN dialog, not the producer Outcomes', () => {
+  // A wake edge always carries an `outcome` (edgeId keys on it), so without the
+  // exception every click would jump to the Routing tab and EditWakeHandoffDialog
+  // would be unreachable code. Mutation check: the pre-#2031 rule intercepted it.
+  const edge = { on: 'wake', from: 'dev', to: 'rev', outcome: 'hand-off-rev' };
+  assert.equal(edgeOpensProducerOutcome(edge), false);
+  const preChange = !!(edge.outcome && edge.from && edge.on !== 'label');
+  assert.equal(preChange, true, 'the old rule DID swallow it — which is what this fixes');
+  // The opens-PR/issue edges still focus the Outcomes: they carry no per-edge
+  // state to edit, so there is no dialog for them to open.
+  assert.equal(edgeOpensProducerOutcome({ on: 'github', from: 'a', to: 'b', outcome: 'opens-pr' }), true);
+});
+
+test('#2031: consumerCandidates excludes the actor pseudo-nodes, not just humans', () => {
+  // On a LIVE team `peers` is the graph's node list, which carries @github /
+  // @external / @timer as `kind: 'actor'`. An exclusion list of `!== 'human'`
+  // offered all three as pickable consumers and hand-off targets, which the
+  // server then refuses as "not a role in this flow".
+  const peers = [
+    { id: 'dev', displayName: 'Developer' },
+    { id: 'lead', displayName: 'Tech Lead', kind: 'human' },
+    { id: '@github', displayName: 'GitHub', kind: 'actor' },
+    { id: '@external', displayName: 'External system', kind: 'actor' },
+    { id: '@timer', displayName: 'Schedule', kind: 'actor' },
+    { id: 'rev', displayName: 'Reviewer', kind: 'agent' },
+  ];
+  assert.deepEqual(consumerCandidates({ id: 'ba' }, peers).map(c => c.id), ['dev', 'rev']);
+  // A draft's roles carry no `kind` at all — they must still be candidates.
+  assert.deepEqual(consumerCandidates({ id: 'ba' }, [{ id: 'dev', displayName: 'D' }]).map(c => c.id), ['dev']);
+});

@@ -397,8 +397,10 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **280,624 — 82.5% used,
-59,376 left**, where the all-topics fold route-scoping replaced stood at 322,243 (94.8%). #1930
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **282,691 — 83.1% used,
+57,309 left** (#2031 added the direct-hand-off chapter to `flows.md`, +2,067 measured on its own branch; re-measured on the merge with #2035 in — `create.md` names `/flows` in its
+`seeAlso`, so a Flows-topic edit lands on this figure), where the all-topics fold route-scoping
+replaced stood at 322,243 (94.8%). #1930
 moved the crown here by removing the Agents page: `/flows` lost its `/agents` `seeAlso` neighbour
 and fell to 258,761, the no-route Overview fold dropped too, and `create.md` (which claims
 `/create` and `/quickstart`) links to `/chats`, whose topic absorbed the deleted `agents.md` — so

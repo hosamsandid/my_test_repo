@@ -77,9 +77,17 @@ function asArray(x) { return Array.isArray(x) ? x : []; }
 
 // Stable, deterministic edge id so re-builds and the renderer agree.
 function edgeId(e) {
-  const tail = e.label != null ? e.label
-    : (Array.isArray(e.events) ? e.events.join(',')
-      : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
+  // A direct hand-off (#2031) carries no label token, no events and no paths, so
+  // the generic tail below would be the empty string for every one of them: two
+  // `wakeAgent` actions out of ONE producer aimed at the SAME target (authored in
+  // two different outcome options — e.g. "approved" and "needs a second look"
+  // both handing off to the reviewer) would collapse into a single edge, and the
+  // canvas would silently drop one. The outcome option is the only thing that
+  // distinguishes them, so it IS the tail here.
+  const tail = e.on === 'wake' ? (e.outcome || '')
+    : e.label != null ? e.label
+      : (Array.isArray(e.events) ? e.events.join(',')
+        : (Array.isArray(e.paths) ? e.paths.join(',') : ''));
   // GitHub channels between the same pair are distinct per artifact (PR vs issue).
   const kind = e.on === 'github' ? `github:${e.artifact || 'pr'}` : e.on;
   // Trigger-backed edges are one-edge-per-trigger — key them by the trigger so
@@ -141,6 +149,24 @@ function processEdgeToUnified(e) {
       from: e.from, to: e.to, on: 'review', label: e.label,
       ...(e.reviewFlow ? { reviewFlow: e.reviewFlow } : {}),
       ...(e.outcome ? { outcome: e.outcome } : {}),
+    };
+  }
+  if (e.kind === 'wake') {
+    // Direct agent-to-agent hand-off (#2031, concept §10 / resolved decision 11).
+    // A new discriminator, not `on: 'label'` (which presupposes a carrying label
+    // and a listening `triggerId`) and not `handoff` (already means "human
+    // decision / brake"). No label, no artifact, no transport toggle: a direct
+    // hand-off is internal by construction, so there is nothing to select.
+    //
+    // `outcome` rides along because the producer authored the hand-off INSIDE an
+    // outcome option — it is what `edgeId` keys on and what the canvas titles a
+    // second hand-off to the same target with. No `triggerId`: the consumer's
+    // wake-agent listener is DERIVED from this action by the reconciler, so the
+    // producer's action — not a trigger — is the edge's authoring point.
+    return {
+      from: e.from, to: e.to, on: 'wake',
+      ...(e.outcome ? { outcome: e.outcome } : {}),
+      ...(e.note ? { note: e.note } : {}),
     };
   }
   if (e.external) {

@@ -181,6 +181,137 @@ export async function unwireLabelHandoff({ ops }, { from, to, triggerId, label, 
   }
 }
 
+// ── direct hand-off: A wakes B inside the platform (#2031) ──────────────────
+//
+// The whole hand-off is ONE `wakeAgent` action on the producer's outcomes port.
+// There is deliberately no consumer-side write here — unlike a label hand-off,
+// whose listener this engine creates with `ops.createTrigger`, the target's
+// `wake-agent` listener is DERIVED server-side by `expandWakeHandoffs` on the
+// same outcomes-port save (#2031). Creating one here would race that derivation
+// and, because a consumer's instruction is one-per-agent, would be the trigger
+// the runner picks and the reconciler then strips.
+//
+// Keyed on (action type, `to`) so re-wiring the same pair is a no-op — the
+// action-keyed shape of `ensureArtifactOutcome`, not the label-keyed shape of
+// `ensureLabelOutcome`: a hand-off has no label to name its option after.
+
+// The option id/title for a fresh hand-off. Distinct per target so a producer
+// handing off to two agents gets two readable options rather than a collision
+// that `finalize()` would silently suffix (`hand-off-2`).
+function wakeOptionId(to) { return `hand-off-${to}`; }
+
+async function ensureWakeOutcome(ops, roleId, to, note) {
+  if (!ops.getRoleOutcomes || !ops.setRoleOutcomes) return;
+  const target = String(to || '').trim();
+  if (!target) throw new Error('a target role is required');
+  const cur = (await ops.getRoleOutcomes(roleId)) || { mode: 'anyOf', options: [] };
+  const existing = (cur.options || []).find(o =>
+    (o.actions || []).some(a => a && a.type === 'wakeAgent' && a.to === target));
+  const n = String(note || '').trim();
+  if (existing) {
+    // Idempotent on the WIRING, but not a silent no-op on the note. The edge
+    // chooser offers a one-click tile for an outcome that already hands off to
+    // this target, titled "edit the note it hands over" and pre-filled from it —
+    // a bare `return` here accepted that edit, closed the panel with no error,
+    // and discarded it. A note the caller actually supplied is applied; an empty
+    // one is left alone, so re-running the plain wire cannot wipe a note nobody
+    // was editing (clearing a note is the Edit dialog's job, which passes it
+    // explicitly through `updateWakeHandoff`).
+    if (!n) return;
+    await ops.setRoleOutcomes(roleId, {
+      ...cur,
+      options: (cur.options || []).map(o => (o.id !== existing.id ? o : {
+        ...o,
+        actions: (o.actions || []).map(a => (a && a.type === 'wakeAgent' && a.to === target
+          ? { type: 'wakeAgent', to: target, note: n } : a)),
+      })),
+    });
+    return;
+  }
+  await ops.setRoleOutcomes(roleId, {
+    ...cur,
+    options: [...(cur.options || []), {
+      id: wakeOptionId(target),
+      title: `Hand off to ${target}`,
+      actions: [{ type: 'wakeAgent', to: target, ...(n ? { note: n } : {}) }],
+    }],
+  });
+}
+
+/**
+ * Wire "A hands off directly to B": a `wakeAgent` outcome action on A. The
+ * target's wake listener is derived server-side, so this is a single write.
+ * Idempotent — an existing hand-off to the same target is reused, never doubled.
+ */
+export async function wireWakeHandoff({ ops }, { from, to, note }) {
+  await ensureWakeOutcome(ops, from, to, note);
+}
+
+// Which hand-off an edit applies to. The (from, to) pair does NOT identify one:
+// a producer may hand off to the same target from two different outcome options,
+// and `unified-graph`'s edgeId keys wake edges on the outcome precisely so both
+// are drawn as separate, separately-clickable edges. So an edit that matched on
+// the pair alone would rewrite BOTH from one click — re-pointing the sibling and
+// destroying its note, or deleting it outright.
+//
+// `outcome` is therefore the scope when the caller has one (every canvas edge
+// does, and it is what the dialog was opened from). Without one, the pair is the
+// only thing left to match on — that is the legacy/imported-data path, and
+// touching every matching action is then the honest reading of "this hand-off".
+function wakeActionMatches(option, action, { to, outcome }) {
+  if (!action || action.type !== 'wakeAgent' || action.to !== to) return false;
+  return outcome ? option.id === outcome : true;
+}
+
+/**
+ * Re-point and/or re-note an existing hand-off. Scoped to `outcome` when given
+ * (see above). Matches the action on its CURRENT target rather than on the
+ * option id alone, because the option may have been renamed by hand since it was
+ * wired and the action is what the edge is built from. A blank `note` CLEARS it
+ * (the key is dropped, never written as '') — "no note" and "an empty note" must
+ * not be two states.
+ */
+export async function updateWakeHandoff({ ops }, { from, to, newTo, note, outcome }) {
+  if (!ops.getRoleOutcomes || !ops.setRoleOutcomes) return;
+  const next = String(newTo == null ? to : newTo).trim();
+  if (!next) throw new Error('a target role is required');
+  const cur = await ops.getRoleOutcomes(from);
+  if (!cur) return;
+  const n = String(note || '').trim();
+  await ops.setRoleOutcomes(from, {
+    ...cur,
+    options: (cur.options || []).map(o => ({
+      ...o,
+      actions: (o.actions || []).map(a => (wakeActionMatches(o, a, { to, outcome })
+        ? { type: 'wakeAgent', to: next, ...(n ? { note: n } : {}) }
+        : a)),
+    })),
+  });
+}
+
+/**
+ * Remove a hand-off: strip the `wakeAgent` action aimed at `to`, scoped to
+ * `outcome` when given. An option left with no actions at all is dropped, and
+ * emptying the port clears it entirely (never a dangling `{options: []}`) — the
+ * `unwireLabelHandoff` discipline. An option that ALSO sets a label keeps its
+ * remaining actions: §11 allows the two mechanisms in one option, so removing
+ * the wake must not remove the label with it. The target's derived listener
+ * disappears on its own once the last hand-off to it is gone
+ * (expandWakeHandoffs strips what it no longer derives).
+ */
+export async function unwireWakeHandoff({ ops }, { from, to, outcome }) {
+  if (!ops.getRoleOutcomes || !ops.setRoleOutcomes) return;
+  const cur = await ops.getRoleOutcomes(from);
+  if (!cur) return;
+  const options = (cur.options || [])
+    .map(o => ({
+      ...o,
+      actions: (o.actions || []).filter(a => !wakeActionMatches(o, a, { to, outcome })),
+    }))
+    .filter(o => (o.actions || []).length > 0);
+  await ops.setRoleOutcomes(from, options.length ? { ...cur, options } : null);
+}
+
 // ── GitHub channel: A opens a PR/issue that wakes B ─────────────────────────
 
 /**

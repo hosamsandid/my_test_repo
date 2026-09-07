@@ -39,6 +39,9 @@
 // load-time cycle.
 const {
   isAuthoredOutcomes, normalizeOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
+  // #2031: the `{to, note?, outcome}` triples a port hands off directly — the
+  // wake-edge index, the sibling of `outcomeEmitPairs`.
+  outcomeWakePairs,
 } = require('./outcomes');
 // Claim-label convention (#958) — the suffix is defined once, in process-template,
 // so the lint below can never drift from what the expanders derive. Acyclic:
@@ -711,6 +714,37 @@ function buildProcessGraph(agents, options) {
       } else if (audience === 'human') {
         edges.push({ from: n.id, to: null, kind: 'delivery', artifact, handoff: 'human' });
       }
+    }
+  }
+
+  // Direct agent-to-agent hand-offs (#2031, concept §10): a `wakeAgent` outcome
+  // action wakes a wired SAME-TEAM role inside the platform — no label token, no
+  // issue/PR, no GitHub trace. `kind: 'wake'` maps onto the `on: 'wake'`
+  // discriminator in unified-graph; the note rides along so the edge dialog and
+  // the canvas can show what the producer hands over.
+  //
+  // Three cases draw NO edge, and each is deliberate:
+  //   - an unknown target — validateOutcomes refuses one at authoring time, so a
+  //     surviving one is imported/legacy data; a line into nothing is worse than
+  //     no line, and P3 owns the lint that names it.
+  //   - a HUMAN role as the target — `wakeAgent` wakes an agent through the
+  //     pending queue; a person has no queue. `nodeIds` is the AGENT id set
+  //     (human roles only join as `allNodes` further down), so the same
+  //     membership check that rejects an unknown target rejects a person too.
+  //   - a self-wake — refused server-side; drawing it would suggest a legal loop.
+  //
+  // Unlike the label paths above there is no emit index to consult and no
+  // dead-end case: a `wakeAgent` names its consumer directly, so the edge either
+  // resolves to that node or does not exist.
+  for (const n of nodes) {
+    if (!isAuthoredOutcomes(n.outcomes)) continue;
+    for (const w of outcomeWakePairs(n.outcomes)) {
+      if (w.to === n.id) continue;
+      if (!nodeIds.has(w.to)) continue;
+      edges.push({
+        from: n.id, to: w.to, kind: 'wake', outcome: w.outcome,
+        ...(w.note ? { note: w.note } : {}),
+      });
     }
   }
 

@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 280 338 of 340 000 — 82.5% used, 59 662 left — against
+// neighbours) at 282 405 of 340 000 — 83.1% used, 57 595 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -135,9 +135,16 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // launcher's preview to the flow cards, which cost +645 on top of 279 693: +250
 // in `create.md` (the crown-holding context IS that topic's, so a paragraph
 // there lands on this figure in full) and +395 in admin-console.md +
-// walkthrough/01-team-setup.md, which lands on EVERY context. Re-measure
-// rather than trust this comment — measureWorstCaseSystemPrompt() sweeps every
-// context.
+// walkthrough/01-team-setup.md, which lands on EVERY context. #2031 then added
+// the direct-hand-off chapter to `flows.md` (+2 067 on top of 280 338) — worth
+// knowing WHY a Flows edit lands on the `/quickstart` figure at all: `create.md`
+// lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
+// contains the Flows topic even though the crown is not on `/flows`. Its other
+// docs edit (`docs/process-template-format.md`) costs nothing here, that file
+// not being in CORPUS_FILES. Re-measure rather than trust this comment —
+// measureWorstCaseSystemPrompt() sweeps every context and returns which one
+// won, so read the `context` it hands back and never assume it is still the
+// page you edited.
 //
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth

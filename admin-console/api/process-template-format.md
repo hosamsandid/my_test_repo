@@ -242,11 +242,24 @@ the same option.
   target is disabled or in maintenance mode, and one `source: "internal"`
   event-log row is written per hand-off — that log is the audit trail, because
   nothing appears on GitHub.
-- **Consumer side.** The target needs a listener carrying the wake instruction:
-  `{ "id": "…", "type": "wake-agent", "prompt": "…" }` in its `triggers.json`.
-  Nothing schedules a trigger of this type and the poller never subscribes to it
-  — it fires only from the queue. In this phase the listener is hand-edited on
-  `triggers.json` / the bundle; the Flow Editor authors it in P2.
+- **Consumer side — derived, not authored (#2031).** The target needs a listener
+  carrying the wake instruction: `{ "id": "…", "type": "wake-agent",
+  "prompt": "…" }` in its `triggers.json`. Nothing schedules a trigger of this
+  type and the poller never subscribes to it — it fires only from the queue.
+  `expandWakeHandoffs` derives it from the producers' `wakeAgent` actions, the
+  way `expandGithubChannels` derives a label listener: stamped
+  `wakeHandoff: true` (the marker that makes it strippable and regenerable),
+  `id` = `<consumerId>-on-handoff`, and `sources` recording which producers hand
+  off to it — informational only, like a channel trigger's. It carries no
+  `events`, `labelFilter`, `claim`, `transport` or `activatedAt`: there is no
+  GitHub event behind it, no label to claim, it is internal by construction, and
+  nothing polls it so there is no history horizon to preserve.
+  **Exactly one per consumer**, not one per producer or per outcome — the
+  producer cannot know the consumer's trigger id, so none is stamped on the queue
+  entry and the target's runner takes the first enabled `wake-agent` trigger it
+  finds; a second would be authored, materialised and never fire. A
+  **hand-authored** listener (one without the `wakeHandoff` marker) is therefore
+  left alone and suppresses the derivation for that role.
 - **Same team only**, and stricter than the internal label channel (which has no
   team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
   check is an **integrity constraint on the flow graph, not authentication** —

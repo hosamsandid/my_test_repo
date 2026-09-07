@@ -135,10 +135,13 @@ once you know.
 
 ### Growing creates a new team, it does not convert this one
 
-**Grow into a full team** takes you to the Agent Team Wizard when you want
-reviewers, a developer or a whole development workflow.
+When you want reviewers, a developer or a whole development workflow, you grow
+into a full team through the **Agent Team Wizard** — from **+ Create**, under
+*Or build a team of agents that work together*. The one-assistant form used to
+carry a **Grow into a full team** link of its own; it was removed so the form
+keeps a single call to action, and the path itself is unchanged.
 
-One thing worth knowing before you click it: the wizard **creates a new team** —
+One thing worth knowing before you take it: the wizard **creates a new team** —
 it does not convert your existing assistant into one. Your single agent keeps
 running independently, with its own chat history, and you can retire it
 afterwards from its row menu in Agent Chat if the team replaces it. Nothing

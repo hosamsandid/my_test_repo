@@ -146,24 +146,32 @@ export function quickstartSubmitReasons({
 // (`detail`) and shortened the team-of-one note: what the two submit paths
 // actually create — which fields each one uses, the environment/agent reuse, the
 // prerequisites — is the `create` help topic, reachable from the page's "?".
+// #2045 then removed the team-of-one note and its `growCtaLabel` forward link
+// entirely: a second call-to-action under the form competed with the one action
+// this page exists for. Only the heading and the intro are left, so this object
+// is now the page's title copy and nothing else.
 export const QUICKSTART_COPY = {
   heading: 'Chat with one assistant',
   intro:
     'Name your assistant, pick a model provider, and start chatting. Point it at a '
     + 'GitHub repository if you want it to read code — that part is optional.',
-  // A single agent is simply a team of one — growing into a full team is an
-  // optional next step, never a mode you should have chosen instead (AC1/AC3).
-  // The framing stays on the page (it is what keeps the fast lane from reading as
-  // a separate mode); the "what growing means" detail lives in the topic.
-  teamOfOneNote: 'A single agent is simply a team of one.',
-  growCtaLabel: 'Grow into a full team',
 };
 
-// AC3 guard: none of the launcher-path (fast-lane) copy may frame single-vs-team
-// as a forced, up-front choice. Rejects the tell-tale mode-picker phrasings we
-// removed ("…team instead", "…for that", "agent vs team") AND requires the
-// "team of one" framing to be present. Expressed as a predicate so the reframe
-// is asserted, not eyeballed.
+// AC3 guard (#1667): none of the launcher-path (fast-lane) copy may frame
+// single-vs-team as a forced, up-front choice. It rejects the tell-tale
+// mode-picker phrasings that were removed ("…team instead", "…for that",
+// "agent vs team"). Expressed as a predicate so the reframe is asserted, not
+// eyeballed.
+//
+// It no longer *requires* the "a single agent is a team of one" wording to be
+// present. #2045 removed the note that carried it, so the requirement would
+// have kept a string alive purely to satisfy a guard — which is what a
+// dead-copy check looks like once its surface is gone. The framing itself is
+// unaffected: the launcher hero still promises growing into a team where the
+// choice is actually made (#2027, guarded in onboarding-help-copy.test.js) and
+// the `create` topic still owns the reasoning in its own chapter. What this
+// guard protects is the thing that could still regress here — the heading and
+// intro drifting back into "agent or team, pick now" phrasing.
 export function fastLaneCopyForcesModeChoice(copy = QUICKSTART_COPY) {
   const blob = Object.values(copy).join(' ').toLowerCase();
   const forcedFraming = [
@@ -174,7 +182,5 @@ export function fastLaneCopyForcesModeChoice(copy = QUICKSTART_COPY) {
     'for that', // "…use the Agent Team Wizard for that"
     'single agent vs',
   ];
-  const hasForcedFraming = forcedFraming.some((p) => blob.includes(p));
-  const hasTeamOfOne = blob.includes('team of one');
-  return hasForcedFraming || !hasTeamOfOne;
+  return forcedFraming.some((p) => blob.includes(p));
 }

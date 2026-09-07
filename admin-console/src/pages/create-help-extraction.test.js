@@ -66,10 +66,6 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
   // Guards the pairing itself: if sectionSlug ever changed its rule, the
   // constants would still "exist" as strings while matching nothing at runtime.
   assert.equal(sectionSlug('The entry paths'), CREATE_HELP_SECTIONS.entryPaths);
-  assert.equal(
-    sectionSlug('A single agent is a team of one'),
-    CREATE_HELP_SECTIONS.teamOfOne,
-  );
   assert.equal(sectionSlug('The repository fast lane'), CREATE_HELP_SECTIONS.fastLane);
   assert.equal(
     sectionSlug('What you need before you start'),
@@ -79,10 +75,20 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
 
 test('the four areas the ticket names are top-level chapters, not sub-headings', () => {
   const h2 = topicSections(topicBody).filter(s => s.level === 2).map(s => s.slug);
-  for (const key of ['entryPaths', 'teamOfOne', 'fastLane', 'prerequisites']) {
+  // The team-of-one chapter is asserted by its heading rather than by a
+  // constant: #2045 removed its only "?" surface (the footer note), so the
+  // registry no longer names it — but the chapter must stay a chapter, because
+  // the framing is now the topic's alone.
+  const chapters = [
+    CREATE_HELP_SECTIONS.entryPaths,
+    sectionSlug('A single agent is a team of one'),
+    CREATE_HELP_SECTIONS.fastLane,
+    CREATE_HELP_SECTIONS.prerequisites,
+  ];
+  for (const slug of chapters) {
     assert.ok(
-      h2.includes(CREATE_HELP_SECTIONS[key]),
-      `"${CREATE_HELP_SECTIONS[key]}" must stay a "## " chapter — the panel scrolls to `
+      h2.includes(slug),
+      `"${slug}" must stay a "## " chapter — the panel scrolls to `
       + 'h2/h3, but the epic asks for one clearly-headed chapter per area',
     );
   }
@@ -113,10 +119,12 @@ test('each launcher / one-assistant surface mounts a "?" pointed at its own chap
     ['Create.jsx', launcherPage, [
       ['the launcher header above the entry tiles', 'entryPaths'],
     ]],
+    // #2045 removed the third QuickStart surface (the team-of-one footer note),
+    // so this page is down to two "?" — and the button count below is what
+    // catches a re-added one that nobody wired to a chapter.
     ['QuickStart.jsx', quickstartPage, [
       ['the one-assistant page header', 'fastLane'],
       ['the disabled-submit prerequisite checklist', 'prerequisites'],
-      ['the team-of-one note and its Grow CTA', 'teamOfOne'],
     ]],
   ];
   for (const [name, src, surfaces] of wired) {

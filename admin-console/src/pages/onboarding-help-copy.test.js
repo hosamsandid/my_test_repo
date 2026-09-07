@@ -104,9 +104,46 @@ test('the one-assistant page has one description, not two', () => {
       `"${phrase}" belongs to help-topics/create.md`,
     );
   }
-  // The team-of-one note + its forward CTA stay (an actionable next step).
-  assert.match(quickstartView, /team of one/i);
-  assert.match(quickstartView, /growCtaLabel/);
+  // #2045 removed the team-of-one footer card and its forward CTA: a second
+  // call-to-action under the form competed with the one action the page exists
+  // for. The framing is not lost — the launcher hero carries the promise (see
+  // the launcher test above) and help-topics/create.md carries the reasoning —
+  // so this is now a removal guard, not a keep-assertion.
+  assert.ok(
+    !/team of one/i.test(quickstartView),
+    'the team-of-one framing is the launcher hero\'s and the create topic\'s (#2045)',
+  );
+  assert.ok(
+    !/growCtaLabel|Grow into a full team/i.test(quickstartView),
+    'the "Grow into a full team →" forward link was removed from this page (#2045)',
+  );
+  assert.ok(
+    !/team-setup/.test(quickstartPage),
+    'no link to the Agent Team Wizard may grow back under the form (#2045)',
+  );
+});
+
+test('#2045: the GitHub Repository URL field carries no description', () => {
+  // The `(optional)` label and the placeholder already say what an empty value
+  // means; the HTTPS→SSH normalisation detail is help-topics/create.md's.
+  for (const phrase of [
+    'Leave empty for a repo-less assistant',
+    'normalise to SSH',
+    'clone with the SSH key',
+  ]) {
+    assert.ok(
+      !quickstartPage.includes(phrase),
+      `"${phrase}" was removed from the repo-URL field — it belongs to help-topics/create.md`,
+    );
+  }
+  // What the removal must NOT touch: the label, its optional marker and the
+  // placeholder are the copy that made the description redundant.
+  assert.match(quickstartPage, /GitHub Repository URL/);
+  assert.match(quickstartPage, /\(optional\)/);
+  assert.ok(
+    quickstartPage.includes('https://github.com/org/repo — leave empty for a repo-less agent'),
+    'the field must keep its existing placeholder',
+  );
 });
 
 test('the "What happens here" block is gone from the one-assistant page', () => {

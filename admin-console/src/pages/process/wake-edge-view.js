@@ -33,6 +33,27 @@ export const WAKE_EDGE_LEGEND = 'direct hand-off';
 // the console and reads as "hands off to", so it takes the job.
 export const WAKE_GLYPH = '↪';
 
+// ── the hand-off note cap ───────────────────────────────────────────────────
+//
+// Mirrors `api/outcomes.js` (WAKE_NOTE_MAX / WAKE_NOTE_TRUNCATION_MARK /
+// clampWakeNote) so a field cannot submit a value the server would silently
+// truncate behind the author's back. #2030 put a copy in RoutingSection.jsx;
+// #2031 adds a second editor (the Edit-hand-off dialog), and a third copy of a
+// cap is how caps drift — so it lives here once and both import it. The marker
+// matters as much as the number: a bare slice would drop the tail of a
+// hand-authored note on the next Save with nothing to show it happened.
+export const WAKE_NOTE_MAX = 1024;
+export const WAKE_NOTE_TRUNCATION_MARK = ' […truncated]';
+
+export function clampWakeNote(s) {
+  // Code points, not UTF-16 units: a cut inside a surrogate pair yields a lone
+  // surrogate that is not encodable as UTF-8 downstream.
+  const chars = Array.from(String(s == null ? '' : s));
+  if (chars.length <= WAKE_NOTE_MAX) return String(s == null ? '' : s);
+  const mark = Array.from(WAKE_NOTE_TRUNCATION_MARK).length;
+  return chars.slice(0, WAKE_NOTE_MAX - mark).join('') + WAKE_NOTE_TRUNCATION_MARK;
+}
+
 /**
  * The chip text for a wake edge.
  *

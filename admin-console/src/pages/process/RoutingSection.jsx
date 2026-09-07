@@ -18,6 +18,7 @@ import {
   rowArtifact, wireConsumerSpec, currentConsumers, consumerCandidates, openEndMarker,
 } from './outcome-routing.js';
 import { consumeKey } from './humans-registry-ops';
+import { WAKE_NOTE_MAX, clampWakeNote } from './wake-edge-view.js';
 
 // The human role currently wired to consume `entry` (or '' if none). #987.
 function humanConsuming(humans, entry) {
@@ -814,7 +815,7 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
         onChange={e => onChange({ ...option, when: e.target.value })} style={{ ...input, fontSize: 'var(--eb-text-xs)' }} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {actions.map((a, i) => (
-          <ActionRow key={i} action={a}
+          <ActionRow key={i} action={a} node={node} peers={peers}
             onChange={(na) => setActions(actions.map((x, j) => j === i ? na : x))}
             onRemove={actions.length > 1 ? () => setActions(actions.filter((_, j) => j !== i)) : null} />
         ))}
@@ -892,40 +893,62 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   );
 }
 
-function ActionRow({ action, onChange, onRemove }) {
+function ActionRow({ action, node, peers = [], onChange, onRemove }) {
   const type = ACTION_TYPES.includes(action.type) ? action.type : 'setLabel';
-  // Direct hand-off (#2030): P1 makes a `wakeAgent` action authorable on the
-  // bundle / `triggers.json` and carried losslessly through save; the Flow
-  // Editor's edge + Edit-hand-off dialog — and this select's own option — are
-  // P2. So the row is READ-ONLY here rather than absent: an editable select
-  // with no `wakeAgent` option would silently rewrite a hand-authored hand-off
-  // into a different action type the first time anyone touched it.
-  if (type === 'wakeAgent') {
-    return (
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 'var(--eb-text-xs)' }}>
-        <span style={{ width: 130, flexShrink: 0, color: 'var(--eb-text-secondary)' }}>hand off directly</span>
-        <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{action.to || '(no target)'}</code>
-        {action.note && (
-          <span style={{ color: 'var(--eb-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            — {action.note}
-          </span>
-        )}
-        {onRemove && <button onClick={onRemove} title="Remove action" style={iconBtn}><X size={12} /></button>}
-      </div>
-    );
-  }
+  // Direct hand-off (#2031): P1 rendered this row READ-ONLY, because putting
+  // `wakeAgent` in ACTION_TYPES without a matching `<option>` would have made a
+  // persisted hand-off render in a select that did not contain its own value —
+  // rewriting it into another action type on the first interaction. P2 supplies
+  // the option AND the target picker, so the row is editable now.
+  //
+  // Candidates are the same set the server accepts (outcomes.js §4.2): another
+  // agent on this team. A person is excluded — a hand-off is delivered through
+  // the target's pending queue and a human role has none.
+  const targets = consumerCandidates(node, peers);
+  const changeType = (next) => {
+    if (next === 'setLabel') return onChange({ type: 'setLabel', label: action.label || '' });
+    // A fresh hand-off starts target-less on purpose rather than defaulting to
+    // whichever agent sorts first: `finalize()` drops a `to`-less wakeAgent, so
+    // an unfinished row is discarded on Save instead of silently wiring a
+    // hand-off to an agent nobody chose.
+    if (next === 'wakeAgent') return onChange({ type: 'wakeAgent', to: '' });
+    return onChange({ type: next });
+  };
   return (
-    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-      <select value={type} onChange={e => onChange(e.target.value === 'setLabel' ? { type: 'setLabel', label: action.label || '' } : { type: e.target.value })}
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      <select value={type} onChange={e => changeType(e.target.value)}
         style={{ ...input, width: 130, flexShrink: 0 }}>
         <option value="setLabel">set label</option>
         <option value="openPr">open PR</option>
         <option value="openIssue">open issue</option>
+        <option value="wakeAgent">hand off directly</option>
         <option value="none">no signal</option>
       </select>
       {type === 'setLabel' && (
         <input value={action.label || ''} placeholder="label" onChange={e => onChange({ type: 'setLabel', label: e.target.value })}
           style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
+      )}
+      {type === 'wakeAgent' && (
+        <>
+          <select value={action.to || ''} style={{ ...input, flex: '1 1 140px', minWidth: 120 }}
+            onChange={e => onChange({ ...action, type: 'wakeAgent', to: e.target.value })}>
+            <option value="">— pick an agent —</option>
+            {/* A target that is no longer in the flow (a stale id from an
+                import) is still listed, so opening the row cannot silently
+                re-point the hand-off to whichever agent sorts first. */}
+            {action.to && !targets.some(t => t.id === action.to) && (
+              <option value={action.to}>{action.to} (not in this flow)</option>
+            )}
+            {targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          {/* `maxLength` stops the overflow at the keystroke; `clampWakeNote`
+              is still applied because a PASTE that exceeds the cap must be
+              truncated with the server's own marker, not silently cut. */}
+          <input value={action.note || ''} maxLength={WAKE_NOTE_MAX}
+            placeholder="note (optional) — context, not instructions"
+            onChange={e => onChange({ ...action, type: 'wakeAgent', note: clampWakeNote(e.target.value) })}
+            style={{ ...input, flex: '2 1 180px', fontSize: 'var(--eb-text-xs)' }} />
+        </>
       )}
       {onRemove && <button onClick={onRemove} title="Remove action" style={iconBtn}><X size={12} /></button>}
     </div>
@@ -943,21 +966,11 @@ function ModeToggle({ value, onChange }) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 const ACTION_TYPES = ['setLabel', 'openPr', 'openIssue', 'wakeAgent', 'none'];
-// #2030: a direct hand-off's note is capped server-side (outcomes.js
-// WAKE_NOTE_MAX); the same cap is applied here so the field cannot submit a
-// value the server would truncate behind the author's back. The marker matches
-// the server's too — a bare slice would drop the tail of a hand-authored note
-// on the next Save with nothing to show it happened.
-const WAKE_NOTE_MAX = 1024;
-const WAKE_NOTE_TRUNCATION_MARK = ' […truncated]';
-function clampWakeNote(s) {
-  // Code points, not UTF-16 units: a cut inside a surrogate pair yields a lone
-  // surrogate that is not encodable as UTF-8 downstream.
-  const chars = Array.from(s);
-  if (chars.length <= WAKE_NOTE_MAX) return s;
-  const mark = Array.from(WAKE_NOTE_TRUNCATION_MARK).length;
-  return chars.slice(0, WAKE_NOTE_MAX - mark).join('') + WAKE_NOTE_TRUNCATION_MARK;
-}
+// #2030 put a copy of the server's note cap (api/outcomes.js WAKE_NOTE_MAX) in
+// this file. #2031 adds a second editor for the same field — the Edit-hand-off
+// dialog — so the cap moved to `wake-edge-view.js` and both import it: three
+// copies of a cap is how caps drift. It is applied on input so the field cannot
+// submit a value the server would truncate behind the author's back.
 
 function emptyPort() { return { mode: 'anyOf', options: [] }; }
 function normalize(oc) {

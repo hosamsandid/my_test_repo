@@ -157,3 +157,16 @@ test('labelEdgeHasListener: true only when the edge carries a triggerId', () => 
   assert.equal(labelEdgeHasListener(null), false);
   assert.equal(labelEdgeHasListener(undefined), false);
 });
+
+test('#2031: a direct hand-off edge opens its OWN dialog, not the producer Outcomes', () => {
+  // A wake edge always carries an `outcome` (edgeId keys on it), so without the
+  // exception every click would jump to the Routing tab and EditWakeHandoffDialog
+  // would be unreachable code. Mutation check: the pre-#2031 rule intercepted it.
+  const edge = { on: 'wake', from: 'dev', to: 'rev', outcome: 'hand-off-rev' };
+  assert.equal(edgeOpensProducerOutcome(edge), false);
+  const preChange = !!(edge.outcome && edge.from && edge.on !== 'label');
+  assert.equal(preChange, true, 'the old rule DID swallow it — which is what this fixes');
+  // The opens-PR/issue edges still focus the Outcomes: they carry no per-edge
+  // state to edit, so there is no dialog for them to open.
+  assert.equal(edgeOpensProducerOutcome({ on: 'github', from: 'a', to: 'b', outcome: 'opens-pr' }), true);
+});

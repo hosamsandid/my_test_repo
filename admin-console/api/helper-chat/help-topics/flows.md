@@ -141,6 +141,11 @@ outcome sets a **Label**, and a **Consumer** agent that was waiting on that
 label wakes up. That *Outcome → Label → Consumer* chain is what most arrows on
 the canvas are.
 
+One kind of arrow skips the label: a **direct hand-off**, where an outcome wakes
+a named teammate inside the platform with no label, no issue and no pull
+request. It is still an outcome on the producer — it just names its consumer
+instead of setting something the consumer listens for.
+
 When you draw an edge between two agents the chooser asks the question in those
 terms — *how does the downstream agent learn about the upstream agent's work?*
 If the upstream agent already has an outcome that fits, that one is offered
@@ -152,6 +157,7 @@ Dragging from one agent to another offers these:
 | Kind | What it does |
 |---|---|
 | **Label hand-off** | An outcome of A sets a label that wakes B. The default, and what most arrows are. |
+| **Hand off directly** | A wakes B inside the platform — no label, no issue, no pull request. For pure coordination that has no natural home on a work item. |
 | **Issue channel** | A opens an issue that wakes B (optionally routed via a label / human approval). |
 | **Pull-request channel** | A opens a pull request that wakes B (optionally routed via a label / human approval). |
 | **File artifact** | A produces an artifact that B consumes, matched by logical name rather than file path. Leave the name empty for a plain **dependency** — B is then simply woken when A pushes. |
@@ -159,6 +165,34 @@ Dragging from one agent to another offers these:
 One more sits under a collapsed **Structure** group, because it is placement
 rather than hand-off: **Parent / child**, where A groups B as a child and B
 inherits its parent's stage.
+
+### Label hand-off or direct hand-off?
+
+The three hand-off mechanisms are not redundant, and the question that separates
+them is not speed or reliability — all of them are delivered through the same
+queue. It is **what a human can see afterwards**.
+
+- Pick a **label hand-off** when a person should be able to read the state off
+  the issue or pull request. The label *is* the human-readable process state.
+- Pick a **direct hand-off** when there is no label worth inventing and no
+  artifact to hang the step on. Nothing appears on GitHub at all; the event log
+  is the audit trail.
+- Pick an **issue** or **pull-request channel** when the artifact itself is the
+  hand-off, and the consumer reacts to the thing A opened.
+
+A direct hand-off has some deliberate limits. Its target must be another agent
+**on the same team** — never a person, because a hand-off is delivered to the
+target's queue and a human role has none, and never the producer itself. It also
+carries no *Delivery* choice: unlike a label, which can travel either over
+GitHub events or internally, a direct hand-off is internal by construction.
+
+The dialog offers a **note** — a sentence about what you are handing over. Two
+things are worth knowing about it. It reaches the consumer as *context to
+check*, not as instructions: what the consumer actually does on a hand-off is
+set by its own wake instruction, which the platform derives for you and lists in
+its Triggers tab as **Direct hand-off from …**. And that instruction is one per
+agent, not one per incoming arrow — so several teammates handing off to the same
+agent all wake it the same way.
 
 **Which tiles you see depends on where you dragged from.** The list above is
 what an *agent* source offers. Two more kinds hang off the pseudo-nodes on the

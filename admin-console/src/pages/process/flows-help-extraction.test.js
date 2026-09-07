@@ -399,7 +399,25 @@ test('the topic records the two corrections this ticket made', () => {
   );
   const source = readFileSync(join(here, 'connection-capabilities.js'), 'utf8');
   assert.match(
-    source, /agent:\s*\['github-pr', 'github-issue', 'label', 'artifact', 'hierarchy'\]/,
+    source, /agent:\s*\['github-pr', 'github-issue', 'label', 'wake', 'artifact', 'hierarchy'\]/,
     'the agent create-type list changed — recheck the chooser chapter against it',
   );
+});
+
+test('#2031: the chooser chapter documents the direct hand-off and its limits', () => {
+  // This guard is why the create-type assertion above is pinned to the exact
+  // list: adding a tile without documenting it is the drift it exists to catch.
+  assert.match(topicBody, /\*\*Hand off directly\*\*/, 'the tile is in the chooser table');
+  assert.match(topicBody, /Label hand-off or direct hand-off\?/,
+    'the topic answers WHICH to pick — the only question the two tiles raise');
+  // The distinguishing question is what a human can see afterwards, not speed
+  // or reliability: all three mechanisms use the same queue (concept §11).
+  assert.match(topicBody, /\*\*what a human can see afterwards\*\*/i);
+  // The three limits a reader would otherwise discover as a validation error.
+  assert.match(topicBody, /same team/, 'the same-team limit');
+  assert.match(topicBody, /never a person/, 'a human role has no queue to deliver to');
+  assert.match(topicBody, /internal by construction/, 'no Delivery selector, and why');
+  // And the two non-obvious facts about the note + the derived instruction.
+  assert.match(topicBody, /context to\s+check/, 'the note is context, not instructions');
+  assert.match(topicBody, /one per\s+agent, not one per incoming arrow/);
 });

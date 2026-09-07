@@ -635,6 +635,11 @@ class GitHubPoller {
           // ever wake the agent — saves a Claude invocation per unrelated
           // label change.
           labelFilter: (typeof t.labelFilter === 'string' && t.labelFilter.trim()) || null,
+          // The trigger's own claim label (#957/#958): the `<wake>:wip` label the
+          // claim swap ADDS after this trigger fires. Its own `*.labeled` event
+          // must never re-wake the trigger — see the self-claim-label drop in
+          // `_fanOutBatch`. null when the trigger declares no claim.
+          claimAdd: (t.claim && typeof t.claim.add === 'string' && t.claim.add.trim()) || null,
         });
       }
     }
@@ -836,6 +841,31 @@ class GitHubPoller {
           continue;
         }
 
+        // Self-caused claim label (#1376 follow-up): after this trigger fires,
+        // the claim swap ADDS its own `<wake>:wip` label (sub.claimAdd) and
+        // removes `<wake>`. Adding `<wake>:wip` emits its own `*.labeled` event
+        // whose event-time `payload.labels` snapshot can STILL carry `<wake>`
+        // (the paired remove is not atomic with the add), so `labelFilterMatches`
+        // below would fire the trigger a SECOND time on the agent's OWN status
+        // decoration. The directly-attributed label being our claim label is
+        // never a human wake — drop it before the label-filter match. Keyed on
+        // the exact `payload.label.name` (not the full set), so a genuine human
+        // re-add of the wake label — whose attributed label IS the wake label —
+        // is unaffected. Scoped to `*.labeled`.
+        if (
+          sub.claimAdd &&
+          typeof key === 'string' && key.endsWith('.labeled') &&
+          ghEvent.payload?.label?.name === sub.claimAdd
+        ) {
+          console.log(
+            `[GH-Poller] self-claim-label: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(claim label '${sub.claimAdd}' is agent-set, never a wake)`,
+          );
+          outcome.status = 'dropped';
+          outcome.reason = 'self-claim-label';
+          continue;
+        }
+
         // Label-name filter for *.labeled / *.unlabeled events. Content routing
         // (WHICH label), not a source filter — how label hand-offs (incl.
         // human-approval gates) are wired. Matches the directly-attributed
@@ -865,24 +895,26 @@ class GitHubPoller {
         // label-filter drops, which continue before reaching this point.
         outcome.wakeLabel = sub.labelFilter || null;
 
-        // Internal fast-path dedup (#1858): if this exact (agent, trigger, repo,
-        // number, label) wake was already delivered internally by the plugin
-        // path within the match window, drop this later Events-API duplicate.
-        // Scoped to `*.labeled` — the only events the fast-path delivers. A
-        // consumed marker is time-bounded + consume-once, so a legitimate later
-        // re-label (newer created_at) still fires normally.
+        // Internal fast-path dedup (#1858): if this (agent, trigger, repo,
+        // number, wakeLabel) wake was already delivered internally by the plugin
+        // path within the match window, drop this later Events-API event. Scoped
+        // to `*.labeled` — the only events the fast-path delivers. Window-scoped,
+        // not consume-once: a single apply churns up several matching events (the
+        // real `<wake>` delivery, the claim swap's `<wake>:wip` add, a co-added
+        // label) and ALL within the window are dropped; a legitimate later
+        // re-label (created_at outside the window) still fires normally.
         if (this.labelMarkers && typeof key === 'string' && key.endsWith('.labeled')) {
           const wl = sub.labelFilter || ghEvent.payload?.label?.name || null;
           const num = workItemNumber(ghEvent);
           if (wl && num != null) {
-            const consumed = this.labelMarkers.consume({
+            const dropped = this.labelMarkers.shouldDrop({
               agentId: sub.agentId, triggerId: sub.triggerId,
               repo: repoFullName,
               kind: key.startsWith('pull_request') ? 'pr' : 'issue',
               number: num, label: wl,
               eventCreatedAt: ghEvent.created_at,
             });
-            if (consumed) {
+            if (dropped) {
               console.log(
                 `[GH-Poller] internal-dedup: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
                 `(already delivered internally, ${repoFullName}#${num} +${wl})`,

@@ -60,7 +60,7 @@ const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
 const hillClimbApplyGuard = require('./hill-climb-apply-guard');
-const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion } = require('./outcome-suggestion');
+const { heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion, wakePeerList } = require('./outcome-suggestion');
 const { buildUnifiedGraph, briefingsToUnified, processTemplateToUnified, unifiedToProcessTemplate } = require('./unified-graph');
 const { readBriefingPacks, BriefingsError } = require('./briefings-fs');
 const { validateOutcomes, normalizeOutcomes, isAuthoredOutcomes } = require('./outcomes');
@@ -11356,6 +11356,15 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
   const roleName = typeof req.body?.roleName === 'string' ? req.body.roleName.trim() : '';
   let prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
   if (!roleName && !prompt) return res.status(400).json({ error: 'roleName or prompt is required' });
+  // #2032: the peer roles a suggested `wakeAgent` may name, and this role's own
+  // id so a self-hand-off is refused. Optional — an older client sends neither
+  // and the suggester then says "do not use wakeAgent" rather than inviting a
+  // guess. `wakePeerList` filters out actor pseudo-nodes and human roles; the
+  // SAME list is the `agents` source `parseOutcomeSuggestion` validates
+  // against, so an invented target sinks the suggestion instead of persisting.
+  const suggestPeers = wakePeerList(req.body?.peers, req.body?.roleId);
+  const suggestRoleId = typeof req.body?.roleId === 'string' ? req.body.roleId.trim() : '';
+  const suggestSources = { agents: suggestPeers, ...(suggestRoleId ? { roleId: suggestRoleId } : {}) };
 
   const fallback = () => res.json({
     suggestion: heuristicOutcomeSuggestion({ roleName, prompt }),
@@ -11371,10 +11380,15 @@ app.post('/api/agent-outcomes/suggest', heavyLimiter, async (req, res) => {
     'anthropic-version': '2023-06-01',
     ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
   };
-  const payload = { model: target.model, ...buildOutcomeSuggestionRequest(roleName, prompt) };
+  const payload = {
+    model: target.model,
+    ...buildOutcomeSuggestionRequest(roleName, prompt, undefined, {
+      peers: suggestPeers, roleId: suggestRoleId,
+    }),
+  };
   const result = await httpPostJson(url, headers, payload);
   if (result.error || result.status < 200 || result.status >= 300) return fallback();
-  const suggestion = parseOutcomeSuggestion(extractMessageText(result.body));
+  const suggestion = parseOutcomeSuggestion(extractMessageText(result.body), suggestSources);
   if (!suggestion) return fallback();
   res.json({ suggestion, source: 'llm', model: target.model, meta: assistMeta(target) });
 });

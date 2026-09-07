@@ -8,6 +8,7 @@ const {
   withIds,
   removeEntryById,
   summarizeEntry,
+  QUEUE_NOTE_PREVIEW_MAX,
 } = require('./pending-queue');
 
 test('entryKind classifies every queue entry shape', () => {
@@ -140,4 +141,64 @@ test('summarizeEntry surfaces per-kind hints for non-GitHub entries', () => {
   assert.equal(summarizeEntry({ id: 'd', kind: 'github-digest', events: [1, 2] }).count, 2);
   assert.equal(summarizeEntry({ id: 's', kind: 'session-set', roomId: '!r:x' }).roomId, '!r:x');
   assert.equal(summarizeEntry({ id: 'w', kind: 'throttle-warning', convKey: 'push:main' }).convKey, 'push:main');
+});
+
+// ── direct agent-to-agent hand-off (#2032) ──────────────────────────────────
+
+test('summarizeEntry projects a wake-agent hand-off (producer + note)', () => {
+  const s = summarizeEntry({
+    id: 'w1', kind: 'wake-agent', source: 'internal', receivedAt: '2026-09-07T10:00:00.000Z',
+    from: 'team-developer', teamId: 'team', note: 'Look at the migration in step 3.',
+  });
+  assert.equal(s.kind, 'wake-agent');
+  assert.equal(s.from, 'team-developer');
+  assert.equal(s.note, 'Look at the migration in step 3.');
+  assert.equal(s.receivedAt, '2026-09-07T10:00:00.000Z');
+  // A hand-off carries no triggerId — the consumer resolves its own listener at
+  // drain time — so projecting one would invent a field the entry never had.
+  assert.equal('triggerId' in s, false);
+});
+
+test('summarizeEntry omits the note key when a hand-off carries none', () => {
+  for (const note of [undefined, '', '   ']) {
+    const s = summarizeEntry({ id: 'w', kind: 'wake-agent', from: 'a', note });
+    assert.equal('note' in s, false, `note=${JSON.stringify(note)}`);
+    assert.equal(s.from, 'a');
+  }
+});
+
+test('summarizeEntry previews a long hand-off note instead of carrying it whole', () => {
+  // The note is capped at 1024 code points at author AND delivery time, which
+  // is a wall of text in a queue row; this projection exists to keep the list
+  // small, and the full entry is one GET /internal/agents/:id/pending/:id away.
+  const long = 'x'.repeat(400);
+  const s = summarizeEntry({ id: 'w', kind: 'wake-agent', from: 'a', note: long });
+  assert.ok(Array.from(s.note).length <= QUEUE_NOTE_PREVIEW_MAX + 1, 'preview is bounded');
+  assert.ok(s.note.endsWith('…'), 'a cut note says it was cut');
+  assert.notEqual(s.note, long);
+});
+
+test('summarizeEntry cuts a hand-off note preview in code points', () => {
+  // Same surrogate hazard as clampNote: `String#slice` can land between a
+  // surrogate pair, and a lone surrogate is not encodable as UTF-8 — here it
+  // would be JSON-serialized into the API response as a replacement char.
+  for (const pad of [0, 1, 2, 3]) {
+    const note = 'a'.repeat(118 + pad) + '😀'.repeat(10);
+    const s = summarizeEntry({ id: 'w', kind: 'wake-agent', from: 'a', note });
+    assert.deepEqual(Buffer.from(s.note, 'utf8').toString('utf8'), s.note, `pad=${pad}`);
+    for (const ch of s.note) {
+      const cp = ch.codePointAt(0);
+      assert.ok(cp < 0xd800 || cp > 0xdfff, `pad=${pad}: lone surrogate`);
+    }
+  }
+});
+
+test('a malformed hand-off entry degrades rather than throwing', () => {
+  const s = summarizeEntry({ id: 'w', kind: 'wake-agent', from: 42, note: { nope: 1 } });
+  assert.equal(s.from, null);
+  assert.equal('note' in s, false);
+});
+
+test('entryKind classifies a wake-agent entry from its explicit kind', () => {
+  assert.equal(entryKind({ kind: 'wake-agent', from: 'a' }), 'wake-agent');
 });

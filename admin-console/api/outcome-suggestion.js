@@ -116,9 +116,35 @@ function heuristicOutcomeSuggestion({ roleName, prompt, labels }) {
   return normalizeOutcomes(port);
 }
 
+// The peer roles a suggested `wakeAgent` may name (#2032). A direct hand-off
+// addresses a role by id, so the model can only propose one when it is told
+// which ids exist — and `validateOutcomes` (with these same entries as its
+// `agents` source) rejects the port outright if it invents one, which is why
+// the caller must thread the SAME list into `parseOutcomeSuggestion`.
+//
+// Filtered on `(p.kind || 'agent') === 'agent'`: on a live team the peer list
+// is the graph's node list, which also carries the actor pseudo-nodes
+// (`@github`/`@external`/`@timer`, `kind: 'actor'`) and named human roles —
+// none of which has a pending queue. Draft roles carry no `kind`, so the
+// default keeps them eligible.
+function wakePeerList(peers, roleId) {
+  const self = typeof roleId === 'string' ? roleId.trim() : '';
+  const seen = new Set();
+  const out = [];
+  for (const p of (Array.isArray(peers) ? peers : [])) {
+    if (!p || typeof p !== 'object') continue;
+    if ((p.kind || 'agent') !== 'agent') continue;
+    const id = typeof p.id === 'string' ? p.id.trim() : '';
+    if (!id || id === self || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name: typeof p.displayName === 'string' && p.displayName.trim() ? p.displayName.trim() : id });
+  }
+  return out;
+}
+
 // Meta-prompt for the LLM path — asks for a single JSON object shaped like the
 // `outcomes` port. Deliberately schematic: the model decides mode + options.
-function buildOutcomeSuggestionRequest(roleName, prompt, labels) {
+function buildOutcomeSuggestionRequest(roleName, prompt, labels, opts) {
   // Human-gate labels come from the flag registry (#928), not a name convention,
   // so the model is told the concrete forbidden names when we know them.
   const gateNames = (Array.isArray(labels) ? labels : [])
@@ -127,9 +153,24 @@ function buildOutcomeSuggestionRequest(roleName, prompt, labels) {
   const promptBlock = prompt
     ? `The role's current system prompt (routing intent lives in here as prose):\n"""\n${String(prompt).slice(0, 4000)}\n"""`
     : 'The role has no system prompt yet — infer sensible outcomes from the name alone.';
+  // #2032: `wakeAgent` is offered only when the caller told us which roles
+  // exist. Told nothing, the model would have to guess an id — and a guess is
+  // rejected by `validateOutcomes`, which drops the WHOLE suggestion back to
+  // the heuristic, so an unusable action type is worse than an absent one.
+  const peers = wakePeerList(opts && opts.peers, opts && opts.roleId);
+  const wakeAction = peers.length
+    ? '{"type":"wakeAgent","to":"<roleId>","note":"<one sentence of context>"}, '
+    : '';
+  const wakeGuidance = peers.length
+    ? [
+      'A "wakeAgent" action is a DIRECT hand-off: it wakes another role inside the platform with no label and no issue/PR — use it for pure coordination that has no natural home on a work item, and prefer "setLabel" when a person should be able to see the state on the issue/PR.',
+      `Its "to" MUST be one of these role ids exactly: ${peers.map(p => `"${p.id}"${p.name !== p.id ? ` (${p.name})` : ''}`).join(', ')}. Never invent one, never name this role itself.`,
+      'Its "note" is optional but worth writing: it is the only context the woken role receives.',
+    ]
+    : null;
   const instruction = [
     'You model the OUTCOMES of an AI agent in an autonomous software-delivery team.',
-    'An outcome is a way a run can end and the GitHub signal it sets. Examples:',
+    'An outcome is a way a run can end and the signal it sets. Examples:',
     '- a code reviewer ends "accepted" (label `ready-to-merge`) or "revisions required" (label `revisions-required`) — mutually exclusive.',
     '- a dispatcher routes each task to one of several developers via different labels — mutually exclusive.',
     '- a docs agent may set several labels in one run — not exclusive.',
@@ -142,10 +183,12 @@ function buildOutcomeSuggestionRequest(roleName, prompt, labels) {
     '- "anyOf": zero or more outcomes may apply in one run.',
     '',
     'For each outcome give: a short stable "id" (kebab-case), a "title", a human-readable "when" condition, and "actions".',
-    'Each action is one of: {"type":"setLabel","label":"<github-label>"}, {"type":"openPr"}, {"type":"openIssue"}, or {"type":"none"} (a terminal outcome with no signal).',
+    `Each action is one of: {"type":"setLabel","label":"<github-label>"}, {"type":"openPr"}, {"type":"openIssue"}, ${wakeAction}or {"type":"none"} (a terminal outcome with no signal).`,
+    ...(wakeGuidance || []),
     gateNames.length
       ? `NEVER use these labels — they are human approval gates only a person applies: ${gateNames.map(n => `"${n}"`).join(', ')}.`
       : 'NEVER use a label that a human applies as an approval gate — an outcome is a signal the AGENT sets.',
+    !peers.length ? 'Do NOT use a "wakeAgent" action: the roles it could name are not known here.' : null,
     '',
     'Answer with ONLY a JSON object (no fences, no prose):',
     '{"mode":"exactlyOne|anyOf","options":[{"id":"...","title":"...","when":"...","actions":[{"type":"setLabel","label":"..."}]}]}',
@@ -192,5 +235,5 @@ function parseOutcomeSuggestion(text, sources) {
 
 module.exports = {
   heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion,
-  scoreShape, harvestLabels,
+  scoreShape, harvestLabels, wakePeerList,
 };

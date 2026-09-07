@@ -11164,6 +11164,12 @@ async function main() {
             }),
             source: 'internal',
             emittedBy: fromAgentId,
+            // The producer→target pair and the note, in fields that mean that
+            // (#2032) — `buildEventEntry` only extracts GitHub's own
+            // vocabulary, so without this the note would never reach the log.
+            ...wakeAgent.buildWakeLogFields({
+              producerId: fromAgentId, targetId: resolved.agentId, note,
+            }),
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, target: resolved.agentId }));

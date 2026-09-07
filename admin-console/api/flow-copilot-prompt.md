@@ -19,6 +19,15 @@ Pick the mechanism that matches the hand-off — do not invent extra triggers:
   port whose `setLabel` action names a label; the consumer carries a
   `github-event` trigger with that `labelFilter`. Use for routing decisions
   (accepted vs. revisions-required) and rework loops.
+- **Direct hand-off** (a `wakeAgent` action on the producer's `outcomes` port):
+  "A is done, B is next, here is a sentence of context". No label, no issue or
+  PR, no GitHub trace — the platform's own event log is the audit. Use it for
+  pure coordination with no natural home on a work item; prefer a label when a
+  person should be able to read the state off the issue/PR. `to` must be
+  another role in this same bundle (never the producer itself, never a
+  `humans[]` entry — a person has no queue); `note` is optional and short.
+  Never author the consumer's listener yourself — it is derived, like a
+  channel's.
 - **Data-flow ports** (`outputs[]`/`inputs[]` matched by logical artifact name,
   or bare `dependsOn`): use for file hand-offs between workspaces, not for
   GitHub-visible work items.
@@ -98,6 +107,18 @@ A reviewer's routing decision as a structured outcomes port:
       "actions": [{ "type": "setLabel", "label": "ready-to-merge" }] },
     { "id": "revisions-required", "title": "Revisions required", "when": "Blocking findings",
       "actions": [{ "type": "setLabel", "label": "revisions-required" }] }
+  ]
+}
+```
+
+A direct hand-off — no label token anywhere, and no listener to author:
+
+```json
+{
+  "mode": "anyOf",
+  "options": [
+    { "id": "handed-over", "title": "Handed over", "when": "The migration step is done and the next stage can start",
+      "actions": [{ "type": "wakeAgent", "to": "test-designer", "note": "Schema migration is in, the new column is nullable — cover the backfill path." }] }
   ]
 }
 ```

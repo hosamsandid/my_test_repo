@@ -8,12 +8,15 @@ test('partitionTriggers separates manual from reconciler-derived triggers', () =
     { id: 'b', type: 'github-event', events: ['pull_request.opened'], channel: true },
     { id: 'c', type: 'github-event', events: ['push'], dataFlow: true },
     { id: 'd', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
+    { id: 'e', type: 'wake-agent', wakeHandoff: true },
     null,
     'not-an-object',
   ];
   const { manual, derived } = partitionTriggers(triggers);
   assert.deepEqual(manual.map(t => t.id), ['a', 'd']);
-  assert.deepEqual(derived.map(t => t.id), ['b', 'c']);
+  // #2032: the derived wake-agent hand-off listener belongs in the read-only
+  // bucket, not among the editable/deletable manual rows.
+  assert.deepEqual(derived.map(t => t.id), ['b', 'c', 'e']);
 });
 
 test('partitionTriggers tolerates non-array input', () => {
@@ -21,9 +24,11 @@ test('partitionTriggers tolerates non-array input', () => {
   assert.deepEqual(partitionTriggers(null), { manual: [], derived: [] });
 });
 
-test('isDerivedTrigger only flags channel/dataFlow markers', () => {
+test('isDerivedTrigger flags channel/dataFlow/wakeHandoff markers', () => {
   assert.equal(isDerivedTrigger({ channel: true }), true);
   assert.equal(isDerivedTrigger({ dataFlow: true }), true);
+  // #2032: the P3 direct hand-off listener is reconciler-owned too.
+  assert.equal(isDerivedTrigger({ wakeHandoff: true }), true);
   assert.equal(isDerivedTrigger({ type: 'github-event' }), false);
   assert.equal(isDerivedTrigger(null), false);
 });

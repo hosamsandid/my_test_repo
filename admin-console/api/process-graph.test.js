@@ -360,7 +360,13 @@ test('#1175: an internal-transport listener silences the internal-channel hint',
     { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch', transport: 'internal',
       claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
-  assert.deepEqual(g.lints, []);
+  assert.ok(!g.lints.some((l) => l.code === 'internal-channel-candidate'));
+  // #2032 makes this exact fixture the NEXT rung's candidate: a single-pair
+  // label that already opted out of GitHub delivery is a label nobody reads,
+  // so the direct-hand-off hint takes over where the internal one stops. The
+  // two are a ladder — asserted here so neither can start firing together.
+  assert.deepEqual(g.lints.map((l) => `${l.code}:${l.severity}`),
+    ['direct-handoff-candidate:info']);
 });
 
 test('#1175: gate and orphan label edges never raise the internal-channel hint', () => {
@@ -1516,4 +1522,171 @@ test('#2031: a legacy agent with flat emits and no authored outcomes is untouche
   ]);
   assert.deepEqual(g.edges.filter(e => e.kind === 'wake'), []);
   assert.ok(g.edges.some(e => e.from === 'dev' && e.to === 'rev' && e.label === 'ready-for-review'));
+});
+
+// ─── #2032: direct hand-off lints (concept §12 P3, §13 Q3) ──────────────────
+
+// A hand-off's target listener is `wake-agent`-typed and DERIVED — the
+// producer never names a trigger id, so the consumer resolves its own at drain
+// time (`_execute_wake_agent` takes the first ENABLED one).
+const wakeListener = (over = {}) => ({ id: 'rev-on-handoff', type: 'wake-agent', prompt: 'take over', ...over });
+
+function handoffGraph({ to = 'rev', note = 'mind step 3', target = {} } = {}) {
+  return buildProcessGraph([
+    { id: 'dev', displayName: 'Developer', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'handed-off', actions: [{ type: 'wakeAgent', to, ...(note ? { note } : {}) }] },
+    ] } },
+    { id: 'rev', displayName: 'Reviewer', triggers: [wakeListener()], ...target },
+  ]);
+}
+
+test('#2032: a fully wired hand-off with a note raises no lint at all', () => {
+  assert.deepEqual(lintCodes(handoffGraph()), []);
+});
+
+test('#2032: wake-target-disabled fires when the target listener is switched off', () => {
+  // The outcome-without-consumer sibling: the producer's `aee-wake` succeeds,
+  // the entry is enqueued, and `_execute_wake_agent` then drops it because no
+  // enabled `wake-agent` trigger tells the consumer what to do — with nothing
+  // on GitHub to show any of it happened.
+  const g = handoffGraph({ target: { triggers: [wakeListener({ enabled: false })] } });
+  const l = g.lints.filter(x => x.code === 'wake-target-disabled');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'warning');
+  assert.equal(l[0].nodeId, 'dev', 'attributed to the producer, whose outcome it is');
+  assert.equal(l[0].outcome, 'handed-off');
+  assert.match(l[0].message, /queued and then dropped/);
+});
+
+test('#2032: one enabled listener beside a disabled one clears the lint', () => {
+  // The runner takes the FIRST enabled one, so a single enabled listener is
+  // enough — the lint must not fire on "some are disabled".
+  const g = handoffGraph({ target: { triggers: [
+    wakeListener({ id: 'old', enabled: false }), wakeListener({ id: 'live' }),
+  ] } });
+  assert.ok(!lintCodes(g).includes('wake-target-disabled'));
+});
+
+test('#2032: a MISSING listener is deliberately not linted', () => {
+  // That listener is derived, never authored (`expandWakeHandoffs` /
+  // `reconcileTeamWakeHandoffs`), so its absence in a draft or an imported
+  // bundle is the reconciler's business at materialise time. Warning about it
+  // would fire on every draft that has ever drawn a hand-off.
+  const g = handoffGraph({ target: { triggers: [] } });
+  assert.ok(!lintCodes(g).includes('wake-target-disabled'));
+  assert.deepEqual(lintCodes(g), []);
+});
+
+test('#2032: wake-target-unresolved names the three hand-offs that draw no edge', () => {
+  // Each of these draws NO edge by design, so without a lint the outcome
+  // exists, the canvas shows nothing, and delivery refuses it at runtime with
+  // a 404/403 the author never sees.
+  const unknown = handoffGraph({ to: 'ghost' });
+  assert.deepEqual(unknown.lints.filter(l => l.code === 'wake-target-unresolved')
+    .map(l => l.severity), ['warning']);
+  assert.match(unknown.lints.find(l => l.code === 'wake-target-unresolved').message,
+    /not an agent in this flow/);
+
+  const self = handoffGraph({ to: 'dev' });
+  assert.match(self.lints.find(l => l.code === 'wake-target-unresolved').message,
+    /hands off to itself/);
+
+  const human = buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'h', actions: [{ type: 'wakeAgent', to: 'lead', note: 'n' }] },
+    ] } },
+  ], { humans: [{ id: 'lead', name: 'Tech Lead' }] });
+  assert.match(human.lints.find(l => l.code === 'wake-target-unresolved').message,
+    /a person has no queue/);
+});
+
+test('#2032: an unresolved hand-off is reported ONCE, not also as note-less', () => {
+  // A target that cannot receive anything makes the note question moot — two
+  // lints on one broken action would read as two problems.
+  const g = handoffGraph({ to: 'ghost', note: '' });
+  assert.deepEqual(lintCodes(g), ['wake-target-unresolved']);
+});
+
+test('#2032: wake-without-note is the Q3 answer — info, never a requirement', () => {
+  // §13 Q3: the note stays optional (a required field invites "done"), but a
+  // note-less hand-off carries less than a label does — a label at least names
+  // a stage, while this row can only say who woke whom.
+  const g = handoffGraph({ note: '' });
+  const l = g.lints.filter(x => x.code === 'wake-without-note');
+  assert.equal(l.length, 1);
+  assert.equal(l[0].severity, 'info');
+  assert.equal(l[0].nodeId, 'dev');
+  assert.equal(l[0].outcome, 'handed-off');
+  assert.ok(!lintCodes(handoffGraph({ note: 'a sentence' })).includes('wake-without-note'));
+});
+
+test('#2032: direct-handoff-candidate needs a single pair AND internal delivery', () => {
+  const mk = (over = {}) => buildProcessGraph([
+    { id: 'a', emits: ['dispatch'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
+      transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
+    ...(over.extra || []),
+  ], over.opts);
+  assert.ok(lintCodes(mk()).includes('direct-handoff-candidate'));
+  // A second producer means the label is a shared vocabulary, not this pair's
+  // private plumbing.
+  assert.ok(!lintCodes(mk({ extra: [{ id: 'c', emits: ['dispatch'], triggers: [] }] }))
+    .includes('direct-handoff-candidate'));
+  // A second consumer, likewise.
+  assert.ok(!lintCodes(mk({ extra: [{ id: 'd', triggers: [{ id: 't2', type: 'github-event',
+    labelFilter: 'dispatch', transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] }] }))
+    .includes('direct-handoff-candidate'));
+});
+
+test('#2032: direct-handoff-candidate never fires on a label a person touches', () => {
+  // The §11 "a human tracks this state on the issue/PR" row: a gate, a brake
+  // and a plain label a named human consumes each mean somebody besides the
+  // pair reads it, so the label is not plumbing to be removed.
+  const pair = (label, opts) => buildProcessGraph([
+    { id: 'a', emits: [label], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: label,
+      transport: 'internal', claim: { remove: label, add: `${label}:wip` } }] },
+  ], opts);
+  assert.ok(!lintCodes(pair('approved', { labels: [{ name: 'approved', humanGate: true }] }))
+    .includes('direct-handoff-candidate'));
+  assert.ok(!lintCodes(pair('hold', { labels: [{ name: 'hold', brake: true }] }))
+    .includes('direct-handoff-candidate'));
+  assert.ok(!lintCodes(pair('shipped', {
+    humans: [{ id: 'lead', name: 'Lead', consumes: [{ label: 'shipped' }] }],
+  })).includes('direct-handoff-candidate'));
+});
+
+test('#2032: a poller-delivered pair gets the internal hint, not the hand-off one', () => {
+  // The ladder: poller → internal → direct. Suggesting "drop the label" to a
+  // flow that has not even opted out of GitHub delivery skips a step, and
+  // poller delivery is also what lets a HUMAN wake the listener by hand.
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['dispatch'], triggers: [] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
+      claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
+  ]);
+  assert.deepEqual(lintCodes(g), ['internal-channel-candidate']);
+});
+
+test('#2032: a cron expression can never be mistaken for a label name', () => {
+  // A `timer` edge's `label` is its cron string and a `webhook` edge's is a
+  // description, so a label-name index that read every edge would let an
+  // unrelated string claim the label and silence the hint.
+  const g = buildProcessGraph([
+    { id: 'a', emits: ['dispatch'], triggers: [{ id: 'c', type: 'cron', cron: 'dispatch' }] },
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
+      transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
+  ]);
+  assert.ok(g.edges.some(e => e.kind === 'timer' && e.label === 'dispatch'),
+    'the fixture really does put the label string on a timer edge');
+  assert.ok(lintCodes(g).includes('direct-handoff-candidate'));
+});
+
+test('#2032: computeLints still works without a classifier (nodes+edges callers)', () => {
+  // The signature is `computeLints(nodes, edges, classifier?)`; the new lints
+  // read `isBrake`, which the fallback classifier must therefore also provide.
+  const nodes = [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }];
+  const edges = [{ from: 'a', to: 'b', label: 'dispatch', kind: 'agent', triggerId: 't', transport: 'internal' }];
+  assert.doesNotThrow(() => computeLints(nodes, edges));
+  assert.ok(computeLints(nodes, edges).some(l => l.code === 'direct-handoff-candidate'));
 });

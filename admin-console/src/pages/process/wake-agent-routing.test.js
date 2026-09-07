@@ -152,3 +152,18 @@ test('#2031: ActionRow is actually GIVEN the node and peers it needs', () => {
   assert.match(CODE, /<ActionRow key=\{i\} action=\{a\} node=\{node\} peers=\{peers\}/);
   assert.match(CODE, /function ActionRow\(\{ action, node, peers = \[\], onChange, onRemove \}\)/);
 });
+
+test('#2032: the suggest call sends the peer list a wakeAgent needs', () => {
+  // The suggester cannot propose a direct hand-off without knowing which role
+  // ids exist — a `wakeAgent` addresses a role by id — and without `roleId` it
+  // cannot be told to avoid a self-hand-off. Both are silent when missing: the
+  // suggestion just never contains a hand-off, which reads as "the model chose
+  // not to" rather than "we never offered it".
+  const start = CODE.indexOf("apiCall('POST', '/api/agent-outcomes/suggest'");
+  assert.ok(start !== -1, 'the suggest call is still made from here');
+  const body = CODE.slice(start, CODE.indexOf('}', CODE.indexOf('peers:', start)) + 1);
+  assert.match(body, /roleId: node\.id/);
+  assert.match(body, /peers: \(peers \|\| \[\]\)\.map/);
+  assert.match(body, /kind: p\.kind/,
+    'the kind must travel: the server drops actor pseudo-nodes and humans by it');
+});

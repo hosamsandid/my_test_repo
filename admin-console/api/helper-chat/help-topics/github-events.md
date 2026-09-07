@@ -97,7 +97,7 @@ Two consequences that surprise people:
 
 ### The poller is not the only writer
 
-Two other things write rows here, which is why this stays one honest timeline of
+Three other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
 - **Internal-channel hand-offs.** A hand-off on an internal channel
@@ -106,11 +106,18 @@ every wake rather than a log of one delivery mechanism:
 - **Labels applied in the console.** A label a human applies through the GitHub
   Issues plugin is delivered immediately on that fast path, and the poller's
   later sighting of the same `*.labeled` event is dropped as a duplicate.
+- **Direct agent-to-agent hand-offs.** A `wakeAgent` hand-off wakes a teammate
+  straight through the platform — no issue, PR or label — so this log is its
+  *only* record. Such a row has no repository or work item and honestly shows
+  `—` there; it reads **direct hand-off** in the Event column, with the sender's
+  note in the Title column.
 
-Each row carries a `source` marking which writer produced it — but **the table
-never renders it**, so two rows that reached an agent by different routes look
-identical here. The `dropped (internal-dedup)` chip described in the next
-chapter is the only visible trace of the fast path.
+Each row carries a `source` marking which writer produced it, but **the table
+never renders it** — so a poller row and an internal-fast-path row that arrived by
+different routes look identical here. A direct hand-off is the one you can pick
+out, because its Event cell reads *direct hand-off*. The
+`dropped (internal-dedup)` chip described in the next chapter is the only visible
+trace of the fast path.
 
 ## Outcomes
 

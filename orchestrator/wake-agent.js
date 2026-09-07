@@ -164,9 +164,10 @@ function buildWakeEntry({ from, note, teamId }) {
 // GitHub-event-shaped, so a hand-off has no repo, no label and no work item and
 // those columns honestly render `—`; the distinguishing `source: 'internal'` is
 // stamped by the caller. A dedicated event key `handoff.wake` is what lets the
-// Event column read as a direct hand-off rather than as a blank; RENDERING that
-// key in plain language, and surfacing the producer→target pair and the note in
-// the row, is P3's UI slice (§7) — this phase only writes an honest row.
+// Event column read as a direct hand-off rather than as a blank. #2032 renders
+// that key in plain language and surfaces the producer→target pair and the note
+// in the row — the note through `buildWakeLogFields` below, since nothing in
+// the GitHub-shaped entry has a slot for it.
 function buildWakeLogEvent({ producerId, targetId, note, eventId, now }) {
   return {
     id: eventId,
@@ -185,6 +186,26 @@ function buildWakeLogEvent({ producerId, targetId, note, eventId, now }) {
 
 const WAKE_EVENT_KEY = 'handoff.wake';
 
+// The hand-off fields that ride ALONGSIDE the GitHub-shaped entry (#2032) — the
+// same slot the caller stamps `source`/`emittedBy` into, because
+// `buildEventEntry` extracts only GitHub's own vocabulary (`label`, `ref`,
+// `workItem`) and would drop the note on the floor.
+//
+// `from`/`to` are carried even though the row's Actor cell shows `agent:<from>`
+// and its single outcome names `to`: those two are a consequence of how this
+// module synthesizes a GitHub-shaped event, not a contract a reader should
+// parse a prefix out of. A reader that means "the producer and the target"
+// reads them from the field that means that.
+function buildWakeLogFields({ producerId, targetId, note }) {
+  return {
+    handoff: {
+      from: producerId,
+      to: targetId,
+      ...(typeof note === 'string' && note.trim() ? { note } : {}),
+    },
+  };
+}
+
 module.exports = {
   WAKE_NOTE_MAX,
   WAKE_NOTE_TRUNCATION_MARK,
@@ -195,4 +216,5 @@ module.exports = {
   resolveWakeTarget,
   buildWakeEntry,
   buildWakeLogEvent,
+  buildWakeLogFields,
 };

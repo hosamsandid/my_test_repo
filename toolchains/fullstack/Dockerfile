@@ -34,10 +34,24 @@ FROM ${AGENT_BASE_IMAGE}
 # versions from the current directory's config with no shell integration at all,
 # and it manages Java, Node AND Maven in one tool, so nothing here is
 # language-specific machinery.
-ARG MISE_VERSION=2025.1.9
+# Bumped from 2025.1.9: that build resolved java/node/maven via asdf plugins but
+# defaulted `gradle` to the aqua backend, whose registry fetch 400s on that old
+# pin (https://mise-versions.jdx.dev/aqua-registry/gradle/gradle/registry.yaml).
+# A current mise serves the aqua gradle registry correctly, so Gradle 8.10.2
+# installs the same mise-managed way as the other runtimes. Scoped to this
+# variant; jvm keeps its own pin until it needs Gradle too.
+ARG MISE_VERSION=2026.9.1
 ARG BASELINE_JAVA=temurin-21
 ARG BASELINE_NODE=22
 ARG BASELINE_MAVEN=3.9
+# Gradle is pinned to an EXACT patch (unlike the coarse java/node/maven pins
+# above) because it was added in response to a real project that bootstrapped
+# exactly this distribution at runtime — the first build printed "Gradle 8.10.2
+# bootstrapped, network up, now compiling" and paid a network download. Baking
+# that exact version means a fresh agent building a Gradle project resolves it
+# from the image and pays nothing. A project that needs a different Gradle pins
+# it in its own .mise.toml as usual; only the no-pin fallback is fixed here.
+ARG BASELINE_GRADLE=8.10.2
 
 # ── extra developer CLIs (add-only OS layer) ────────────────────────────────
 # git-delta (nicer diffs an agent can read), jq (JSON on the command line) and
@@ -101,8 +115,8 @@ ENV PATH="${PATH}:/opt/aee/toolchain-bin"
 # cost of shipping a baseline at all.
 RUN set -eux; \
     mkdir -p /opt/aee/toolchain/baseline; \
-    printf '[tools]\njava = "%s"\nnode = "%s"\nmaven = "%s"\n' \
-      "$BASELINE_JAVA" "$BASELINE_NODE" "$BASELINE_MAVEN" \
+    printf '[tools]\njava = "%s"\nnode = "%s"\nmaven = "%s"\ngradle = "%s"\n' \
+      "$BASELINE_JAVA" "$BASELINE_NODE" "$BASELINE_MAVEN" "$BASELINE_GRADLE" \
       > /opt/aee/toolchain/baseline/config.toml; \
     MISE_YES=1 \
     MISE_DATA_DIR=/opt/aee/toolchain/baseline \

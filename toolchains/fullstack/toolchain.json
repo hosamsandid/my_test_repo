@@ -1,9 +1,9 @@
 {
   "toolchainVersion": 1,
   "id": "fullstack",
-  "name": "Full-stack — Java + Node + Maven (versions pinned by the project)",
+  "name": "Full-stack — Java + Node + Maven + Gradle (versions pinned by the project)",
   "stack": "fullstack",
-  "description": "Builds and tests a mixed Java + Node/TypeScript project: compile Java, run unit tests, run Maven, run npm/npx from one image. Carries the mise version manager, not a fixed runtime — each repo pins the exact Java, Node and Maven in a committed .mise.toml, so an update is a commit there, not a platform release, and two repos can use different versions at once. No pin falls back to the baseline (Java 21 / Node 22 / Maven 3.9). Runtimes are cached in the agent workspace and survive a respawn. Also bundles git-delta, jq and fzf. Container/Docker work is not included — use the podman-sandbox plugin.",
+  "description": "Builds and tests a mixed Java + Node/TypeScript project: compile Java, run unit tests, run Maven, run Gradle, run npm/npx from one image. Carries the mise version manager, not a fixed runtime — each repo pins the exact Java, Node and Maven in a committed .mise.toml, so an update is a commit there, not a platform release, and two repos can use different versions at once. No pin falls back to the baseline (Java 21 / Node 22 / Maven 3.9 / Gradle 8.10.2), which is pre-installed in the image so a fresh Gradle build pays no runtime download. Runtimes are cached in the agent workspace and survive a respawn. Also bundles git-delta, jq and fzf. Container/Docker work is not included — use the podman-sandbox plugin.",
   "image": "as-agent-fullstack:latest",
   "platforms": [
     "podman",
@@ -11,5 +11,5 @@
   ],
   "versionSource": "bootstrap",
   "versionManager": "mise",
-  "baseline": "java temurin-21, node 22, maven 3.9"
+  "baseline": "java temurin-21, node 22, maven 3.9, gradle 8.10.2"
 }

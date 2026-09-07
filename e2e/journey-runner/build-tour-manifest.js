@@ -55,6 +55,7 @@ const ROUTE_MAP = {
   'iban-story': '/chats',
   triggers: '/chats',
   'flows-draft': '/flows',
+  'outcomes-routing': '/flows',
   'agent-templates': '/role-templates',
   knowledge: '/knowledge',
   'token-usage': '/token-usage',

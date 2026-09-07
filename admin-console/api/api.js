@@ -46,7 +46,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
@@ -1874,6 +1874,52 @@ async function reconcileTeamGithubChannels(teamId) {
   }
 }
 
+// The wake-side sibling of reconcileTeamGithubChannels (#2031): re-derive each
+// member's `wake-agent` listener from the team's `wakeAgent` outcome actions, so
+// wiring a direct hand-off on a LIVE team takes effect without a re-materialise.
+// Same discipline throughout — strip the previously-derived triggers, regenerate
+// from the ports, write back only members whose set actually changed.
+//
+// Two deliberate differences from the channel reconciler:
+//   - the whole team is the input, not just the edited member. A hand-off is
+//     authored on the PRODUCER but the derived listener lands on the TARGET, so
+//     an edit to one member's outcomes changes a different member's triggers.
+//   - no `stampDerivedActivation`. That stamp exists solely to keep the GitHub
+//     poller's per-subscriber history horizon fixed across a rewrite; a
+//     `wake-agent` trigger is never polled (`pollerSubscribes` requires
+//     `type === 'github-event'`), so it has no horizon to protect and carrying
+//     an `activatedAt` onto it would imply one.
+async function reconcileTeamWakeHandoffs(teamId) {
+  if (!teamId) return;
+  const members = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.parentTeamId !== teamId) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    members.push({
+      id, displayName: cfg.displayName || id, outcomes: cfg.outcomes || null,
+      triggers: Array.isArray(triggers) ? triggers : [],
+    });
+  }
+  if (members.length === 0) return;
+
+  const roles = members.map(m => ({
+    id: m.id,
+    displayName: m.displayName,
+    outcomes: m.outcomes,
+    triggers: m.triggers.filter(t => !isWakeHandoffTrigger(t)),
+  }));
+  const byId = new Map(expandWakeHandoffs({ roles }).roles.map(r => [r.id, r]));
+  const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
+
+  for (const m of members) {
+    const next = byId.get(m.id)?.triggers || [];
+    if (norm(next) === norm(m.triggers)) continue;
+    try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
+    catch { /* best-effort — never break the originating request */ }
+  }
+}
+
 // Re-render the derived OUTCOMES prompt block (#829) for a whole team from its
 // members' declarative `outcomes` ports, mirroring what `expandGithubChannels`
 // (via applyDerivedPromptBlocks) does at materialise time. This is the prompt-side
@@ -2586,6 +2632,13 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // github-flag-only change keeps the produce block's established lazy refresh.
   if (outcomesChanged && fresh.parentTeamId) {
     await reconcileTeamOutcomes(fresh.parentTeamId);
+    // A `wakeAgent` action lives on the same port (#2031), and unlike every
+    // other action it needs a RUNTIME listener on its target — without this the
+    // hand-off is drawn on the canvas, projected into the producer's prompt, and
+    // then dropped by the target's runner as "no enabled wake-agent trigger".
+    // Keyed on the same flag rather than on a wake-specific diff: the whole team
+    // is re-derived either way, and a no-op member write is already skipped.
+    await reconcileTeamWakeHandoffs(fresh.parentTeamId);
   }
   // A humans-registry change on the TEAM agent (reviewer/gate bindings) feeds
   // the members' generated Outcomes blocks (#1007) — re-render them.
@@ -13179,7 +13232,13 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     // normalizeLegacyReview maps any legacy pr-review roles (#347) onto channels.
     customRolesRaw = templateToCustomRoles(
       expandDataFlowSteps(
-        expandGithubChannels(liftTriggerEmits(normalizeLegacyReview(body.processTemplate)), { teamId }),
+        // expandWakeHandoffs (#2031) runs INSIDE expandGithubChannels' input so
+        // the single derived-prompt pass at the tail of that expander is still
+        // the last thing to touch each role's systemPrompt.
+        expandGithubChannels(
+          expandWakeHandoffs(liftTriggerEmits(normalizeLegacyReview(body.processTemplate))),
+          { teamId },
+        ),
         { teamId },
       )
     );
@@ -13794,7 +13853,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
     customRolesRaw = templateToCustomRoles(
       expandDataFlowSteps(
-        expandGithubChannels(liftTriggerEmits(normalizeLegacyReview(body.processTemplate)), { teamId }),
+        // expandWakeHandoffs (#2031) runs INSIDE expandGithubChannels' input so
+        // the single derived-prompt pass at the tail of that expander is still
+        // the last thing to touch each role's systemPrompt.
+        expandGithubChannels(
+          expandWakeHandoffs(liftTriggerEmits(normalizeLegacyReview(body.processTemplate))),
+          { teamId },
+        ),
         { teamId },
       )
     );

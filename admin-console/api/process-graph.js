@@ -847,6 +847,11 @@ function computeHumanTouchpoints(nodes, edges, humanIds) {
   return out.sort(compareHumanTouchpoints);
 }
 
+// Edge kinds whose `label` field holds an actual label TOKEN (#2032). `timer`
+// carries a cron expression, `webhook` a description, `loop`/`wake`/`delivery`
+// carry no label at all — so a label-name index must not read them.
+const LABEL_EDGE_KINDS = new Set(['agent', 'gate', 'brake', 'label', 'review']);
+
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
 // block saving. Derived purely from the built nodes/edges.
 //
@@ -855,7 +860,7 @@ function computeHumanTouchpoints(nodes, edges, humanIds) {
 // nodes: the fallback still picks up every channel `gate: 'human'`, it just
 // cannot see a `labels[]` registry that was never threaded in.
 function computeLints(nodes, edges, classifier) {
-  const { isHumanGate } = classifier || makeLabelClassifier({ agents: nodes });
+  const { isHumanGate, isBrake } = classifier || makeLabelClassifier({ agents: nodes });
   const lints = [];
   for (const e of edges) {
     if (e.orphan) {
@@ -913,6 +918,104 @@ function computeLints(nodes, edges, classifier) {
     internalCandidates.add(key);
     lints.push({ code: 'internal-channel-candidate', severity: 'info', label: e.label, nodeId: e.to,
       message: `\`${e.to}\` is woken by \`${e.label}\` via GitHub events — an agent-to-agent hand-off can use internal delivery (Delivery toggle on the edge) for lossless, low-latency wakes; the label stays mirrored on GitHub.` });
+  }
+  // ── direct hand-off checks (#2032, direct-agent-handoff concept §12 P3) ────
+  //
+  // Three lints over the `kind: 'wake'` edges P2 draws, plus one that suggests
+  // replacing a label with a hand-off. They sit here rather than beside the
+  // label lints because all three read the OUTCOME actions, not the edge alone.
+  const wakeNodeById = new Map(nodes.filter(n => !n.synthetic).map(n => [n.id, n]));
+  for (const n of nodes) {
+    if (n.synthetic || !isAuthoredOutcomes(n.outcomes)) continue;
+    for (const w of outcomeWakePairs(n.outcomes)) {
+      const target = wakeNodeById.get(w.to);
+      // A hand-off naming something that is not an agent in this flow draws NO
+      // edge at all (buildProcessGraph skips it deliberately — a line into
+      // nothing is worse than no line), so without this lint it is invisible:
+      // the outcome exists, the canvas shows nothing, and delivery refuses it
+      // at runtime with a 404/403 the author never sees. `validateOutcomes`
+      // rejects all three shapes at authoring time when an `agents` source is
+      // threaded, so a surviving one is imported or hand-edited data.
+      if (w.to === n.id) {
+        lints.push({ code: 'wake-target-unresolved', severity: 'warning', nodeId: n.id, outcome: w.outcome,
+          message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to itself — a self-wake is refused on delivery.` });
+        continue;
+      }
+      if (!target) {
+        lints.push({ code: 'wake-target-unresolved', severity: 'warning', nodeId: n.id, outcome: w.outcome,
+          message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to \`${w.to}\`, which is not an agent in this flow — a person has no queue, and an unknown role is refused on delivery.` });
+        continue;
+      }
+      // The `outcome-without-consumer` sibling. The consumer's `wake-agent`
+      // listener carries the wake instruction, and `_execute_wake_agent` takes
+      // the first ENABLED one; with none the entry is dequeued and dropped, so
+      // the producer's hand-off succeeds and nothing runs.
+      //
+      // Deliberately narrower than "has no listener": that listener is DERIVED,
+      // never authored (`expandWakeHandoffs` / `reconcileTeamWakeHandoffs`), so
+      // its absence in a draft or an imported bundle is the reconciler's
+      // business at materialise time, not an authoring error to warn about.
+      // A listener that is present and switched off is nobody's derivation.
+      const wakeListeners = (target.triggers || []).filter(t => t && t.type === 'wake-agent');
+      if (wakeListeners.length > 0 && wakeListeners.every(t => t.enabled === false)) {
+        lints.push({ code: 'wake-target-disabled', severity: 'warning', nodeId: n.id, outcome: w.outcome,
+          message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to \`${w.to}\`, whose hand-off input is disabled — the wake is queued and then dropped, with nothing on GitHub to show it.` });
+      }
+      // Q3 (§13): the note stays OPTIONAL, but a note-less hand-off carries
+      // less than a label does — a label at least names a stage, while the
+      // event-log row for this one can only say who woke whom. `info`, because
+      // a required field invites `"done"`.
+      if (!w.note) {
+        lints.push({ code: 'wake-without-note', severity: 'info', nodeId: n.id, outcome: w.outcome,
+          message: `\`${n.id}\` outcome \`${w.outcome}\` hands off to \`${w.to}\` with no note — a sentence of context is what makes the hand-off readable in the event log and useful to \`${w.to}\`.` });
+      }
+    }
+  }
+  // Direct-hand-off candidate (#2032, concept §11). The next rung above
+  // `internal-channel-candidate`: an agent→agent label edge that ALREADY opted
+  // out of GitHub delivery, whose label is read by nobody else — one producer,
+  // one consumer, no gate, no brake, on no other edge in the graph. Then the
+  // label token exists only to route this one pair, and a direct hand-off does
+  // that with no label to invent and no work item to hang it on.
+  //
+  // `info` only, and the message states what you give up: the label (and the
+  // `:wip`/`:completed` claim states derived from it) stop appearing on the
+  // issue/PR, so a flow whose label IS the human-readable process state should
+  // keep it — that is exactly the §11 "a human tracks this state" row.
+  const labelProducers = new Map(); // label -> Set(producerId)
+  const labelConsumers = new Map(); // label -> Set(consumerId)
+  const labelReadElsewhere = new Set(); // label seen on a non agent→agent edge
+  for (const e of edges) {
+    // Only the kinds whose `label` is a LABEL TOKEN. A `timer` edge's label is
+    // a cron expression and a `webhook` edge's is a description, so counting
+    // them here would let an unrelated string claim a label name; `external`
+    // edges carry a raw GitHub event key for the same reason.
+    if (!e.label || e.external || !LABEL_EDGE_KINDS.has(e.kind)) continue;
+    if (e.kind === 'agent' && !e.orphan && e.from != null && e.to != null) {
+      if (!labelProducers.has(e.label)) labelProducers.set(e.label, new Set());
+      labelProducers.get(e.label).add(e.from);
+      if (!labelConsumers.has(e.label)) labelConsumers.set(e.label, new Set());
+      labelConsumers.get(e.label).add(e.to);
+      continue;
+    }
+    // Anything else touching the label means somebody besides this pair reads
+    // or writes it: a human gate/brake/delivery edge, an orphan listener a
+    // person may satisfy by hand, or a dead-end emit.
+    labelReadElsewhere.add(e.label);
+  }
+  const handoffCandidates = new Set();
+  for (const e of edges) {
+    if (e.kind !== 'agent' || e.orphan || e.transport !== 'internal') continue;
+    if (e.from == null || e.to == null || !e.triggerId || !e.label) continue;
+    if (isHumanGate(e.label) || isBrake(e.label)) continue;
+    if (labelReadElsewhere.has(e.label)) continue;
+    if ((labelProducers.get(e.label) || new Set()).size !== 1) continue;
+    if ((labelConsumers.get(e.label) || new Set()).size !== 1) continue;
+    const key = `${e.from} ${e.to} ${e.label}`;
+    if (handoffCandidates.has(key)) continue;
+    handoffCandidates.add(key);
+    lints.push({ code: 'direct-handoff-candidate', severity: 'info', label: e.label, nodeId: e.from,
+      message: `\`${e.label}\` only routes \`${e.from}\` → \`${e.to}\` and nobody else reads it — a direct hand-off needs no label at all. Keep the label if a person tracks this state on the issue/PR: a hand-off puts nothing there, so the \`${e.label}:wip\`/\`:completed\` states go with it.` });
   }
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
   // consumes, and a channel that points at a role which doesn't produce that

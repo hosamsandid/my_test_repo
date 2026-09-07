@@ -11,6 +11,14 @@ SSO) hangs off this entity.
 > qualify it as such. The two only share a word. The agent role id stays `team`
 > short-term; renaming it (e.g. `agent-team` / `squad`) is a follow-up.
 
+> **Successor design — [`decentralised-access-concept.md`](decentralised-access-concept.md) (#2041 / #2046).**
+> The separate human-Team layer described on this page is **retired** by decision D1:
+> the **Agent Team** becomes the access boundary, `teams/index.json` disappears, and
+> `users` + `memberships` survive with `memberships.teamId` re-pointed at Agent Team ids.
+> The terminology note above therefore goes with it — after the change there is one
+> concept and one word. This page still describes what is live on `main`; the successor
+> doc is the design of record for what replaces it (rewritten here in phase P6).
+
 ## Scope of this issue
 
 In scope:

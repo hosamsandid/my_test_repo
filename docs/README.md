@@ -123,6 +123,7 @@ understanding intent — do not read them as descriptions of current behaviour.
 | [unified-create-launcher-concept.md](unified-create-launcher-concept.md) | One "Create" launcher replacing the scattered agent/team/flow entry points | shipped (Phases A–F, #1664–#1669) |
 | [multi-user-concept.md](multi-user-concept.md) | Enterprise identity, SSO, isolation, audit | partly shipped (login, teams, audit); SSO open |
 | [personal-credentials-concept.md](personal-credentials-concept.md) | Per-human GitHub tokens & SSH keys — agents act under their owner's identity | proposal |
+| [decentralised-access-concept.md](decentralised-access-concept.md) | The Agent Team becomes the access boundary — private by default, shared by its creator; the separate access-scope layer is retired | design of record (epic #2041, phases P1–P6) |
 | [agent-toolchains-concept.md](agent-toolchains-concept.md) | Language stacks (Java/Maven and beyond) in an agent container — image per Working Environment, version pinned in the project repo | proposal (epic #1939) |
 | [actionable-help-concept.md](actionable-help-concept.md) | The Help assistant operates the console: navigate → prefill an existing dialog → execute with per-action confirmation, gated by the caller's own role | proposal (#1973) |
 | [direct-agent-handoff-concept.md](direct-agent-handoff-concept.md) | A `wakeAgent` outcome action that wakes the next agent inside the platform — no label, no issue/PR, no GitHub trace | proposal (#1528) |

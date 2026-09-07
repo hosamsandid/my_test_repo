@@ -397,9 +397,8 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **282,405 — 83.1% used,
-57,595 left** (#2031 added the direct-hand-off chapter to `flows.md`, +2,067 on top of the
-280,338 the launcher-preview #2034 line below records — `create.md` names `/flows` in its
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **282,691 — 83.1% used,
+57,309 left** (#2031 added the direct-hand-off chapter to `flows.md`, +2,067 measured on its own branch; re-measured on the merge with #2035 in — `create.md` names `/flows` in its
 `seeAlso`, so a Flows-topic edit lands on this figure), where the all-topics fold route-scoping
 replaced stood at 322,243 (94.8%). #1930
 moved the crown here by removing the Agents page: `/flows` lost its `/agents` `seeAlso` neighbour
@@ -408,7 +407,9 @@ and fell to 258,761, the no-route Overview fold dropped too, and `create.md` (wh
 the biggest single neighbourhood is the one `/quickstart` sees. It had held the no-route fallback
 at 262,568 since the #1996 child, and stood at 279,693 before #2034 narrowed the launcher's
 preview to the flow cards (+250 in `create.md`, which IS this context's topic, and +395 in the two
-vendored docs, which land on every context). Re-measure rather than trust this line:
+vendored docs, which land on every context) and 280,338 before #2035 pinned the Agent Chat nav
+entry (+286, all of it in `admin-console.md`, so it lands on every context equally and changes no
+context's rank). Re-measure rather than trust this line:
 `node -e "console.log(require('./helper-chat/corpus').measureWorstCaseSystemPrompt())"` from
 `admin-console/api`. (#1992 is consequence 2 below in the flesh: it widened the *Create* topic,
 which `/flows`' `seeAlso` names, so the worst case moved by exactly that topic's growth even

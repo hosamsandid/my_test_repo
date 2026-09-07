@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import {
   createdAgentDestination, isSingleAgentFormOpen,
-  heroEntry, entriesByTier, previewToggleLabel,
+  heroEntry, entriesByTier, previewToggleLabel, hasPreview,
   CREATE_COPY, ADVANCED_DEFAULT_OPEN,
 } from './create-launcher-view';
 import { CREATE_PREVIEWS } from './create-previews.jsx';
@@ -110,6 +110,121 @@ function Outcome({ children }) {
   );
 }
 
+// The card itself: one <Link> covering the whole entry, in either layout. It
+// takes `onFocus`/`onBlur` rather than owning them, because only a
+// preview-bearing card has anything to do with a focus event (#2034) — passing
+// nothing leaves the DOM node with no handler at all rather than one that sets
+// state nobody reads.
+function EntryLink({ entry, variant, onFocus, onBlur }) {
+  const Icon = ICONS[entry.icon] || Plus;
+  const hero = variant === 'hero';
+  const badgeTone = entry.badge === 'Advanced' ? 'muted' : 'accent';
+
+  return (
+    <Link
+      to={entry.to}
+      data-testid={`create-entry-${entry.key}`}
+      onFocus={onFocus}
+      onBlur={onBlur}
+      style={{
+        ...CARD_BASE,
+        flex: '1 1 auto',
+        display: 'flex',
+        flexDirection: hero ? 'row' : 'column',
+        alignItems: hero ? 'center' : 'stretch',
+        gap: hero ? 'var(--eb-space-5)' : 'var(--eb-space-3)',
+        padding: hero ? 'var(--eb-space-6)' : 'var(--eb-space-5)',
+        ...(hero
+          ? { borderColor: 'var(--eb-accent-primary)', background: 'var(--eb-bg-elevated)' }
+          : null),
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = 'var(--eb-accent-primary)';
+        e.currentTarget.style.background = 'var(--eb-bg-hover)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = hero
+          ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)';
+        e.currentTarget.style.background = hero
+          ? 'var(--eb-bg-elevated)' : 'var(--eb-bg-surface)';
+      }}
+    >
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: hero ? 52 : 40,
+        height: hero ? 52 : 40,
+        borderRadius: 'var(--eb-radius-md)',
+        background: hero ? 'var(--eb-bg-surface)' : 'var(--eb-bg-elevated)',
+        color: 'var(--eb-accent-primary)',
+        flexShrink: 0,
+      }}>
+        <Icon size={hero ? 26 : 20} />
+      </span>
+
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--eb-space-2)',
+        minWidth: 0,
+        flex: '1 1 auto',
+      }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          flexWrap: 'wrap',
+        }}>
+          <span style={{
+            fontSize: hero ? 'var(--eb-text-xl)' : 'var(--eb-text-lg)',
+            fontWeight: 'var(--eb-font-semibold)',
+            color: 'var(--eb-text-primary)',
+          }}>
+            {entry.title}
+          </span>
+          {entry.badge && (
+            <Badge
+              tone={badgeTone}
+              icon={badgeTone === 'accent' ? <Star size={11} /> : null}
+            >
+              {entry.badge}
+            </Badge>
+          )}
+        </div>
+        <p style={{
+          margin: 0,
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-secondary)',
+          lineHeight: 1.6,
+        }}>
+          {entry.description}
+        </p>
+        <Outcome>{entry.outcome}</Outcome>
+      </div>
+
+      {/* The hero is a primary action, so it says so in a button-shaped
+          affordance. It is decoration inside the same <Link> — never a nested
+          button — so the whole card stays one click target (AC7). */}
+      {hero && entry.action && (
+        <span style={{
+          flexShrink: 0,
+          alignSelf: 'center',
+          padding: 'var(--eb-space-3) var(--eb-space-5)',
+          borderRadius: 'var(--eb-radius-md)',
+          background: 'var(--eb-accent-primary)',
+          color: 'var(--eb-text-inverted)',
+          fontSize: 'var(--eb-text-sm)',
+          fontWeight: 'var(--eb-font-semibold)',
+          whiteSpace: 'nowrap',
+        }}>
+          {entry.action}
+        </span>
+      )}
+    </Link>
+  );
+}
+
 /**
  * The "what you get" reveal.
  *
@@ -159,19 +274,43 @@ function PreviewReveal({ entry, shown }) {
   );
 }
 
-// One entry, whatever tier it is in. `variant` only changes the layout — the
-// copy, the badge, the outcome line and the preview are the entry's own, so a
-// tier cannot silently drop one of them.
+/**
+ * One entry, whatever tier it is in. `variant` only changes the layout — the
+ * copy, the badge and the outcome line are the entry's own, so a tier cannot
+ * silently drop one of them.
+ *
+ * The "what you get" preview is the one thing a card may legitimately not have:
+ * since #2034 only the three flow entries carry one, because that is where the
+ * destination is genuinely non-obvious. An entry without a preview renders NO
+ * reveal path at all — no hover/focus state, no eye control, no panel — rather
+ * than a hidden one, so it leaves behind no orphan focus target and no
+ * screen-reader label for a preview that does not exist. The decision is the
+ * pure `hasPreview`, not a tier check: the tier is where the previews happen to
+ * live today, the field is what the renderer actually needs.
+ */
 function EntryCard({ entry, variant = 'card' }) {
+  if (!hasPreview(entry)) {
+    // The flex wrapper stays even with nothing to position inside it, so the
+    // card's own geometry is unchanged from before the removal (AC4: no gap and
+    // no reflow — both the affordance and the panel were absolutely positioned,
+    // so nothing occupied layout space to leave behind).
+    return (
+      <div style={{ position: 'relative', display: 'flex' }}>
+        <EntryLink entry={entry} variant={variant} />
+      </div>
+    );
+  }
+  return <PreviewableEntryCard entry={entry} variant={variant} />;
+}
+
+// An entry that reveals its "what you get" schematic. Split from EntryCard so
+// the reveal's state lives only where a reveal exists.
+function PreviewableEntryCard({ entry, variant }) {
   // Hover/focus and the touch toggle are tracked separately: leaving the card
   // must not close a preview the user pinned open with the eye control.
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
   const shown = hovered || pinned;
-
-  const Icon = ICONS[entry.icon] || Plus;
-  const hero = variant === 'hero';
-  const badgeTone = entry.badge === 'Advanced' ? 'muted' : 'accent';
 
   return (
     <div
@@ -179,107 +318,12 @@ function EntryCard({ entry, variant = 'card' }) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <Link
-        to={entry.to}
-        data-testid={`create-entry-${entry.key}`}
+      <EntryLink
+        entry={entry}
+        variant={variant}
         onFocus={() => setHovered(true)}
         onBlur={() => setHovered(false)}
-        style={{
-          ...CARD_BASE,
-          flex: '1 1 auto',
-          display: 'flex',
-          flexDirection: hero ? 'row' : 'column',
-          alignItems: hero ? 'center' : 'stretch',
-          gap: hero ? 'var(--eb-space-5)' : 'var(--eb-space-3)',
-          padding: hero ? 'var(--eb-space-6)' : 'var(--eb-space-5)',
-          ...(hero
-            ? { borderColor: 'var(--eb-accent-primary)', background: 'var(--eb-bg-elevated)' }
-            : null),
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = 'var(--eb-accent-primary)';
-          e.currentTarget.style.background = 'var(--eb-bg-hover)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = hero
-            ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)';
-          e.currentTarget.style.background = hero
-            ? 'var(--eb-bg-elevated)' : 'var(--eb-bg-surface)';
-        }}
-      >
-        <span style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: hero ? 52 : 40,
-          height: hero ? 52 : 40,
-          borderRadius: 'var(--eb-radius-md)',
-          background: hero ? 'var(--eb-bg-surface)' : 'var(--eb-bg-elevated)',
-          color: 'var(--eb-accent-primary)',
-          flexShrink: 0,
-        }}>
-          <Icon size={hero ? 26 : 20} />
-        </span>
-
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 'var(--eb-space-2)',
-          minWidth: 0,
-          flex: '1 1 auto',
-        }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--eb-space-2)',
-            flexWrap: 'wrap',
-          }}>
-            <span style={{
-              fontSize: hero ? 'var(--eb-text-xl)' : 'var(--eb-text-lg)',
-              fontWeight: 'var(--eb-font-semibold)',
-              color: 'var(--eb-text-primary)',
-            }}>
-              {entry.title}
-            </span>
-            {entry.badge && (
-              <Badge
-                tone={badgeTone}
-                icon={badgeTone === 'accent' ? <Star size={11} /> : null}
-              >
-                {entry.badge}
-              </Badge>
-            )}
-          </div>
-          <p style={{
-            margin: 0,
-            fontSize: 'var(--eb-text-sm)',
-            color: 'var(--eb-text-secondary)',
-            lineHeight: 1.6,
-          }}>
-            {entry.description}
-          </p>
-          <Outcome>{entry.outcome}</Outcome>
-        </div>
-
-        {/* The hero is a primary action, so it says so in a button-shaped
-            affordance. It is decoration inside the same <Link> — never a nested
-            button — so the whole card stays one click target (AC7). */}
-        {hero && entry.action && (
-          <span style={{
-            flexShrink: 0,
-            alignSelf: 'center',
-            padding: 'var(--eb-space-3) var(--eb-space-5)',
-            borderRadius: 'var(--eb-radius-md)',
-            background: 'var(--eb-accent-primary)',
-            color: 'var(--eb-text-inverted)',
-            fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-semibold)',
-            whiteSpace: 'nowrap',
-          }}>
-            {entry.action}
-          </span>
-        )}
-      </Link>
+      />
 
       {/* Touch affordance. Overlaid on the card rather than nested in the link,
           so tapping it previews and tapping anywhere else still navigates. */}

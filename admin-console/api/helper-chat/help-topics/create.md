@@ -47,10 +47,15 @@ options — because "five ways in, all equally weighted" answers the question
    agent form. It is the specialist path, so it is one click away rather than
    competing with the four above it.
 
-Each entry also states its **outcome** as a "→ …" line, and can reveal a small
-**what you get** sketch of the screen it opens — hover it, tab to it, or tap the
-eye control. The sketch is a deliberate illustration, not a screenshot: it
-promises the *kind* of destination and nothing about a specific agent.
+Each entry states its **outcome** as a "→ …" line. The three flow cards
+additionally reveal a small **what you get** sketch of the screen they open —
+hover one, tab to it, or tap the eye control. The sketch is a deliberate
+illustration, not a screenshot: it promises the *kind* of destination and
+nothing about a specific agent.
+
+The hero and the advanced entry deliberately have no sketch: a chat window needs
+no drawing, and the manual form is the path you take when you already know what
+you are doing. On those two the "→ …" line is the whole promise.
 
 ### What each tile produces
 

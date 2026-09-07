@@ -3,9 +3,17 @@ import React from 'react';
 /**
  * "What you get" schematics for the Create launcher (#2027).
  *
- * Each launcher entry can reveal a small illustration of the *kind* of screen it
- * leads to, so a newcomer can tell a chat window from an editor form from an
- * empty canvas before committing.
+ * The three flow entries reveal a small illustration of the *kind* of screen
+ * they lead to, so a newcomer can tell a ready-made flow from a drafted one from
+ * an empty canvas before committing.
+ *
+ * There are three of these, not five: #2034 dropped the preview from the hero
+ * and the advanced entry, and their two schematics went with it rather than
+ * staying in the map as dead weight that reads as coverage — a chat window is
+ * self-evident (and at hero width the drawing was the largest thing on the
+ * page), and a specialist who opens the disclosure to reach the manual form does
+ * not need to be shown a form. create-launcher-wiring.test.js asserts the map
+ * and the entries stay in exact correspondence in BOTH directions.
  *
  * Three deliberate properties, all of them the reason these are hand-drawn SVG
  * rather than screenshots (open question 2, answered: schematic SVG, revealed on
@@ -24,15 +32,14 @@ import React from 'react';
  *
  * Referenced by NAME from the pure create-launcher-view.js (`preview.schematic`),
  * the same indirection the lucide `ICONS` map uses, so that module stays free of
- * React imports. create-launcher-wiring.test.js asserts every name an entry
- * claims has a component here.
+ * React imports.
  *
  * The JSX itself stays uncovered per the #651 convention.
  */
 
 const VIEW_BOX = '0 0 160 88';
 
-// One shared frame so the five schematics read as one family: same aspect, same
+// One shared frame so the schematics read as one family: same aspect, same
 // rounded outline, same 1px token stroke.
 function Frame({ children }) {
   return (
@@ -98,24 +105,6 @@ function Connector({ x1, x2, y }) {
       stroke="var(--eb-accent-primary)"
       strokeWidth="1.5"
     />
-  );
-}
-
-// A chat window: one message in, one reply out.
-function ChatSchematic() {
-  return (
-    <Frame>
-      {/* window title bar */}
-      <line x1="0" y1="16" x2="160" y2="16" stroke="var(--eb-border-default)" />
-      <Line x={10} y={7} w={34} h={3} />
-      {/* incoming message, left */}
-      <rect x="12" y="26" width="72" height="18" rx="5" fill="var(--eb-bg-surface)" stroke="var(--eb-border-default)" />
-      <Line x={19} y={33} w={44} h={3} />
-      {/* reply, right, accented */}
-      <rect x="60" y="50" width="88" height="22" rx="5" fill="var(--eb-accent-primary)" opacity="0.2" />
-      <Line x={68} y={56} w={62} h={3} accent />
-      <Line x={68} y={63} w={40} h={3} accent />
-    </Frame>
   );
 }
 
@@ -210,39 +199,10 @@ function CanvasSchematic() {
   );
 }
 
-// A short form: id · role · environment · prompt.
-function FormSchematic() {
-  return (
-    <Frame>
-      {[14, 30, 46].map((y, i) => (
-        <g key={y}>
-          <Line x={12} y={y + 4} w={22 - i * 2} h={3} />
-          <rect
-            x="44"
-            y={y}
-            width="104"
-            height="11"
-            rx="3"
-            fill="var(--eb-bg-surface)"
-            stroke="var(--eb-border-default)"
-          />
-        </g>
-      ))}
-      {/* the prompt textarea */}
-      <Line x={12} y={66} w={20} h={3} />
-      <rect x="44" y="62" width="104" height="18" rx="3" fill="var(--eb-bg-surface)" stroke="var(--eb-border-default)" />
-      <Line x={50} y={67} w={60} h={3} />
-      <Line x={50} y={73} w={44} h={3} />
-    </Frame>
-  );
-}
-
 export const CREATE_PREVIEWS = {
-  chat: ChatSchematic,
   template: TemplateSchematic,
   describe: DescribeSchematic,
   canvas: CanvasSchematic,
-  form: FormSchematic,
 };
 
 export default CREATE_PREVIEWS;

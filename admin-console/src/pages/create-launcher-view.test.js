@@ -6,6 +6,7 @@ import {
   createdAgentDestination,
   entriesByTier,
   entryByKey,
+  hasPreview,
   heroEntry,
   isSingleAgentFormOpen,
   previewToggleLabel,
@@ -20,6 +21,13 @@ import {
 // whole point of the ticket is that the launcher is RANKED, so a reorder has to
 // be a deliberate edit here rather than an accident in the entry array.
 const ORDER = ['chat', 'template', 'describe', 'build', 'single-agent'];
+
+// #2034: the "what you get" preview is the flow tier's, and only the flow
+// tier's. Kept as its own list rather than derived from the tier so the two
+// claims stay independent — a preview added to the hero should fail here even if
+// somebody also moved the hero into the flow tier.
+const PREVIEW_ENTRIES = ['template', 'describe', 'build'];
+const NO_PREVIEW_ENTRIES = ['chat', 'single-agent'];
 
 test('the entries are ordered simplest → most advanced (#2027 AC1)', () => {
   const entries = createEntries();
@@ -192,9 +200,12 @@ test('AC6 — the badges rank the entries: hero, recommended, and two advanced',
   assert.equal(entryByKey('describe').badge, undefined);
 });
 
-test('AC5 — every entry carries an outcome line and a "what you get" preview', () => {
+test('AC5 — every entry carries an outcome line, and the flow cards a preview', () => {
   for (const e of createEntries()) {
     assert.match(e.outcome, /^→ /, `${e.key}'s outcome must read as a destination`);
+  }
+  for (const key of PREVIEW_ENTRIES) {
+    const e = entryByKey(key);
     assert.equal(typeof e.preview.schematic, 'string');
     assert.ok(e.preview.schematic.length > 0, `${e.key} names no schematic`);
     assert.equal(typeof e.preview.caption, 'string');
@@ -206,20 +217,57 @@ test('AC5 — every entry carries an outcome line and a "what you get" preview',
       `${e.key}'s caption implies a specific reused resource: ${e.preview.caption}`,
     );
   }
-  // Each entry gets its own schematic — a shared one would promise the wrong
-  // destination for at least one of them.
-  const schematics = createEntries().map((e) => e.preview.schematic);
+  // Each previewing entry gets its own schematic — a shared one would promise
+  // the wrong destination for at least one of them.
+  const schematics = PREVIEW_ENTRIES.map((k) => entryByKey(k).preview.schematic);
   assert.equal(new Set(schematics).size, schematics.length);
   assert.deepEqual(
-    createEntries().map((e) => e.preview.caption),
+    PREVIEW_ENTRIES.map((k) => entryByKey(k).preview.caption),
     [
-      "You'll land in a chat window, talking to your assistant.",
       "You'll see a ready-made flow of agents to review, then launch.",
       'You type a sentence; we turn it into an editable draft flow.',
       "You'll start on the canvas with a prompt to add your first agent — never a blank page.",
-      "You'll fill in an agent's details in a short form.",
     ],
   );
+});
+
+test('#2034 AC1/AC2 — the hero and the advanced entry carry NO preview', () => {
+  // The preview earns its place only where the destination is non-obvious: on
+  // the hero it was a large drawing of a chat window, and on the advanced entry
+  // a drawing of a form for the reader who least needs one.
+  for (const key of NO_PREVIEW_ENTRIES) {
+    const e = entryByKey(key);
+    assert.equal(e.preview, undefined, `${key} must not carry a preview`);
+    // Not an empty object either: `{}` is truthy, so a renderer branching on
+    // the field alone would still draw an affordance with nothing behind it.
+    assert.ok(!('preview' in e), `${key} still hands out a preview key`);
+    assert.equal(hasPreview(e), false);
+  }
+  // AC3 — the three flow cards are untouched.
+  for (const key of PREVIEW_ENTRIES) {
+    assert.equal(hasPreview(entryByKey(key)), true, `${key} must keep its preview`);
+  }
+  assert.deepEqual(
+    createEntries().filter(hasPreview).map((e) => e.key),
+    PREVIEW_ENTRIES,
+  );
+  // AC1/AC2 also say the rest of those two cards is unchanged — their title,
+  // body, badge and outcome line are asserted verbatim by the copy-inventory
+  // test above, and their routes by the AC7 test.
+  assert.equal(entriesByTier('hero')[0].key, 'chat');
+  assert.equal(entriesByTier('advanced')[0].key, 'single-agent');
+});
+
+test('hasPreview demands a NAMED schematic, not merely a preview object', () => {
+  // The reveal resolves the schematic by name, so a preview naming nothing
+  // renders an empty panel behind a control that promises one.
+  assert.equal(hasPreview({ preview: { schematic: 'canvas', caption: 'x' } }), true);
+  assert.equal(hasPreview({ preview: { caption: 'x' } }), false);
+  assert.equal(hasPreview({ preview: { schematic: '   ' } }), false);
+  assert.equal(hasPreview({ preview: {} }), false);
+  assert.equal(hasPreview({}), false);
+  assert.equal(hasPreview(null), false);
+  assert.equal(hasPreview(undefined), false);
 });
 
 test('the preview control names its entry and its own state (touch a11y edge case)', () => {
@@ -278,7 +326,10 @@ test('#1665 AC7 (jargon-free titles) is superseded on purpose, not by accident',
   const opaque = /\b(template|orchestrator)s?\b/i;
   for (const text of [
     ...Object.values(CREATE_COPY),
-    ...createEntries().flatMap((e) => [e.title, e.description, e.outcome, e.preview.caption]),
+    ...createEntries().flatMap((e) => [
+      e.title, e.description, e.outcome,
+      ...(hasPreview(e) ? [e.preview.caption] : []),
+    ]),
   ]) {
     assert.ok(!opaque.test(text), `internal vocabulary leaked into launcher copy: ${text}`);
   }
@@ -326,4 +377,9 @@ test('entryByKey returns null for an unknown key, and hands out deep copies', ()
   const fresh = createEntries().find((e) => e.key === 'describe');
   assert.notEqual(fresh.title, 'mutated');
   assert.notEqual(fresh.preview.caption, 'mutated');
+  // A preview-less entry (#2034) is copied just as defensively, and adding a
+  // preview to the copy must not give the module one.
+  const hero = heroEntry();
+  hero.preview = { schematic: 'chat', caption: 'mutated' };
+  assert.equal(hasPreview(heroEntry()), false);
 });

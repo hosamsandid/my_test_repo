@@ -919,3 +919,157 @@ test("_fanOutBatch: a legitimate later re-label still fires (marker outside wind
     githubEventLog.record = origRecord;
   }
 });
+
+// ── _fanOutBatch: double-fire regressions (self-claim-label + window dedup) ───
+//
+// Two live double-fires this hardens against, both rooted in labelFilterMatches
+// firing off the event-time label SET (the #1376 collapsed-multi-add recovery):
+//
+//  (A) 2026-09-06 #1960: a human applied `ready` once. The claim swap then added
+//      `ready:wip`, whose own issues.labeled event still carried `ready` in its
+//      snapshot → matched the `ready` filter → the agent fired a SECOND time on
+//      its own status label. Fix: drop an event whose directly-added label is the
+//      trigger's own claim label (reason: 'self-claim-label').
+//
+//  (B) 2026-09-07 #2026: a human applied `ready` (delivered internally) then a
+//      second label `ux` seconds later; the Events API surfaced TWO `ux` events
+//      that both still carried `ready`. Consume-once deduped only the first; the
+//      second double-woke the agent. Fix: the dedup window drops EVERY echo of
+//      one apply, not just the first.
+
+test("_fanOutBatch: the claim swap's own <wake>:wip add is dropped, not re-fired (#1960 regression)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // issues.labeled(ready:wip) whose event-time set STILL carries `ready`
+    // (the paired remove of `ready` hadn't propagated into the snapshot).
+    const ghEvent = {
+      id: "selfclaim-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready:wip" },
+        labels: [{ name: "ready:wip" }, { name: "ready" }],
+        issue: { number: 1960, title: "Test", html_url: "https://github.com/org/repo/issues/1960" },
+      },
+    };
+    const subscribers = [{
+      agentId: "developer", triggerId: "t-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready", claimAdd: "ready:wip", horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 0, "the self-caused claim-label event must NOT wake the agent");
+    const outcome = recorded[0].outcomes[0];
+    assert.equal(outcome.status, "dropped");
+    assert.equal(outcome.reason, "self-claim-label");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: a genuine human re-add of the wake label still fires even when the trigger declares a claim", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // The directly-added label IS the wake label — a real human wake, not the
+    // agent's `ready:wip` decoration. The self-claim gate must not touch it.
+    const ghEvent = {
+      id: "genuine-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        labels: [{ name: "ready" }],
+        issue: { number: 1961, title: "Test", html_url: "https://github.com/org/repo/issues/1961" },
+      },
+    };
+    const subscribers = [{
+      agentId: "developer", triggerId: "t-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready", claimAdd: "ready:wip", horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1, "a genuine ready re-add must still wake the agent");
+    assert.equal(recorded[0].outcomes[0].status, "delivered");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch: window dedup drops EVERY echo of one apply, not just the first (#2026 regression)", async () => {
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const markers = new LabelDedupMarkers();
+    const poller = new GitHubPoller({ labelMarkers: markers });
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const base = Date.now();
+    // The internal path delivered the `ready` apply and armed a marker.
+    markers.add({
+      agentId: "developer", triggerId: "t-ready",
+      repo: "org/repo", kind: "issue", number: 2026, label: "ready",
+      appliedAt: new Date(base).toISOString(),
+    });
+
+    // Two collapsed `ux` events seconds apart, both still carrying `ready` in
+    // their snapshot → both match the `ready` filter via the full set. Both are
+    // within the marker window; consume-once would have let the second through.
+    const uxEvent = (id, offsetMs) => ({
+      id,
+      actor: { login: "thorsten" },
+      created_at: new Date(base + offsetMs).toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }, { name: "ready" }],
+        issue: { number: 2026, title: "Test", html_url: "https://github.com/org/repo/issues/2026" },
+      },
+    });
+    const subscribers = [{
+      agentId: "developer", triggerId: "t-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready", horizon: null,
+    }];
+
+    await poller._fanOutBatch(
+      "org/repo",
+      [uxEvent("ux-echo-1", 3_000), uxEvent("ux-echo-2", 33_000)],
+      subscribers, "tok",
+    );
+
+    assert.equal(enqueued.length, 0, "no echo of the same apply may wake the agent");
+    assert.equal(recorded.length, 2);
+    for (const entry of recorded) {
+      assert.equal(entry.outcomes[0].status, "dropped");
+      assert.equal(entry.outcomes[0].reason, "internal-dedup");
+    }
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});

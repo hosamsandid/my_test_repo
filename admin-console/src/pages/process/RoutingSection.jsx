@@ -107,6 +107,12 @@ export default function RoutingSection({ node, peers = [], lints = [], labels = 
       }
       const res = await apiCall('POST', '/api/agent-outcomes/suggest', {
         roleName: node.displayName || node.id, prompt,
+        // #2032: without these the suggester cannot propose a direct hand-off
+        // at all, because a `wakeAgent` addresses a role by id. The server
+        // re-filters the list and validates the suggested target against it,
+        // so sending the whole peer set is safe.
+        roleId: node.id,
+        peers: (peers || []).map(p => ({ id: p.id, displayName: p.displayName, kind: p.kind })),
       });
       if (res?.suggestion) {
         setOutcomes(normalize(res.suggestion));

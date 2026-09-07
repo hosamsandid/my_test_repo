@@ -5,7 +5,7 @@ const assert = require('node:assert');
 
 const {
   heuristicOutcomeSuggestion, buildOutcomeSuggestionRequest, parseOutcomeSuggestion,
-  scoreShape, harvestLabels,
+  scoreShape, harvestLabels, wakePeerList,
 } = require('./outcome-suggestion');
 const { validateOutcomes } = require('./outcomes');
 
@@ -156,4 +156,81 @@ test('parse: rejects garbage / non-JSON / missing mode', () => {
   assert.equal(parseOutcomeSuggestion(''), null);
   assert.equal(parseOutcomeSuggestion('{"options":[]}'), null);
   assert.equal(parseOutcomeSuggestion('{"mode":"nope","options":[]}'), null);
+});
+
+// ── wakeAgent in the action enum (#2032, concept §4.3) ──────────────────────
+
+test('wakePeerList keeps agents, drops actors, humans, self and duplicates', () => {
+  // On a LIVE team the peer list is the graph's node list, which also carries
+  // the actor pseudo-nodes (@github / @external / @timer, kind 'actor') and the
+  // named human roles — none of which has a pending queue, so none can be
+  // handed off to. A draft role carries no `kind` at all and stays eligible.
+  const peers = wakePeerList([
+    { id: 'rev', displayName: 'Reviewer', kind: 'agent' },
+    { id: 'docs' },
+    { id: '@github', kind: 'actor' },
+    { id: 'lead', displayName: 'Tech Lead', kind: 'human' },
+    { id: 'rev', displayName: 'Reviewer again', kind: 'agent' },
+    { id: 'dev', kind: 'agent' },
+    { id: '   ' },
+    null,
+    'nope',
+  ], 'dev');
+  assert.deepEqual(peers, [
+    { id: 'rev', name: 'Reviewer' },
+    { id: 'docs', name: 'docs' },
+  ]);
+});
+
+test('wakePeerList is safe on junk input', () => {
+  assert.deepEqual(wakePeerList(undefined, undefined), []);
+  assert.deepEqual(wakePeerList('nope', 'x'), []);
+});
+
+test('buildOutcomeSuggestionRequest teaches wakeAgent only with a peer list', () => {
+  const withPeers = buildOutcomeSuggestionRequest('Developer', 'implements issues', undefined, {
+    peers: [{ id: 'rev', displayName: 'Reviewer' }, { id: 'docs' }], roleId: 'dev',
+  }).messages[0].content;
+  assert.match(withPeers, /"type":"wakeAgent"/);
+  assert.match(withPeers, /"rev" \(Reviewer\)/);
+  assert.match(withPeers, /"docs"/);
+  assert.ok(!/Do NOT use a "wakeAgent" action/.test(withPeers));
+});
+
+test('buildOutcomeSuggestionRequest FORBIDS wakeAgent when no peers are known', () => {
+  // Told nothing, the model would have to guess a role id — and a guess is
+  // rejected by validateOutcomes, which sinks the WHOLE suggestion back to the
+  // heuristic. An unusable action type is worse than an absent one.
+  const text = buildOutcomeSuggestionRequest('Developer', 'implements issues').messages[0].content;
+  assert.ok(!text.includes('"type":"wakeAgent"'));
+  assert.match(text, /Do NOT use a "wakeAgent" action/);
+  // The four original action types are untouched either way.
+  for (const t of ['setLabel', 'openPr', 'openIssue', 'none']) {
+    assert.ok(text.includes(t), t);
+  }
+});
+
+test('parse: accepts a wakeAgent naming a real peer, and keeps to + note', () => {
+  const txt = JSON.stringify({ mode: 'anyOf', options: [{
+    id: 'handed-off', title: 'Handed off',
+    actions: [{ type: 'wakeAgent', to: 'rev', note: 'mind step 3' }],
+  }] });
+  const port = parseOutcomeSuggestion(txt, { agents: [{ id: 'rev' }], roleId: 'dev' });
+  assert.ok(port);
+  assert.deepEqual(port.options[0].actions, [{ type: 'wakeAgent', to: 'rev', note: 'mind step 3' }]);
+});
+
+test('parse: an INVENTED hand-off target sinks the whole suggestion', () => {
+  // This is why the route must thread the same peer list into both halves: the
+  // enum in the prompt and the `agents` source here. Without the source a
+  // hallucinated id would validate and persist as an edge into nothing.
+  const txt = JSON.stringify({ mode: 'anyOf', options: [{
+    id: 'h', actions: [{ type: 'wakeAgent', to: 'ghost' }],
+  }] });
+  assert.equal(parseOutcomeSuggestion(txt, { agents: [{ id: 'rev' }], roleId: 'dev' }), null);
+  // A self-hand-off is refused the same way (delivery answers it 403).
+  const selfTxt = JSON.stringify({ mode: 'anyOf', options: [{
+    id: 'h', actions: [{ type: 'wakeAgent', to: 'dev' }],
+  }] });
+  assert.equal(parseOutcomeSuggestion(selfTxt, { agents: [{ id: 'dev' }, { id: 'rev' }], roleId: 'dev' }), null);
 });

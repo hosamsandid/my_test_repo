@@ -52,24 +52,40 @@ test('every onboarding page keeps its "?" help affordance', () => {
 });
 
 test('launcher tiles are one-line intents, not paragraphs', () => {
-  // Each tile states what the user wants to do; what the path produces is the
-  // create topic. Guard the removed elaborations by their distinctive wording.
+  // Each entry states what the user wants to do; what the path produces in
+  // detail is the create topic. Guard the removed elaborations by their
+  // distinctive wording.
   for (const phrase of [
     'show a live preview before anything is created',
     'Fastest way to a working setup',
     'Full control',
     'No wiring',
     'the quickest path in',
-    'grow it into a',
   ]) {
     assert.ok(
       !launcher.includes(phrase),
-      `"${phrase}" belongs to help-topics/create.md, not to a launcher tile`,
+      `"${phrase}" belongs to help-topics/create.md, not to a launcher entry`,
     );
   }
-  // The "team of one" framing itself stays — #1667 AC3 depends on it being on the
-  // tile, and the topic only carries the reasoning behind it.
-  assert.match(launcher, /team of one/i, 'the fast-lane tile keeps the team-of-one framing');
+  // 'grow it into a' was on this banned list until #2027, whose binding copy
+  // inventory puts it back on the hero verbatim ("…and grow it into a team
+  // whenever you're ready"). It is not an elaboration — it is the promise that
+  // starting small is not a dead end, which is exactly why the hero has to make
+  // it where the choice is made. #1667 AC3 depended on the old tile's "a team of
+  // one you can grow later" wording for the same reason; the phrasing moved, the
+  // guarantee did not, so this asserts the new wording rather than the old.
+  assert.match(
+    launcher, /grow it into a team/i,
+    'the hero keeps the "one assistant is not a dead end" promise on the page',
+  );
+  // The "team of one" *reasoning* is the topic's, and #2027 stopped the entry
+  // copy from claiming the framing outright — the hero now says what you get
+  // and what it grows into, which is the same promise in the user's words.
+  assert.ok(
+    !/team of one/i.test(launcher),
+    'the "team of one" framing itself is help-topics/create.md — the entry says '
+    + '"grow it into a team", which is the promise without the internal wording',
+  );
 });
 
 test('the one-assistant page has one description, not two', () => {
@@ -207,5 +223,12 @@ test('the create launcher still hands off to all four existing routes', () => {
   for (const route of ['/flows?new=describe', '/team-setup', '/flows?new=blank', '/quickstart']) {
     assert.ok(launcher.includes(route), `the launcher must still route to ${route}`);
   }
-  assert.match(create, /createEntries/, 'Create.jsx stays a thin renderer over the pure module');
+  // #2027 re-sorted the launcher into three tiers, so the page reads the tiers
+  // rather than the flat list — but it is still a thin renderer over the pure
+  // module, which is what this line is here to protect.
+  assert.match(
+    create, /heroEntry\(\)/,
+    'Create.jsx stays a thin renderer over the pure module',
+  );
+  assert.match(create, /entriesByTier\(/);
 });

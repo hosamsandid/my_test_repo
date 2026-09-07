@@ -2,7 +2,7 @@
 id: create
 routes: ["/create", "/quickstart"]
 title: Creating something new
-summary: The five ways to start — describe it, use a ready-made setup, build it yourself, spin up one assistant, or fill in a single agent yourself — what each of them actually creates, and what has to be in place first.
+summary: The five ways to start, ranked simplest to most advanced — chat with one assistant, use a ready-made team, describe what you need, design it on the canvas, or configure an agent by hand — what each of them actually creates, and what has to be in place first.
 seeAlso:
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Flows", to: "/flows" }
@@ -13,7 +13,10 @@ seeAlso:
   - { label: "GitHub Tokens", to: "/github-tokens" }
 askPrompts:
   - "Which of the five ways to start should I pick?"
-  - "What is the difference between one assistant and creating a single agent?"
+  - "Where should I begin if I have never used this before?"
+  - "What is hidden under Advanced options, and should I use it?"
+  - "What is a flow, and do I need one?"
+  - "What is the difference between one assistant and configuring an agent manually?"
   - "What exactly gets created when I create one assistant?"
   - "Do I have to decide between a single agent and a team up front?"
   - "What do I need before I can create anything?"
@@ -29,61 +32,84 @@ from the persistent control in the sidebar and from the `/create` route — both
 open the same launcher.
 
 The launcher asks *how* you would like to start, not *what kind of thing* you are
-making. You never have to know the words agent / team / flow / template to choose
-among the first four, and none of them is a highlighted default: they are
-**equally ranked** because none of them is the "right" one. You can always change
-direction later.
+making. You never have to know the words agent / team / flow / template to pick
+one, and you can always change direction later.
 
-The fifth entry is deliberately different. **Create a single agent** is the "I
-already know exactly what I want" path and is the one place the launcher names
-the artifact, because that is the point of it.
+It is **ranked**, simplest to most advanced, rather than a flat set of equal
+options — because "five ways in, all equally weighted" answers the question
+*what can I do* while leaving *where should I begin* unanswered. Three tiers:
+
+1. **Chat with one assistant** — the hero, on its own at the top. The fastest
+   thing you can do here, and the recommended starting point if you are not sure.
+2. **A flow** — three ways to build a team of agents that hand work off to each
+   other. All three end in the *same* flow; they differ only in how you start it.
+3. **Advanced options** — collapsed, and holding exactly one entry: the manual
+   agent form. It is the specialist path, so it is one click away rather than
+   competing with the four above it.
+
+Each entry also states its **outcome** as a "→ …" line, and can reveal a small
+**what you get** sketch of the screen it opens — hover it, tab to it, or tap the
+eye control. The sketch is a deliberate illustration, not a screenshot: it
+promises the *kind* of destination and nothing about a specific agent.
 
 ### What each tile produces
 
 | Entry | What it does | Where it lands |
 |---|---|---|
+| **Chat with one assistant** | Spin up a single assistant you can talk to right away — no wiring, no roles. | A chat with your assistant |
+| **Start from a ready-made team** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
 | **Describe what you need** | Tell it in plain language what you want done. The Flow Copilot drafts a flow and shows a live preview — nothing is created until you confirm. | A new draft in the Flows canvas |
-| **Start from a ready-made setup** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
-| **Build it yourself** | Lay the pieces out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
-| **Just give me one assistant to chat with** | Spin up a single assistant you can talk to right away — no wiring, no roles. | The one-assistant form |
-| **Create a single agent** | Fill in the fields yourself: id, role, Working Environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
+| **Design it on the canvas** | Lay the agents out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
+| **Configure an agent manually** | Fill in the fields yourself: id, role, Working Environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
+
+The **Recommended** badge on *Start from a ready-made team* and **Fastest start**
+on the hero are advice, not a restriction — every entry stays one click away, and
+the *Advanced* markers say "this one asks more of you", not "you may not".
 
 ### A draft, a wizard, a fast lane, or a form
 
-The five tiles produce four different *kinds* of result, and the difference is
+The five entries produce four different *kinds* of result, and the difference is
 worth knowing before you click.
 
-**A draft that is not live yet.** *Describe what you need* and *Build it
-yourself* both leave you with an editable flow on the Flows canvas. A **draft**
-is a plan, not a running system: no agent exists, nothing is polling GitHub,
-nothing is costing you anything. Agents come into existence only when you
+**A draft that is not live yet.** *Describe what you need* and *Design it on the
+canvas* both leave you with an editable flow on the Flows canvas. A **draft** is
+a plan, not a running system: no agent exists, nothing is polling GitHub, nothing
+is costing you anything. Agents come into existence only when you
 **materialise** the draft into a team, and until then you can rename roles, add
 and delete nodes, or throw the whole thing away.
 
-**The guided wizard.** *Start from a ready-made setup* hands you to the Agent
+Opening the canvas from *Design it on the canvas* does not drop you on a blank
+grid: an empty flow shows a centred prompt to add your first agent, with the
+button that does it. What it does *not* yet do is walk you through the wiring
+step by step — that guided first step is a separate improvement, so this page
+deliberately promises only "opens the canvas" until it exists.
+
+**The guided wizard.** *Start from a ready-made team* hands you to the Agent
 Team Wizard on its template gallery. It walks you through template → Working
 Environment → team → knowledge → review, and it does create real agents — at the
 end, at the point where it says it will.
 
-**The fast lane.** *Just give me one assistant to chat with* is the one path that
-skips every decision it can. It is described in full below.
+**The fast lane.** *Chat with one assistant* is the one path that skips every
+decision it can. It is described in full below.
 
-**The direct form.** *Create a single agent* opens a panel on the launcher
-itself, so the four guided tiles stay visible behind it. It is the same form the
-Agents page uses, so what it produces is identical.
+**The direct form.** *Configure an agent manually* opens a panel on the launcher
+itself, so the ranked entries stay visible behind it. It is the same form the
+Agents page used, so what it produces is identical.
 
 ### One assistant, or one agent?
 
 The two single-agent paths are not the same thing, and the difference is who
-decides.
+decides. That is why one is the hero and the other sits under *Advanced options*
+— they used to be two near-identical tiles side by side, with the expert one
+reading as the simpler of the two.
 
-**Just give me one assistant to chat with** is the fast lane: you give it a name
-(or a repository) and it works out the rest — it creates or reuses a Working
+**Chat with one assistant** is the fast lane: you give it a name (or a
+repository) and it works out the rest — it creates or reuses a Working
 Environment, picks the branch off the remote, and names the assistant after the
 repository. Choose it when you want to be talking to something in a minute.
 
-**Create a single agent** decides nothing for you. You pick the id, the role
-(a plain agent, an Agent Team template or an orchestrator), the Working
+**Configure an agent manually** decides nothing for you. You pick the id, the
+role (a plain agent, an Agent Team template or an orchestrator), the Working
 Environment it binds to, its skills and its system prompt — and it creates
 exactly that, on an environment that must already exist. Choose it when the
 answer to each of those is already settled.
@@ -110,9 +136,10 @@ reviewers, a developer or a whole development workflow.
 One thing worth knowing before you click it: the wizard **creates a new team** —
 it does not convert your existing assistant into one. Your single agent keeps
 running independently, with its own chat history, and you can retire it
-afterwards on the Agents page if the team replaces it. Nothing moves across on
-its own, so if the assistant has accumulated knowledge or skills you want the
-team to have, carry them over deliberately from the Knowledge and Skills pages.
+afterwards from its row menu in Agent Chat if the team replaces it. Nothing
+moves across on its own, so if the assistant has accumulated knowledge or skills
+you want the team to have, carry them over deliberately from the Knowledge and
+Skills pages.
 
 ## The repository fast lane
 

@@ -271,14 +271,11 @@ export default function QuickStart() {
                 style={{ ...inputStyle, paddingLeft: 'var(--eb-space-10)' }}
               />
             </div>
-            <div style={{
-              fontSize: 'var(--eb-text-xs)',
-              color: 'var(--eb-text-muted)',
-              marginTop: 'var(--eb-space-2)',
-            }}>
-              Leave empty for a repo-less assistant. If provided, HTTPS or SSH — we
-              normalise to SSH (<code>git@github.com:…</code>) and clone with the SSH key.
-            </div>
+            {/* No description under this field (#2045): the `(optional)` label and
+                the placeholder already say what an empty value means, and the
+                HTTPS→SSH normalisation detail lives in the `create` help topic
+                (chapter: what you need before you start), reachable from the
+                header's "?". */}
           </div>
 
           {showRepoPrereqs && showSshKeyPicker && (
@@ -458,32 +455,16 @@ export default function QuickStart() {
           help topic in E14 (#1888) — including what the box never said: an
           existing environment AND an existing standalone agent for the same
           repository are reused, and on the repository path the Name / Model
-          Provider fields above are not used at all. */}
+          Provider fields above are not used at all.
 
-      <div style={{
-        padding: 'var(--eb-space-3) var(--eb-space-4)',
-        background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-        color: 'var(--eb-text-secondary)',
-      }}>
-        {QUICKSTART_COPY.teamOfOneNote}{' '}
-        <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)' }}>
-          {QUICKSTART_COPY.growCtaLabel} →
-        </Link>
-        {/* The team-of-one chapter's "?" (#1992). The note keeps its one-line
-            framing — it is what stops the fast lane reading as a separate mode —
-            and the chapter behind the "?" carries the consequence the line has
-            no room for: growing creates a NEW team rather than converting this
-            assistant. */}
-        <PageHelpButton
-          label="What does growing into a full team do?"
-          size={14}
-          style={{ padding: 0, marginLeft: 'var(--eb-space-2)', flexShrink: 0, verticalAlign: 'middle' }}
-          section={CREATE_HELP_SECTIONS.teamOfOne}
-        />
-      </div>
+          The team-of-one footer card and its "Grow into a full team →" link
+          followed in #2045: a second call-to-action under the form pulled
+          attention away from the one action this page exists for. The framing
+          itself is not lost — the launcher hero promises growing into a team
+          where the choice is made, and the `create` topic's own chapter (a
+          single agent is a team of one) carries the consequence, one scroll
+          from wherever the header's "?" lands. The form ends with its own
+          submit button. */}
     </div>
   );
 }

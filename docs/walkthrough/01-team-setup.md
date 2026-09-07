@@ -121,13 +121,13 @@ The three flow-producing paths therefore form a spectrum of "how much do I decid
 
 ## Path D — Chat with one assistant (the fast lane, a team of one) (slide 10)
 
-Screenshot: the single-assistant form — a name field, a model-provider picker, and an optional repository URL field; a "Grow into a full team →" link below.
+Screenshot: the single-assistant form — a name field, a model-provider picker, and an optional repository URL field, and nothing under it but the **Create agent & start chatting** button.
 
 Sometimes you don't want a workflow at all — you just want *one* assistant to talk to, right now. The hero at the top of the launcher, **"Chat with one assistant"**, is exactly that, and it's the quickest path in the whole studio — which is precisely why it sits first and full width, with the **Start chatting** button on it.
 
 It's a single, short form: give the assistant a name, pick a model provider for it to run on, and start chatting. There's one optional field — a **repository URL**. Leave it empty and you get a repo-less conversational assistant in a couple of seconds. Fill it in and the assistant clones that repository and can answer questions about the code (that's the one case where it needs an SSH key and a GitHub token). Notice there's no "repo mode vs. LLM mode" switch to pick anymore — whether you typed a repository URL is the *only* thing that changes, and the form figures out the rest.
 
-The framing here matters. This lone assistant is presented as **a team of one**, not as a separate kind of product you chose instead of a team. So the form doesn't nudge you toward "use the team wizard instead" — it simply offers a **"Grow into a full team →"** link for when you outgrow a single assistant and want reviewers, a developer, or a full development workflow around it. There's nothing to decide up front and nothing to undo: you start with one, and you scale up when the work calls for it.
+The framing here matters. This lone assistant is presented as **a team of one**, not as a separate kind of product you chose instead of a team. So the form doesn't nudge you toward "use the team wizard instead" — and since #2045 it doesn't nudge you toward growing either: the *"Grow into a full team →"* link that used to sit under it was removed, because a second call to action under a four-field form competes with the one thing the page is for. The promise still gets made where the choice is made — the launcher hero says you can grow it into a team whenever you're ready — and the "?" on this page explains what growing does (it creates a *new* team rather than converting this assistant). There's nothing to decide up front and nothing to undo: you start with one, and you scale up when the work calls for it.
 
 ## Where creating ends and managing begins (slide 11)
 

@@ -21,12 +21,17 @@
 // out. Same call made in #1990 for skills-help-sections.js and #1995 for
 // github-events-help-sections.js.
 
+// Chapter 2 of the topic — "A single agent is a team of one" — deliberately has
+// no entry here: #2045 removed the footer note that was its only "?" surface,
+// and a constant no call site imports is not a slug registry, it is dead data
+// that reads as coverage. The chapter itself is untouched and stays one scroll
+// from either landing point, which is exactly the fallback this file's header
+// describes. Re-add the constant with its "?" if a surface ever raises the
+// question again.
 export const CREATE_HELP_SECTIONS = {
   // 1 — the launcher tiles and what each one produces (draft / wizard / fast
   //     lane / direct form), plus one-assistant vs one-agent
   entryPaths: 'the-entry-paths',
-  // 2 — the team-of-one framing, and that growing creates a NEW team
-  teamOfOne: 'a-single-agent-is-a-team-of-one',
   // 3 — the SSH probe, environment reuse, agent reuse, and why Name / Model
   //     Provider are unused once a repository URL is entered
   fastLane: 'the-repository-fast-lane',

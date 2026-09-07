@@ -329,7 +329,9 @@ and **E14 → #1992** (Create & Quickstart: E14 lifted the launcher's tile prose
 reaching it from the top; the topic is now four chapters — the entry paths · a single agent
 is a team of one · the repository fast lane · what you need before you start — with a "?" on
 the launcher header, the one-assistant header, the prerequisite checklist and the
-team-of-one note),
+team-of-one note; #2045 removed that last surface with the footer note it hung off, leaving
+three affordances and one chapter reachable only by scrolling — which is the documented
+fallback, not a gap),
 and **E9 → #1989** (MCP Servers: E9 lifted the intro box and the *required* `InfoTip`, which
 left the two **create forms** — the page's only real decision surfaces — reaching that
 explanation from the top; the topic is now five chapters — the three-part model · the server
@@ -397,8 +399,13 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **282,691 — 83.1% used,
-57,309 left** (#2031 added the direct-hand-off chapter to `flows.md`, +2,067 measured on its own branch; re-measured on the merge with #2035 in — `create.md` names `/flows` in its
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **283,284 — 83.3% used,
+56,716 left** (#2045 removed the one-assistant form's team-of-one footer and its repo-URL help
+text and the figure went UP by 593: a page-copy removal is not a grounding saving, because the
+facts the copy carried still have to be answerable — +249 in `create.md`, which IS this context's
+topic, and +348 in `walkthrough/01-team-setup.md`, which lands on every context. It stood at
+282,691 after #2031 added the direct-hand-off chapter to `flows.md`, +2,067 measured on its own
+branch and re-measured on the merge with #2035 in — `create.md` names `/flows` in its
 `seeAlso`, so a Flows-topic edit lands on this figure), where the all-topics fold route-scoping
 replaced stood at 322,243 (94.8%). #1930
 moved the crown here by removing the Agents page: `/flows` lost its `/agents` `seeAlso` neighbour

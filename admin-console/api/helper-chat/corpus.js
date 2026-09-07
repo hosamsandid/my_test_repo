@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 282 691 of 340 000 — 83.1% used, 57 309 left — against
+// neighbours) at 283 284 of 340 000 — 83.3% used, 56 716 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -137,8 +137,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // there lands on this figure in full) and +395 in admin-console.md +
 // walkthrough/01-team-setup.md, which lands on EVERY context. #2031 then added
 // the direct-hand-off chapter to `flows.md` (+2 067 measured on this branch;
-// re-measured on the merge, with #2035's nav pin already in, the figure is the
-// 282 691 above) — worth
+// re-measured on the merge, with #2035's nav pin already in, that figure was
+// 282 691). #2045 removed the one-assistant form's team-of-one footer and its
+// repo-URL help text, which grew the figure by +593 rather than shrinking it —
+// a page-copy REMOVAL is not a grounding saving, because the facts the copy
+// carried have to keep being answerable: +249 in `create.md` (which IS the
+// crown-holding context's topic, so it lands in full) for the "where the Grow
+// link went" reconciliation, and +348 in walkthrough/01-team-setup.md, which
+// lands on EVERY context — worth
 // knowing WHY a Flows edit lands on the `/quickstart` figure at all: `create.md`
 // lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
 // contains the Flows topic even though the crown is not on `/flows`. Its other

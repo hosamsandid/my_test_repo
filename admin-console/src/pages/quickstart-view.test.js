@@ -108,11 +108,17 @@ test('#1667 AC3: the fast-lane heading drops the "Single Agent" mode label', () 
   assert.doesNotMatch(QUICKSTART_COPY.heading, /\bvs\b/i);
 });
 
-test('#1667 AC3: copy carries the "a single agent is a team of one" framing', () => {
-  assert.match(QUICKSTART_COPY.teamOfOneNote, /team of one/i);
-  // The forward link frames a team as this scaled up ("grow into"), not an
-  // alternative mode to pick instead.
-  assert.match(QUICKSTART_COPY.growCtaLabel, /grow/i);
+test('#2045: the team-of-one note and its Grow CTA are gone from the copy', () => {
+  // The footer card that carried them was removed, so keeping the strings would
+  // be dead data that only a guard still reads. The framing lives on the
+  // launcher hero and in help-topics/create.md.
+  assert.deepEqual(Object.keys(QUICKSTART_COPY).sort(), ['heading', 'intro']);
+  assert.ok(!('teamOfOneNote' in QUICKSTART_COPY));
+  assert.ok(!('growCtaLabel' in QUICKSTART_COPY));
+  assert.ok(
+    !/team of one|grow into/i.test(Object.values(QUICKSTART_COPY).join(' ')),
+    'no remaining page copy may re-introduce the footer wording',
+  );
 });
 
 test('#1667 AC1/AC3: no launcher-path copy forces an agent-vs-team choice', () => {
@@ -121,7 +127,7 @@ test('#1667 AC1/AC3: no launcher-path copy forces an agent-vs-team choice', () =
   assert.equal(
     fastLaneCopyForcesModeChoice({
       ...QUICKSTART_COPY,
-      teamOfOneNote: 'Need a full development team instead?',
+      note: 'Need a full development team instead?',
     }),
     true,
   );
@@ -132,11 +138,10 @@ test('#1667 AC1/AC3: no launcher-path copy forces an agent-vs-team choice', () =
     }),
     true,
   );
-  // Dropping the "team of one" framing entirely also fails the guard.
-  assert.equal(
-    fastLaneCopyForcesModeChoice({ ...QUICKSTART_COPY, teamOfOneNote: 'x' }),
-    true,
-  );
+  // Since #2045 the guard no longer demands the "team of one" wording — the
+  // surface that carried it is gone, and requiring it would keep a string
+  // alive for the guard's sake alone.
+  assert.equal(fastLaneCopyForcesModeChoice({ heading: 'Chat with one assistant' }), false);
 });
 
 // --- quickstartSubmitReasons: explain the disabled submit button -----------

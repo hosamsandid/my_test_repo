@@ -17,6 +17,7 @@ import {
   CLAIM_MARKER,
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
+  INTERNAL_EVENT_LABELS,
 } from './trigger-summary.js';
 
 test('eventLabel: maps a known dotted key to its friendly label (AC1)', () => {
@@ -283,4 +284,22 @@ test('transportBodyFor: a no-longer-label listener with a stale transport is cle
   assert.equal(
     transportBodyFor({ showTransport: false, transport: 'internal', isEdit: false, priorTransport: undefined }),
     undefined);
+});
+
+// ── platform-synthesized event keys (#2032) ─────────────────────────────────
+
+test('eventLabel renders the direct-hand-off key in plain language', () => {
+  // Without this the GitHub Event Log's Event column shows the raw
+  // `handoff.wake` on a row whose Repository / Type / Work item are all `—`.
+  assert.equal(eventLabel('handoff.wake'), 'direct hand-off');
+});
+
+test('handoff.wake is NOT offered as a subscribable trigger event', () => {
+  // GITHUB_EVENT_OPTIONS is the trigger editor's <select>. Nobody can subscribe
+  // to a hand-off with a `github-event` trigger — the consumer's listener is a
+  // derived `wake-agent` trigger — so offering it there would author a trigger
+  // that can never fire.
+  assert.equal(GITHUB_EVENT_OPTIONS.some(o => o.value === 'handoff.wake'), false);
+  assert.equal(LABEL_FILTERABLE_EVENTS.has('handoff.wake'), false);
+  assert.equal(INTERNAL_EVENT_LABELS.has('handoff.wake'), true);
 });

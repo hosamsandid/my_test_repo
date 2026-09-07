@@ -13,6 +13,10 @@ const KIND_LABELS = {
   'session-reset': 'Session reset',
   'session-set': 'Session resume',
   trigger: 'Trigger',
+  // #2032: a direct agent-to-agent hand-off (#2030). Registered here — and in
+  // KIND_TOOLTIPS / entryDetail below — or the row reads "wake-agent — An
+  // unrecognised queue entry", which is how `handover-dm` still reads today.
+  'wake-agent': 'Direct hand-off',
   unknown: 'Unknown',
 };
 
@@ -30,6 +34,7 @@ const KIND_TOOLTIPS = {
   'session-reset': "A queued request to reset this room's Claude session.",
   'session-set': 'A queued request to resume a specific Claude session in this room.',
   trigger: 'A queued trigger invocation waiting to run.',
+  'wake-agent': 'Another agent on this team handed work over directly — no label, no issue or PR. It drains within seconds unless maintenance mode is active or a loop holds the workspace.',
   unknown: 'An unrecognised queue entry.',
 };
 
@@ -66,6 +71,15 @@ export function entryDetail(entry) {
       return entry.roomId ? `room ${entry.roomId}` : '';
     case 'trigger':
       return entry.triggerId ? `trigger ${entry.triggerId}` : '';
+    // #2032: producer first — "who handed this to me" is the one thing a
+    // hand-off row must answer; the note (already previewed server-side)
+    // follows. A hand-off carries no triggerId to show: the consumer resolves
+    // its own `wake-agent` listener at drain time.
+    case 'wake-agent':
+      return [
+        entry.from ? `from ${entry.from}` : null,
+        entry.note ? `“${entry.note}”` : null,
+      ].filter(Boolean).join(' · ');
     default:
       return '';
   }

@@ -10,6 +10,7 @@ import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-que
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
+import { isHandoffRow, handoffNote, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
@@ -194,9 +195,11 @@ function TypeCell({ workItem }) {
    title now wraps onto multiple lines within the column (AC4), keeping the
    table at 100% width with no horizontal scrollbar. The full text is still
    offered on hover. */
-function TitleCell({ title }) {
+function TitleCell({ title, hint }) {
   if (!title) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
-  return <span title={title}>{title}</span>;
+  // `hint` (#2032) is set for a direct-hand-off row, whose "title" is the
+  // producer's note rather than a PR/issue title — the hover says which.
+  return <span title={hint ? `${hint}: ${title}` : title}>{title}</span>;
 }
 
 /* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
@@ -317,7 +320,10 @@ function ProcessedEventsView() {
   const rows = useMemo(() => (data || []).map(e => ({
     ...e,
     workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
-    workItemTitle: e.workItem ? e.workItem.title : null,
+    // A direct hand-off (#2032) has no work item, so this column is free for
+    // the producer's note — flattened onto the same key so DataTable's
+    // key-based text filter and sort reach it, exactly as they reach a title.
+    workItemTitle: isHandoffRow(e) ? (handoffNote(e) || null) : (e.workItem ? e.workItem.title : null),
     // Flat 'PR'/'Issue'/null so the Type column sorts + filters by its own key
     // (#1848), consistent with the Work item / Title columns.
     workItemType: workItemTypeLabel(e.workItem),
@@ -349,7 +355,7 @@ function ProcessedEventsView() {
     // scrollbar. Enabling wrap here changes only this page — the other ~11
     // DataTable pages stay single-line + ellipsis (AC9).
     { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
-    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: (v, row) => <TitleCell title={v} hint={handoffTitleHint(row)} /> },
     { key: 'event', label: 'Event', render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who

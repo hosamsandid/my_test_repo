@@ -64,3 +64,26 @@ test('totalPending prefers the total field but falls back to summing groups', ()
   assert.equal(totalPending({ agents: [] }), 0);
   assert.equal(totalPending(null), 0);
 });
+
+// ── direct agent-to-agent hand-off (#2032) ──────────────────────────────────
+
+test('a wake-agent entry has its own label and tooltip, not the unknown fallback', () => {
+  // Without these it reads "wake-agent — An unrecognised queue entry", which is
+  // how `handover-dm` still reads today.
+  assert.equal(kindLabel('wake-agent'), 'Direct hand-off');
+  assert.notEqual(kindTooltip('wake-agent'), kindTooltip('unknown'));
+  assert.match(kindTooltip('wake-agent'), /no label/);
+});
+
+test('entryDetail leads a hand-off with the producer, then the note', () => {
+  assert.equal(
+    entryDetail({ kind: 'wake-agent', from: 'team-developer', note: 'Check step 3.' }),
+    'from team-developer · “Check step 3.”',
+  );
+});
+
+test('entryDetail degrades a hand-off with a missing half', () => {
+  assert.equal(entryDetail({ kind: 'wake-agent', from: 'team-developer' }), 'from team-developer');
+  assert.equal(entryDetail({ kind: 'wake-agent', note: 'x' }), '“x”');
+  assert.equal(entryDetail({ kind: 'wake-agent' }), '');
+});

@@ -39,14 +39,24 @@ export const LABEL_FILTERABLE_EVENTS = new Set([
   'pull_request.unlabeled',
 ]);
 
+// Event keys the PLATFORM synthesizes, not GitHub (#2032). Deliberately a
+// separate map rather than an entry in GITHUB_EVENT_OPTIONS: that array is the
+// trigger editor's `<select>`, and a key nobody can subscribe to must never be
+// offered there — a `handoff.wake` row is written by
+// `POST /internal/wake-agent`, and the consumer's listener is a derived
+// `wake-agent` trigger, not a `github-event` one.
+export const INTERNAL_EVENT_LABELS = new Map([
+  ['handoff.wake', 'direct hand-off'],
+]);
+
 const EVENT_LABELS = new Map(GITHUB_EVENT_OPTIONS.map(o => [o.value, o.label]));
 
-// Friendly label for a GitHub event key (e.g. `issues.labeled` → "Issue
-// labeled"), falling back to the raw key for keys not in the map so an
-// unknown/hand-edited event never renders blank.
+// Friendly label for an event key (e.g. `issues.labeled` → "Issue labeled"),
+// falling back to the raw key for keys not in either map so an unknown or
+// hand-edited event never renders blank.
 export function eventLabel(value) {
   if (!value) return '';
-  return EVENT_LABELS.get(value) || String(value);
+  return EVENT_LABELS.get(value) || INTERNAL_EVENT_LABELS.get(value) || String(value);
 }
 
 // Whether any of the given event keys carries a `payload.label.name` that a

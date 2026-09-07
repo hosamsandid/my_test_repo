@@ -14,6 +14,7 @@ const {
   resolveWakeTarget,
   buildWakeEntry,
   buildWakeLogEvent,
+  buildWakeLogFields,
 } = require('./wake-agent');
 
 // ── validateWakeRequest ────────────────────────────────────────────────────
@@ -306,4 +307,46 @@ test('validateWakeRequest inherits the code-point-safe clamp', () => {
   assert.equal(r.ok, true);
   assert.deepEqual(Buffer.from(r.value.note, 'utf8').toString('utf8'), r.value.note);
   assert.ok(Array.from(r.value.note).length <= WAKE_NOTE_MAX);
+});
+
+// ── the event-log fields the GitHub-shaped entry has no slot for (#2032) ─────
+
+test('buildWakeLogFields carries the pair and the note', () => {
+  const f = buildWakeLogFields({
+    producerId: 'team-developer', targetId: 'team-code-reviewer',
+    note: 'Look closely at the migration in step 3.',
+  });
+  assert.deepEqual(f, {
+    handoff: {
+      from: 'team-developer',
+      to: 'team-code-reviewer',
+      note: 'Look closely at the migration in step 3.',
+    },
+  });
+});
+
+test('buildWakeLogFields omits an absent or blank note', () => {
+  // The note is optional (§13 Q3), so the field must be ABSENT rather than an
+  // empty string: the Title cell renders `—` on a falsy value either way, but
+  // an empty string would filter and sort as content.
+  for (const note of [undefined, '', '   ', null]) {
+    const f = buildWakeLogFields({ producerId: 'a', targetId: 'b', note });
+    assert.equal('note' in f.handoff, false, `note=${JSON.stringify(note)}`);
+    assert.deepEqual(f, { handoff: { from: 'a', to: 'b' } });
+  }
+});
+
+test('buildWakeLogFields rides ALONGSIDE buildEventEntry, not inside it', () => {
+  // The regression this guards: `buildEventEntry` extracts only GitHub's own
+  // vocabulary (label / ref / workItem), so a note left in the synthesized
+  // payload never reaches the log and the row is a dash.
+  const ghEvent = buildWakeLogEvent({
+    producerId: 'a', targetId: 'b', note: 'hi', eventId: 'wake:1',
+    now: '2026-09-07T00:00:00.000Z',
+  });
+  assert.equal(ghEvent.payload.note, 'hi', 'the synthesized payload still carries it');
+  const fields = buildWakeLogFields({ producerId: 'a', targetId: 'b', note: 'hi' });
+  assert.equal(fields.handoff.note, 'hi');
+  assert.equal(fields.handoff.from, 'a');
+  assert.equal(fields.handoff.to, 'b');
 });

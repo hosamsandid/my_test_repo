@@ -517,15 +517,26 @@ export default function Shell({ children }) {
           </button>
         </div>
 
-        {/* Nav sections */}
-        <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
-          {/* Ungrouped top — primary/daily (Agent Chat, with its badges) */}
-          {topItems.length > 0 && (
-            <div style={{ marginBottom: 'var(--eb-space-2)' }}>
-              {topItems.map(renderNavItem)}
-            </div>
-          )}
+        {/* Pinned ungrouped top — primary/daily (Agent Chat, with its badges).
+            Deliberately OUTSIDE the scrolling <nav> (#2035): it used to be the
+            first child inside it and scrolled away with the accordion groups,
+            while "+ Create" — which has always sat above the nav — stayed put.
+            `flexShrink: 0` in the fixed-height flex column is what pins it, the
+            same way the Create block above is pinned. The whole NAV_TOP tier is
+            pinned, not just Agent Chat, so a second primary entry would inherit
+            the behaviour rather than silently scroll.
+            The padding replaces the <nav>'s top padding for this row, and the
+            <nav>'s own top padding then supplies the gap down to the first group
+            header — so the spacing is unchanged from when this block lived
+            inside the nav (where it carried marginBottom instead). */}
+        {topItems.length > 0 && (
+          <div style={{ flexShrink: 0, padding: 'var(--eb-space-2) 0 0' }}>
+            {topItems.map(renderNavItem)}
+          </div>
+        )}
 
+        {/* Nav sections — only the accordion groups scroll */}
+        <nav style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-2) 0' }}>
           {/* Collapsible groups (accordions), including the dynamic Plugins group
               appended last. In rail mode headers are hidden and every item stays
               reachable, exactly as today (AC10). */}

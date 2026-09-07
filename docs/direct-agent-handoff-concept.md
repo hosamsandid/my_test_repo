@@ -409,6 +409,22 @@ just a writer:
 **No dedicated transcript or room in v1.** One timeline for both delivery
 paths keeps the operator's mental model single.
 
+**Shipped in P3 (#2032), with two deviations from the sketch above.** (1) The
+note needed a *writer* change too, not only a renderer: `buildEventEntry`
+extracts GitHub's own vocabulary (`label`, `ref`, `workItem`) and has no slot
+for a note, so the synthesized `payload.note` never reached the log at all.
+The row now carries a `handoff: {from, to, note?}` block written alongside
+`source`/`emittedBy` (`buildWakeLogFields`) — and the producer/target pair
+rides in it rather than being recovered by stripping `agent:` off `actor` or
+reaching into `outcomes[0]`, both of which are consequences of synthesizing a
+GitHub-shaped event rather than contracts. (2) `handoff.wake` is registered in
+a separate `INTERNAL_EVENT_LABELS` map, **not** in `GITHUB_EVENT_OPTIONS`:
+that array is the trigger editor's `<select>`, and nobody can subscribe to a
+hand-off with a `github-event` trigger. The queue projection's note is a
+bounded preview (`QUEUE_NOTE_PREVIEW_MAX`), the full entry being one
+`GET /internal/agents/:id/pending/:entryId` away, as that module's contract
+already states.
+
 ## 8. Loop-safety (AC 6)
 
 An internal delivery bypasses the poller entirely, so **neither** the
@@ -426,13 +442,28 @@ shape of failure for `cron` and `loop`. This is *why* §5.3 goes through
 `_execute` rather than a bespoke handler: it is not tidiness, it is the AC-6
 answer.
 
-**Not decided here:** whether a *dedicated* per-`(producer, target)` hand-off
-throttle is additionally warranted. The consumer-side backstop bounds the
-blast radius but attributes the stop to the victim, not to the pair — so a
-two-agent ping-pong shows up as "agent B is runaway" rather than "the B↔A edge
-is oscillating". That is a diagnosis-quality problem, not a safety hole, and
-it is P3's to settle with real data (§13 Q1). Neither `handover-dm` nor
-`loop-verify` has any such throttle today, and neither has caused an incident.
+**Verdict (P3, #2032): no dedicated pair-level throttle.** The question was
+deferred to "when there is real oscillation data to size it against", and the
+answer that arrived is not a measurement — it is that the *reason* to want one
+was an observability gap, and §7 closes it. The backstop still attributes the
+stop to the victim, but a `handoff.wake` row now names its producer and its
+target in plain language, so an A→B→A ping-pong reads off the event log as
+alternating rows on one pair: exactly the "the B↔A edge is oscillating"
+diagnosis a pair-level throttle was wanted for, without a second throttle to
+size, tune and explain. A throttle sized against no data would also be a
+guess with teeth — it drops hand-offs, and a dropped hand-off is the one
+outcome this whole concept exists to prevent (§5.2, the 500 on a failed queue
+write).
+
+So: the #611 consumer-side backstop remains the only limiter, unchanged.
+Neither `handover-dm` nor `loop-verify` has any such throttle today and neither
+has caused an incident, which is the same evidence base — and it now comes with
+a re-open condition rather than an open question. **Re-open if** the event log
+shows a `handoff.wake` pair alternating into the #611 backstop, or if an
+operator has to correlate rows by hand to identify the oscillating pair; the
+fix then is a throttle keyed on `(producer, target)` at the
+`POST /internal/wake-agent` route, refusing with a distinct status so
+`aee-wake` can report it rather than dropping silently.
 
 ## 9. Serialization & delivery guarantees (AC 7)
 
@@ -550,8 +581,25 @@ and the git-state/nudge half of its dialog has no analogue because this adds a
 |---|---|---|
 | **P1** | Delivery + schema. `wakeAgent` in `ACTION_TYPES` + `validateOutcomes`; **all five whitelists/remaps of §4.2** + the `label-suffix.js` non-regression; `orchestrator/wake-agent.js` + `POST /internal/wake-agent`; `aee-wake` + its three `Dockerfile` lines; the `wake-agent` `_handle_pending_entry` branch routed through `_execute`; the marker widening (§9); the prompt projection (§4.3). **Both copies** of `process-template-format.md` in the same commit (byte-parity guard: `admin-console/api/flow-copilot.test.js:31-38`). Edges hand-editable on `triggers.json` / the bundle. | — |
 | **P2** | Flow Editor: `on: 'wake'` through `process-graph.js` → `unified-graph.js` (incl. `edgeId`) → `flow-graph-render.js` (style, legend key list, edge branch), `PROCESS_CREATE_TYPES`, the edge-chooser tile + `wiring-engine.js` writer, the Edit-hand-off dialog, the `RoutingSection` action type, and the derived consumer trigger written by the reconciler. | P1 |
-| **P3** | Defaults, lints & observability polish: the event-log row rendering + both pending-queue projections (§7), the outcome suggester + Flow-Copilot prompt enum (§4.3), an `outcome-without-consumer` sibling for a `wakeAgent` whose target is disabled, an info lint suggesting a direct hand-off for a pure agent→agent label edge whose label nobody reads, and the loop-safety verdict from §8 / Q1. | P1, P2 |
+| **P3** | Defaults, lints & observability polish: the event-log row rendering + both pending-queue projections (§7), the outcome suggester + Flow-Copilot prompt enum (§4.3), an `outcome-without-consumer` sibling for a `wakeAgent` whose target is disabled, an info lint suggesting a direct hand-off for a pure agent→agent label edge whose label nobody reads, and the loop-safety verdict from §8 / Q1. **Shipped in #2032**; the four lints it added are `wake-target-disabled`, `wake-target-unresolved`, `wake-without-note` and `direct-handoff-candidate` (see §12.1). | P1, P2 |
 | **P4** *(deferred)* | Room-based free-form agent↔agent messaging — only if a need beyond wake+note appears. | revisit after P1–P3 |
+
+### 12.1 The P3 lints, and why each is scoped the way it is
+
+All four live in `computeLints` (`admin-console/api/process-graph.js`) and are
+advisory, like every lint there.
+
+| Code | Severity | Fires when | Deliberately does NOT fire when |
+|---|---|---|---|
+| `wake-target-disabled` | warning | every `wake-agent` trigger on the target is `enabled: false` — `_execute_wake_agent` takes the first *enabled* one, so the entry is dequeued and dropped with nothing on GitHub to show it | the target has **no** `wake-agent` trigger at all: that listener is DERIVED (`expandWakeHandoffs` / `reconcileTeamWakeHandoffs`), so its absence in a draft or an imported bundle is the reconciler's business at materialise time, not an authoring error. Warning about it would fire on every draft that has ever drawn a hand-off. This is why the lint is narrower than the ticket's phrase "whose target is disabled" — agent-level `enabled` is not threaded into the graph at all, and the *flow-visible* form of "cannot receive it" is the switched-off listener |
+| `wake-target-unresolved` | warning | the action names an unknown role, a human role, or its own role — the three cases §10 draws no edge for, so the outcome exists, the canvas shows nothing, and delivery refuses it with a 404/403 the author never sees | ever, once `validateOutcomes` has an `agents` source: it rejects all three at authoring time, so a surviving one is imported or hand-edited data. Suppresses `wake-without-note` on the same action — a target that cannot receive anything makes the note question moot |
+| `wake-without-note` | info | the action carries no note (§13 Q3) | a note is present. Never an error: a required field invites `"done"` |
+| `direct-handoff-candidate` | info | an agent→agent label edge that *already* opted out of GitHub delivery (`transport: 'internal'`) whose label has exactly one producer, one consumer, and appears on no other edge — then the label token only routes this one pair | the label is a gate, a brake, consumed by a named human, has a second producer or consumer, or is still poller-delivered. That last one is the ladder: `internal-channel-candidate` → this. Both never fire on the same edge, and the message states what a hand-off costs — the label and its `:wip`/`:completed` claim states stop appearing on the issue/PR, which is the §11 "a human tracks this state" row |
+
+The label-name index behind the last one reads only the edge kinds whose
+`label` is a label *token* (`LABEL_EDGE_KINDS`): a `timer` edge's label is its
+cron expression and a `webhook` edge's is a description, so an index over every
+edge would let an unrelated string claim a label name and silence the hint.
 
 **Out of scope, permanently for this concept:** replacing the git-backed
 artifact hand-off (`outputs`/`inputs` + `aee-artifact`). Git stays the durable
@@ -560,17 +608,24 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 
 ## 13. Open questions
 
-1. **Loop-safety backstop shape** — a dedicated per-`(producer, target)`
-   hand-off throttle, or the #611 consumer-side backstop alone? §8 ships the
-   backstop and defers the pair-level throttle to P3, when there is real
-   oscillation data to size it against.
+1. ~~**Loop-safety backstop shape**~~ — **answered in P3 (#2032): the #611
+   consumer-side backstop alone.** The pair-level throttle was wanted for
+   diagnosis quality, and §7's event-log row supplies that instead. See §8 for
+   the reasoning and the re-open condition.
 2. **P4's fate** — keep room-based free-form messaging on the horizon, or drop
    it once wake+note has shipped? Revisit after P1–P3.
-3. **Should `note` be optional at all?** A hand-off with no note carries less
-   than a label does (a label at least names a stage). Argument for requiring
-   one word: it makes the event-log row self-explanatory. Argument against: a
-   required field invites `"done"`. Left optional in P1; P3 can add an info
-   lint if empty notes turn out to dominate.
+3. ~~**Should `note` be optional at all?**~~ — **answered in P3 (#2032): it
+   stays optional, with an `info` lint.** A required field invites `"done"`,
+   which is worse than an empty note because it *looks* like context. But a
+   note-less hand-off does carry less than a label does — a label at least
+   names a stage, whereas the event-log row for a note-less hand-off can only
+   say who woke whom, and the Title column §7 reserved for the note renders
+   `—`. So `wake-without-note` (info) nudges per edge at authoring time.
+   Deliberately **not** conditioned on empty notes turning out to dominate:
+   note-lessness is a property of the individual edge, visible in the flow the
+   operator is looking at, and no population statistic changes what that one
+   hand-off will deliver. If notes turn out to be universally present the lint
+   simply never fires.
 
 ## 14. Resolved decisions
 
@@ -588,6 +643,8 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 | 10 | The queue stays unbounded; execution, not enqueueing, is what gets bounded | §9 |
 | 11 | New edge discriminator `on: 'wake'`; `handoff` is taken | §10 |
 | 12 | Coexists with #1172 and #1480; answers #1968's candidate question with "the wired edge" | §11 |
+| 13 | The #611 consumer-side backstop is the only limiter — no pair-level hand-off throttle; §7's row supplies the diagnosis instead | §8, §13 Q1 |
+| 14 | `note` stays optional, nudged by an `info` lint per edge rather than required | §13 Q3 |
 
 ## 15. Key files to read before implementing
 

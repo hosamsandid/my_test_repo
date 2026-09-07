@@ -25,27 +25,34 @@ steps:
   - kind: narrative-only
     id: intro
     voiceover: |
-      Let's set up a team of agents that work together on one repository. Everything now starts at one front door — the "+ Create" launcher — and from there we pick the ready-made-setup path, which runs the five-step wizard, ending in a review before anything is created.
+      Let's set up a team of agents that work together on one repository. Everything now starts at one front door — the "+ Create" launcher — and from there we pick the ready-made-team path, which runs the five-step wizard, ending in a review before anything is created.
     narrative: |
       Let's walk through how you go from an idea to a running set of agents. This is where the Agent Studio really shows what it's about: it doesn't just run a single agent, it lets you stand up a whole team of agents that work together on the same repository — and it lets you start small and grow into that team when you're ready.
 
       So what exactly is a team here? A team is a coordinated group of AI agents — think of a Business Analyst, a Developer, a Code Reviewer — each with its own role, its own system prompt. They all share one working environment, which means they all work against the same GitHub repository with the same credentials and the same knowledge sources. What makes it a team rather than just a collection of agents is that they're wired together: one agent's output becomes the next agent's trigger. The Business Analyst writes an issue, a human approves it, the Developer picks it up, opens a pull request, the Code Reviewer reacts to that pull request, and so on. The hand-offs happen automatically over GitHub labels and events.
 
-      The important thing is that you no longer decide up front what kind of thing you're creating. There is now one front door — the "+ Create" launcher — and it asks a much simpler question: how would you like to start? Whether the result is one assistant or a four-agent team is an outcome the system right-sizes, not a mode you classify yourself. Let's start at that launcher, then follow the most complete path — starting from a ready-made setup — all the way to a live, wired team.
+      The important thing is that you no longer decide up front what kind of thing you're creating. There is now one front door — the "+ Create" launcher — and it asks a much simpler question: how would you like to start? Whether the result is one assistant or a four-agent team is an outcome the system right-sizes, not a mode you classify yourself. Let's start at that launcher, then follow the most complete path — starting from a ready-made team — all the way to a live, wired team.
 
   # ── Slide 2: the "+ Create" launcher (the new single front door) ─────────────
   - id: create-launcher
     voiceover: |
-      Everything starts at the "+ Create" launcher, reachable from the sidebar on every page. It offers four equally-ranked ways in: describe what you need in plain language, start from a ready-made setup, build it yourself on a canvas, or spin up a single assistant to chat with. None is a forced default, and the titles avoid our internal vocabulary — you choose by what you want to do. For the demo we take "Start from a ready-made setup".
+      Everything starts at the "+ Create" launcher, reachable from the sidebar on every page. It asks "what do you want to create?" and ranks the answers from simplest to most advanced. At the top, on its own, is the fastest thing you can do: chat with one assistant. Below it, under one heading, are three ways to build a team of agents that work together — a flow. And the expert path sits folded away under "Advanced options". Each option tells you where it lands you, and can show you a sketch of that screen before you commit. For the demo we take "Start from a ready-made team".
     narrative: |
-      Everything starts at the launcher. It's reachable two ways that open the same screen: a persistent "+ Create" control pinned in the sidebar on every page, and a dedicated /create route. The heading asks one plain question — how would you like to start? — and offers four equally-ranked tiles. None of them is a highlighted default, and, deliberately, none of the titles uses the words agent, team, flow or template: you choose by what you're trying to do.
+      Everything starts at the launcher. It's reachable two ways that open the same screen: a persistent "+ Create" control pinned in the sidebar on every page, and a dedicated /create route. The heading asks one plain question — what do you want to create? — and, crucially, it answers "where should I begin?" as well, by ranking the options from simplest to most advanced instead of laying them out as equals.
 
-      "Describe what you need" is the conversational way in — you say what you want and the Flow Copilot drafts a flow with a live preview before anything is created. "Start from a ready-made setup" is the fastest way to a working team when a proven pattern fits — it opens the guided wizard on its template gallery. "Build it yourself" opens a blank canvas for full control. And "Just give me one assistant to chat with" is the fast lane to a single assistant — framed as a team of one that you can grow into a full team later.
+      At the top, full width and on its own, is the hero: "Chat with one assistant", badged "Fastest start". It's the fast lane to a single assistant you can talk to in a minute — and the copy says out loud that you can grow it into a team whenever you're ready, so starting small is never a dead end.
 
-      For this demo we take the most complete path — "Start from a ready-made setup" — which runs the five-step wizard.
+      Under it, gathered into one bordered group with a heading that finally names the concept — "Or build a team of agents that work together (a flow)" — sit the three ways of doing exactly that: "Start from a ready-made team", badged Recommended, which opens the guided wizard on its template gallery; "Describe what you need", which lets the Flow Copilot draft a flow from a sentence; and "Design it on the canvas", marked Advanced, which drops you into the editor to wire it yourself. The group's intro makes the point that matters: all three end in the same flow, they just differ in how you start it.
+
+      Last, collapsed, is "Advanced options", holding the one entry that names the artifact on purpose — "Configure an agent manually", the direct form where you set the id, role, environment and system prompt yourself. It's still one click away; it just isn't competing for a newcomer's attention any more.
+
+      Two smaller touches do a lot of work here. Every option carries an outcome line — "opens a chat with your assistant", "review the team, then launch it", "opens an editable draft on the canvas" — so you know whether you're heading for a chat, a wizard or an editor. And hovering an option (or tabbing to it, or tapping its eye control on a touch screen) reveals a small hand-drawn sketch of that destination with a one-line caption. They're deliberately schematic rather than screenshots, so they promise the *kind* of screen and can never drift out of date.
+
+      For this demo we take the most complete path — "Start from a ready-made team" — which runs the five-step wizard.
     # Open the launcher first (the intro above is narrative-only and never runs, so
-    # nothing has navigated yet); create.open goes to /create and confirms all four
-    # tiles, then expectEntry spot-checks the "ready-made setup" tile we'll take.
+    # nothing has navigated yet); create.open goes to /create and confirms the hero,
+    # the three grouped flow cards and the still-collapsed Advanced disclosure, then
+    # expectEntry spot-checks the ready-made-team card we'll take.
     action:
       do: create.open
     assert:
@@ -53,7 +60,7 @@ steps:
       entry: template
     screenshot: create-launcher
 
-  # Take the ready-made-setup path into the wizard (plumbing — no capture).
+  # Take the ready-made-team path into the wizard (plumbing — no capture).
   - action:
       do: create.startFromTemplate
 
@@ -62,9 +69,9 @@ steps:
     voiceover: |
       The wizard lands on the Process step — the template gallery. It comes first on purpose, because it's the central decision. For the demo we pick a ready-made template, the Core SDLC flow. It gives us four agents that cover a full build-and-review loop: a Business Analyst who writes issues, a Developer who implements them, a Code Reviewer, and a Reworker. The live preview on the right confirms the hand-offs connect.
     narrative: |
-      Choosing "Start from a ready-made setup" on the launcher drops us into the wizard, which lands directly on the Process step — the template gallery. It comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
+      Choosing "Start from a ready-made team" on the launcher drops us into the wizard, which lands directly on the Process step — the template gallery. It comes first on purpose, because the process is the central decision. Everything after it — the environment, the name, the knowledge — just qualifies this choice.
 
-      The gallery lists the curated templates alongside any drafts you've saved. The two more free-form ways of authoring a process — describing it in plain language, or starting from a blank canvas — aren't crammed into this step anymore; they're their own tiles back on the "+ Create" launcher, and the wizard keeps only a small "need a custom flow? use + Create" pointer. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
+      The gallery lists the curated templates alongside any drafts you've saved. The two more free-form ways of authoring a process — describing it in plain language, or starting from a blank canvas — aren't crammed into this step anymore; they're their own options back on the "+ Create" launcher, grouped with this one under the flow heading, and the wizard keeps only a small "need a custom flow? use + Create" pointer. In this demo we take the simplest, most powerful path: we pick a ready-made template — the Core SDLC flow.
 
       Core SDLC gives us four agents that cover a complete build-and-review loop: the Business Analyst turns ideas into well-defined GitHub issues, the Developer implements a ready issue and opens a pull request, the Code Reviewer checks the change against every acceptance criterion, and the Reworker addresses review feedback and loops until the change is clean. The agents do the heavy lifting, but the human stays in control of the two decisions that matter — what gets built, by approving the issue, and the final merge. Below the selection you also see a small live preview of the flow and a wiring check, so you can confirm the hand-offs actually connect before moving on.
     action:

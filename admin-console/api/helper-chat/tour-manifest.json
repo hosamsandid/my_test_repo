@@ -10,7 +10,7 @@
       "steps": [
         {
           "id": "create-launcher",
-          "voiceover": "Everything starts at the \"+ Create\" launcher, reachable from the sidebar on every page. It offers four equally-ranked ways in: describe what you need in plain language, start from a ready-made setup, build it yourself on a canvas, or spin up a single assistant to chat with. None is a forced default, and the titles avoid our internal vocabulary — you choose by what you want to do. For the demo we take \"Start from a ready-made setup\".",
+          "voiceover": "Everything starts at the \"+ Create\" launcher, reachable from the sidebar on every page. It asks \"what do you want to create?\" and ranks the answers from simplest to most advanced. At the top, on its own, is the fastest thing you can do: chat with one assistant. Below it, under one heading, are three ways to build a team of agents that work together — a flow. And the expert path sits folded away under \"Advanced options\". Each option tells you where it lands you, and can show you a sketch of that screen before you commit. For the demo we take \"Start from a ready-made team\".",
           "screenshotPath": "team-setup/create-launcher.png"
         },
         {

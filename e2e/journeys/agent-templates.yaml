@@ -17,6 +17,8 @@ steps:
 
   # ── Slide 35: the template library ──────────────────────────────────────────
   - id: template-library
+    voiceover: |
+      This is the Agent Templates page — the single catalog of every predefined agent the platform ships with, and the same library the Team-Setup wizard and the Flow editor draw from. Each row is one reusable role — Business Analyst, Developer, Code Reviewer, Dispatcher and more — with its category, session policy and source. The built-in roles are read-only defaults, but "New template" lets you capture a role you've refined into your own reusable agent, which then appears here and in every flow's template picker. Editing a template only changes agents created from it later — the ones already running keep going untouched — so a template is really about defining a good agent once and reusing it across every team and flow.
     narrative: |
       This is where those templates live: the Agent Templates management page. It's the single catalog of every predefined agent the platform offers — the same ones the Team-Setup wizard and the Flow editor draw from.
 

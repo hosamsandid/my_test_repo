@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-03T13:43:18.682Z",
+  "generated": "2026-09-07T13:39:24.463Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -37,6 +37,19 @@
           "id": "review-step",
           "voiceover": "Finally, review — everything in one place. When we hit create, the wizard builds the whole team in one atomic transaction, each member with its own chat identity, ready for the first issue.",
           "screenshotPath": "team-setup/review-step.png"
+        }
+      ]
+    },
+    {
+      "id": "agent-templates",
+      "order": 20,
+      "title": "Agent Templates",
+      "route": "/role-templates",
+      "steps": [
+        {
+          "id": "template-library",
+          "voiceover": "This is the Agent Templates page — the single catalog of every predefined agent the platform ships with, and the same library the Team-Setup wizard and the Flow editor draw from. Each row is one reusable role — Business Analyst, Developer, Code Reviewer, Dispatcher and more — with its category, session policy and source. The built-in roles are read-only defaults, but \"New template\" lets you capture a role you've refined into your own reusable agent, which then appears here and in every flow's template picker. Editing a template only changes agents created from it later — the ones already running keep going untouched — so a template is really about defining a good agent once and reusing it across every team and flow.",
+          "screenshotPath": "agent-templates/template-library.png"
         }
       ]
     },
@@ -136,6 +149,34 @@
           "id": "stages",
           "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
           "screenshotPath": "flows-draft/flow-stages.png"
+        }
+      ]
+    },
+    {
+      "id": "outcomes-routing",
+      "order": 45,
+      "title": "Routing & outcomes",
+      "route": "/flows",
+      "steps": [
+        {
+          "id": "routing-tab",
+          "voiceover": "I open the Dispatcher and switch to its new Routing tab. At the top are its inputs — what wakes it. Below is the Outcomes section: I set the mode to \"exactly one\", because a dispatcher picks a single path per task.",
+          "screenshotPath": "outcomes-routing/routing-tab-empty.png"
+        },
+        {
+          "id": "author-outcomes",
+          "voiceover": "I add three outcomes: route to Developer on the \"ready\" label, route to Developer 2 on \"ready-2\", and hold for clarification with no label at all — a terminal, human-only branch. I save, and the switch is stored.",
+          "screenshotPath": "outcomes-routing/routing-outcomes-authored.png"
+        },
+        {
+          "id": "switch-badge",
+          "voiceover": "Back on the canvas, the Dispatcher now wears a diamond switch badge and sprouts one output port per outcome. I drag the \"Route to Developer\" port onto the Developer — and the hand-off dialog opens already filled with the \"ready\" label. One confirm, and the branch is wired.",
+          "screenshotPath": "outcomes-routing/routing-switch-canvas.png"
+        },
+        {
+          "id": "suggest-decline",
+          "voiceover": "The Routing tab can also propose outcomes for me. On the Developer I press \"suggest outcomes\" — the assistant drafts a set, highlighted as unconfirmed. I decide not to keep them and close the panel without saving. Nothing is persisted: suggestions never write until I confirm.",
+          "screenshotPath": "outcomes-routing/routing-suggest.png"
         }
       ]
     },

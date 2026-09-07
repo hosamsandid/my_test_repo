@@ -282,7 +282,7 @@ async function cancelForm(ctx) {
 }
 
 /**
- * Assert the Data-flow form shows its "woken on any push" dependency note
+ * Assert the Data-flow form shows its "Woken by any push" dependency note
  * (capture point).
  *
  * @example
@@ -290,7 +290,7 @@ async function cancelForm(ctx) {
  *     do: triggers.expectDataFlowForm
  */
 async function expectDataFlowForm(ctx) {
-  await expect(dialog(ctx.page).getByText(/woken on/)).toBeVisible();
+  await expect(dialog(ctx.page).getByText(/woken by any push/i)).toBeVisible();
 }
 
 /**
